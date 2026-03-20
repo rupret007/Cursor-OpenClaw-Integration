@@ -10,8 +10,12 @@ import json
 import re
 from typing import Any, Dict
 
+# Cursor agent IDs are opaque strings; disallow path-like / URL-like values.
 AGENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$")
+
+# Synthetic status for transport-layer failures (retried like 5xx).
 TRANSIENT_TRANSPORT_STATUS = 599
+
 USER_AGENT_OPENCLAW = "cursor-openclaw-integration/1.1"
 USER_AGENT_HANDOFF = "openclaw-cursor-handoff/1.2"
 
@@ -28,6 +32,7 @@ def validate_agent_id(agent_id: str, flag_name: str = "--id") -> None:
 
 
 def parse_json_response_body(raw: str, max_preview: int = 2000) -> Dict[str, Any]:
+    """Parse JSON from a successful HTTP body; never raise — return a structured dict."""
     if not raw.strip():
         return {}
     try:

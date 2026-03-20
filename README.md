@@ -43,6 +43,7 @@ Hardened **Cursor Cloud Agents** integration toolkit for **OpenClaw** and shell 
 ├── openclaw-cursor-integration-roadmap.md
 ├── scripts/
 │   ├── cursor_openclaw.py
+│   ├── env_loader.py        # auto-load .env (used by CLIs)
 │   ├── setup_admin.sh       # interactive .env + optional OpenClaw skill install
 │   └── test_integration.sh
 ├── skills/
@@ -70,7 +71,9 @@ It will:
 - Write **`./.env`** with `set -a && source .env && set +a` usage hints
 - Optionally install **`cursor_handoff`** under `~/.openclaw/workspace/skills/` (replaces that folder if present), write **`~/.openclaw/workspace/skills/cursor_handoff/.env`**, restart **`openclaw gateway`**, and run **`diagnose`**
 
-The CLIs read the **process environment** — after setup, load credentials in each shell:
+The CLIs read the **process environment**. They also **auto-load** a repo-root `.env` (and the skill directory `.env` for `cursor_handoff`) if present, **without** overriding variables you already exported.
+
+Optional: load the same file in your shell:
 
 ```bash
 cd /path/to/Cursor-OpenClaw-Integration
@@ -99,7 +102,7 @@ echo
 export CURSOR_API_KEY
 ```
 
-If you only assign the variable without `export`, child processes (including Python) will not see it. If you use a `.env` file, run `set -a && source .env && set +a` before calling Python.
+If you only assign the variable without `export`, child processes (including Python) will not see it. If you use a `.env` file, the CLIs load it automatically from the repo (or skill) root; you can still `source .env` in the shell if you want non-Python tools to see the same variables.
 
 ### 3. Diagnostics
 
@@ -191,7 +194,7 @@ See [.env.example](.env.example) and [skills/cursor_handoff/.env.example](skills
 
 | Symptom | What to try |
 |---------|----------------|
-| `CURSOR_API_KEY missing` in Python | Use `export CURSOR_API_KEY=...` (not only `CURSOR_API_KEY=...` in the same shell). |
+| `CURSOR_API_KEY missing` in Python | Use `export CURSOR_API_KEY=...`, or create `./.env` (wizard writes one; CLIs auto-load it if the key is not already set in the environment). |
 | `401 Unauthorized` | Wrong key type or revoked key; confirm key in Cursor settings. |
 | `CERTIFICATE_VERIFY_FAILED` (Python) | On macOS, try `export SSL_CERT_FILE="$(python3 -c 'import certifi; print(certifi.where())')"` if `certifi` is installed. |
 | Skill not listed after copy | `openclaw gateway restart`; confirm path `~/.openclaw/workspace/skills/cursor_handoff/SKILL.md`. |

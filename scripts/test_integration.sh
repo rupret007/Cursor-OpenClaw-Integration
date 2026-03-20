@@ -6,10 +6,11 @@ CLI="${BASE_DIR}/scripts/cursor_openclaw.py"
 TEST_FILE="${BASE_DIR}/tests/test_cursor_openclaw.py"
 
 echo "[1/5] Validate required files..."
-for f in "$CLI" "$TEST_FILE" "${BASE_DIR}/README.md" "${BASE_DIR}/.env.example" "${BASE_DIR}/scripts/setup_admin.sh"; do
+for f in "$CLI" "$TEST_FILE" "${BASE_DIR}/README.md" "${BASE_DIR}/.env.example" "${BASE_DIR}/scripts/setup_admin.sh" "${BASE_DIR}/scripts/env_loader.py"; do
   [[ -f "$f" ]] || { echo "Missing file: $f" >&2; exit 1; }
 done
 bash -n "${BASE_DIR}/scripts/setup_admin.sh"
+python3 -m py_compile "${BASE_DIR}/scripts/env_loader.py"
 
 echo "[2/5] Python syntax compile..."
 python3 -m py_compile "$CLI"

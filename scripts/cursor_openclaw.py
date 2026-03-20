@@ -20,10 +20,22 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
+
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+import env_loader  # noqa: E402
 
 
 TERMINAL_STATUSES = {"FINISHED", "FAILED", "CANCELLED", "STOPPED", "EXPIRED"}
+
+
+def _load_repo_dotenv() -> None:
+    """Populate os.environ from repo-root .env then cwd .env without overriding exports."""
+    repo_root = _SCRIPTS_DIR.parent
+    env_loader.merge_dotenv_paths([repo_root / ".env", Path.cwd() / ".env"], override=False)
 
 
 def parse_bool(value: str) -> bool:
@@ -339,6 +351,7 @@ def handle(cfg: Config, args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
 
 
 def main() -> int:
+    _load_repo_dotenv()
     args = parse_args()
     try:
         validate_common_args(args)

@@ -36,6 +36,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+import env_loader  # noqa: E402
 
 EXIT_OK = 0
 EXIT_VALIDATION = 2
@@ -405,6 +409,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    skill_root = Path(__file__).resolve().parent.parent
+    env_loader.merge_dotenv_paths([skill_root / ".env", Path.cwd() / ".env"], override=False)
     args = parse_args()
 
     if args.timeout_seconds <= 0:

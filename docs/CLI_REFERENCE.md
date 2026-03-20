@@ -33,7 +33,7 @@ Subcommands:
 | `stop-agent` | `--id` |
 | `delete-agent` | `--id` |
 
-Transient **network/SSL errors** are surfaced as retriable failures (same backoff as `5xx`).
+Transient **network/SSL errors** are surfaced as retriable failures (same backoff as `5xx`). Outbound JSON bodies preserve Unicode (UTF-8, not `\\u` escapes).
 
 API contract aligns with [Cursor Cloud Agents API](https://cursor.com/docs/cloud-agent/api/endpoints).
 

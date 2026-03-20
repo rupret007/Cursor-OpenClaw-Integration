@@ -25,7 +25,8 @@ Hardened **Cursor Cloud Agents** integration toolkit for **OpenClaw** and shell 
   - Agent lifecycle: `create-agent`, `list-agents`, `agent-status`, `followup`, `stop-agent`, `delete-agent`
   - Insights: `conversation`, `artifacts`, `artifact-download-url`
 - **Auth fallback:** `--auth-mode auto` tries bearer then basic when the API or docs disagree.
-- **Resilience:** retries with backoff on `429` and `5xx`.
+- **Resilience:** retries with backoff on `429`, `5xx`, and transient **network/SSL** failures.
+- **Unicode:** request JSON uses UTF-8 (`ensure_ascii=False`) so prompts stay readable end-to-end.
 - **OpenClaw skill** (`skills/cursor_handoff/`): API-first handoff with CLI fallback, diagnostics, dry-run, tests.
 
 ## Repository layout

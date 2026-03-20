@@ -33,6 +33,14 @@ class CursorApiCommonTests(unittest.TestCase):
         self.assertTrue(MOD.argv_has_json_flag(["x", "y", "--json"]))
         self.assertFalse(MOD.argv_has_json_flag(["x", "y"]))
 
+    def test_encode_request_json_unicode(self):
+        raw = MOD.encode_request_json({"prompt": {"text": "café 日本語"}})
+        self.assertIn("café".encode("utf-8"), raw)
+
+    def test_encode_request_json_rejects_non_serializable(self):
+        with self.assertRaises(ValueError):
+            MOD.encode_request_json({"x": object()})  # type: ignore[arg-type]
+
 
 if __name__ == "__main__":
     unittest.main()

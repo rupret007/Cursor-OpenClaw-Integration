@@ -42,7 +42,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
 import env_loader  # noqa: E402
 import cursor_api_common  # noqa: E402
 
-VERSION = "1.2.1"
+VERSION = "1.2.2"
 
 EXIT_OK = 0
 EXIT_VALIDATION = 2
@@ -224,7 +224,7 @@ class CursorApiClient:
 
         payload: Optional[bytes] = None
         if body is not None:
-            payload = json.dumps(body).encode("utf-8")
+            payload = cursor_api_common.encode_request_json(body)
 
         request = urllib.request.Request(url=url, data=payload, headers=headers, method=method)
         try:
@@ -233,7 +233,10 @@ class CursorApiClient:
                 parsed = cursor_api_common.parse_json_response_body(text)
                 return response.status, parsed, text
         except urllib.error.HTTPError as err:
-            raw = err.read().decode("utf-8", errors="replace")
+            try:
+                raw = err.read().decode("utf-8", errors="replace")
+            except Exception as read_err:  # noqa: BLE001
+                raw = f"<unreadable HTTP error body: {read_err}>"
             try:
                 parsed = json.loads(raw) if raw else {}
             except json.JSONDecodeError:
@@ -759,19 +762,26 @@ def main() -> int:
     agent_url = target.get("url")
     pr_url_out = target.get("prUrl")
 
-    if agent_id and args.poll_max_attempts > 0:
-        for _ in range(args.poll_max_attempts):
-            if status_text in TERMINAL_STATUSES:
-                break
-            if args.poll_interval_seconds > 0:
-                time.sleep(args.poll_interval_seconds)
-            poll_status, poll_data, _, _ = api_client.get_agent(agent_id)
-            if poll_status >= 400:
-                break
-            status_text = poll_data.get("status", status_text)
-            target = poll_data.get("target") or target
-            agent_url = target.get("url", agent_url)
-            pr_url_out = target.get("prUrl", pr_url_out)
+    poll_skipped: Optional[str] = None
+    if agent_id is not None and args.poll_max_attempts > 0:
+        aid = str(agent_id).strip()
+        try:
+            cursor_api_common.validate_agent_id(aid, flag_name="agent id from API")
+        except ValueError as err:
+            poll_skipped = str(err)
+        else:
+            for _ in range(args.poll_max_attempts):
+                if status_text in TERMINAL_STATUSES:
+                    break
+                if args.poll_interval_seconds > 0:
+                    time.sleep(args.poll_interval_seconds)
+                poll_status, poll_data, _, _ = api_client.get_agent(aid)
+                if poll_status >= 400:
+                    break
+                status_text = poll_data.get("status", status_text)
+                target = poll_data.get("target") or target
+                agent_url = target.get("url", agent_url)
+                pr_url_out = target.get("prUrl", pr_url_out)
 
     payload = {
         "ok": True,
@@ -789,6 +799,8 @@ def main() -> int:
         "source_pr_url": pr_url or None,
         "auto_create_pr": auto_create_pr,
     }
+    if poll_skipped:
+        payload["poll_skipped"] = poll_skipped
     emit_json(payload) if args.json else emit_text(payload)
     return EXIT_OK
 

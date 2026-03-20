@@ -29,7 +29,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
 import env_loader  # noqa: E402
 import cursor_api_common  # noqa: E402
 
-VERSION = "1.1.1"
+VERSION = "1.1.2"
 
 TERMINAL_STATUSES = {"FINISHED", "FAILED", "CANCELLED", "STOPPED", "EXPIRED"}
 
@@ -105,7 +105,7 @@ class CursorApiClient:
         }
         headers.update(self._auth_headers(mode))
         if body is not None:
-            payload = json.dumps(body).encode("utf-8")
+            payload = cursor_api_common.encode_request_json(body)
         req = urllib.request.Request(url=url, data=payload, method=method, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=self.cfg.timeout_seconds) as resp:
@@ -113,7 +113,10 @@ class CursorApiClient:
                 data = cursor_api_common.parse_json_response_body(raw)
                 return resp.status, data, raw
         except urllib.error.HTTPError as err:
-            raw = err.read().decode("utf-8", errors="replace")
+            try:
+                raw = err.read().decode("utf-8", errors="replace")
+            except Exception as read_err:  # noqa: BLE001
+                raw = f"<unreadable HTTP error body: {read_err}>"
             try:
                 data = json.loads(raw) if raw else {}
             except json.JSONDecodeError:

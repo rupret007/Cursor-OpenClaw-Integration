@@ -31,6 +31,14 @@ def validate_agent_id(agent_id: str, flag_name: str = "--id") -> None:
         )
 
 
+def encode_request_json(body: Dict[str, Any]) -> bytes:
+    """Serialize a dict to UTF-8 JSON for HTTP bodies (Unicode-safe)."""
+    try:
+        return json.dumps(body, ensure_ascii=False).encode("utf-8")
+    except (TypeError, ValueError) as err:
+        raise ValueError(f"Request body is not JSON-serializable: {err}") from err
+
+
 def parse_json_response_body(raw: str, max_preview: int = 2000) -> Dict[str, Any]:
     """Parse JSON from a successful HTTP body; never raise — return a structured dict."""
     if not raw.strip():

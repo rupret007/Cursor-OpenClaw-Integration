@@ -42,7 +42,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
 import env_loader  # noqa: E402
 import cursor_api_common  # noqa: E402
 
-VERSION = "1.2.2"
+VERSION = "1.2.3"
 
 EXIT_OK = 0
 EXIT_VALIDATION = 2
@@ -207,7 +207,7 @@ class CursorApiClient:
     ) -> Tuple[int, Dict[str, Any], str]:
         url = f"{self.cfg.base_url}{path}"
         headers = {
-            "Content-Type": "application/json",
+            "Content-Type": "application/json; charset=utf-8",
             "Accept": "application/json",
             "User-Agent": cursor_api_common.USER_AGENT_HANDOFF,
         }
@@ -526,6 +526,13 @@ def main() -> int:
 
     branch_from_user = bool(args.branch.strip())
     branch = args.branch.strip() or now_branch_name()
+    if branch_from_user:
+        try:
+            cursor_api_common.assert_no_newlines_or_nul(branch, "--branch")
+        except ValueError as err:
+            payload = {"ok": False, "error": str(err)}
+            emit_json(payload) if args.json else emit_text(payload)
+            return EXIT_VALIDATION
     include_branch_in_prompt = branch_from_user or (not read_only)
     final_prompt = build_handoff_prompt(
         prompt_text, read_only=read_only, branch=branch, include_branch=include_branch_in_prompt

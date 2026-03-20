@@ -29,15 +29,20 @@ if str(_SCRIPTS_DIR) not in sys.path:
 import env_loader  # noqa: E402
 import cursor_api_common  # noqa: E402
 
-VERSION = "1.1.2"
+VERSION = "1.1.3"
 
 TERMINAL_STATUSES = {"FINISHED", "FAILED", "CANCELLED", "STOPPED", "EXPIRED"}
+
+_DOTENV_FILES_LOADED: list[Path] = []
 
 
 def _load_repo_dotenv() -> None:
     """Populate os.environ from repo-root .env then cwd .env without overriding exports."""
+    global _DOTENV_FILES_LOADED
     repo_root = _SCRIPTS_DIR.parent
-    env_loader.merge_dotenv_paths([repo_root / ".env", Path.cwd() / ".env"], override=False)
+    _DOTENV_FILES_LOADED = env_loader.merge_dotenv_paths(
+        [repo_root / ".env", Path.cwd() / ".env"], override=False
+    )
 
 
 def parse_bool(value: str) -> bool:
@@ -100,7 +105,7 @@ class CursorApiClient:
         payload: Optional[bytes] = None
         headers = {
             "Accept": "application/json",
-            "Content-Type": "application/json",
+            "Content-Type": "application/json; charset=utf-8",
             "User-Agent": cursor_api_common.USER_AGENT_OPENCLAW,
         }
         headers.update(self._auth_headers(mode))
@@ -210,6 +215,7 @@ def validate_common_args(args: argparse.Namespace) -> None:
 
 def validate_command_args(args: argparse.Namespace) -> None:
     if args.command == "create-agent":
+        cursor_api_common.assert_no_newlines_or_nul(args.branch_name, "--branch-name")
         if args.poll_attempts < 0:
             raise ValueError("--poll-attempts must be >= 0")
         if args.poll_interval_seconds < 0:
@@ -284,6 +290,7 @@ def handle(cfg: Config, args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
             "retries": cfg.retries,
             "api_key_present": bool(cfg.api_key),
             "api_key_redacted": redact(cfg.api_key) if args.show_key else "***",
+            "dotenv_files_loaded": [str(p) for p in _DOTENV_FILES_LOADED],
         }
         return 0, payload
 

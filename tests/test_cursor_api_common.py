@@ -41,6 +41,15 @@ class CursorApiCommonTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             MOD.encode_request_json({"x": object()})  # type: ignore[arg-type]
 
+    def test_assert_no_newlines_or_nul(self):
+        MOD.assert_no_newlines_or_nul("feature/ok", "--branch")
+        with self.assertRaises(ValueError):
+            MOD.assert_no_newlines_or_nul("a\nb", "--branch")
+        with self.assertRaises(ValueError):
+            MOD.assert_no_newlines_or_nul("a\rb", "--branch")
+        with self.assertRaises(ValueError):
+            MOD.assert_no_newlines_or_nul("a\x00b", "--branch")
+
 
 if __name__ == "__main__":
     unittest.main()

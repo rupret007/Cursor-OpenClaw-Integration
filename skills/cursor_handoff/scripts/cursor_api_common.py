@@ -20,6 +20,12 @@ USER_AGENT_OPENCLAW = "cursor-openclaw-integration/1.1"
 USER_AGENT_HANDOFF = "openclaw-cursor-handoff/1.2"
 
 
+def assert_no_newlines_or_nul(value: str, field_name: str) -> None:
+    """Reject branch names and similar fields that could break argv or logs."""
+    if "\n" in value or "\r" in value or "\x00" in value:
+        raise ValueError(f"{field_name} cannot contain newlines or null bytes.")
+
+
 def validate_agent_id(agent_id: str, flag_name: str = "--id") -> None:
     aid = (agent_id or "").strip()
     if not aid:

@@ -37,7 +37,7 @@ done
 pass "all subcommand --help"
 
 # Diagnose: explicit empty key blocks .env fill (key already in env as empty)
-CURSOR_API_KEY="" python3 "$CLI" --json diagnose | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("ok") is True; assert d.get("api_key_present") is False' || fail "diagnose empty key"
+CURSOR_API_KEY="" python3 "$CLI" --json diagnose | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("ok") is True; assert d.get("api_key_present") is False; assert "dotenv_files_loaded" in d' || fail "diagnose empty key"
 pass "diagnose with CURSOR_API_KEY empty"
 
 CURSOR_API_KEY="" python3 "$CLI" diagnose --show-key | grep -q "api_key_redacted" || fail "diagnose --show-key text"
@@ -78,6 +78,10 @@ expect_fail "list-agents bad limit 101" \
 expect_fail "create-agent negative poll" \
   env CURSOR_API_KEY=dummy_test_key python3 "$CLI" --json create-agent \
   --prompt "x" --repository "https://github.com/a/b" --ref main --branch-name "c" --poll-attempts -1 --dry-run
+
+expect_fail "create-agent branch newline" \
+  env CURSOR_API_KEY=dummy_test_key python3 "$CLI" --json create-agent \
+  --prompt "x" --repository "https://github.com/a/b" --ref main --branch-name $'evil\ninj' --dry-run
 
 expect_fail "common args bad timeout" \
   env CURSOR_API_KEY=dummy_test_key python3 "$CLI" --timeout-seconds 0 --json whoami
@@ -154,6 +158,9 @@ expect_fail "handoff bad poll" python3 "$HANDOFF" --repo "$BASE_DIR" --prompt "x
 
 expect_fail "handoff bad cli-timeout" \
   python3 "$HANDOFF" --repo "$BASE_DIR" --prompt "x" --cli-timeout-seconds -1 --dry-run
+
+expect_fail "handoff branch newline" \
+  python3 "$HANDOFF" --repo "$BASE_DIR" --prompt "x" --branch $'evil\ninj' --dry-run
 
 # Modes (dry-run)
 for mode in api cli auto; do

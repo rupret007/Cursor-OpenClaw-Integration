@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BASE_DIR="${HOME}/.openclaw/workspace/skills/cursor_handoff"
+BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY_SCRIPT="${BASE_DIR}/scripts/cursor_handoff.py"
 CLI_SCRIPT="${BASE_DIR}/scripts/cursor_cli_fallback.sh"
 SKILL_FILE="${BASE_DIR}/SKILL.md"
@@ -32,13 +32,23 @@ echo "OK: unit tests passed"
 
 echo "[5/6] Running dry-run example..."
 CURSOR_API_KEY="dummy_test_key" python3 "$PY_SCRIPT" \
-  --repo "$HOME/.openclaw/workspace" \
+  --repo "$BASE_DIR" \
   --prompt "Analyze repository structure and propose a plan" \
   --mode auto \
   --read-only true \
   --json \
   --dry-run >/dev/null
 echo "OK: dry-run works"
+
+echo "[5b/6] Running backend-unavailable dry-run..."
+env -u CURSOR_API_KEY python3 "$PY_SCRIPT" \
+  --repo "$BASE_DIR" \
+  --prompt "Analyze repository structure and propose a plan" \
+  --mode auto \
+  --read-only true \
+  --json \
+  --dry-run >/dev/null
+echo "OK: dry-run works without configured backend"
 
 echo "[6/6] Running diagnostics smoke check..."
 python3 "$PY_SCRIPT" --diagnose --json >/dev/null
@@ -48,4 +58,4 @@ echo "Next steps:"
 echo "  chmod +x \"$PY_SCRIPT\" \"$CLI_SCRIPT\" \"$BASE_DIR/scripts/test_handoff.sh\""
 echo "  openclaw gateway restart"
 echo "  openclaw skills list"
-echo "  python3 \"$PY_SCRIPT\" --repo \"$HOME/.openclaw/workspace\" --prompt \"Repo analysis\" --mode auto --read-only true --json --dry-run"
+echo "  python3 \"$PY_SCRIPT\" --repo \"$BASE_DIR\" --prompt \"Repo analysis\" --mode auto --read-only true --json --dry-run"

@@ -519,22 +519,18 @@ def main() -> int:
         emit_json(payload) if args.json else emit_text(payload)
         return EXIT_OK
 
-    backend, backend_error = choose_backend(
-        requested_mode=requested_mode,
-        has_api_creds=has_api_credentials,
-        cli_wrapper_path=cli_wrapper,
-        cli_binary=cli_binary,
-    )
-    if not backend:
-        payload = {"ok": False, "error": backend_error}
-        emit_json(payload) if args.json else emit_text(payload)
-        return EXIT_PREREQ
-
     if args.dry_run:
+        backend, backend_error = choose_backend(
+            requested_mode=requested_mode,
+            has_api_creds=has_api_credentials,
+            cli_wrapper_path=cli_wrapper,
+            cli_binary=cli_binary,
+        )
         payload = {
             "ok": True,
             "dry_run": True,
-            "backend": backend,
+            "backend": backend if backend else "unavailable",
+            "backend_error": backend_error,
             "mode_requested": requested_mode,
             "read_only": read_only,
             "branch": branch,
@@ -549,6 +545,17 @@ def main() -> int:
         }
         emit_json(payload) if args.json else emit_text(payload)
         return EXIT_OK
+
+    backend, backend_error = choose_backend(
+        requested_mode=requested_mode,
+        has_api_creds=has_api_credentials,
+        cli_wrapper_path=cli_wrapper,
+        cli_binary=cli_binary,
+    )
+    if not backend:
+        payload = {"ok": False, "error": backend_error}
+        emit_json(payload) if args.json else emit_text(payload)
+        return EXIT_PREREQ
 
     if backend == "cli":
         if local_repo is None:

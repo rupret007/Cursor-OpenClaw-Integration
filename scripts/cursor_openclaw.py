@@ -44,7 +44,7 @@ def normalize_base_url(raw: Optional[str]) -> str:
 
 def redact(value: str) -> str:
     if not value:
-        return ""
+        return "***"
     if len(value) <= 8:
         return "***"
     return f"{value[:2]}***{value[-2:]}"
@@ -177,6 +177,15 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--json", action="store_true")
 
 
+def validate_common_args(args: argparse.Namespace) -> None:
+    if args.timeout_seconds <= 0:
+        raise ValueError("--timeout-seconds must be > 0")
+    if args.retries < 0:
+        raise ValueError("--retries must be >= 0")
+    if args.retry_backoff_seconds < 0:
+        raise ValueError("--retry-backoff-seconds must be >= 0")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Cursor Cloud Agents CLI for OpenClaw integrations.")
     add_common_args(parser)
@@ -256,7 +265,14 @@ def handle(cfg: Config, args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
         return status, {"status": status, "auth_mode": auth_mode, "response": data or raw}
 
     if args.command == "list-agents":
-        query: Dict[str, str] = {"limit": args.limit}
+        try:
+            limit = int(str(args.limit))
+        except ValueError as err:
+            raise ValueError("--limit must be an integer between 1 and 100.") from err
+        if limit < 1 or limit > 100:
+            raise ValueError("--limit must be an integer between 1 and 100.")
+
+        query: Dict[str, str] = {"limit": str(limit)}
         if args.cursor:
             query["cursor"] = args.cursor
         if args.pr_url:
@@ -325,6 +341,7 @@ def handle(cfg: Config, args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
 def main() -> int:
     args = parse_args()
     try:
+        validate_common_args(args)
         api_key = (os.getenv("CURSOR_API_KEY") or "").strip()
         if args.command != "diagnose" and not api_key:
             raise RuntimeError("CURSOR_API_KEY is required.")

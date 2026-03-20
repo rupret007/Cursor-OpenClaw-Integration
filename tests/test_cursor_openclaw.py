@@ -1,6 +1,7 @@
 import importlib.util
 import pathlib
 import sys
+import types
 import unittest
 
 
@@ -25,9 +26,25 @@ class CursorOpenClawTests(unittest.TestCase):
         self.assertEqual(MODULE.normalize_base_url(""), "https://api.cursor.com")
 
     def test_redact(self):
-        self.assertEqual(MODULE.redact(""), "")
+        self.assertEqual(MODULE.redact(""), "***")
         self.assertEqual(MODULE.redact("abcd"), "***")
         self.assertEqual(MODULE.redact("key_12345678"), "ke***78")
+
+    def test_validate_common_args(self):
+        ok = types.SimpleNamespace(timeout_seconds=30, retries=2, retry_backoff_seconds=0.5)
+        MODULE.validate_common_args(ok)
+
+        bad_timeout = types.SimpleNamespace(timeout_seconds=0, retries=2, retry_backoff_seconds=0.5)
+        with self.assertRaises(ValueError):
+            MODULE.validate_common_args(bad_timeout)
+
+        bad_retries = types.SimpleNamespace(timeout_seconds=30, retries=-1, retry_backoff_seconds=0.5)
+        with self.assertRaises(ValueError):
+            MODULE.validate_common_args(bad_retries)
+
+        bad_backoff = types.SimpleNamespace(timeout_seconds=30, retries=2, retry_backoff_seconds=-0.1)
+        with self.assertRaises(ValueError):
+            MODULE.validate_common_args(bad_backoff)
 
     def test_build_create_payload_from_repository(self):
         class Args:

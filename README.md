@@ -64,6 +64,13 @@ For a new machine or operator, run the interactive wizard (writes a **local** `.
 bash scripts/setup_admin.sh
 ```
 
+**Non-interactive (e.g. your own terminal, key already exported):** writes `.env`, syncs skill, restarts gateway, runs `diagnose`. Refuses to overwrite `./.env` unless you pass **`--force`**.
+
+```bash
+export CURSOR_API_KEY   # must be set
+bash scripts/setup_admin.sh --batch --force   # --force only if .env already exists
+```
+
 It will:
 
 - Prompt for **CURSOR_API_KEY** (hidden input) and optional **CURSOR_BASE_URL** / **CURSOR_AUTH_MODE**

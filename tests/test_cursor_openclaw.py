@@ -24,6 +24,11 @@ class CursorOpenClawTests(unittest.TestCase):
     def test_normalize_base_url(self):
         self.assertEqual(MODULE.normalize_base_url("https://api.cursor.com/"), "https://api.cursor.com")
         self.assertEqual(MODULE.normalize_base_url(""), "https://api.cursor.com")
+        self.assertEqual(MODULE.normalize_base_url("http://localhost:8080/"), "http://localhost:8080")
+        with self.assertRaises(ValueError):
+            MODULE.normalize_base_url("ftp://example.com")
+        with self.assertRaises(ValueError):
+            MODULE.normalize_base_url("not-a-url")
 
     def test_redact(self):
         self.assertEqual(MODULE.redact(""), "***")

@@ -28,7 +28,7 @@ git pull origin main
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `CURSOR_API_KEY` | Yes (for live API) | Cursor API key (export in shell and/or put in repo-root `.env`; `cursor_openclaw.py` and `cursor_handoff.py` auto-load `.env` without overriding existing exports) |
-| `CURSOR_BASE_URL` | No | Default `https://api.cursor.com` |
+| `CURSOR_BASE_URL` | No | Default `https://api.cursor.com`; must be `http://` or `https://` if set |
 | `CURSOR_AUTH_MODE` | No | `auto` (default), `basic`, or `bearer` |
 | `SSL_CERT_FILE` | Sometimes on macOS | If Python reports `CERTIFICATE_VERIFY_FAILED`, set to certifi bundle (see README troubleshooting) |
 

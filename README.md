@@ -55,7 +55,9 @@ Hardened **Cursor Cloud Agents** integration toolkit for **OpenClaw** and shell 
 │       ├── scripts/         # includes env_loader.py, cursor_api_common.py (mirror)
 │       └── tests/
 └── tests/
-    └── test_cursor_openclaw.py
+    ├── test_cursor_openclaw.py
+    ├── test_cursor_api_common.py
+    └── test_env_loader.py
 ```
 
 ## Admin setup (guided)
@@ -191,6 +193,10 @@ bash skills/cursor_handoff/scripts/test_handoff.sh
 RUN_LIVE_API=1 bash scripts/exhaustive_feature_check.sh
 ```
 
+**Overnight / soak:** safe to loop `RUN_LIVE_API=1 bash scripts/exhaustive_feature_check.sh` or your own agent workflows; avoid high `list-agents` limits or tight polling against production so you don’t hit rate limits.
+
+**Exit codes (`cursor_openclaw.py`):** `0` success, `2` usage/validation error, `4` HTTP/API failure.
+
 **Unit tests only:**
 
 ```bash
@@ -206,7 +212,7 @@ See [.env.example](.env.example) and [skills/cursor_handoff/.env.example](skills
 | Variable | Required | Notes |
 |----------|----------|--------|
 | `CURSOR_API_KEY` | For live API | Export in the shell that runs Python |
-| `CURSOR_BASE_URL` | No | Default `https://api.cursor.com` |
+| `CURSOR_BASE_URL` | No | Default `https://api.cursor.com`; if set, must start with `http://` or `https://` |
 | `CURSOR_AUTH_MODE` | No | `auto`, `basic`, `bearer` |
 
 ## Security
@@ -227,11 +233,12 @@ See [.env.example](.env.example) and [skills/cursor_handoff/.env.example](skills
 | zsh: `command not found: #` / `no matches found` after paste | You pasted comment lines or broken lines into the shell. Run commands one at a time; avoid copying `#` comment lines from docs or chat. |
 | `create-agent` validation errors | Use `--dry-run` first; use **either** `--repository` or `--pr-url`, not both; check `--ref` / `--branch-name` per API docs. |
 | `Invalid --id format` | Pass only the agent id (e.g. `bc-…`), not a full URL. Allowed characters: letters, digits, `._:-`. |
+| `Base URL must start with http:// or https://` | Fix `CURSOR_BASE_URL` / `--base-url` (no `ftp://`, bare hostnames, etc.). |
 
 ## Hardening details (summary)
 
 - `--auth-mode auto` tolerates bearer vs basic inconsistencies.
-- `--retries` + exponential backoff reduce transient failures.
+- `--retries` + exponential backoff reduce transient failures (including transport-layer errors).
 - `diagnose` redacts secrets.
 - `create-agent --dry-run` validates payload without network calls.
 - `cursor_handoff` supports `--dry-run` and read-only defaults for safer delegation.

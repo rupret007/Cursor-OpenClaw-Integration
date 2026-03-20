@@ -82,6 +82,9 @@ expect_fail "create-agent negative poll" \
 expect_fail "common args bad timeout" \
   env CURSOR_API_KEY=dummy_test_key python3 "$CLI" --timeout-seconds 0 --json whoami
 
+expect_fail "invalid CURSOR_BASE_URL scheme" \
+  env CURSOR_API_KEY=dummy_test_key CURSOR_BASE_URL="ftp://bad" python3 "$CLI" --json whoami
+
 # Dry-run create (no network)
 env CURSOR_API_KEY=dummy_test_key python3 "$CLI" --json create-agent \
   --prompt "Test prompt" \

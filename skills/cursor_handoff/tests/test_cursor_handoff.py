@@ -34,6 +34,11 @@ class CursorHandoffTests(unittest.TestCase):
         self.assertIn("Target branch: feature/x", with_branch)
         self.assertNotIn("Target branch: feature/x", without_branch)
 
+    def test_normalize_base_url(self):
+        self.assertTrue(MODULE.normalize_base_url("https://api.cursor.com/").startswith("https://"))
+        with self.assertRaises(ValueError):
+            MODULE.normalize_base_url("file:///etc/passwd")
+
     def test_normalize_repo_input(self):
         local, url, err = MODULE.normalize_repo_input("owner/repo")
         self.assertIsNone(local)

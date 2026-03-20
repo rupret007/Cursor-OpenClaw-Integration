@@ -29,7 +29,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
 import env_loader  # noqa: E402
 import cursor_api_common  # noqa: E402
 
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 
 TERMINAL_STATUSES = {"FINISHED", "FAILED", "CANCELLED", "STOPPED", "EXPIRED"}
 
@@ -50,9 +50,13 @@ def parse_bool(value: str) -> bool:
 
 
 def normalize_base_url(raw: Optional[str]) -> str:
-    base = (raw or "https://api.cursor.com").strip()
+    default = "https://api.cursor.com"
+    base = (raw or default).strip()
     if not base:
-        base = "https://api.cursor.com"
+        base = default
+    lowered = base.lower()
+    if not lowered.startswith(("http://", "https://")):
+        raise ValueError("Base URL must start with http:// or https:// (check CURSOR_BASE_URL).")
     return base.rstrip("/")
 
 
@@ -270,6 +274,7 @@ def handle(cfg: Config, args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
     if args.command == "diagnose":
         payload = {
             "ok": True,
+            "cli_version": VERSION,
             "base_url": cfg.base_url,
             "auth_mode": cfg.auth_mode,
             "timeout_seconds": cfg.timeout_seconds,
@@ -334,19 +339,24 @@ def handle(cfg: Config, args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
             return 0, {"status": 0, "dry_run": True, "payload": payload}
         status, data, raw, auth_mode = client.request("POST", "/v0/agents", body=payload)
         response = {"status": status, "auth_mode": auth_mode, "response": data or raw}
-        if status < 400 and args.poll_attempts > 0 and isinstance(data, dict) and data.get("id"):
-            agent_id = str(data["id"])
+        if status < 400 and args.poll_attempts > 0 and isinstance(data, dict) and data.get("id") is not None:
+            agent_id = str(data["id"]).strip()
             current = data
-            for _ in range(args.poll_attempts):
-                current_status = str(current.get("status", ""))
-                if current_status in TERMINAL_STATUSES:
-                    break
-                time.sleep(max(0.0, args.poll_interval_seconds))
-                poll_status, poll_data, _, _ = client.request("GET", f"/v0/agents/{agent_id}")
-                if poll_status >= 400:
-                    break
-                current = poll_data
-            response["polled"] = current
+            try:
+                cursor_api_common.validate_agent_id(agent_id, flag_name="agent id from API")
+            except ValueError as err:
+                response["poll_skipped"] = str(err)
+            else:
+                for _ in range(args.poll_attempts):
+                    current_status = str(current.get("status", ""))
+                    if current_status in TERMINAL_STATUSES:
+                        break
+                    time.sleep(max(0.0, args.poll_interval_seconds))
+                    poll_status, poll_data, _, _ = client.request("GET", f"/v0/agents/{agent_id}")
+                    if poll_status >= 400:
+                        break
+                    current = poll_data
+                response["polled"] = current
         return status, response
 
     if args.command == "followup":

@@ -4,7 +4,7 @@ Global options (before subcommand):
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--base-url` | `https://api.cursor.com` | API base |
+| `--base-url` | `https://api.cursor.com` | API base (**must** be `http://` or `https://`) |
 | `--auth-mode` | `auto` | `auto`, `bearer`, or `basic` |
 | `--timeout-seconds` | `30` | Per-request timeout (> 0) |
 | `--retries` | `2` | Retries on 429/5xx (>= 0) |
@@ -20,7 +20,7 @@ Subcommands:
 
 | Command | Notes |
 |---------|--------|
-| `diagnose` | Env summary; optional `--show-key` for redacted preview |
+| `diagnose` | Env summary; optional `--show-key` for redacted preview; includes `cli_version` |
 | `whoami` | `GET /v0/me` |
 | `models` | `GET /v0/models` |
 | `list-agents` | `--limit` 1–100, optional `--cursor`, `--pr-url` |

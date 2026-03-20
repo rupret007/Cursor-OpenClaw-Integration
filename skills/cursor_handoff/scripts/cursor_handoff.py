@@ -42,7 +42,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
 import env_loader  # noqa: E402
 import cursor_api_common  # noqa: E402
 
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 
 EXIT_OK = 0
 EXIT_VALIDATION = 2
@@ -74,6 +74,9 @@ def normalize_base_url(raw: Optional[str]) -> str:
     candidate = (raw or default).strip()
     if not candidate:
         candidate = default
+    lowered = candidate.lower()
+    if not lowered.startswith(("http://", "https://")):
+        raise ValueError("Base URL must start with http:// or https:// (check CURSOR_BASE_URL).")
     return candidate.rstrip("/")
 
 
@@ -291,6 +294,8 @@ def emit_text(payload: Dict[str, Any]) -> None:
     if payload.get("diagnose"):
         print("Diagnostics complete.")
         checks = payload.get("checks") or {}
+        if checks.get("tool_version"):
+            print(f"  tool_version: {checks.get('tool_version')}")
         print(f"  api_key_set: {checks.get('api_key_set')}")
         print(f"  api_base_url: {checks.get('api_base_url')}")
         print(f"  requested_mode: {checks.get('requested_mode')}")
@@ -527,12 +532,18 @@ def main() -> int:
     cli_binary = detect_cli_binary()
 
     api_key = os.getenv("CURSOR_API_KEY", "").strip()
-    api_base_url = normalize_base_url(os.getenv("CURSOR_BASE_URL"))
+    try:
+        api_base_url = normalize_base_url(os.getenv("CURSOR_BASE_URL"))
+    except ValueError as err:
+        payload = {"ok": False, "error": str(err)}
+        emit_json(payload) if args.json else emit_text(payload)
+        return EXIT_VALIDATION
     has_api_credentials = bool(api_key)
 
     if args.diagnose:
         suggested_backend = "api" if has_api_credentials else ("cli" if cli_binary else "none")
         checks: Dict[str, Any] = {
+            "tool_version": VERSION,
             "api_key_set": has_api_credentials,
             "api_key_length": len(api_key),
             "api_base_url": api_base_url,

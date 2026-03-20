@@ -19,8 +19,9 @@ git clone https://github.com/rupret007/Cursor-OpenClaw-Integration.git
 cd Cursor-OpenClaw-Integration
 git checkout main
 git pull origin main
-cp .env.example .env.local   # optional; do not commit secrets
 ```
+
+**Guided credentials + optional OpenClaw skill:** run `bash scripts/setup_admin.sh` (writes `./.env`, gitignored). Or copy [.env.example](../.env.example) manually and fill values — still do not commit secrets.
 
 ## Environment
 

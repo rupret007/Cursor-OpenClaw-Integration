@@ -8,6 +8,7 @@ Hardened **Cursor Cloud Agents** integration toolkit for **OpenClaw** and shell 
 
 - [What this repository provides](#what-this-repository-provides)
 - [Repository layout](#repository-layout)
+- [Admin setup (guided)](#admin-setup-guided)
 - [Quick start](#quick-start)
 - [OpenClaw skill (`cursor_handoff`)](#openclaw-skill-cursor_handoff)
 - [Documentation](#documentation)
@@ -42,6 +43,7 @@ Hardened **Cursor Cloud Agents** integration toolkit for **OpenClaw** and shell 
 ├── openclaw-cursor-integration-roadmap.md
 ├── scripts/
 │   ├── cursor_openclaw.py
+│   ├── setup_admin.sh       # interactive .env + optional OpenClaw skill install
 │   └── test_integration.sh
 ├── skills/
 │   └── cursor_handoff/        # vendored skill (sync to ~/.openclaw/workspace/skills/)
@@ -51,6 +53,28 @@ Hardened **Cursor Cloud Agents** integration toolkit for **OpenClaw** and shell 
 │       └── tests/
 └── tests/
     └── test_cursor_openclaw.py
+```
+
+## Admin setup (guided)
+
+For a new machine or operator, run the interactive wizard (writes a **local** `.env`, mode `600`, ignored by git; never commit it):
+
+```bash
+bash scripts/setup_admin.sh
+```
+
+It will:
+
+- Prompt for **CURSOR_API_KEY** (hidden input) and optional **CURSOR_BASE_URL** / **CURSOR_AUTH_MODE**
+- Optional **CURSOR_EMAIL** and **OPENCLAW_CURSOR_DEFAULT_MODE** (`auto` \| `api` \| `cli`) for the handoff skill
+- Write **`./.env`** with `set -a && source .env && set +a` usage hints
+- Optionally install **`cursor_handoff`** under `~/.openclaw/workspace/skills/` (replaces that folder if present), write **`~/.openclaw/workspace/skills/cursor_handoff/.env`**, restart **`openclaw gateway`**, and run **`diagnose`**
+
+The CLIs read the **process environment** — after setup, load credentials in each shell:
+
+```bash
+cd /path/to/Cursor-OpenClaw-Integration
+set -a && source .env && set +a
 ```
 
 ## Quick start
@@ -65,13 +89,17 @@ git checkout main && git pull origin main
 
 ### 2. Set your API key (do not commit)
 
+**Easiest:** [Admin setup (guided)](#admin-setup-guided) — `bash scripts/setup_admin.sh`.
+
+**Manual:**
+
 ```bash
 read -s "CURSOR_API_KEY?Paste Cursor API key: "
 echo
 export CURSOR_API_KEY
 ```
 
-If you only assign the variable without `export`, child processes (including Python) will not see it.
+If you only assign the variable without `export`, child processes (including Python) will not see it. If you use a `.env` file, run `set -a && source .env && set +a` before calling Python.
 
 ### 3. Diagnostics
 

@@ -1,2 +1,7 @@
 __pycache__/
 *.pyc
+
+# Local secrets (never commit)
+.env
+.env.local
+skills/cursor_handoff/.env

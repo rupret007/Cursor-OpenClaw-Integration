@@ -1,0 +1,48 @@
+# OpenClaw + `cursor_handoff` skill
+
+## Roles
+
+| Component | Role |
+|-----------|------|
+| **`scripts/cursor_openclaw.py`** | Full Cursor Cloud Agents API surface from the shell (diagnostics, lifecycle, artifacts). |
+| **`skills/cursor_handoff/`** | OpenClaw Agent Skill: policy + `cursor_handoff.py` for **delegating heavy repo work** to Cursor (API preferred, CLI fallback). |
+
+## Installing the skill in OpenClaw
+
+1. Copy the skill directory to your OpenClaw workspace:
+
+   ```bash
+   mkdir -p ~/.openclaw/workspace/skills
+   cp -R skills/cursor_handoff ~/.openclaw/workspace/skills/
+   ```
+
+2. Optional: copy `.env.example` to `.env` inside the skill folder and set `CURSOR_API_KEY` (or rely on gateway/shell env).
+
+3. Restart gateway:
+
+   ```bash
+   openclaw gateway restart
+   openclaw skills list
+   ```
+
+   Confirm **`cursor_handoff`** shows as **ready**.
+
+## Typical OpenClaw → Cursor flow
+
+1. **Preflight:** `python3 .../cursor_handoff.py --diagnose --json`
+2. **Handoff (read-only audit):** `--read-only true --dry-run` first, then real run without `--dry-run`.
+3. **Handoff (implementation):** `--read-only false` only when the user explicitly wants code changes.
+4. **Deep operations:** use `cursor_openclaw.py` for `list-agents`, `conversation`, `followup`, `artifacts`, etc.
+
+## Skill scripts
+
+| Script | Purpose |
+|--------|---------|
+| `scripts/cursor_handoff.py` | Main orchestrator (API / CLI / auto, retries, diagnose). |
+| `scripts/cursor_cli_fallback.sh` | Safe wrapper around `agent` or `cursor-agent`. |
+| `scripts/test_handoff.sh` | Smoke + unit tests for the skill. |
+
+## Documentation in repo
+
+- [Roadmap / phased integration plan](../openclaw-cursor-integration-roadmap.md) (repo root)
+- [Integration proposal / ideas](../openclaw-cursor-integration-proposal.md) (repo root)

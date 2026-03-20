@@ -10,6 +10,11 @@ Global options (before subcommand):
 | `--retries` | `2` | Retries on 429/5xx (>= 0) |
 | `--retry-backoff-seconds` | `0.5` | Exponential backoff base (>= 0) |
 | `--json` | off | JSON output |
+| `--version` / `-V` | — | Print version and exit (no subcommand required) |
+
+`--id` values must be plain agent identifiers (letters, digits, `._:-` only) — not URLs — to avoid ambiguous paths.
+
+`create-agent` accepts **either** `--repository` **or** `--pr-url`, not both.
 
 Subcommands:
 
@@ -28,6 +33,8 @@ Subcommands:
 | `stop-agent` | `--id` |
 | `delete-agent` | `--id` |
 
+Transient **network/SSL errors** are surfaced as retriable failures (same backoff as `5xx`).
+
 API contract aligns with [Cursor Cloud Agents API](https://cursor.com/docs/cloud-agent/api/endpoints).
 
 ---
@@ -45,5 +52,7 @@ API contract aligns with [Cursor Cloud Agents API](https://cursor.com/docs/cloud
 | `--auto-create-pr` etc. | API PR targets |
 | `--poll-max-attempts`, `--poll-interval-seconds` | Post-create polling |
 | `--timeout-seconds`, `--api-retries`, `--api-retry-backoff-seconds` | API resilience |
-| `--diagnose` | No handoff; env + optional `/me` and `/agents?limit=1` |
+| `--cli-timeout-seconds` | CLI backend only; subprocess limit (`0` = none). Default `3600` |
+| `--version` / `-V` | Print version and exit |
+| `--diagnose` | No handoff; env + optional `/me` and `/agents?limit=1`; JSON includes `dotenv_files_loaded` |
 | `--dry-run` | Validate and show payload; works even if no backend configured (`backend: unavailable`) |

@@ -24,8 +24,9 @@ expect_fail() {
 cd "$BASE_DIR"
 
 echo "======== cursor_openclaw.py ========"
+python3 -m py_compile "${BASE_DIR}/scripts/cursor_api_common.py" || fail "py_compile cursor_api_common"
 python3 -m py_compile "$CLI" || fail "py_compile cursor_openclaw"
-pass "py_compile cursor_openclaw"
+pass "py_compile cursor_openclaw + cursor_api_common"
 
 python3 "$CLI" --help >/dev/null || fail "top-level --help"
 pass "top-level --help"
@@ -42,7 +43,28 @@ pass "diagnose with CURSOR_API_KEY empty"
 CURSOR_API_KEY="" python3 "$CLI" diagnose --show-key | grep -q "api_key_redacted" || fail "diagnose --show-key text"
 pass "diagnose --show-key (text)"
 
+python3 "$CLI" --version | grep -q "cursor_openclaw" || fail "cursor_openclaw --version"
+pass "cursor_openclaw --version"
+
+python3 "$HANDOFF" --version | grep -q "cursor_handoff" || fail "cursor_handoff --version"
+pass "cursor_handoff --version"
+
+bash "${BASE_DIR}/skills/cursor_handoff/scripts/cursor_cli_fallback.sh" --help >/dev/null || fail "cursor_cli_fallback --help"
+pass "cursor_cli_fallback --help"
+
 # Validation errors (exit 2)
+expect_fail "create-agent both repository and pr-url" \
+  env CURSOR_API_KEY=dummy_test_key python3 "$CLI" --json create-agent \
+  --prompt "x" \
+  --repository "https://github.com/foo/bar" \
+  --ref main \
+  --pr-url "https://github.com/foo/bar/pull/1" \
+  --branch-name "b" \
+  --dry-run
+
+expect_fail "agent-status invalid id" \
+  env CURSOR_API_KEY=dummy_test_key python3 "$CLI" --json agent-status --id "../bad"
+
 expect_fail "create-agent missing repo/pr" \
   env CURSOR_API_KEY=dummy_test_key python3 "$CLI" --json create-agent \
   --prompt "x" --branch-name "b" --dry-run
@@ -93,6 +115,7 @@ fi
 echo "======== cursor_handoff.py ========"
 python3 -m py_compile "$HANDOFF" || fail "py_compile handoff"
 python3 -m py_compile "${BASE_DIR}/skills/cursor_handoff/scripts/env_loader.py" || fail "py_compile env_loader"
+python3 -m py_compile "${BASE_DIR}/skills/cursor_handoff/scripts/cursor_api_common.py" || fail "py_compile cursor_api_common"
 
 python3 "$HANDOFF" --help >/dev/null || fail "handoff --help"
 pass "handoff --help"
@@ -125,6 +148,9 @@ expect_fail "handoff invalid repo" python3 "$HANDOFF" --repo "not-a-valid-repo-!
 expect_fail "handoff bad timeout" python3 "$HANDOFF" --repo "$BASE_DIR" --prompt "x" --timeout-seconds 0 --dry-run
 
 expect_fail "handoff bad poll" python3 "$HANDOFF" --repo "$BASE_DIR" --prompt "x" --poll-max-attempts -1 --dry-run
+
+expect_fail "handoff bad cli-timeout" \
+  python3 "$HANDOFF" --repo "$BASE_DIR" --prompt "x" --cli-timeout-seconds -1 --dry-run
 
 # Modes (dry-run)
 for mode in api cli auto; do

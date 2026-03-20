@@ -76,6 +76,13 @@ class CursorOpenClawTests(unittest.TestCase):
         self.assertEqual(payload["target"]["branchName"], "cursor/test")
         self.assertFalse(payload["target"]["autoCreatePr"])
 
+    def test_require_one_of_exclusive(self):
+        with self.assertRaises(ValueError) as ctx:
+            MODULE.require_one_of("https://github.com/a/b", "https://github.com/a/b/pull/1")
+        self.assertIn("only one", str(ctx.exception).lower())
+        with self.assertRaises(ValueError):
+            MODULE.require_one_of("", "")
+
     def test_build_create_payload_from_pr(self):
         class Args:
             prompt = "hello"

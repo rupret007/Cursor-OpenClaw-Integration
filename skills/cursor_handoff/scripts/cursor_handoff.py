@@ -40,6 +40,9 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 import env_loader  # noqa: E402
+import cursor_api_common  # noqa: E402
+
+VERSION = "1.2.0"
 
 EXIT_OK = 0
 EXIT_VALIDATION = 2
@@ -50,7 +53,7 @@ EXIT_DIAG = 6
 
 TERMINAL_STATUSES = {"FINISHED", "FAILED", "CANCELLED", "STOPPED", "EXPIRED"}
 GITHUB_SLUG_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-TRANSIENT_HTTP_STATUSES = {429, 500, 502, 503, 504}
+TRANSIENT_HTTP_STATUSES = {429, 500, 502, 503, 504, cursor_api_common.TRANSIENT_TRANSPORT_STATUS}
 
 
 def parse_bool_text(value: str) -> bool:
@@ -203,7 +206,7 @@ class CursorApiClient:
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "User-Agent": "openclaw-cursor-handoff/1.1",
+            "User-Agent": cursor_api_common.USER_AGENT_HANDOFF,
         }
 
         if auth_mode == "bearer":
@@ -224,7 +227,7 @@ class CursorApiClient:
         try:
             with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
                 text = response.read().decode("utf-8", errors="replace")
-                parsed = json.loads(text) if text else {}
+                parsed = cursor_api_common.parse_json_response_body(text)
                 return response.status, parsed, text
         except urllib.error.HTTPError as err:
             raw = err.read().decode("utf-8", errors="replace")
@@ -233,23 +236,16 @@ class CursorApiClient:
             except json.JSONDecodeError:
                 parsed = {"raw": raw}
             return err.code, parsed, raw
-        except urllib.error.URLError as err:
-            raise RuntimeError(f"Network error while calling Cursor API: {err}") from err
+        except (urllib.error.URLError, TimeoutError, ConnectionError, BrokenPipeError, OSError) as err:
+            msg = str(err)
+            return cursor_api_common.TRANSIENT_TRANSPORT_STATUS, {"error": msg, "error_type": type(err).__name__}, msg
 
     def _request_with_retries(
         self, method: str, path: str, body: Optional[Dict[str, Any]], auth_mode: str
     ) -> Tuple[int, Dict[str, Any], str]:
         attempts = max(0, self.cfg.retries) + 1
         for attempt in range(attempts):
-            try:
-                status, data, raw = self._request(method, path, body, auth_mode)
-            except RuntimeError:
-                if attempt >= attempts - 1:
-                    raise
-                delay = max(0.0, self.cfg.retry_backoff_seconds) * (2**attempt)
-                if delay > 0:
-                    time.sleep(delay)
-                continue
+            status, data, raw = self._request(method, path, body, auth_mode)
 
             if status in TRANSIENT_HTTP_STATUSES and attempt < attempts - 1:
                 delay = max(0.0, self.cfg.retry_backoff_seconds) * (2**attempt)
@@ -310,6 +306,8 @@ def emit_text(payload: Dict[str, Any]) -> None:
             print(f"  api_check_error: {checks.get('api_check_error')}")
         if checks.get("hint"):
             print(f"  hint: {checks.get('hint')}")
+        if checks.get("dotenv_files_loaded"):
+            print(f"  dotenv_files_loaded: {checks.get('dotenv_files_loaded')}")
         print("  (Use --json for full diagnostics.)")
         return
 
@@ -438,12 +436,23 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     parser.add_argument("--dry-run", action="store_true", help="Validate and print what would run")
+    parser.add_argument(
+        "--cli-timeout-seconds",
+        type=int,
+        default=3600,
+        help="CLI backend only. Subprocess timeout (0 = no limit). Default 3600.",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     skill_root = Path(__file__).resolve().parent.parent
-    env_loader.merge_dotenv_paths([skill_root / ".env", Path.cwd() / ".env"], override=False)
+    dotenv_loaded = env_loader.merge_dotenv_paths(
+        [skill_root / ".env", Path.cwd() / ".env"], override=False
+    )
+    if len(sys.argv) == 2 and sys.argv[1] in ("--version", "-V"):
+        print(f"cursor_handoff {VERSION}")
+        return EXIT_OK
     args = parse_args()
 
     if args.timeout_seconds <= 0:
@@ -475,6 +484,10 @@ def main() -> int:
         return EXIT_VALIDATION
     if args.poll_interval_seconds < 0:
         payload = {"ok": False, "error": "--poll-interval-seconds must be >= 0"}
+        emit_json(payload) if args.json else emit_text(payload)
+        return EXIT_VALIDATION
+    if args.cli_timeout_seconds < 0:
+        payload = {"ok": False, "error": "--cli-timeout-seconds must be >= 0"}
         emit_json(payload) if args.json else emit_text(payload)
         return EXIT_VALIDATION
 
@@ -510,8 +523,7 @@ def main() -> int:
         prompt_text, read_only=read_only, branch=branch, include_branch=include_branch_in_prompt
     )
 
-    skill_dir = Path(__file__).resolve().parent.parent
-    cli_wrapper = skill_dir / "scripts" / "cursor_cli_fallback.sh"
+    cli_wrapper = skill_root / "scripts" / "cursor_cli_fallback.sh"
     cli_binary = detect_cli_binary()
 
     api_key = os.getenv("CURSOR_API_KEY", "").strip()
@@ -528,6 +540,7 @@ def main() -> int:
             "suggested_backend": suggested_backend,
             "cli_binary": cli_binary,
             "ssl": build_ssl_diagnostics(),
+            "dotenv_files_loaded": [str(p) for p in dotenv_loaded],
         }
         if has_api_credentials:
             api_client = CursorApiClient(
@@ -580,6 +593,7 @@ def main() -> int:
             "cli_binary": cli_binary if backend == "cli" else None,
             "timeout_seconds": args.timeout_seconds,
             "api_retries": args.api_retries,
+            "cli_timeout_seconds": args.cli_timeout_seconds,
             "prompt_preview": final_prompt[:500],
         }
         emit_json(payload) if args.json else emit_text(payload)
@@ -612,13 +626,28 @@ def main() -> int:
 
         env = os.environ.copy()
         env["CURSOR_CLI_BIN"] = cli_binary
-        proc = subprocess.run(
-            [str(cli_wrapper), str(local_repo), final_prompt, "true" if read_only else "false", branch],
-            text=True,
-            capture_output=True,
-            check=False,
-            env=env,
-        )
+        run_kw: Dict[str, Any] = {
+            "text": True,
+            "capture_output": True,
+            "check": False,
+            "env": env,
+        }
+        if args.cli_timeout_seconds > 0:
+            run_kw["timeout"] = args.cli_timeout_seconds
+        try:
+            proc = subprocess.run(
+                [str(cli_wrapper), str(local_repo), final_prompt, "true" if read_only else "false", branch],
+                **run_kw,
+            )
+        except subprocess.TimeoutExpired:
+            payload = {
+                "ok": False,
+                "backend": "cli",
+                "error": "CLI handoff subprocess timed out",
+                "timeout_seconds": args.cli_timeout_seconds,
+            }
+            emit_json(payload) if args.json else emit_text(payload)
+            return EXIT_CLI
         if proc.returncode != 0:
             payload = {
                 "ok": False,
@@ -758,5 +787,5 @@ if __name__ == "__main__":
         sys.exit(main())
     except KeyboardInterrupt:
         payload = {"ok": False, "error": "Interrupted by user"}
-        emit_json(payload) if "--json" in sys.argv else emit_text(payload)
+        emit_json(payload) if cursor_api_common.argv_has_json_flag() else emit_text(payload)
         sys.exit(EXIT_VALIDATION)

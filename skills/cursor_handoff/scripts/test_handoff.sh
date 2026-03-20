@@ -9,7 +9,7 @@ README_FILE="${BASE_DIR}/README.md"
 TEST_FILE="${BASE_DIR}/tests/test_cursor_handoff.py"
 
 echo "[1/6] Checking required files..."
-for f in "$PY_SCRIPT" "${BASE_DIR}/scripts/env_loader.py" "$CLI_SCRIPT" "$SKILL_FILE" "$README_FILE" "$TEST_FILE"; do
+for f in "$PY_SCRIPT" "${BASE_DIR}/scripts/env_loader.py" "${BASE_DIR}/scripts/cursor_api_common.py" "$CLI_SCRIPT" "$SKILL_FILE" "$README_FILE" "$TEST_FILE"; do
   if [[ ! -f "$f" ]]; then
     echo "Missing required file: $f" >&2
     exit 1
@@ -22,7 +22,7 @@ python3 "$PY_SCRIPT" --help >/dev/null
 echo "OK: help command works"
 
 echo "[3/6] Running basic static checks..."
-python3 -m py_compile "$PY_SCRIPT" "${BASE_DIR}/scripts/env_loader.py"
+python3 -m py_compile "$PY_SCRIPT" "${BASE_DIR}/scripts/env_loader.py" "${BASE_DIR}/scripts/cursor_api_common.py"
 bash -n "$CLI_SCRIPT"
 echo "OK: syntax checks passed"
 

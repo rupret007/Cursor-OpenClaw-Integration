@@ -43,14 +43,16 @@ Hardened **Cursor Cloud Agents** integration toolkit for **OpenClaw** and shell 
 ├── openclaw-cursor-integration-roadmap.md
 ├── scripts/
 │   ├── cursor_openclaw.py
+│   ├── cursor_api_common.py # shared validation, HTTP helpers (mirrored under skills)
 │   ├── env_loader.py        # auto-load .env (used by CLIs)
 │   ├── setup_admin.sh       # interactive .env + optional OpenClaw skill install
+│   ├── exhaustive_feature_check.sh  # offline sweep of both CLIs (+ optional live API)
 │   └── test_integration.sh
 ├── skills/
 │   └── cursor_handoff/        # vendored skill (sync to ~/.openclaw/workspace/skills/)
 │       ├── SKILL.md
 │       ├── .env.example
-│       ├── scripts/
+│       ├── scripts/         # includes env_loader.py, cursor_api_common.py (mirror)
 │       └── tests/
 └── tests/
     └── test_cursor_openclaw.py
@@ -223,7 +225,8 @@ See [.env.example](.env.example) and [skills/cursor_handoff/.env.example](skills
 | `CERTIFICATE_VERIFY_FAILED` (Python) | On macOS, try `export SSL_CERT_FILE="$(python3 -c 'import certifi; print(certifi.where())')"` if `certifi` is installed. |
 | Skill not listed after copy | `openclaw gateway restart`; confirm path `~/.openclaw/workspace/skills/cursor_handoff/SKILL.md`. |
 | zsh: `command not found: #` / `no matches found` after paste | You pasted comment lines or broken lines into the shell. Run commands one at a time; avoid copying `#` comment lines from docs or chat. |
-| `create-agent` validation errors | Use `--dry-run` first; check `--repository` / `--ref` / `--branch-name` / `--pr-url` per API docs. |
+| `create-agent` validation errors | Use `--dry-run` first; use **either** `--repository` or `--pr-url`, not both; check `--ref` / `--branch-name` per API docs. |
+| `Invalid --id format` | Pass only the agent id (e.g. `bc-…`), not a full URL. Allowed characters: letters, digits, `._:-`. |
 
 ## Hardening details (summary)
 

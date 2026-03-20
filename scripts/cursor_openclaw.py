@@ -27,7 +27,9 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 import env_loader  # noqa: E402
+import cursor_api_common  # noqa: E402
 
+VERSION = "1.1.0"
 
 TERMINAL_STATUSES = {"FINISHED", "FAILED", "CANCELLED", "STOPPED", "EXPIRED"}
 
@@ -95,7 +97,7 @@ class CursorApiClient:
         headers = {
             "Accept": "application/json",
             "Content-Type": "application/json",
-            "User-Agent": "cursor-openclaw-integration/1.0",
+            "User-Agent": cursor_api_common.USER_AGENT_OPENCLAW,
         }
         headers.update(self._auth_headers(mode))
         if body is not None:
@@ -104,7 +106,7 @@ class CursorApiClient:
         try:
             with urllib.request.urlopen(req, timeout=self.cfg.timeout_seconds) as resp:
                 raw = resp.read().decode("utf-8", errors="replace")
-                data = json.loads(raw) if raw else {}
+                data = cursor_api_common.parse_json_response_body(raw)
                 return resp.status, data, raw
         except urllib.error.HTTPError as err:
             raw = err.read().decode("utf-8", errors="replace")
@@ -113,6 +115,10 @@ class CursorApiClient:
             except json.JSONDecodeError:
                 data = {"raw": raw}
             return err.code, data, raw
+        except (urllib.error.URLError, TimeoutError, ConnectionError, BrokenPipeError, OSError) as err:
+            msg = str(err)
+            data = {"error": msg, "error_type": type(err).__name__}
+            return cursor_api_common.TRANSIENT_TRANSPORT_STATUS, data, msg
 
     def request(
         self, method: str, path: str, query: Optional[Dict[str, str]] = None, body: Optional[Dict[str, Any]] = None
@@ -124,7 +130,7 @@ class CursorApiClient:
             while True:
                 status, data, raw = self._request_once(method, path, query, body, mode)
                 last = (status, data, raw, mode)
-                retryable = status in {429, 500, 502, 503, 504}
+                retryable = status in {429, 500, 502, 503, 504, cursor_api_common.TRANSIENT_TRANSPORT_STATUS}
                 if retryable and attempt < self.cfg.retries:
                     time.sleep(self.cfg.retry_backoff_seconds * (2**attempt))
                     attempt += 1
@@ -145,15 +151,12 @@ def print_out(payload: Dict[str, Any], as_json: bool) -> None:
             print(f"{key}: {value}")
 
 
-def require_api_key() -> str:
-    key = (os.getenv("CURSOR_API_KEY") or "").strip()
-    if not key:
-        raise RuntimeError("CURSOR_API_KEY is required.")
-    return key
-
-
 def require_one_of(repo: str, pr_url: str) -> None:
-    if not repo and not pr_url:
+    has_r = bool((repo or "").strip())
+    has_p = bool((pr_url or "").strip())
+    if has_r and has_p:
+        raise ValueError("Pass only one of --repository or --pr-url (not both).")
+    if not has_r and not has_p:
         raise ValueError("Provide --repository or --pr-url.")
 
 
@@ -301,18 +304,22 @@ def handle(cfg: Config, args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
         return status, {"status": status, "auth_mode": auth_mode, "response": data or raw}
 
     if args.command == "agent-status":
+        cursor_api_common.validate_agent_id(args.id)
         status, data, raw, auth_mode = client.request("GET", f"/v0/agents/{args.id}")
         return status, {"status": status, "auth_mode": auth_mode, "response": data or raw}
 
     if args.command == "conversation":
+        cursor_api_common.validate_agent_id(args.id)
         status, data, raw, auth_mode = client.request("GET", f"/v0/agents/{args.id}/conversation")
         return status, {"status": status, "auth_mode": auth_mode, "response": data or raw}
 
     if args.command == "artifacts":
+        cursor_api_common.validate_agent_id(args.id)
         status, data, raw, auth_mode = client.request("GET", f"/v0/agents/{args.id}/artifacts")
         return status, {"status": status, "auth_mode": auth_mode, "response": data or raw}
 
     if args.command == "artifact-download-url":
+        cursor_api_common.validate_agent_id(args.id)
         status, data, raw, auth_mode = client.request(
             "GET",
             f"/v0/agents/{args.id}/artifacts/download",
@@ -343,15 +350,18 @@ def handle(cfg: Config, args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
         return status, response
 
     if args.command == "followup":
+        cursor_api_common.validate_agent_id(args.id)
         body = {"prompt": {"text": args.prompt}}
         status, data, raw, auth_mode = client.request("POST", f"/v0/agents/{args.id}/followup", body=body)
         return status, {"status": status, "auth_mode": auth_mode, "response": data or raw}
 
     if args.command == "stop-agent":
+        cursor_api_common.validate_agent_id(args.id)
         status, data, raw, auth_mode = client.request("POST", f"/v0/agents/{args.id}/stop")
         return status, {"status": status, "auth_mode": auth_mode, "response": data or raw}
 
     if args.command == "delete-agent":
+        cursor_api_common.validate_agent_id(args.id)
         status, data, raw, auth_mode = client.request("DELETE", f"/v0/agents/{args.id}")
         return status, {"status": status, "auth_mode": auth_mode, "response": data or raw}
 
@@ -360,6 +370,9 @@ def handle(cfg: Config, args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
 
 def main() -> int:
     _load_repo_dotenv()
+    if len(sys.argv) == 2 and sys.argv[1] in ("--version", "-V"):
+        print(f"cursor_openclaw {VERSION}")
+        return 0
     args = parse_args()
     try:
         validate_common_args(args)
@@ -382,8 +395,7 @@ def main() -> int:
         return 0 if status < 400 else 4
     except Exception as err:  # noqa: BLE001
         payload = {"ok": False, "error": str(err)}
-        as_json = "--json" in sys.argv
-        print_out(payload, as_json=as_json)
+        print_out(payload, as_json=cursor_api_common.argv_has_json_flag())
         return 2
 
 

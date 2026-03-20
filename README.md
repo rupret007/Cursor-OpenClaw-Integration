@@ -183,6 +183,12 @@ bash scripts/test_integration.sh
 bash skills/cursor_handoff/scripts/test_handoff.sh
 ```
 
+`test_integration.sh` ends with **`scripts/exhaustive_feature_check.sh`** (every subcommand `--help`, validation paths, handoff diagnose/dry-run modes). Optional live API smoke:
+
+```bash
+RUN_LIVE_API=1 bash scripts/exhaustive_feature_check.sh
+```
+
 **Unit tests only:**
 
 ```bash

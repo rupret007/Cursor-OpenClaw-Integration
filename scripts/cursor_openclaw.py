@@ -198,6 +198,14 @@ def validate_common_args(args: argparse.Namespace) -> None:
         raise ValueError("--retry-backoff-seconds must be >= 0")
 
 
+def validate_command_args(args: argparse.Namespace) -> None:
+    if args.command == "create-agent":
+        if args.poll_attempts < 0:
+            raise ValueError("--poll-attempts must be >= 0")
+        if args.poll_interval_seconds < 0:
+            raise ValueError("--poll-interval-seconds must be >= 0")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Cursor Cloud Agents CLI for OpenClaw integrations.")
     add_common_args(parser)
@@ -355,6 +363,7 @@ def main() -> int:
     args = parse_args()
     try:
         validate_common_args(args)
+        validate_command_args(args)
         api_key = (os.getenv("CURSOR_API_KEY") or "").strip()
         if args.command != "diagnose" and not api_key:
             raise RuntimeError("CURSOR_API_KEY is required.")

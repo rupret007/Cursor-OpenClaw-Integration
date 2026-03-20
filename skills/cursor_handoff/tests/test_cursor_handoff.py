@@ -1,7 +1,9 @@
 import importlib.util
+import io
 import pathlib
 import sys
 import unittest
+from contextlib import redirect_stdout
 
 
 SCRIPT_PATH = (
@@ -53,6 +55,45 @@ class CursorHandoffTests(unittest.TestCase):
         self.assertIsNotNone(hint)
         no_hint = MODULE.build_ssl_hint("some other error")
         self.assertIsNone(no_hint)
+
+    def test_emit_text_diagnose(self):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            MODULE.emit_text(
+                {
+                    "ok": True,
+                    "diagnose": True,
+                    "checks": {
+                        "api_key_set": False,
+                        "api_base_url": "https://api.cursor.com",
+                        "requested_mode": "auto",
+                        "suggested_backend": "none",
+                        "cli_binary": None,
+                    },
+                }
+            )
+        out = buf.getvalue()
+        self.assertIn("Diagnostics complete", out)
+        self.assertNotIn("Handoff submitted successfully", out)
+
+    def test_emit_text_dry_run(self):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            MODULE.emit_text(
+                {
+                    "ok": True,
+                    "dry_run": True,
+                    "backend": "api",
+                    "backend_error": None,
+                    "mode_requested": "api",
+                    "read_only": True,
+                    "branch": "b1",
+                    "repo_input": "/tmp",
+                }
+            )
+        out = buf.getvalue()
+        self.assertIn("Dry run", out)
+        self.assertNotIn("Handoff submitted successfully", out)
 
 
 if __name__ == "__main__":

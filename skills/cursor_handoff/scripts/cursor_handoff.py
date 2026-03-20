@@ -292,6 +292,39 @@ def emit_json(payload: Dict[str, Any]) -> None:
 
 
 def emit_text(payload: Dict[str, Any]) -> None:
+    if payload.get("diagnose"):
+        print("Diagnostics complete.")
+        checks = payload.get("checks") or {}
+        print(f"  api_key_set: {checks.get('api_key_set')}")
+        print(f"  api_base_url: {checks.get('api_base_url')}")
+        print(f"  requested_mode: {checks.get('requested_mode')}")
+        print(f"  suggested_backend: {checks.get('suggested_backend')}")
+        print(f"  cli_binary: {checks.get('cli_binary')}")
+        if "me" in checks:
+            me = checks["me"]
+            print(f"  /v0/me HTTP: {me.get('status')}")
+        if "agents" in checks:
+            ag = checks["agents"]
+            print(f"  /v0/agents HTTP: {ag.get('status')}")
+        if checks.get("api_check_error"):
+            print(f"  api_check_error: {checks.get('api_check_error')}")
+        if checks.get("hint"):
+            print(f"  hint: {checks.get('hint')}")
+        print("  (Use --json for full diagnostics.)")
+        return
+
+    if payload.get("dry_run"):
+        print("Dry run (nothing submitted).")
+        print(f"  backend: {payload.get('backend')}")
+        if payload.get("backend_error"):
+            print(f"  backend_error: {payload.get('backend_error')}")
+        print(f"  mode_requested: {payload.get('mode_requested')}")
+        print(f"  read_only: {payload.get('read_only')}")
+        print(f"  branch: {payload.get('branch')}")
+        print(f"  repo_input: {payload.get('repo_input')}")
+        print("  (Use --json for full dry-run payload.)")
+        return
+
     if payload.get("ok"):
         print("Handoff submitted successfully.")
         print(f"Backend: {payload.get('backend')}")

@@ -30,6 +30,18 @@ class CursorOpenClawTests(unittest.TestCase):
         self.assertEqual(MODULE.redact("abcd"), "***")
         self.assertEqual(MODULE.redact("key_12345678"), "ke***78")
 
+    def test_validate_command_args_create_poll(self):
+        bad = types.SimpleNamespace(command="create-agent", poll_attempts=-1, poll_interval_seconds=1.0)
+        with self.assertRaises(ValueError):
+            MODULE.validate_command_args(bad)
+        bad2 = types.SimpleNamespace(command="create-agent", poll_attempts=0, poll_interval_seconds=-0.5)
+        with self.assertRaises(ValueError):
+            MODULE.validate_command_args(bad2)
+        ok = types.SimpleNamespace(command="create-agent", poll_attempts=0, poll_interval_seconds=0.0)
+        MODULE.validate_command_args(ok)
+        skip = types.SimpleNamespace(command="whoami")
+        MODULE.validate_command_args(skip)
+
     def test_validate_common_args(self):
         ok = types.SimpleNamespace(timeout_seconds=30, retries=2, retry_backoff_seconds=0.5)
         MODULE.validate_common_args(ok)

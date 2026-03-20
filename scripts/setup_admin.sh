@@ -68,9 +68,70 @@ sync_skill_tree() {
   say "Skill copied to: $SKILL_DEST"
 }
 
+run_batch() {
+  local api_key="$1" base_url="$2" auth_mode="$3" email="$4" default_mode="$5"
+  write_env_file "$api_key" "$base_url" "$auth_mode" "$email" "$default_mode" "$ENV_FILE"
+  say "Wrote $ENV_FILE (mode 600)."
+  [ -d "$SKILL_SRC" ] || die "Missing skill source: $SKILL_SRC"
+  sync_skill_tree
+  write_env_file "$api_key" "$base_url" "$auth_mode" "$email" "$default_mode" "$SKILL_DEST/.env"
+  say "Wrote $SKILL_DEST/.env (mode 600)."
+  if command -v openclaw >/dev/null 2>&1; then
+    openclaw gateway restart
+    say "Gateway restarted."
+  else
+    say "openclaw not in PATH — restart the gateway yourself when ready."
+  fi
+  if [ -n "${api_key// }" ]; then
+    set -a
+    # shellcheck source=/dev/null
+    source "$ENV_FILE"
+    set +a
+    python3 "$CLI" --json diagnose || say "diagnose exited non-zero — check key and network."
+  else
+    say "Skipping diagnose (empty API key)."
+  fi
+}
+
 main() {
   require_bash
   cd "$BASE_DIR"
+
+  local batch=false force=false
+  for arg in "$@"; do
+    case "$arg" in
+      --batch) batch=true ;;
+      --force) force=true ;;
+    esac
+  done
+
+  if $batch; then
+    say ""
+    say "=== Cursor + OpenClaw — admin setup (batch) ==="
+    say "Repo: $BASE_DIR"
+    local api_key="${CURSOR_API_KEY:-}"
+    api_key="${api_key//$'\r'/}"
+    api_key="${api_key//$'\n'/}"
+    if [ -z "${api_key// }" ]; then
+      die "Batch mode requires CURSOR_API_KEY in the environment (export it in your terminal, then re-run)."
+    fi
+    if [ -f "$ENV_FILE" ] && ! $force; then
+      die "Refusing to overwrite $ENV_FILE without --force (or remove the file first)."
+    fi
+    local base_url="${CURSOR_BASE_URL:-https://api.cursor.com}"
+    base_url="${base_url%/}"
+    local auth_mode="${CURSOR_AUTH_MODE:-auto}"
+    case "$auth_mode" in auto|basic|bearer) ;; *) die "CURSOR_AUTH_MODE must be auto, basic, or bearer" ;; esac
+    local email="${CURSOR_EMAIL:-}"
+    local default_mode="${OPENCLAW_CURSOR_DEFAULT_MODE:-auto}"
+    case "$default_mode" in auto|api|cli) ;; *) die "OPENCLAW_CURSOR_DEFAULT_MODE must be auto, api, or cli" ;; esac
+    run_batch "$api_key" "$base_url" "$auth_mode" "$email" "$default_mode"
+    say ""
+    say "=== Done (batch) ==="
+    say "CLIs also auto-load ./.env; optional shell: set -a && source .env && set +a"
+    say ""
+    return 0
+  fi
 
   say ""
   say "=== Cursor + OpenClaw — admin setup ==="

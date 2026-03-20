@@ -1,0 +1,70 @@
+import importlib.util
+import pathlib
+import sys
+import unittest
+
+
+SCRIPT_PATH = pathlib.Path(__file__).resolve().parent.parent / "scripts" / "cursor_openclaw.py"
+SPEC = importlib.util.spec_from_file_location("cursor_openclaw", SCRIPT_PATH)
+MODULE = importlib.util.module_from_spec(SPEC)
+assert SPEC and SPEC.loader
+sys.modules["cursor_openclaw"] = MODULE
+SPEC.loader.exec_module(MODULE)  # type: ignore[attr-defined]
+
+
+class CursorOpenClawTests(unittest.TestCase):
+    def test_parse_bool(self):
+        self.assertTrue(MODULE.parse_bool("true"))
+        self.assertTrue(MODULE.parse_bool("YES"))
+        self.assertFalse(MODULE.parse_bool("false"))
+        with self.assertRaises(ValueError):
+            MODULE.parse_bool("maybe")
+
+    def test_normalize_base_url(self):
+        self.assertEqual(MODULE.normalize_base_url("https://api.cursor.com/"), "https://api.cursor.com")
+        self.assertEqual(MODULE.normalize_base_url(""), "https://api.cursor.com")
+
+    def test_redact(self):
+        self.assertEqual(MODULE.redact(""), "")
+        self.assertEqual(MODULE.redact("abcd"), "***")
+        self.assertEqual(MODULE.redact("key_12345678"), "ke***78")
+
+    def test_build_create_payload_from_repository(self):
+        class Args:
+            prompt = "hello"
+            repository = "https://github.com/foo/bar"
+            ref = "main"
+            pr_url = ""
+            model = "default"
+            branch_name = "cursor/test"
+            auto_create_pr = False
+            open_as_cursor_github_app = False
+            skip_reviewer_request = False
+
+        payload = MODULE.build_create_payload(Args())
+        self.assertEqual(payload["source"]["repository"], "https://github.com/foo/bar")
+        self.assertEqual(payload["source"]["ref"], "main")
+        self.assertEqual(payload["target"]["branchName"], "cursor/test")
+        self.assertFalse(payload["target"]["autoCreatePr"])
+
+    def test_build_create_payload_from_pr(self):
+        class Args:
+            prompt = "hello"
+            repository = ""
+            ref = ""
+            pr_url = "https://github.com/foo/bar/pull/1"
+            model = "default"
+            branch_name = "cursor/test"
+            auto_create_pr = True
+            open_as_cursor_github_app = True
+            skip_reviewer_request = True
+
+        payload = MODULE.build_create_payload(Args())
+        self.assertEqual(payload["source"]["prUrl"], "https://github.com/foo/bar/pull/1")
+        self.assertTrue(payload["target"]["autoCreatePr"])
+        self.assertTrue(payload["target"]["openAsCursorGithubApp"])
+        self.assertTrue(payload["target"]["skipReviewerRequest"])
+
+
+if __name__ == "__main__":
+    unittest.main()

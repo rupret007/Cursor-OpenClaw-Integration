@@ -31,6 +31,7 @@ Hardened **Cursor Cloud Agents** integration toolkit for **OpenClaw** and shell 
 
 ```text
 .
+├── LICENSE
 ├── .env.example
 ├── README.md
 ├── docs/
@@ -174,4 +175,4 @@ See [.env.example](.env.example) and [skills/cursor_handoff/.env.example](skills
 
 ## License
 
-See repository default or add a `LICENSE` file if you want an explicit SPDX license on `main`.
+[MIT](LICENSE).

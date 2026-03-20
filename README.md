@@ -66,9 +66,20 @@ bash scripts/setup_admin.sh
 
 **Non-interactive (e.g. your own terminal, key already exported):** writes `.env`, syncs skill, restarts gateway, runs `diagnose`. Refuses to overwrite `./.env` unless you pass **`--force`**.
 
+Use your real key; **paste only the commands** (not prose or `# …` comment lines from chat), or zsh may error.
+
 ```bash
-export CURSOR_API_KEY   # must be set
-bash scripts/setup_admin.sh --batch --force   # --force only if .env already exists
+export CURSOR_API_KEY="…"
+```
+
+```bash
+bash scripts/setup_admin.sh --batch
+```
+
+If `./.env` already exists and you want to replace it:
+
+```bash
+bash scripts/setup_admin.sh --batch --force
 ```
 
 It will:
@@ -205,6 +216,7 @@ See [.env.example](.env.example) and [skills/cursor_handoff/.env.example](skills
 | `401 Unauthorized` | Wrong key type or revoked key; confirm key in Cursor settings. |
 | `CERTIFICATE_VERIFY_FAILED` (Python) | On macOS, try `export SSL_CERT_FILE="$(python3 -c 'import certifi; print(certifi.where())')"` if `certifi` is installed. |
 | Skill not listed after copy | `openclaw gateway restart`; confirm path `~/.openclaw/workspace/skills/cursor_handoff/SKILL.md`. |
+| zsh: `command not found: #` / `no matches found` after paste | You pasted comment lines or broken lines into the shell. Run commands one at a time; avoid copying `#` comment lines from docs or chat. |
 | `create-agent` validation errors | Use `--dry-run` first; check `--repository` / `--ref` / `--branch-name` / `--pr-url` per API docs. |
 
 ## Hardening details (summary)

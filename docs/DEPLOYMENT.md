@@ -45,12 +45,15 @@ bash skills/cursor_handoff/scripts/test_handoff.sh
 
 ## OpenClaw gateway
 
-After updating skill files under `~/.openclaw/workspace/skills/` (or syncing from this repo), restart the gateway so skills reload:
+**Sync from this repo (typical):** from the repository root after `git pull`:
 
 ```bash
+cp -R skills/cursor_handoff ~/.openclaw/workspace/skills/
 openclaw gateway restart
 openclaw skills list   # expect cursor_handoff ready if skill is installed in workspace
 ```
+
+Optional clean replace if the skill had files removed upstream: `rm -rf ~/.openclaw/workspace/skills/cursor_handoff` then the same `cp -R`.
 
 The **canonical skill copy** for day-to-day OpenClaw may live under `~/.openclaw/workspace/skills/cursor_handoff/`. This repository includes a **mirror** under `skills/cursor_handoff/` for version control and CI.
 

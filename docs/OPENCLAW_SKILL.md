@@ -9,7 +9,7 @@
 
 ## Installing the skill in OpenClaw
 
-1. Copy the skill directory to your OpenClaw workspace:
+1. Copy the skill directory to your OpenClaw workspace (run from the repo root):
 
    ```bash
    mkdir -p ~/.openclaw/workspace/skills
@@ -26,6 +26,15 @@
    ```
 
    Confirm **`cursor_handoff`** shows as **ready**.
+
+### Updating / daily sync
+
+When you pull a newer `main`, repeat the copy and restart — no need to remove the old folder unless you want a guaranteed clean tree (e.g. after files were deleted in the repo):
+
+```bash
+cp -R skills/cursor_handoff ~/.openclaw/workspace/skills/
+openclaw gateway restart
+```
 
 ## Typical OpenClaw → Cursor flow
 

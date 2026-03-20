@@ -97,13 +97,17 @@ More examples are in [docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md).
 
 ## OpenClaw skill (`cursor_handoff`)
 
-Install into your OpenClaw workspace and restart the gateway:
+**Daily sync (recommended):** from your clone of this repo (ideally `main`), copy the skill into the OpenClaw workspace and restart the gateway so changes load:
 
 ```bash
 cp -R skills/cursor_handoff ~/.openclaw/workspace/skills/
 openclaw gateway restart
-openclaw skills list
+openclaw skills list   # expect cursor_handoff ready
 ```
+
+That flow is enough for normal updates. If you ever remove or rename files inside the skill in git, you can do a clean replace first (`rm -rf ~/.openclaw/workspace/skills/cursor_handoff`) and then the same `cp -R` — either approach works; `cp -R` alone is fine day to day.
+
+First-time install: ensure the directory exists — `mkdir -p ~/.openclaw/workspace/skills` — then use the same `cp -R` line.
 
 Full steps and flow: [docs/OPENCLAW_SKILL.md](docs/OPENCLAW_SKILL.md).
 

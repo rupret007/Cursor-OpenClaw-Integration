@@ -135,7 +135,12 @@ def make_handler(server: SyncServer) -> type:
                     self._send(200, payload)
                 return
             if path == "/v1/tasks":
-                limit = int(urllib.parse.parse_qs(parsed.query).get("limit", ["50"])[0])
+                raw_lim = (urllib.parse.parse_qs(parsed.query).get("limit") or ["50"])[0]
+                try:
+                    limit = int(raw_lim)
+                except ValueError:
+                    limit = 50
+                limit = max(1, min(limit, 500))
 
                 def lst(c: sqlite3.Connection) -> bytes:
                     rows = list_tasks(c, limit=limit)
@@ -155,7 +160,17 @@ def make_handler(server: SyncServer) -> type:
                     return json.dumps(handle_command(c, body), indent=2).encode("utf-8")
 
                 out = server.with_lock(run)
-                self._send(200, out)
+                try:
+                    result = json.loads(out.decode("utf-8"))
+                except json.JSONDecodeError:
+                    self._send(500, out)
+                    return
+                if result.get("ok") is True:
+                    self._send(200, out)
+                else:
+                    err = str(result.get("error") or "").lower()
+                    code = 404 if "unknown task" in err else 400
+                    self._send(code, out)
                 return
             if path == "/v1/internal/events":
                 if not self._auth_internal():
@@ -183,7 +198,18 @@ def make_handler(server: SyncServer) -> type:
                     seq = append_event(c, str(task_id), ev, payload)
                     return json.dumps({"ok": True, "seq": seq}).encode("utf-8")
 
-                self._send(200, server.with_lock(append))
+                raw = server.with_lock(append)
+                try:
+                    result = json.loads(raw.decode("utf-8"))
+                except json.JSONDecodeError:
+                    self._send(500, raw)
+                    return
+                if result.get("ok") is True:
+                    self._send(200, raw)
+                else:
+                    err = str(result.get("error") or "").lower()
+                    code = 404 if "unknown" in err else 400
+                    self._send(code, raw)
                 return
             if path == "/v1/telegram/webhook":
                 q = urllib.parse.parse_qs(parsed.query)

@@ -90,6 +90,19 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(proj["status"], TaskStatus.COMPLETED.value)
         self.assertEqual(proj["cursor_agent_id"], "bc-test")
 
+    def test_unknown_channel_rejected(self) -> None:
+        r = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.CREATE_TASK.value,
+                "channel": "not-a-real-channel",
+                "external_id": "x1",
+                "payload": {"summary": "nope"},
+            },
+        )
+        self.assertFalse(r.get("ok"))
+        self.assertIn("unknown channel", str(r.get("error", "")).lower())
+
     def test_normalize_idempotency_base_stable(self) -> None:
         a = normalize_idempotency_base("telegram", "42", "SubmitUserMessage")
         b = normalize_idempotency_base("telegram", "42", "SubmitUserMessage")

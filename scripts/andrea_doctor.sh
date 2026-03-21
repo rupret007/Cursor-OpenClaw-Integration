@@ -4,12 +4,14 @@
 #        SKIP_OPENCLAW_PROBE=1 bash scripts/andrea_doctor.sh
 #        STRICT_SECURITY=1 bash scripts/andrea_doctor.sh   # fail on security warnings too
 #        MODEL_GUARD_ON_FAIL=1 bash scripts/andrea_doctor.sh
+#        OPENCLAW_ENFORCE=1 bash scripts/andrea_doctor.sh
 set -euo pipefail
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export STRICT="${STRICT_SECURITY:-0}"
 SKIP_OPENCLAW="${SKIP_OPENCLAW_PROBE:-0}"
 MODEL_GUARD_ON_FAIL="${MODEL_GUARD_ON_FAIL:-0}"
+OPENCLAW_ENFORCE="${OPENCLAW_ENFORCE:-0}"
 
 cd "$BASE_DIR"
 
@@ -34,6 +36,13 @@ echo ""
 echo ">>> [3/4] Reliability probes (deterministic)"
 bash "${BASE_DIR}/scripts/andrea_reliability_probes.sh"
 echo ""
+
+if [[ "${OPENCLAW_ENFORCE}" == "1" ]]; then
+  echo ">>> [3.5/4] OpenClaw enforcer (sync + required skills + probe)"
+  bash "${BASE_DIR}/scripts/andrea_openclaw_enforce.sh" \
+    || echo "WARN: openclaw enforcer failed; continuing to direct probe step" >&2
+  echo ""
+fi
 
 echo ">>> [4/4] OpenClaw model probe (optional)"
 if [[ "${SKIP_OPENCLAW}" == "1" ]]; then

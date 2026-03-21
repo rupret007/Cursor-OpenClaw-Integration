@@ -94,6 +94,12 @@ MODEL_GUARD_ON_FAIL=1 bash scripts/andrea_doctor.sh
 
 If the model probe fails, doctor invokes model guard for automatic recovery.
 
+For broader OpenClaw enforcement (skill sync + required skills + probe + optional guard), use:
+
+```bash
+bash scripts/andrea_openclaw_enforce.sh
+```
+
 ---
 
 ## 6. Allowlist vs catalog

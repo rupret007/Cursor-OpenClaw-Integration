@@ -45,6 +45,8 @@ bash scripts/andrea_doctor.sh
 # STRICT_SECURITY=1 bash scripts/andrea_doctor.sh
 # Auto-remediate failed model probe using profile guard:
 # MODEL_GUARD_ON_FAIL=1 bash scripts/andrea_doctor.sh
+# Enforce OpenClaw baseline first (skill sync + required skills + probe):
+# OPENCLAW_ENFORCE=1 bash scripts/andrea_doctor.sh
 ```
 
 Manual steps (same ingredients):
@@ -79,6 +81,7 @@ bash scripts/andrea_slo_check.sh
 | Security sanity (repo) | `bash scripts/andrea_security_sanity.sh` |
 | Readiness grade (A/B/C) | `python3 scripts/andrea_readiness_grade.py` |
 | SLO check (grade + probe) | `bash scripts/andrea_slo_check.sh` |
+| OpenClaw baseline enforce | `bash scripts/andrea_openclaw_enforce.sh` |
 | Model remediation (auto profile failover) | `bash scripts/andrea_model_guard.sh` |
 | Telegram getMe SLO (optional) | `TELEGRAM_SLO=1 bash scripts/andrea_slo_check.sh` (needs `TELEGRAM_BOT_TOKEN`) |
 | Release gate (strict) | `bash scripts/andrea_release_gate.sh` |

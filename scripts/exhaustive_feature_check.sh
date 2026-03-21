@@ -78,6 +78,16 @@ pass "andrea_model_guard --dry-run"
 expect_fail "andrea_model_guard invalid timeout" \
   bash "${BASE_DIR}/scripts/andrea_model_guard.sh" --dry-run --probe-timeout-ms nope
 
+bash "${BASE_DIR}/scripts/andrea_openclaw_enforce.sh" --help >/dev/null || fail "andrea_openclaw_enforce --help"
+pass "andrea_openclaw_enforce --help"
+
+bash "${BASE_DIR}/scripts/andrea_openclaw_enforce.sh" --dry-run --required-skills "cursor_handoff,github" >/dev/null \
+  || fail "andrea_openclaw_enforce --dry-run"
+pass "andrea_openclaw_enforce --dry-run"
+
+expect_fail "andrea_openclaw_enforce invalid timeout" \
+  bash "${BASE_DIR}/scripts/andrea_openclaw_enforce.sh" --dry-run --probe-timeout-ms nope
+
 # Validation errors (exit 2)
 expect_fail "create-agent both repository and pr-url" \
   env CURSOR_API_KEY=dummy_test_key python3 "$CLI" --json create-agent \

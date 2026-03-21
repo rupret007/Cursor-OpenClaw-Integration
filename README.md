@@ -39,7 +39,8 @@ Hardened **Cursor Cloud Agents** integration toolkit for **OpenClaw** and shell 
 ├── docs/
 │   ├── DEPLOYMENT.md          # main branch, env, gateway, verify
 │   ├── OPENCLAW_SKILL.md      # install skill, typical flows
-│   └── CLI_REFERENCE.md       # flags and subcommands
+│   ├── CLI_REFERENCE.md       # flags and subcommands
+│   └── ANDREA_*.md            # Andrea max-autonomy: matrix, policy, runbooks, playbook
 ├── openclaw-cursor-integration-proposal.md
 ├── openclaw-cursor-integration-roadmap.md
 ├── scripts/
@@ -48,6 +49,8 @@ Hardened **Cursor Cloud Agents** integration toolkit for **OpenClaw** and shell 
 │   ├── env_loader.py        # auto-load .env (used by CLIs)
 │   ├── setup_admin.sh       # interactive .env + optional OpenClaw skill install
 │   ├── exhaustive_feature_check.sh  # offline sweep of both CLIs (+ optional live API)
+│   ├── andrea_capabilities.py      # Andrea runtime capability matrix (live readiness)
+│   ├── andrea_reliability_probes.sh # deterministic probes + capability snapshot
 │   └── test_integration.sh
 ├── skills/
 │   └── cursor_handoff/        # vendored skill (sync to ~/.openclaw/workspace/skills/)
@@ -177,6 +180,32 @@ First-time install: ensure the directory exists — `mkdir -p ~/.openclaw/worksp
 
 Full steps and flow: [docs/OPENCLAW_SKILL.md](docs/OPENCLAW_SKILL.md).
 
+## Andrea (max-autonomy operator)
+
+**Andrea** is the hardened operator profile for this stack: capability baseline, execute-first policy, DevOps/Telegram/productivity runbooks, and reliability probes.
+
+| Doc | Purpose |
+|-----|---------|
+| [docs/ANDREA_OPERATIONS_PLAYBOOK.md](docs/ANDREA_OPERATIONS_PLAYBOOK.md) | **Start here** — autonomy scope, verification, recovery |
+| [docs/ANDREA_CAPABILITY_MATRIX.md](docs/ANDREA_CAPABILITY_MATRIX.md) | Live readiness matrix (`scripts/andrea_capabilities.py`) |
+| [docs/ANDREA_AUTONOMY_POLICY.md](docs/ANDREA_AUTONOMY_POLICY.md) | Execute-first + confirm-required boundaries |
+| [docs/ANDREA_DEVOPS_RUNBOOK.md](docs/ANDREA_DEVOPS_RUNBOOK.md) | Task → branch → test → PR + GitHub fallbacks |
+| [docs/ANDREA_COMMS_PRODUCTIVITY.md](docs/ANDREA_COMMS_PRODUCTIVITY.md) | Telegram + productivity routines |
+| [docs/ANDREA_READINESS_REPORT.md](docs/ANDREA_READINESS_REPORT.md) | Readiness template / sign-off |
+
+**Startup self-check:**
+
+```bash
+python3 scripts/andrea_capabilities.py
+```
+
+**Reliability probes** (deterministic env for `diagnose` + JSON shape checks):
+
+```bash
+bash scripts/andrea_reliability_probes.sh
+# optional: RUN_LIVE_PROBES=1 for gh + openclaw
+```
+
 ## Documentation
 
 | Doc | Purpose |
@@ -200,7 +229,7 @@ bash scripts/test_integration.sh
 bash skills/cursor_handoff/scripts/test_handoff.sh
 ```
 
-`test_integration.sh` ends with **`scripts/exhaustive_feature_check.sh`** (every subcommand `--help`, validation paths, handoff diagnose/dry-run modes). Optional live API smoke:
+`test_integration.sh` runs **`scripts/andrea_reliability_probes.sh`** then ends with **`scripts/exhaustive_feature_check.sh`** (every subcommand `--help`, validation paths, handoff diagnose/dry-run modes). Optional live API smoke:
 
 ```bash
 RUN_LIVE_API=1 bash scripts/exhaustive_feature_check.sh

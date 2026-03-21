@@ -47,9 +47,13 @@ Never commit `.env` or paste keys into chat logs.
 export CURSOR_API_KEY="..."   # use read -s in real use
 python3 scripts/cursor_openclaw.py --json diagnose
 python3 scripts/cursor_openclaw.py --json whoami
+python3 scripts/andrea_capabilities.py        # Andrea readiness snapshot
+bash scripts/andrea_reliability_probes.sh       # deterministic probes (+ optional RUN_LIVE_PROBES=1)
 bash scripts/test_integration.sh
 bash skills/cursor_handoff/scripts/test_handoff.sh
 ```
+
+**Andrea operator docs:** [ANDREA_OPERATIONS_PLAYBOOK.md](ANDREA_OPERATIONS_PLAYBOOK.md).
 
 ## OpenClaw gateway
 

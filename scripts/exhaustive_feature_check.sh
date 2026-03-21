@@ -23,6 +23,9 @@ expect_fail() {
 
 cd "$BASE_DIR"
 
+# Pre-set empty so env_loader skips repo .env for these keys (else parent shell / .env leaks into tests).
+ENV_NO_SECRETS=(env CURSOR_API_KEY="" OPENAI_API_KEY="" OPENAI_API_ENABLED="0")
+
 echo "======== cursor_openclaw.py ========"
 python3 -m py_compile "${BASE_DIR}/scripts/cursor_api_common.py" || fail "py_compile cursor_api_common"
 python3 -m py_compile "$CLI" || fail "py_compile cursor_openclaw"
@@ -36,11 +39,11 @@ for cmd in diagnose whoami models list-agents agent-status conversation artifact
 done
 pass "all subcommand --help"
 
-# Diagnose: explicit empty key blocks .env fill (key already in env as empty)
-CURSOR_API_KEY="" python3 "$CLI" --json diagnose | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("ok") is True; assert d.get("api_key_present") is False; assert "dotenv_files_loaded" in d; assert d.get("openai_api_key_present") is False; assert d.get("openai_api_enabled") is False; assert d.get("openai_api_key_redacted") == "***"' || fail "diagnose empty key"
+# Diagnose: empty Cursor + OpenAI in env so .env merge does not inject local secrets
+"${ENV_NO_SECRETS[@]}" python3 "$CLI" --json diagnose | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("ok") is True; assert d.get("api_key_present") is False; assert "dotenv_files_loaded" in d; assert d.get("openai_api_key_present") is False; assert d.get("openai_api_enabled") is False; assert d.get("openai_api_key_redacted") == "***"' || fail "diagnose empty key"
 pass "diagnose with CURSOR_API_KEY empty"
 
-CURSOR_API_KEY="" python3 "$CLI" diagnose --show-key | grep -q "api_key_redacted" || fail "diagnose --show-key text"
+"${ENV_NO_SECRETS[@]}" python3 "$CLI" diagnose --show-key | grep -q "api_key_redacted" || fail "diagnose --show-key text"
 pass "diagnose --show-key (text)"
 
 python3 "$CLI" --version | grep -q "cursor_openclaw" || fail "cursor_openclaw --version"
@@ -128,13 +131,13 @@ python3 "$HANDOFF" --help >/dev/null || fail "handoff --help"
 pass "handoff --help"
 
 # Diagnose text mode (not "Handoff submitted")
-out="$(CURSOR_API_KEY="" python3 "$HANDOFF" --diagnose 2>&1)" || true
+out="$("${ENV_NO_SECRETS[@]}" python3 "$HANDOFF" --diagnose 2>&1)" || true
 echo "$out" | grep -q "Diagnostics complete" || fail "handoff diagnose text header"
 echo "$out" | grep -q "openai_api_key_present" || fail "handoff diagnose text openai"
 echo "$out" | grep -q "Handoff submitted successfully" && fail "handoff diagnose must not say submitted" || true
 pass "handoff --diagnose text output"
 
-CURSOR_API_KEY="" python3 "$HANDOFF" --diagnose --json | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("diagnose") is True; c=d.get("checks") or {}; assert c.get("openai_api_key_present") is False; assert c.get("openai_api_enabled") is False' || fail "handoff diagnose json"
+"${ENV_NO_SECRETS[@]}" python3 "$HANDOFF" --diagnose --json | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("diagnose") is True; c=d.get("checks") or {}; assert c.get("openai_api_key_present") is False; assert c.get("openai_api_enabled") is False' || fail "handoff diagnose json"
 pass "handoff --diagnose --json"
 
 # Dry-run text
@@ -143,7 +146,7 @@ echo "$out" | grep -q "Dry run" || fail "handoff dry-run text"
 pass "handoff --dry-run text"
 
 # Backend-unavailable dry-run
-out="$(CURSOR_API_KEY="" python3 "$HANDOFF" --repo "$BASE_DIR" --prompt "x" --dry-run 2>&1)" || true
+out="$("${ENV_NO_SECRETS[@]}" python3 "$HANDOFF" --repo "$BASE_DIR" --prompt "x" --dry-run 2>&1)" || true
 echo "$out" | grep -q "Dry run" || fail "handoff dry-run no key"
 pass "handoff --dry-run without API key"
 

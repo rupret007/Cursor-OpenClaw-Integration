@@ -42,7 +42,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
 import env_loader  # noqa: E402
 import cursor_api_common  # noqa: E402
 
-VERSION = "1.2.4"
+VERSION = "1.2.3"
 
 EXIT_OK = 0
 EXIT_VALIDATION = 2

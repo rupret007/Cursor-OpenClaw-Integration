@@ -30,6 +30,8 @@ Paste outputs or attach logs:
 ```bash
 bash scripts/andrea_doctor.sh
 # or headless: SKIP_OPENCLAW_PROBE=1 bash scripts/andrea_doctor.sh
+# optional auto-remediation if model probe fails:
+# MODEL_GUARD_ON_FAIL=1 bash scripts/andrea_doctor.sh
 ```
 
 ```bash
@@ -44,6 +46,7 @@ python3 scripts/andrea_capabilities.py --json
 ```bash
 bash scripts/andrea_reliability_probes.sh
 bash scripts/andrea_slo_check.sh
+bash scripts/andrea_model_guard.sh --dry-run
 ```
 
 ```bash

@@ -54,6 +54,7 @@ Hardened **Cursor Cloud Agents** integration toolkit for **OpenClaw** and shell 
 │   ├── andrea_security_sanity.sh     # repo secret-pattern sanity checks
 │   ├── andrea_slo_check.sh         # grade + optional OpenClaw model probe
 │   ├── andrea_doctor.sh            # one-pass: security + grade + probes + probe
+│   ├── andrea_model_guard.sh       # automatic profile failover + reprobe loop
 │   ├── andrea_release_gate.sh      # STRICT security + grade not C + test_integration
 │   ├── andrea_slo_telegram.sh      # timed Telegram getMe SLO (token from env only)
 │   ├── handoff_context.py          # shared intent templates + repo triage text
@@ -235,6 +236,15 @@ python3 scripts/andrea_capabilities.py
 bash scripts/andrea_doctor.sh
 # SKIP_OPENCLAW_PROBE=1 bash scripts/andrea_doctor.sh
 # STRICT_SECURITY=1 bash scripts/andrea_doctor.sh   # fail on backup warnings too
+# MODEL_GUARD_ON_FAIL=1 bash scripts/andrea_doctor.sh  # auto-remediate failed model probe
+```
+
+**Model guard** (explicit remediation loop across profiles):
+
+```bash
+bash scripts/andrea_model_guard.sh
+# dry-run:
+# bash scripts/andrea_model_guard.sh --dry-run
 ```
 
 **SLO gate** (grade + probe):

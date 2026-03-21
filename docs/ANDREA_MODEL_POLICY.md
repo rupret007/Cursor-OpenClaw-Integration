@@ -61,13 +61,48 @@ When you see `rate_limit`, `cooldown`, or `model_not_found`:
 
 ---
 
-## 5. Allowlist vs catalog
+## 5. Automatic remediation (model guard)
+
+To enforce policy recovery (not just document it), use:
+
+```bash
+bash scripts/andrea_model_guard.sh
+```
+
+Behavior:
+
+- Tries profile order (default: `balanced,fast,deep`)
+- Applies model + fallbacks for each profile
+- Probes with OpenClaw (`--probe-timeout` in **ms**)
+- Stops on first successful profile, otherwise exits non-zero
+
+Useful forms:
+
+```bash
+# Safe preview (no openclaw mutation):
+bash scripts/andrea_model_guard.sh --dry-run
+
+# Custom order and timeout:
+bash scripts/andrea_model_guard.sh --order "fast,balanced,deep" --probe-timeout-ms 20000
+```
+
+Optional integration with doctor:
+
+```bash
+MODEL_GUARD_ON_FAIL=1 bash scripts/andrea_doctor.sh
+```
+
+If the model probe fails, doctor invokes model guard for automatic recovery.
+
+---
+
+## 6. Allowlist vs catalog
 
 `agents.defaults.models` in `~/.openclaw/openclaw.json` acts as an **allowlist** for many flows. To expose **more** OpenAI models, add each `openai/...` id you want, or widen policy per [OpenClaw models concepts](https://docs.openclaw.ai/concepts/models).
 
 ---
 
-## 6. Related
+## 7. Related
 
 - [ANDREA_DEVOPS_RUNBOOK.md](ANDREA_DEVOPS_RUNBOOK.md)
 - [ANDREA_COMMS_PRODUCTIVITY.md](ANDREA_COMMS_PRODUCTIVITY.md)

@@ -69,6 +69,15 @@ pass "cursor_handoff --version"
 bash "${BASE_DIR}/skills/cursor_handoff/scripts/cursor_cli_fallback.sh" --help >/dev/null || fail "cursor_cli_fallback --help"
 pass "cursor_cli_fallback --help"
 
+bash "${BASE_DIR}/scripts/andrea_model_guard.sh" --help >/dev/null || fail "andrea_model_guard --help"
+pass "andrea_model_guard --help"
+
+bash "${BASE_DIR}/scripts/andrea_model_guard.sh" --dry-run --order "balanced,fast" >/dev/null || fail "andrea_model_guard --dry-run"
+pass "andrea_model_guard --dry-run"
+
+expect_fail "andrea_model_guard invalid timeout" \
+  bash "${BASE_DIR}/scripts/andrea_model_guard.sh" --dry-run --probe-timeout-ms nope
+
 # Validation errors (exit 2)
 expect_fail "create-agent both repository and pr-url" \
   env CURSOR_API_KEY=dummy_test_key python3 "$CLI" --json create-agent \

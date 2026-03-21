@@ -20,7 +20,7 @@ require_bash() {
 }
 
 write_env_file() {
-  local api_key="$1" base_url="$2" auth_mode="$3" email="$4" default_mode="$5" target="$6"
+  local api_key="$1" base_url="$2" auth_mode="$3" email="$4" default_mode="$5" openai_key="$6" openai_enabled="$7" target="$8"
   umask 077
   export _ENV_W_TARGET="$target"
   export _ENV_W_API_KEY="$api_key"
@@ -28,6 +28,8 @@ write_env_file() {
   export _ENV_W_AUTH="$auth_mode"
   export _ENV_W_EMAIL="$email"
   export _ENV_W_MODE="$default_mode"
+  export _ENV_W_OPENAI_KEY="$openai_key"
+  export _ENV_W_OPENAI_ENABLED="$openai_enabled"
   python3 - <<'PY'
 import json
 import os
@@ -52,12 +54,18 @@ chunks = [
     "# cursor_handoff skill (OPENCLAW_CURSOR_DEFAULT_MODE)",
     line("OPENCLAW_CURSOR_DEFAULT_MODE", os.environ.get("_ENV_W_MODE", "auto")),
     "",
+    "# Optional OpenAI API (platform.openai.com) — not required for Cursor Cloud Agents.",
+    "# OPENAI_API_ENABLED: 1 | true | yes (case-insensitive) when read by CLIs.",
+    line("OPENAI_API_KEY", os.environ.get("_ENV_W_OPENAI_KEY", "")),
+    line("OPENAI_API_ENABLED", os.environ.get("_ENV_W_OPENAI_ENABLED", "0")),
+    "",
     "# Optional: macOS SSL — set path to CA bundle if needed, e.g. from python certifi",
     "",
 ]
 path.write_text("\n".join(chunks) + "\n", encoding="utf-8")
 PY
   unset _ENV_W_TARGET _ENV_W_API_KEY _ENV_W_BASE _ENV_W_AUTH _ENV_W_EMAIL _ENV_W_MODE
+  unset _ENV_W_OPENAI_KEY _ENV_W_OPENAI_ENABLED
   chmod 600 "$target" || true
 }
 
@@ -69,12 +77,12 @@ sync_skill_tree() {
 }
 
 run_batch() {
-  local api_key="$1" base_url="$2" auth_mode="$3" email="$4" default_mode="$5"
-  write_env_file "$api_key" "$base_url" "$auth_mode" "$email" "$default_mode" "$ENV_FILE"
+  local api_key="$1" base_url="$2" auth_mode="$3" email="$4" default_mode="$5" openai_key="$6" openai_enabled="$7"
+  write_env_file "$api_key" "$base_url" "$auth_mode" "$email" "$default_mode" "$openai_key" "$openai_enabled" "$ENV_FILE"
   say "Wrote $ENV_FILE (mode 600)."
   [ -d "$SKILL_SRC" ] || die "Missing skill source: $SKILL_SRC"
   sync_skill_tree
-  write_env_file "$api_key" "$base_url" "$auth_mode" "$email" "$default_mode" "$SKILL_DEST/.env"
+  write_env_file "$api_key" "$base_url" "$auth_mode" "$email" "$default_mode" "$openai_key" "$openai_enabled" "$SKILL_DEST/.env"
   say "Wrote $SKILL_DEST/.env (mode 600)."
   if command -v openclaw >/dev/null 2>&1; then
     openclaw gateway restart
@@ -125,7 +133,17 @@ main() {
     local email="${CURSOR_EMAIL:-}"
     local default_mode="${OPENCLAW_CURSOR_DEFAULT_MODE:-auto}"
     case "$default_mode" in auto|api|cli) ;; *) die "OPENCLAW_CURSOR_DEFAULT_MODE must be auto, api, or cli" ;; esac
-    run_batch "$api_key" "$base_url" "$auth_mode" "$email" "$default_mode"
+    local openai_key="${OPENAI_API_KEY:-}"
+    openai_key="${openai_key//$'\r'/}"
+    openai_key="${openai_key//$'\n'/}"
+    local oen_raw="${OPENAI_API_ENABLED:-0}"
+    oen_raw="$(printf '%s' "$oen_raw" | tr '[:upper:]' '[:lower:]')"
+    local openai_enabled="0"
+    case "$oen_raw" in 1|true|yes) openai_enabled="1" ;; esac
+    if [ -z "${openai_key// }" ]; then
+      openai_enabled="0"
+    fi
+    run_batch "$api_key" "$base_url" "$auth_mode" "$email" "$default_mode" "$openai_key" "$openai_enabled"
     say ""
     say "=== Done (batch) ==="
     say "CLIs also auto-load ./.env; optional shell: set -a && source .env && set +a"
@@ -165,7 +183,21 @@ main() {
   default_mode="${mode_in:-auto}"
   case "$default_mode" in auto|api|cli) ;; *) die "mode must be auto, api, or cli" ;; esac
 
-  write_env_file "$api_key" "$base_url" "$auth_mode" "$email" "$default_mode" "$ENV_FILE"
+  say ""
+  say "Optional: OpenAI API key (https://platform.openai.com — API key, not ChatGPT Plus). Enter to skip."
+  read -r -s -p "OPENAI_API_KEY: " openai_key
+  say ""
+  read -r -p "Enable OpenAI (OPENAI_API_ENABLED)? [y/N] " openai_yn
+  openai_key="${openai_key//$'\r'/}"
+  openai_key="${openai_key//$'\n'/}"
+  openai_enabled="0"
+  case "${openai_yn:-}" in y|Y|yes|YES) openai_enabled="1" ;; esac
+  if [ -z "${openai_key// }" ]; then
+    openai_enabled="0"
+    case "${openai_yn:-}" in y|Y|yes|YES) say "WARNING: No OpenAI API key — OPENAI_API_ENABLED forced to 0." ;; esac
+  fi
+
+  write_env_file "$api_key" "$base_url" "$auth_mode" "$email" "$default_mode" "$openai_key" "$openai_enabled" "$ENV_FILE"
   say "Wrote $ENV_FILE (mode 600)."
 
   say ""
@@ -175,7 +207,7 @@ main() {
   case "${sk:-y}" in n|N|no|NO) ;; *)
     [ -d "$SKILL_SRC" ] || die "Missing skill source: $SKILL_SRC"
     sync_skill_tree
-    write_env_file "$api_key" "$base_url" "$auth_mode" "$email" "$default_mode" "$SKILL_DEST/.env"
+    write_env_file "$api_key" "$base_url" "$auth_mode" "$email" "$default_mode" "$openai_key" "$openai_enabled" "$SKILL_DEST/.env"
     say "Wrote $SKILL_DEST/.env (mode 600)."
     ;;
   esac

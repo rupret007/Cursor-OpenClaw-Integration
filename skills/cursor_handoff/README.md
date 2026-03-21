@@ -53,6 +53,8 @@ Defined in `.env.example`:
   Cursor API base URL (default: `https://api.cursor.com`).
 - `OPENCLAW_CURSOR_DEFAULT_MODE`  
   Default mode when `--mode` is omitted (`auto`, `api`, `cli`).
+- `OPENAI_API_KEY` / `OPENAI_API_ENABLED`  
+  Optional OpenAI API credentials for future features. `OPENAI_API_ENABLED` must be `1`, `true`, or `yes` (case-insensitive) for the key to be considered active. Set via `bash scripts/setup_admin.sh` in the main repo or edit `.env` manually.
 
 ## API Mode vs CLI Mode
 

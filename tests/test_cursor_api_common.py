@@ -50,6 +50,19 @@ class CursorApiCommonTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             MOD.assert_no_newlines_or_nul("a\x00b", "--branch")
 
+    def test_redact_secret(self):
+        self.assertEqual(MOD.redact_secret(""), "***")
+        self.assertEqual(MOD.redact_secret("abcd"), "***")
+        self.assertEqual(MOD.redact_secret("key_12345678"), "ke***78")
+
+    def test_parse_openai_enabled(self):
+        self.assertFalse(MOD.parse_openai_enabled(""))
+        self.assertFalse(MOD.parse_openai_enabled("0"))
+        self.assertFalse(MOD.parse_openai_enabled("false"))
+        self.assertTrue(MOD.parse_openai_enabled("1"))
+        self.assertTrue(MOD.parse_openai_enabled("TRUE"))
+        self.assertTrue(MOD.parse_openai_enabled("Yes"))
+
 
 if __name__ == "__main__":
     unittest.main()

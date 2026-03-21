@@ -42,7 +42,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
 import env_loader  # noqa: E402
 import cursor_api_common  # noqa: E402
 
-VERSION = "1.2.3"
+VERSION = "1.2.4"
 
 EXIT_OK = 0
 EXIT_VALIDATION = 2
@@ -316,6 +316,10 @@ def emit_text(payload: Dict[str, Any]) -> None:
             print(f"  hint: {checks.get('hint')}")
         if checks.get("dotenv_files_loaded"):
             print(f"  dotenv_files_loaded: {checks.get('dotenv_files_loaded')}")
+        if "openai_api_key_present" in checks:
+            print(f"  openai_api_key_present: {checks.get('openai_api_key_present')}")
+        if "openai_api_enabled" in checks:
+            print(f"  openai_api_enabled: {checks.get('openai_api_enabled')}")
         print("  (Use --json for full diagnostics.)")
         return
 
@@ -442,6 +446,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run environment/API diagnostics instead of submitting a handoff.",
     )
+    parser.add_argument(
+        "--show-key",
+        action="store_true",
+        help="With --diagnose: include redacted API key previews in JSON (Cursor + OpenAI).",
+    )
     parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     parser.add_argument("--dry-run", action="store_true", help="Validate and print what would run")
     parser.add_argument(
@@ -552,6 +561,8 @@ def main() -> int:
 
     if args.diagnose:
         suggested_backend = "api" if has_api_credentials else ("cli" if cli_binary else "none")
+        openai_key = (os.getenv("OPENAI_API_KEY") or "").strip()
+        openai_on = cursor_api_common.parse_openai_enabled()
         checks: Dict[str, Any] = {
             "tool_version": VERSION,
             "api_key_set": has_api_credentials,
@@ -562,6 +573,9 @@ def main() -> int:
             "cli_binary": cli_binary,
             "ssl": build_ssl_diagnostics(),
             "dotenv_files_loaded": [str(p) for p in dotenv_loaded],
+            "openai_api_key_present": bool(openai_key),
+            "openai_api_enabled": openai_on,
+            "openai_api_key_redacted": cursor_api_common.redact_secret(openai_key) if args.show_key else "***",
         }
         if has_api_credentials:
             api_client = CursorApiClient(

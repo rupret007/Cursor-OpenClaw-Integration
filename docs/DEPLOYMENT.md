@@ -30,6 +30,8 @@ git pull origin main
 | `CURSOR_API_KEY` | Yes (for live API) | Cursor API key (export in shell and/or put in repo-root `.env`; `cursor_openclaw.py` and `cursor_handoff.py` auto-load `.env` without overriding existing exports) |
 | `CURSOR_BASE_URL` | No | Default `https://api.cursor.com`; must be `http://` or `https://` if set |
 | `CURSOR_AUTH_MODE` | No | `auto` (default), `basic`, or `bearer` |
+| `OPENAI_API_KEY` | No | Optional OpenAI API key (not ChatGPT Plus). Stored for optional/future features; never required for Cursor Cloud Agents. |
+| `OPENAI_API_ENABLED` | No | `1` / `true` / `yes` (case-insensitive) to allow use of `OPENAI_API_KEY` when implemented; otherwise off. Set via `bash scripts/setup_admin.sh` or `.env`. |
 | `SSL_CERT_FILE` | Sometimes on macOS | If Python reports `CERTIFICATE_VERIFY_FAILED`, set to certifi bundle (see README troubleshooting) |
 
 Never commit `.env` or paste keys into chat logs.

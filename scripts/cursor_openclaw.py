@@ -29,7 +29,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
 import env_loader  # noqa: E402
 import cursor_api_common  # noqa: E402
 
-VERSION = "1.1.3"
+VERSION = "1.1.4"
 
 TERMINAL_STATUSES = {"FINISHED", "FAILED", "CANCELLED", "STOPPED", "EXPIRED"}
 
@@ -63,14 +63,6 @@ def normalize_base_url(raw: Optional[str]) -> str:
     if not lowered.startswith(("http://", "https://")):
         raise ValueError("Base URL must start with http:// or https:// (check CURSOR_BASE_URL).")
     return base.rstrip("/")
-
-
-def redact(value: str) -> str:
-    if not value:
-        return "***"
-    if len(value) <= 8:
-        return "***"
-    return f"{value[:2]}***{value[-2:]}"
 
 
 @dataclass
@@ -281,6 +273,8 @@ def handle(cfg: Config, args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
     client = CursorApiClient(cfg)
 
     if args.command == "diagnose":
+        openai_key = (os.getenv("OPENAI_API_KEY") or "").strip()
+        openai_on = cursor_api_common.parse_openai_enabled()
         payload = {
             "ok": True,
             "cli_version": VERSION,
@@ -289,7 +283,10 @@ def handle(cfg: Config, args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
             "timeout_seconds": cfg.timeout_seconds,
             "retries": cfg.retries,
             "api_key_present": bool(cfg.api_key),
-            "api_key_redacted": redact(cfg.api_key) if args.show_key else "***",
+            "api_key_redacted": cursor_api_common.redact_secret(cfg.api_key) if args.show_key else "***",
+            "openai_api_key_present": bool(openai_key),
+            "openai_api_enabled": openai_on,
+            "openai_api_key_redacted": cursor_api_common.redact_secret(openai_key) if args.show_key else "***",
             "dotenv_files_loaded": [str(p) for p in _DOTENV_FILES_LOADED],
         }
         return 0, payload

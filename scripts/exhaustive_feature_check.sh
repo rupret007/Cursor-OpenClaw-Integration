@@ -37,7 +37,7 @@ done
 pass "all subcommand --help"
 
 # Diagnose: explicit empty key blocks .env fill (key already in env as empty)
-CURSOR_API_KEY="" python3 "$CLI" --json diagnose | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("ok") is True; assert d.get("api_key_present") is False; assert "dotenv_files_loaded" in d' || fail "diagnose empty key"
+CURSOR_API_KEY="" python3 "$CLI" --json diagnose | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("ok") is True; assert d.get("api_key_present") is False; assert "dotenv_files_loaded" in d; assert d.get("openai_api_key_present") is False; assert d.get("openai_api_enabled") is False; assert d.get("openai_api_key_redacted") == "***"' || fail "diagnose empty key"
 pass "diagnose with CURSOR_API_KEY empty"
 
 CURSOR_API_KEY="" python3 "$CLI" diagnose --show-key | grep -q "api_key_redacted" || fail "diagnose --show-key text"
@@ -130,10 +130,11 @@ pass "handoff --help"
 # Diagnose text mode (not "Handoff submitted")
 out="$(CURSOR_API_KEY="" python3 "$HANDOFF" --diagnose 2>&1)" || true
 echo "$out" | grep -q "Diagnostics complete" || fail "handoff diagnose text header"
+echo "$out" | grep -q "openai_api_key_present" || fail "handoff diagnose text openai"
 echo "$out" | grep -q "Handoff submitted successfully" && fail "handoff diagnose must not say submitted" || true
 pass "handoff --diagnose text output"
 
-CURSOR_API_KEY="" python3 "$HANDOFF" --diagnose --json | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("diagnose") is True' || fail "handoff diagnose json"
+CURSOR_API_KEY="" python3 "$HANDOFF" --diagnose --json | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("diagnose") is True; c=d.get("checks") or {}; assert c.get("openai_api_key_present") is False; assert c.get("openai_api_enabled") is False' || fail "handoff diagnose json"
 pass "handoff --diagnose --json"
 
 # Dry-run text

@@ -75,6 +75,9 @@ Use your real key; **paste only the commands** (not prose or `# …` comment lin
 
 ```bash
 export CURSOR_API_KEY="…"
+# Optional batch-only:
+# export OPENAI_API_KEY="…"
+# export OPENAI_API_ENABLED=1   # or true | yes
 ```
 
 ```bash
@@ -91,6 +94,7 @@ It will:
 
 - Prompt for **CURSOR_API_KEY** (hidden input) and optional **CURSOR_BASE_URL** / **CURSOR_AUTH_MODE**
 - Optional **CURSOR_EMAIL** and **OPENCLAW_CURSOR_DEFAULT_MODE** (`auto` \| `api` \| `cli`) for the handoff skill
+- Optional **OPENAI_API_KEY** (hidden) and **OPENAI_API_ENABLED** (`[y/N]`; no key forces disabled)
 - Write **`./.env`** with `set -a && source .env && set +a` usage hints
 - Optionally install **`cursor_handoff`** under `~/.openclaw/workspace/skills/` (replaces that folder if present), write **`~/.openclaw/workspace/skills/cursor_handoff/.env`**, restart **`openclaw gateway`**, and run **`diagnose`**
 
@@ -215,11 +219,13 @@ See [.env.example](.env.example) and [skills/cursor_handoff/.env.example](skills
 | `CURSOR_API_KEY` | For live API | Export in the shell that runs Python |
 | `CURSOR_BASE_URL` | No | Default `https://api.cursor.com`; if set, must start with `http://` or `https://` |
 | `CURSOR_AUTH_MODE` | No | `auto`, `basic`, `bearer` |
+| `OPENAI_API_KEY` | No | Optional; API key from [OpenAI platform](https://platform.openai.com/). Does **not** use ChatGPT Plus — use an API key with billing enabled. |
+| `OPENAI_API_ENABLED` | No | When `1`, `true`, or `yes` (case-insensitive), future OpenAI features may use `OPENAI_API_KEY`. Otherwise the key is stored but ignored. `bash scripts/setup_admin.sh` can set both. |
 
 ## Security
 
 - Never commit API keys or paste them into assistant chats.
-- `diagnose` redacts keys by default; avoid `--show-key` in shared logs.
+- `diagnose` redacts Cursor and OpenAI keys by default; avoid `--show-key` in shared logs.
 - Prefer short-lived keys and rotate if exposed.
 - Treat agent outputs and artifact URLs as sensitive until reviewed.
 

@@ -20,7 +20,7 @@ Subcommands:
 
 | Command | Notes |
 |---------|--------|
-| `diagnose` | Env summary; optional `--show-key` for redacted preview; includes `cli_version` |
+| `diagnose` | Env summary; optional `--show-key` for redacted Cursor + OpenAI key previews; includes `cli_version`, `dotenv_files_loaded`, `openai_api_key_present`, `openai_api_enabled`, `openai_api_key_redacted` |
 | `whoami` | `GET /v0/me` |
 | `models` | `GET /v0/models` |
 | `list-agents` | `--limit` 1–100, optional `--cursor`, `--pr-url` |
@@ -54,5 +54,6 @@ API contract aligns with [Cursor Cloud Agents API](https://cursor.com/docs/cloud
 | `--timeout-seconds`, `--api-retries`, `--api-retry-backoff-seconds` | API resilience |
 | `--cli-timeout-seconds` | CLI backend only; subprocess limit (`0` = none). Default `3600` |
 | `--version` / `-V` | Print version and exit |
-| `--diagnose` | No handoff; env + optional `/me` and `/agents?limit=1`; JSON includes `dotenv_files_loaded` |
+| `--diagnose` | No handoff; env + optional `/me` and `/agents?limit=1`; JSON `checks` includes `dotenv_files_loaded`, `openai_api_key_present`, `openai_api_enabled`, `openai_api_key_redacted` |
+| `--show-key` | With `--diagnose` only: redacted previews for Cursor/OpenAI keys in JSON |
 | `--dry-run` | Validate and show payload; works even if no backend configured (`backend: unavailable`) |

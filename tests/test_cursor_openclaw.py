@@ -30,11 +30,6 @@ class CursorOpenClawTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             MODULE.normalize_base_url("not-a-url")
 
-    def test_redact(self):
-        self.assertEqual(MODULE.redact(""), "***")
-        self.assertEqual(MODULE.redact("abcd"), "***")
-        self.assertEqual(MODULE.redact("key_12345678"), "ke***78")
-
     def test_validate_command_args_create_poll(self):
         bad = types.SimpleNamespace(
             command="create-agent",

@@ -64,3 +64,20 @@ def argv_has_json_flag(argv: list[str] | None = None) -> bool:
 
     argv = argv or sys.argv
     return "--json" in argv
+
+
+def redact_secret(value: str) -> str:
+    """Short redacted preview for API keys (diagnostics only)."""
+    if not value:
+        return "***"
+    if len(value) <= 8:
+        return "***"
+    return f"{value[:2]}***{value[-2:]}"
+
+
+def parse_openai_enabled(raw: str | None = None) -> bool:
+    """True when OPENAI_API_ENABLED is 1, true, or yes (case-insensitive)."""
+    import os
+
+    v = (raw if raw is not None else os.getenv("OPENAI_API_ENABLED", "")).strip().lower()
+    return v in ("1", "true", "yes")

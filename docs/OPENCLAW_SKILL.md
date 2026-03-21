@@ -38,7 +38,7 @@ openclaw gateway restart
 
 ## Typical OpenClaw → Cursor flow
 
-1. **Preflight:** `python3 .../cursor_handoff.py --diagnose --json` (JSON includes `tool_version`, `dotenv_files_loaded`, and optional `/v0/me` checks)
+1. **Preflight:** `python3 .../cursor_handoff.py --diagnose --json` (JSON includes `tool_version`, `dotenv_files_loaded`, OpenAI env summary fields, and optional `/v0/me` checks)
 2. **Handoff (read-only audit):** `--read-only true --dry-run` first, then real run without `--dry-run`.
 3. **Handoff (implementation):** `--read-only false` only when the user explicitly wants code changes.
 4. **Deep operations:** use `cursor_openclaw.py` for `list-agents`, `conversation`, `followup`, `artifacts`, etc.

@@ -20,7 +20,7 @@ require_bash() {
 }
 
 write_env_file() {
-  local api_key="$1" base_url="$2" auth_mode="$3" email="$4" default_mode="$5" openai_key="$6" openai_enabled="$7" target="$8"
+  local api_key="$1" base_url="$2" auth_mode="$3" email="$4" default_mode="$5" openai_key="$6" openai_enabled="$7" gh_token="$8" gemini_key="$9" telegram_bot="${10}" telegram_chat="${11}" brave_search="${12}" brave_answers="${13}" minimax_key="${14}" target="${15}"
   umask 077
   export _ENV_W_TARGET="$target"
   export _ENV_W_API_KEY="$api_key"
@@ -30,6 +30,13 @@ write_env_file() {
   export _ENV_W_MODE="$default_mode"
   export _ENV_W_OPENAI_KEY="$openai_key"
   export _ENV_W_OPENAI_ENABLED="$openai_enabled"
+  export _ENV_W_GH_TOKEN="$gh_token"
+  export _ENV_W_GEMINI_KEY="$gemini_key"
+  export _ENV_W_TELEGRAM_BOT="$telegram_bot"
+  export _ENV_W_TELEGRAM_CHAT="$telegram_chat"
+  export _ENV_W_BRAVE_SEARCH="$brave_search"
+  export _ENV_W_BRAVE_ANSWERS="$brave_answers"
+  export _ENV_W_MINIMAX_KEY="$minimax_key"
   python3 - <<'PY'
 import json
 import os
@@ -59,6 +66,16 @@ chunks = [
     line("OPENAI_API_KEY", os.environ.get("_ENV_W_OPENAI_KEY", "")),
     line("OPENAI_API_ENABLED", os.environ.get("_ENV_W_OPENAI_ENABLED", "0")),
     "",
+    "# Optional broader OpenClaw integrations.",
+    line("GH_TOKEN", os.environ.get("_ENV_W_GH_TOKEN", "")),
+    line("GITHUB_TOKEN", os.environ.get("_ENV_W_GH_TOKEN", "")),
+    line("GEMINI_API_KEY", os.environ.get("_ENV_W_GEMINI_KEY", "")),
+    line("TELEGRAM_BOT_TOKEN", os.environ.get("_ENV_W_TELEGRAM_BOT", "")),
+    line("TELEGRAM_CHAT_ID", os.environ.get("_ENV_W_TELEGRAM_CHAT", "")),
+    line("BRAVE_SEARCH_API_KEY", os.environ.get("_ENV_W_BRAVE_SEARCH", "")),
+    line("BRAVE_ANSWERS_API_KEY", os.environ.get("_ENV_W_BRAVE_ANSWERS", "")),
+    line("MINIMAX_API_KEY", os.environ.get("_ENV_W_MINIMAX_KEY", "")),
+    "",
     "# Optional: macOS SSL — set path to CA bundle if needed, e.g. from python certifi",
     "",
 ]
@@ -66,6 +83,8 @@ path.write_text("\n".join(chunks) + "\n", encoding="utf-8")
 PY
   unset _ENV_W_TARGET _ENV_W_API_KEY _ENV_W_BASE _ENV_W_AUTH _ENV_W_EMAIL _ENV_W_MODE
   unset _ENV_W_OPENAI_KEY _ENV_W_OPENAI_ENABLED
+  unset _ENV_W_GH_TOKEN _ENV_W_GEMINI_KEY _ENV_W_TELEGRAM_BOT _ENV_W_TELEGRAM_CHAT
+  unset _ENV_W_BRAVE_SEARCH _ENV_W_BRAVE_ANSWERS _ENV_W_MINIMAX_KEY
   chmod 600 "$target" || true
 }
 
@@ -77,12 +96,12 @@ sync_skill_tree() {
 }
 
 run_batch() {
-  local api_key="$1" base_url="$2" auth_mode="$3" email="$4" default_mode="$5" openai_key="$6" openai_enabled="$7"
-  write_env_file "$api_key" "$base_url" "$auth_mode" "$email" "$default_mode" "$openai_key" "$openai_enabled" "$ENV_FILE"
+  local api_key="$1" base_url="$2" auth_mode="$3" email="$4" default_mode="$5" openai_key="$6" openai_enabled="$7" gh_token="$8" gemini_key="$9" telegram_bot="${10}" telegram_chat="${11}" brave_search="${12}" brave_answers="${13}" minimax_key="${14}"
+  write_env_file "$api_key" "$base_url" "$auth_mode" "$email" "$default_mode" "$openai_key" "$openai_enabled" "$gh_token" "$gemini_key" "$telegram_bot" "$telegram_chat" "$brave_search" "$brave_answers" "$minimax_key" "$ENV_FILE"
   say "Wrote $ENV_FILE (mode 600)."
   [ -d "$SKILL_SRC" ] || die "Missing skill source: $SKILL_SRC"
   sync_skill_tree
-  write_env_file "$api_key" "$base_url" "$auth_mode" "$email" "$default_mode" "$openai_key" "$openai_enabled" "$SKILL_DEST/.env"
+  write_env_file "$api_key" "$base_url" "$auth_mode" "$email" "$default_mode" "$openai_key" "$openai_enabled" "$gh_token" "$gemini_key" "$telegram_bot" "$telegram_chat" "$brave_search" "$brave_answers" "$minimax_key" "$SKILL_DEST/.env"
   say "Wrote $SKILL_DEST/.env (mode 600)."
   if command -v openclaw >/dev/null 2>&1; then
     openclaw gateway restart
@@ -143,7 +162,28 @@ main() {
     if [ -z "${openai_key// }" ]; then
       openai_enabled="0"
     fi
-    run_batch "$api_key" "$base_url" "$auth_mode" "$email" "$default_mode" "$openai_key" "$openai_enabled"
+    local gh_token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+    gh_token="${gh_token//$'\r'/}"
+    gh_token="${gh_token//$'\n'/}"
+    local gemini_key="${GEMINI_API_KEY:-${GOOGLE_API_KEY:-${GOOGLE_GENAI_API_KEY:-}}}"
+    gemini_key="${gemini_key//$'\r'/}"
+    gemini_key="${gemini_key//$'\n'/}"
+    local telegram_bot="${TELEGRAM_BOT_TOKEN:-}"
+    telegram_bot="${telegram_bot//$'\r'/}"
+    telegram_bot="${telegram_bot//$'\n'/}"
+    local telegram_chat="${TELEGRAM_CHAT_ID:-}"
+    telegram_chat="${telegram_chat//$'\r'/}"
+    telegram_chat="${telegram_chat//$'\n'/}"
+    local brave_search="${BRAVE_SEARCH_API_KEY:-${BRAVE_API_KEY:-}}"
+    brave_search="${brave_search//$'\r'/}"
+    brave_search="${brave_search//$'\n'/}"
+    local brave_answers="${BRAVE_ANSWERS_API_KEY:-${BRAVE_API_KEY:-}}"
+    brave_answers="${brave_answers//$'\r'/}"
+    brave_answers="${brave_answers//$'\n'/}"
+    local minimax_key="${MINIMAX_API_KEY:-}"
+    minimax_key="${minimax_key//$'\r'/}"
+    minimax_key="${minimax_key//$'\n'/}"
+    run_batch "$api_key" "$base_url" "$auth_mode" "$email" "$default_mode" "$openai_key" "$openai_enabled" "$gh_token" "$gemini_key" "$telegram_bot" "$telegram_chat" "$brave_search" "$brave_answers" "$minimax_key"
     say ""
     say "=== Done (batch) ==="
     say "CLIs also auto-load ./.env; optional shell: set -a && source .env && set +a"
@@ -197,7 +237,40 @@ main() {
     case "${openai_yn:-}" in y|Y|yes|YES) say "WARNING: No OpenAI API key — OPENAI_API_ENABLED forced to 0." ;; esac
   fi
 
-  write_env_file "$api_key" "$base_url" "$auth_mode" "$email" "$default_mode" "$openai_key" "$openai_enabled" "$ENV_FILE"
+  say ""
+  say "Optional: additional integrations (press Enter to skip each)."
+  read -r -s -p "GH_TOKEN (or GitHub PAT): " gh_token
+  say ""
+  read -r -s -p "GEMINI_API_KEY: " gemini_key
+  say ""
+  read -r -s -p "TELEGRAM_BOT_TOKEN: " telegram_bot
+  say ""
+  read -r -p "TELEGRAM_CHAT_ID (optional): " telegram_chat
+  read -r -s -p "BRAVE_SEARCH_API_KEY: " brave_search
+  say ""
+  read -r -s -p "BRAVE_ANSWERS_API_KEY (optional, Enter to reuse BRAVE_SEARCH_API_KEY): " brave_answers
+  say ""
+  read -r -s -p "MINIMAX_API_KEY: " minimax_key
+  say ""
+  gh_token="${gh_token//$'\r'/}"
+  gh_token="${gh_token//$'\n'/}"
+  gemini_key="${gemini_key//$'\r'/}"
+  gemini_key="${gemini_key//$'\n'/}"
+  telegram_bot="${telegram_bot//$'\r'/}"
+  telegram_bot="${telegram_bot//$'\n'/}"
+  telegram_chat="${telegram_chat//$'\r'/}"
+  telegram_chat="${telegram_chat//$'\n'/}"
+  brave_search="${brave_search//$'\r'/}"
+  brave_search="${brave_search//$'\n'/}"
+  brave_answers="${brave_answers//$'\r'/}"
+  brave_answers="${brave_answers//$'\n'/}"
+  minimax_key="${minimax_key//$'\r'/}"
+  minimax_key="${minimax_key//$'\n'/}"
+  if [ -z "${brave_answers// }" ] && [ -n "${brave_search// }" ]; then
+    brave_answers="$brave_search"
+  fi
+
+  write_env_file "$api_key" "$base_url" "$auth_mode" "$email" "$default_mode" "$openai_key" "$openai_enabled" "$gh_token" "$gemini_key" "$telegram_bot" "$telegram_chat" "$brave_search" "$brave_answers" "$minimax_key" "$ENV_FILE"
   say "Wrote $ENV_FILE (mode 600)."
 
   say ""
@@ -207,7 +280,7 @@ main() {
   case "${sk:-y}" in n|N|no|NO) ;; *)
     [ -d "$SKILL_SRC" ] || die "Missing skill source: $SKILL_SRC"
     sync_skill_tree
-    write_env_file "$api_key" "$base_url" "$auth_mode" "$email" "$default_mode" "$openai_key" "$openai_enabled" "$SKILL_DEST/.env"
+    write_env_file "$api_key" "$base_url" "$auth_mode" "$email" "$default_mode" "$openai_key" "$openai_enabled" "$gh_token" "$gemini_key" "$telegram_bot" "$telegram_chat" "$brave_search" "$brave_answers" "$minimax_key" "$SKILL_DEST/.env"
     say "Wrote $SKILL_DEST/.env (mode 600)."
     ;;
   esac

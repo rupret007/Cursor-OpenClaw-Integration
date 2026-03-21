@@ -78,6 +78,13 @@ export CURSOR_API_KEY="…"
 # Optional batch-only:
 # export OPENAI_API_KEY="…"
 # export OPENAI_API_ENABLED=1   # or true | yes
+# export GH_TOKEN="…"
+# export GEMINI_API_KEY="…"
+# export TELEGRAM_BOT_TOKEN="…"
+# export TELEGRAM_CHAT_ID="…"
+# export BRAVE_SEARCH_API_KEY="…"
+# export BRAVE_ANSWERS_API_KEY="…"
+# export MINIMAX_API_KEY="…"
 ```
 
 ```bash
@@ -95,6 +102,7 @@ It will:
 - Prompt for **CURSOR_API_KEY** (hidden input) and optional **CURSOR_BASE_URL** / **CURSOR_AUTH_MODE**
 - Optional **CURSOR_EMAIL** and **OPENCLAW_CURSOR_DEFAULT_MODE** (`auto` \| `api` \| `cli`) for the handoff skill
 - Optional **OPENAI_API_KEY** (hidden) and **OPENAI_API_ENABLED** (`[y/N]`; no key forces disabled)
+- Optional hidden prompts for **GH_TOKEN**, **GEMINI_API_KEY**, **TELEGRAM_BOT_TOKEN**, **BRAVE_SEARCH_API_KEY**, **BRAVE_ANSWERS_API_KEY**, **MINIMAX_API_KEY**, plus **TELEGRAM_CHAT_ID**
 - Write **`./.env`** with `set -a && source .env && set +a` usage hints
 - Optionally install **`cursor_handoff`** under `~/.openclaw/workspace/skills/` (replaces that folder if present), write **`~/.openclaw/workspace/skills/cursor_handoff/.env`**, restart **`openclaw gateway`**, and run **`diagnose`**
 
@@ -221,6 +229,11 @@ See [.env.example](.env.example) and [skills/cursor_handoff/.env.example](skills
 | `CURSOR_AUTH_MODE` | No | `auto`, `basic`, `bearer` |
 | `OPENAI_API_KEY` | No | Optional; API key from [OpenAI platform](https://platform.openai.com/). Does **not** use ChatGPT Plus — use an API key with billing enabled. |
 | `OPENAI_API_ENABLED` | No | When `1`, `true`, or `yes` (case-insensitive), future OpenAI features may use `OPENAI_API_KEY`. Otherwise the key is stored but ignored. `bash scripts/setup_admin.sh` can set both. |
+| `GH_TOKEN` / `GITHUB_TOKEN` | No | Optional GitHub token for `gh`/GitHub-related OpenClaw skills (if they use env-based auth). |
+| `GEMINI_API_KEY` | No | Optional Gemini key for Gemini skills/CLIs. |
+| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | No | Optional Telegram bot credentials (skill-dependent). |
+| `BRAVE_SEARCH_API_KEY` / `BRAVE_ANSWERS_API_KEY` | No | Optional Brave Search skill keys (`brave-api-search` expects both names; answers key may reuse search key). |
+| `MINIMAX_API_KEY` | No | Optional MiniMax provider key for MiniMax integrations. |
 
 ## Security
 

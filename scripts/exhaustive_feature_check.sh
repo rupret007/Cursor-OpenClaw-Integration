@@ -24,7 +24,20 @@ expect_fail() {
 cd "$BASE_DIR"
 
 # Pre-set empty so env_loader skips repo .env for these keys (else parent shell / .env leaks into tests).
-ENV_NO_SECRETS=(env CURSOR_API_KEY="" OPENAI_API_KEY="" OPENAI_API_ENABLED="0")
+ENV_NO_SECRETS=(
+  env
+  CURSOR_API_KEY=""
+  OPENAI_API_KEY=""
+  OPENAI_API_ENABLED="0"
+  GH_TOKEN=""
+  GITHUB_TOKEN=""
+  GEMINI_API_KEY=""
+  TELEGRAM_BOT_TOKEN=""
+  TELEGRAM_CHAT_ID=""
+  BRAVE_SEARCH_API_KEY=""
+  BRAVE_ANSWERS_API_KEY=""
+  MINIMAX_API_KEY=""
+)
 
 echo "======== cursor_openclaw.py ========"
 python3 -m py_compile "${BASE_DIR}/scripts/cursor_api_common.py" || fail "py_compile cursor_api_common"

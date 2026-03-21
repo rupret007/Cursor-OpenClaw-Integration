@@ -57,3 +57,15 @@ API contract aligns with [Cursor Cloud Agents API](https://cursor.com/docs/cloud
 | `--diagnose` | No handoff; env + optional `/me` and `/agents?limit=1`; JSON `checks` includes `dotenv_files_loaded`, `openai_api_key_present`, `openai_api_enabled`, `openai_api_key_redacted` |
 | `--show-key` | With `--diagnose` only: redacted previews for Cursor/OpenAI keys in JSON |
 | `--dry-run` | Validate and show payload; works even if no backend configured (`backend: unavailable`) |
+
+---
+
+## Related integration env vars
+
+The CLIs above directly require Cursor credentials. The setup wizard can also write optional env vars used by other OpenClaw skills/tools:
+
+- `GH_TOKEN` / `GITHUB_TOKEN`
+- `GEMINI_API_KEY`
+- `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`
+- `BRAVE_SEARCH_API_KEY` / `BRAVE_ANSWERS_API_KEY`
+- `MINIMAX_API_KEY`

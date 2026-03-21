@@ -55,6 +55,8 @@ Defined in `.env.example`:
   Default mode when `--mode` is omitted (`auto`, `api`, `cli`).
 - `OPENAI_API_KEY` / `OPENAI_API_ENABLED`  
   Optional OpenAI API credentials for future features. `OPENAI_API_ENABLED` must be `1`, `true`, or `yes` (case-insensitive) for the key to be considered active. Set via `bash scripts/setup_admin.sh` in the main repo or edit `.env` manually.
+- `GH_TOKEN` / `GITHUB_TOKEN`, `GEMINI_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `BRAVE_SEARCH_API_KEY`, `BRAVE_ANSWERS_API_KEY`, `MINIMAX_API_KEY`  
+  Optional integration keys that the main repo wizard can write into this `.env` for other OpenClaw skills on the same machine.
 
 ## API Mode vs CLI Mode
 

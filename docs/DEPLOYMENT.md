@@ -32,6 +32,11 @@ git pull origin main
 | `CURSOR_AUTH_MODE` | No | `auto` (default), `basic`, or `bearer` |
 | `OPENAI_API_KEY` | No | Optional OpenAI API key (not ChatGPT Plus). Stored for optional/future features; never required for Cursor Cloud Agents. |
 | `OPENAI_API_ENABLED` | No | `1` / `true` / `yes` (case-insensitive) to allow use of `OPENAI_API_KEY` when implemented; otherwise off. Set via `bash scripts/setup_admin.sh` or `.env`. |
+| `GH_TOKEN` / `GITHUB_TOKEN` | No | Optional GitHub token for OpenClaw GitHub skills if env auth is used. |
+| `GEMINI_API_KEY` | No | Optional Gemini key for Gemini skills/CLI. |
+| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | No | Optional Telegram bot credentials (skill/plugin dependent). |
+| `BRAVE_SEARCH_API_KEY` / `BRAVE_ANSWERS_API_KEY` | No | Optional Brave Search keys (Brave skill expects these exact names). |
+| `MINIMAX_API_KEY` | No | Optional MiniMax key for MiniMax integrations. |
 | `SSL_CERT_FILE` | Sometimes on macOS | If Python reports `CERTIFICATE_VERIFY_FAILED`, set to certifi bundle (see README troubleshooting) |
 
 Never commit `.env` or paste keys into chat logs.

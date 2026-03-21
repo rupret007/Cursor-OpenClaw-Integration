@@ -16,7 +16,8 @@
    cp -R skills/cursor_handoff ~/.openclaw/workspace/skills/
    ```
 
-2. Optional: copy `.env.example` to `.env` inside the skill folder and set `CURSOR_API_KEY` (or rely on gateway/shell env).
+2. Optional: copy `.env.example` to `.env` inside the skill folder and set `CURSOR_API_KEY` (or rely on gateway/shell env).  
+   The setup wizard can also write additional integration keys (`GH_TOKEN`, `GEMINI_API_KEY`, `TELEGRAM_BOT_TOKEN`, `BRAVE_SEARCH_API_KEY`, `MINIMAX_API_KEY`, etc.) into both repo and skill `.env` for cross-skill convenience.
 
 3. Restart gateway:
 

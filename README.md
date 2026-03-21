@@ -281,6 +281,7 @@ bash scripts/andrea_release_gate.sh
 ```bash
 bash scripts/andrea_reliability_probes.sh
 # optional: RUN_LIVE_PROBES=1 for gh + openclaw
+# optional: RUN_CURSOR_LIVE_PROBE=1 for offline "cursor live execution probe" self-test
 ```
 
 ## Documentation

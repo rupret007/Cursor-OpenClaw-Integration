@@ -52,6 +52,7 @@ Hardened **Cursor Cloud Agents** integration toolkit for **OpenClaw** and shell 
 │   ├── andrea_capabilities.py      # Andrea runtime capability matrix (live readiness)
 │   ├── andrea_reliability_probes.sh # deterministic probes + capability snapshot
 │   ├── dotenv_set_key.py     # merge one .env key without full wizard overwrite
+│   ├── openclaw_apply_openai_key.sh  # openclaw onboard --openai-api-key from .env
 │   └── test_integration.sh
 ├── skills/
 │   └── cursor_handoff/        # vendored skill (sync to ~/.openclaw/workspace/skills/)
@@ -117,6 +118,8 @@ openclaw gateway restart
 ```
 
 See [docs/OPENCLAW_SKILL.md](docs/OPENCLAW_SKILL.md) for how `OPENAI_API_ENABLED` gates usage and how this relates to OpenClaw’s own provider settings.
+
+If OpenClaw rejects the key, see **[docs/OPENCLAW_OPENAI_TROUBLESHOOTING.md](docs/OPENCLAW_OPENAI_TROUBLESHOOTING.md)** and run **`bash scripts/openclaw_apply_openai_key.sh`** (uses `openclaw onboard --openai-api-key` per upstream docs).
 
 It will:
 

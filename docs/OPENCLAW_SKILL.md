@@ -35,7 +35,7 @@ python3 scripts/dotenv_set_key.py OPENAI_API_KEY --enable-openai --skill
 openclaw gateway restart
 ```
 
-**OpenClaw product note:** Gateway routing, model pickers, and any first-party OpenClaw “use OpenAI” toggles may live in **OpenClaw’s own** workspace or UI in addition to these env vars. If a feature still cannot see the key, check OpenClaw’s documentation for provider/environment injection for your version — this repo guarantees the **skill + shell CLIs** see `OPENAI_*` when they load the same `.env` files as documented above.
+**OpenClaw product note:** Gateway routing, model pickers, and any first-party OpenClaw “use OpenAI” toggles may live in **OpenClaw’s own** workspace or UI in addition to these env vars. If OpenClaw still says the key is wrong, use **[OPENCLAW_OPENAI_TROUBLESHOOTING.md](OPENCLAW_OPENAI_TROUBLESHOOTING.md)** and `bash scripts/openclaw_apply_openai_key.sh` (reads `.env`, runs `openclaw onboard --openai-api-key`).
 
 3. Restart gateway:
 

@@ -20,7 +20,7 @@ require_bash() {
 }
 
 write_env_file() {
-  local api_key="$1" base_url="$2" auth_mode="$3" email="$4" default_mode="$5" openai_key="$6" openai_enabled="$7" gh_token="$8" gemini_key="$9" telegram_bot="${10}" telegram_chat="${11}" brave_search="${12}" brave_answers="${13}" minimax_key="${14}" target="${15}"
+  local api_key="$1" base_url="$2" auth_mode="$3" email="$4" default_mode="$5" openai_key="$6" openai_enabled="$7" gh_token="$8" gemini_key="$9" telegram_bot="${10}" telegram_chat="${11}" brave_search="${12}" brave_answers="${13}" minimax_key="${14}" ssl_cert="${15}" target="${16}"
   umask 077
   export _ENV_W_TARGET="$target"
   export _ENV_W_API_KEY="$api_key"
@@ -37,6 +37,7 @@ write_env_file() {
   export _ENV_W_BRAVE_SEARCH="$brave_search"
   export _ENV_W_BRAVE_ANSWERS="$brave_answers"
   export _ENV_W_MINIMAX_KEY="$minimax_key"
+  export _ENV_W_SSL_CERT="$ssl_cert"
   python3 - <<'PY'
 import json
 import os
@@ -76,7 +77,9 @@ chunks = [
     line("BRAVE_ANSWERS_API_KEY", os.environ.get("_ENV_W_BRAVE_ANSWERS", "")),
     line("MINIMAX_API_KEY", os.environ.get("_ENV_W_MINIMAX_KEY", "")),
     "",
-    "# Optional: macOS SSL — set path to CA bundle if needed, e.g. from python certifi",
+    "# Optional: macOS / Python SSL — CA bundle path if you see CERTIFICATE_VERIFY_FAILED",
+    "# Example:  python3 -c \"import certifi; print(certifi.where())\"",
+    line("SSL_CERT_FILE", os.environ.get("_ENV_W_SSL_CERT", "")),
     "",
 ]
 path.write_text("\n".join(chunks) + "\n", encoding="utf-8")
@@ -84,7 +87,7 @@ PY
   unset _ENV_W_TARGET _ENV_W_API_KEY _ENV_W_BASE _ENV_W_AUTH _ENV_W_EMAIL _ENV_W_MODE
   unset _ENV_W_OPENAI_KEY _ENV_W_OPENAI_ENABLED
   unset _ENV_W_GH_TOKEN _ENV_W_GEMINI_KEY _ENV_W_TELEGRAM_BOT _ENV_W_TELEGRAM_CHAT
-  unset _ENV_W_BRAVE_SEARCH _ENV_W_BRAVE_ANSWERS _ENV_W_MINIMAX_KEY
+  unset _ENV_W_BRAVE_SEARCH _ENV_W_BRAVE_ANSWERS _ENV_W_MINIMAX_KEY _ENV_W_SSL_CERT
   chmod 600 "$target" || true
 }
 
@@ -96,12 +99,12 @@ sync_skill_tree() {
 }
 
 run_batch() {
-  local api_key="$1" base_url="$2" auth_mode="$3" email="$4" default_mode="$5" openai_key="$6" openai_enabled="$7" gh_token="$8" gemini_key="$9" telegram_bot="${10}" telegram_chat="${11}" brave_search="${12}" brave_answers="${13}" minimax_key="${14}"
-  write_env_file "$api_key" "$base_url" "$auth_mode" "$email" "$default_mode" "$openai_key" "$openai_enabled" "$gh_token" "$gemini_key" "$telegram_bot" "$telegram_chat" "$brave_search" "$brave_answers" "$minimax_key" "$ENV_FILE"
+  local api_key="$1" base_url="$2" auth_mode="$3" email="$4" default_mode="$5" openai_key="$6" openai_enabled="$7" gh_token="$8" gemini_key="$9" telegram_bot="${10}" telegram_chat="${11}" brave_search="${12}" brave_answers="${13}" minimax_key="${14}" ssl_cert="${15}"
+  write_env_file "$api_key" "$base_url" "$auth_mode" "$email" "$default_mode" "$openai_key" "$openai_enabled" "$gh_token" "$gemini_key" "$telegram_bot" "$telegram_chat" "$brave_search" "$brave_answers" "$minimax_key" "$ssl_cert" "$ENV_FILE"
   say "Wrote $ENV_FILE (mode 600)."
   [ -d "$SKILL_SRC" ] || die "Missing skill source: $SKILL_SRC"
   sync_skill_tree
-  write_env_file "$api_key" "$base_url" "$auth_mode" "$email" "$default_mode" "$openai_key" "$openai_enabled" "$gh_token" "$gemini_key" "$telegram_bot" "$telegram_chat" "$brave_search" "$brave_answers" "$minimax_key" "$SKILL_DEST/.env"
+  write_env_file "$api_key" "$base_url" "$auth_mode" "$email" "$default_mode" "$openai_key" "$openai_enabled" "$gh_token" "$gemini_key" "$telegram_bot" "$telegram_chat" "$brave_search" "$brave_answers" "$minimax_key" "$ssl_cert" "$SKILL_DEST/.env"
   say "Wrote $SKILL_DEST/.env (mode 600)."
   if command -v openclaw >/dev/null 2>&1; then
     openclaw gateway restart
@@ -186,7 +189,10 @@ main() {
     local minimax_key="${MINIMAX_API_KEY:-}"
     minimax_key="${minimax_key//$'\r'/}"
     minimax_key="${minimax_key//$'\n'/}"
-    run_batch "$api_key" "$base_url" "$auth_mode" "$email" "$default_mode" "$openai_key" "$openai_enabled" "$gh_token" "$gemini_key" "$telegram_bot" "$telegram_chat" "$brave_search" "$brave_answers" "$minimax_key"
+    local ssl_cert="${SSL_CERT_FILE:-}"
+    ssl_cert="${ssl_cert//$'\r'/}"
+    ssl_cert="${ssl_cert//$'\n'/}"
+    run_batch "$api_key" "$base_url" "$auth_mode" "$email" "$default_mode" "$openai_key" "$openai_enabled" "$gh_token" "$gemini_key" "$telegram_bot" "$telegram_chat" "$brave_search" "$brave_answers" "$minimax_key" "$ssl_cert"
     say ""
     say "=== Done (batch) ==="
     say "CLIs also auto-load ./.env; optional shell: set -a && source .env && set +a"
@@ -241,20 +247,40 @@ main() {
   fi
 
   say ""
-  say "Optional: additional integrations (press Enter to skip each)."
-  read -r -s -p "GH_TOKEN (or GitHub PAT): " gh_token
-  say ""
-  read -r -s -p "GEMINI_API_KEY: " gemini_key
-  say ""
-  read -r -s -p "TELEGRAM_BOT_TOKEN: " telegram_bot
-  say ""
-  read -r -p "TELEGRAM_CHAT_ID (optional): " telegram_chat
-  read -r -s -p "BRAVE_SEARCH_API_KEY: " brave_search
-  say ""
-  read -r -s -p "BRAVE_ANSWERS_API_KEY (optional, Enter to reuse BRAVE_SEARCH_API_KEY): " brave_answers
-  say ""
-  read -r -s -p "MINIMAX_API_KEY: " minimax_key
-  say ""
+  say "Optional integrations (GitHub PAT, Gemini, Telegram, Brave, MiniMax, SSL bundle)."
+  say "Not everyone uses these — skip the whole block if you only need Cursor/OpenAI, or add keys later in .env."
+  read -r -p "Configure optional integrations now? [Y/n] " opt_int
+  local gh_token="" gemini_key="" telegram_bot="" telegram_chat="" brave_search="" brave_answers="" minimax_key="" ssl_cert=""
+  case "${opt_int:-y}" in n|N|no|NO)
+    say "Skipping optional integrations (left blank in .env)."
+    ;;
+  *)
+    say ""
+    say "GitHub: use a fine-scoped PAT here OR leave blank and use \`gh auth login\` for CLI-only auth."
+    say "Both GH_TOKEN and GITHUB_TOKEN are written (same value) for tools that expect either name."
+    read -r -s -p "GH_TOKEN / GitHub PAT (Enter to skip): " gh_token
+    say ""
+    say "Gemini: API key for Google AI / Gemini skills (Enter to skip)."
+    read -r -s -p "GEMINI_API_KEY: " gemini_key
+    say ""
+    say "Telegram: bot token + default chat (optional if OpenClaw stores these elsewhere)."
+    read -r -s -p "TELEGRAM_BOT_TOKEN (Enter to skip): " telegram_bot
+    say ""
+    read -r -p "TELEGRAM_CHAT_ID (Enter to skip): " telegram_chat
+    say ""
+    say "Brave Search API (Enter to skip each)."
+    read -r -s -p "BRAVE_SEARCH_API_KEY: " brave_search
+    say ""
+    read -r -s -p "BRAVE_ANSWERS_API_KEY (Enter to reuse search key): " brave_answers
+    say ""
+    say "MiniMax provider (Enter to skip)."
+    read -r -s -p "MINIMAX_API_KEY: " minimax_key
+    say ""
+    say "SSL: path to CA bundle if Python shows CERTIFICATE_VERIFY_FAILED (Enter to skip)."
+    read -r -p "SSL_CERT_FILE: " ssl_cert
+    say ""
+    ;;
+  esac
   gh_token="${gh_token//$'\r'/}"
   gh_token="${gh_token//$'\n'/}"
   gemini_key="${gemini_key//$'\r'/}"
@@ -269,11 +295,13 @@ main() {
   brave_answers="${brave_answers//$'\n'/}"
   minimax_key="${minimax_key//$'\r'/}"
   minimax_key="${minimax_key//$'\n'/}"
+  ssl_cert="${ssl_cert//$'\r'/}"
+  ssl_cert="${ssl_cert//$'\n'/}"
   if [ -z "${brave_answers// }" ] && [ -n "${brave_search// }" ]; then
     brave_answers="$brave_search"
   fi
 
-  write_env_file "$api_key" "$base_url" "$auth_mode" "$email" "$default_mode" "$openai_key" "$openai_enabled" "$gh_token" "$gemini_key" "$telegram_bot" "$telegram_chat" "$brave_search" "$brave_answers" "$minimax_key" "$ENV_FILE"
+  write_env_file "$api_key" "$base_url" "$auth_mode" "$email" "$default_mode" "$openai_key" "$openai_enabled" "$gh_token" "$gemini_key" "$telegram_bot" "$telegram_chat" "$brave_search" "$brave_answers" "$minimax_key" "$ssl_cert" "$ENV_FILE"
   say "Wrote $ENV_FILE (mode 600)."
 
   say ""
@@ -283,7 +311,7 @@ main() {
   case "${sk:-y}" in n|N|no|NO) ;; *)
     [ -d "$SKILL_SRC" ] || die "Missing skill source: $SKILL_SRC"
     sync_skill_tree
-    write_env_file "$api_key" "$base_url" "$auth_mode" "$email" "$default_mode" "$openai_key" "$openai_enabled" "$gh_token" "$gemini_key" "$telegram_bot" "$telegram_chat" "$brave_search" "$brave_answers" "$minimax_key" "$SKILL_DEST/.env"
+    write_env_file "$api_key" "$base_url" "$auth_mode" "$email" "$default_mode" "$openai_key" "$openai_enabled" "$gh_token" "$gemini_key" "$telegram_bot" "$telegram_chat" "$brave_search" "$brave_answers" "$minimax_key" "$ssl_cert" "$SKILL_DEST/.env"
     say "Wrote $SKILL_DEST/.env (mode 600)."
     ;;
   esac
@@ -320,6 +348,9 @@ main() {
   say "Load credentials in a new shell session:"
   say "  cd \"$BASE_DIR\" && set -a && source .env && set +a"
   say "Then: python3 scripts/cursor_openclaw.py --json whoami"
+  say ""
+  say "GitHub: if you skipped a PAT, run \`gh auth login\` for CLI auth, or add GH_TOKEN to .env."
+  say "Check readiness: python3 scripts/andrea_capabilities.py"
   say ""
 }
 

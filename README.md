@@ -88,6 +88,7 @@ export CURSOR_API_KEY="…"
 # export BRAVE_SEARCH_API_KEY="…"
 # export BRAVE_ANSWERS_API_KEY="…"
 # export MINIMAX_API_KEY="…"
+# export SSL_CERT_FILE="…"   # optional TLS CA bundle path
 ```
 
 ```bash
@@ -105,7 +106,7 @@ It will:
 - Prompt for **CURSOR_API_KEY** (hidden input) and optional **CURSOR_BASE_URL** / **CURSOR_AUTH_MODE**
 - Optional **CURSOR_EMAIL** and **OPENCLAW_CURSOR_DEFAULT_MODE** (`auto` \| `api` \| `cli`) for the handoff skill
 - Optional **OPENAI_API_KEY** (hidden) and **OPENAI_API_ENABLED** (`[y/N]`; no key forces disabled)
-- Optional hidden prompts for **GH_TOKEN**, **GEMINI_API_KEY**, **TELEGRAM_BOT_TOKEN**, **BRAVE_SEARCH_API_KEY**, **BRAVE_ANSWERS_API_KEY**, **MINIMAX_API_KEY**, plus **TELEGRAM_CHAT_ID**
+- **Optional integrations block** (`[Y/n]`): skip entirely for Cursor-only setups, or enter **GH_TOKEN** (also writes **GITHUB_TOKEN**), **GEMINI_API_KEY**, Telegram bot + chat id, Brave keys, **MINIMAX_API_KEY**, **SSL_CERT_FILE** — each field skippable with Enter
 - Write **`./.env`** with `set -a && source .env && set +a` usage hints
 - Optionally install **`cursor_handoff`** under `~/.openclaw/workspace/skills/` (replaces that folder if present), write **`~/.openclaw/workspace/skills/cursor_handoff/.env`**, restart **`openclaw gateway`**, and run **`diagnose`**
 
@@ -263,6 +264,7 @@ See [.env.example](.env.example) and [skills/cursor_handoff/.env.example](skills
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | No | Optional Telegram bot credentials (skill-dependent). |
 | `BRAVE_SEARCH_API_KEY` / `BRAVE_ANSWERS_API_KEY` | No | Optional Brave Search skill keys (`brave-api-search` expects both names; answers key may reuse search key). |
 | `MINIMAX_API_KEY` | No | Optional MiniMax provider key for MiniMax integrations. |
+| `SSL_CERT_FILE` | No | Optional path to CA bundle for Python TLS (macOS `CERTIFICATE_VERIFY_FAILED`); see README troubleshooting. |
 
 ## Security
 

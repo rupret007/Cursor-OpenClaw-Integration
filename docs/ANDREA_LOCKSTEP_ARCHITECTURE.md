@@ -58,6 +58,8 @@ Commands without `idempotency_key` use a deterministic hash of `channel`, `exter
 
 ## Operations
 
+Telegram ingest over the public internet: [ANDREA_TELEGRAM_LOCKSTEP_E2E.md](ANDREA_TELEGRAM_LOCKSTEP_E2E.md).
+
 ```bash
 # Start server (repo root)
 python3 scripts/andrea_sync_server.py

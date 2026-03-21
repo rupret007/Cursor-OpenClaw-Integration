@@ -122,6 +122,7 @@ bash scripts/andrea_slo_check.sh
 | [ANDREA_OPENCLAW_HYBRID_SKILLS.md](ANDREA_OPENCLAW_HYBRID_SKILLS.md) | Hybrid expansion (Apple/Google/Waves 1–3) |
 | [ANDREA_LOCKSTEP_ARCHITECTURE.md](ANDREA_LOCKSTEP_ARCHITECTURE.md) | Telegram/Alexa/Cursor shared command bus + SQLite event store |
 | [ANDREA_ALEXA_INTEGRATION.md](ANDREA_ALEXA_INTEGRATION.md) | Alexa Custom Skill endpoint + HTTPS notes |
+| [ANDREA_TELEGRAM_LOCKSTEP_E2E.md](ANDREA_TELEGRAM_LOCKSTEP_E2E.md) | Telegram webhook + cloudflared + lockstep verification |
 | [docs/DEPLOYMENT.md](DEPLOYMENT.md) | Branch + deployment baseline |
 
 ---
@@ -169,6 +170,8 @@ python3 scripts/andrea_sync_server.py
 
 **Telegram:** Point BotFather `setWebhook` to  
 `https://your-public-host/v1/telegram/webhook?secret=...` (same value as `ANDREA_SYNC_TELEGRAM_SECRET`). The handler returns `200` immediately and processes updates on a worker thread.
+
+**E2E helper (cloudflared + setWebhook + verify):** see [ANDREA_TELEGRAM_LOCKSTEP_E2E.md](ANDREA_TELEGRAM_LOCKSTEP_E2E.md) and `python3 scripts/andrea_lockstep_telegram_e2e.py tunnel-and-webhook`.
 
 **Alexa:** Publish a Custom Skill whose HTTPS endpoint is `https://your-public-host/v1/alexa`. See [ANDREA_ALEXA_INTEGRATION.md](ANDREA_ALEXA_INTEGRATION.md) for certification, account linking, and signature verification.
 

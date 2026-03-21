@@ -72,6 +72,7 @@ pass "cursor_cli_fallback --help"
 python3 -m py_compile "${BASE_DIR}/scripts/andrea_sync_server.py" || fail "py_compile andrea_sync_server"
 python3 -m py_compile "${BASE_DIR}/scripts/andrea_sync_health.py" || fail "py_compile andrea_sync_health"
 python3 -m py_compile "${BASE_DIR}/scripts/andrea_sync_cursor_report.py" || fail "py_compile andrea_sync_cursor_report"
+python3 -m py_compile "${BASE_DIR}/scripts/andrea_lockstep_telegram_e2e.py" || fail "py_compile andrea_lockstep_telegram_e2e"
 while IFS= read -r _syncpy; do
   python3 -m py_compile "$_syncpy" || fail "py_compile $_syncpy"
 done < <(find "${BASE_DIR}/services" -name "*.py" 2>/dev/null | sort)

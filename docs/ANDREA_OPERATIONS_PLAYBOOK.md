@@ -77,6 +77,7 @@ bash scripts/andrea_slo_check.sh
 | Step | Command |
 |------|---------|
 | Unit + integration | `bash scripts/test_integration.sh` |
+| Live comm smoke (optional) | `RUN_COMM_SMOKE=1 ANDREA_SYNC_URL=http://127.0.0.1:8765 bash scripts/test_integration.sh` or `bash scripts/andrea_communication_smoke.sh` |
 | Masterclass doctor | `bash scripts/andrea_doctor.sh` |
 | Security sanity (repo) | `bash scripts/andrea_security_sanity.sh` |
 | Readiness grade (A/B/C) | `python3 scripts/andrea_readiness_grade.py` |

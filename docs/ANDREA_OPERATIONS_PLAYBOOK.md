@@ -103,6 +103,8 @@ bash scripts/andrea_slo_check.sh
 | Tests fail | Fix on a branch; do not merge to `main` until green |
 | Readiness **Grade C** | `python3 scripts/andrea_capabilities.py` — unblock **blocked** rows (often `github:auth`: `gh auth login` or `python3 scripts/dotenv_set_key.py GH_TOKEN --skill`) |
 | Pre-release strict gate | `bash scripts/andrea_release_gate.sh` |
+| Lockstep server down | Start `python3 scripts/andrea_sync_server.py`; check `ANDREA_SYNC_URL` + `python3 scripts/andrea_sync_health.py` |
+| Telegram webhook 403 | Match `?secret=` to `ANDREA_SYNC_TELEGRAM_SECRET`; re-run `setWebhook` with full URL |
 
 ---
 
@@ -118,6 +120,8 @@ bash scripts/andrea_slo_check.sh
 | [ANDREA_COMMS_PRODUCTIVITY.md](ANDREA_COMMS_PRODUCTIVITY.md) | Telegram + routines + memory policy |
 | [ANDREA_READINESS_REPORT.md](ANDREA_READINESS_REPORT.md) | Final readiness template / last run |
 | [ANDREA_OPENCLAW_HYBRID_SKILLS.md](ANDREA_OPENCLAW_HYBRID_SKILLS.md) | Hybrid expansion (Apple/Google/Waves 1–3) |
+| [ANDREA_LOCKSTEP_ARCHITECTURE.md](ANDREA_LOCKSTEP_ARCHITECTURE.md) | Telegram/Alexa/Cursor shared command bus + SQLite event store |
+| [ANDREA_ALEXA_INTEGRATION.md](ANDREA_ALEXA_INTEGRATION.md) | Alexa Custom Skill endpoint + HTTPS notes |
 | [docs/DEPLOYMENT.md](DEPLOYMENT.md) | Branch + deployment baseline |
 
 ---
@@ -147,3 +151,40 @@ Use this after Wave 1 skills are installed/auth’d (see **[ANDREA_OPENCLAW_HYBR
 **Voice (Wave 3, nice-to-have)** — Enable the `voice-call` plugin in OpenClaw config (`plugins.entries.voice-call.enabled`), then confirm `openclaw skills info voice-call --json` shows `"eligible": true`. Re-run doctor + release gate to confirm **no regression** on core grades.
 
 **Refresh protocol** — After pulling repo changes: `cp -R skills/cursor_handoff ~/.openclaw/workspace/skills/` → `openclaw gateway restart` → `openclaw skills check`.
+
+---
+
+## 10. Lockstep + Alexa (strict channel sync)
+
+**Goal:** One **task timeline** for Telegram, Alexa, and Cursor—no contradictory “I don’t have that skill” answers; ground truth is `openclaw skills list` / `skills info` **plus** the lockstep event log.
+
+**Run the bus (local-first)**
+
+```bash
+cd /path/to/Cursor-OpenClaw-Integration
+export ANDREA_SYNC_TELEGRAM_SECRET='long-random'
+export ANDREA_SYNC_INTERNAL_TOKEN='long-random'
+python3 scripts/andrea_sync_server.py
+```
+
+**Telegram:** Point BotFather `setWebhook` to  
+`https://your-public-host/v1/telegram/webhook?secret=...` (same value as `ANDREA_SYNC_TELEGRAM_SECRET`). The handler returns `200` immediately and processes updates on a worker thread.
+
+**Alexa:** Publish a Custom Skill whose HTTPS endpoint is `https://your-public-host/v1/alexa`. See [ANDREA_ALEXA_INTEGRATION.md](ANDREA_ALEXA_INTEGRATION.md) for certification, account linking, and signature verification.
+
+**Cursor lifecycle:** After agent state changes, emit events:
+
+```bash
+export ANDREA_SYNC_URL=http://127.0.0.1:8765
+export ANDREA_SYNC_INTERNAL_TOKEN=...
+python3 scripts/andrea_sync_cursor_report.py --task-id tsk_... --event JobCompleted --payload '{"summary":"shipped"}'
+```
+
+**Doctor (optional):** `ANDREA_SYNC_DOCTOR=1 ANDREA_SYNC_URL=http://127.0.0.1:8765 bash scripts/andrea_doctor.sh`  
+Strict: also set `ANDREA_SYNC_REQUIRED=1` so a dead bus fails the doctor run.
+
+**Incident recovery**
+
+1. Confirm process: `curl -sS "$ANDREA_SYNC_URL/v1/health"`.
+2. If DB corrupt, move aside `data/andrea_sync.db` and restart (loses history; last resort).
+3. Replay Telegram updates only after fixing idempotency keys—duplicates should `CommandDeduped`, not double-run side effects.

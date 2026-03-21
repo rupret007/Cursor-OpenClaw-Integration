@@ -123,3 +123,4 @@ User asks: "Fix failing tests and push branch for PR."
 
 - Hybrid OpenClaw expansion (Apple/Google productivity, execution lane, optional voice): repo `docs/ANDREA_OPENCLAW_HYBRID_SKILLS.md`
 - Day-to-day gates: `docs/ANDREA_OPERATIONS_PLAYBOOK.md`
+- **Lockstep bus** (Telegram/Alexa/Cursor shared task timeline): `docs/ANDREA_LOCKSTEP_ARCHITECTURE.md` — after spawning a Cursor job, report lifecycle with `scripts/andrea_sync_cursor_report.py` so all channels stay aligned.

@@ -69,6 +69,15 @@ pass "cursor_handoff --version"
 bash "${BASE_DIR}/skills/cursor_handoff/scripts/cursor_cli_fallback.sh" --help >/dev/null || fail "cursor_cli_fallback --help"
 pass "cursor_cli_fallback --help"
 
+python3 -m py_compile "${BASE_DIR}/scripts/andrea_sync_server.py" || fail "py_compile andrea_sync_server"
+python3 -m py_compile "${BASE_DIR}/scripts/andrea_sync_health.py" || fail "py_compile andrea_sync_health"
+python3 -m py_compile "${BASE_DIR}/scripts/andrea_sync_cursor_report.py" || fail "py_compile andrea_sync_cursor_report"
+while IFS= read -r _syncpy; do
+  python3 -m py_compile "$_syncpy" || fail "py_compile $_syncpy"
+done < <(find "${BASE_DIR}/services" -name "*.py" 2>/dev/null | sort)
+"${ENV_NO_SECRETS[@]}" python3 "${BASE_DIR}/scripts/andrea_sync_health.py" | grep -qE "SKIP|OK" || fail "andrea_sync_health default"
+pass "andrea_sync stack py_compile + health smoke"
+
 bash "${BASE_DIR}/scripts/andrea_model_guard.sh" --help >/dev/null || fail "andrea_model_guard --help"
 pass "andrea_model_guard --help"
 

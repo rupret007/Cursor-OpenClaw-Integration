@@ -5,6 +5,7 @@
 #        STRICT_SECURITY=1 bash scripts/andrea_doctor.sh   # fail on security warnings too
 #        MODEL_GUARD_ON_FAIL=1 bash scripts/andrea_doctor.sh
 #        OPENCLAW_ENFORCE=1 bash scripts/andrea_doctor.sh
+#        ANDREA_SYNC_DOCTOR=1 ANDREA_SYNC_URL=http://127.0.0.1:8765 bash scripts/andrea_doctor.sh
 set -euo pipefail
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -44,6 +45,15 @@ if [[ "${OPENCLAW_ENFORCE}" == "1" ]]; then
   echo ""
 fi
 
+if [[ "${ANDREA_SYNC_DOCTOR:-0}" == "1" ]]; then
+  echo ">>> [3.6/4] Andrea lockstep health (ANDREA_SYNC_DOCTOR=1)"
+  python3 "${BASE_DIR}/scripts/andrea_sync_health.py" || {
+    echo "Lockstep health failed — start python3 scripts/andrea_sync_server.py or unset ANDREA_SYNC_REQUIRED" >&2
+    exit 1
+  }
+  echo ""
+fi
+
 echo ">>> [4/4] OpenClaw model probe (optional)"
 if [[ "${SKIP_OPENCLAW}" == "1" ]]; then
   echo "(Skip: SKIP_OPENCLAW_PROBE=1)"
@@ -63,4 +73,4 @@ fi
 echo ""
 
 echo "=== Andrea doctor complete ==="
-echo "Docs: docs/ANDREA_OPERATIONS_PLAYBOOK.md | docs/ANDREA_SECURITY.md | docs/ANDREA_MODEL_POLICY.md"
+echo "Docs: docs/ANDREA_OPERATIONS_PLAYBOOK.md | docs/ANDREA_SECURITY.md | docs/ANDREA_MODEL_POLICY.md | docs/ANDREA_LOCKSTEP_ARCHITECTURE.md"

@@ -6,7 +6,7 @@ CLI="${BASE_DIR}/scripts/cursor_openclaw.py"
 TEST_FILE="${BASE_DIR}/tests/test_cursor_openclaw.py"
 
 echo "[1/9] Validate required files..."
-for f in "$CLI" "$TEST_FILE" "${BASE_DIR}/README.md" "${BASE_DIR}/.env.example" "${BASE_DIR}/docs/ANDREA_OPENCLAW_HYBRID_SKILLS.md" "${BASE_DIR}/scripts/setup_admin.sh" "${BASE_DIR}/scripts/env_loader.py" "${BASE_DIR}/scripts/cursor_api_common.py" "${BASE_DIR}/scripts/handoff_context.py" "${BASE_DIR}/scripts/exhaustive_feature_check.sh" "${BASE_DIR}/scripts/andrea_capabilities.py" "${BASE_DIR}/scripts/andrea_reliability_probes.sh" "${BASE_DIR}/scripts/dotenv_set_key.py" "${BASE_DIR}/scripts/openclaw_apply_openai_key.sh" "${BASE_DIR}/scripts/andrea_readiness_grade.py" "${BASE_DIR}/scripts/andrea_security_sanity.sh" "${BASE_DIR}/scripts/andrea_slo_check.sh" "${BASE_DIR}/scripts/andrea_doctor.sh" "${BASE_DIR}/scripts/andrea_model_guard.sh" "${BASE_DIR}/scripts/andrea_openclaw_enforce.sh" "${BASE_DIR}/scripts/andrea_release_gate.sh" "${BASE_DIR}/scripts/andrea_slo_telegram.sh" "${BASE_DIR}/scripts/andrea_slo_telegram_probe.py"; do
+for f in "$CLI" "$TEST_FILE" "${BASE_DIR}/README.md" "${BASE_DIR}/.env.example" "${BASE_DIR}/docs/ANDREA_OPENCLAW_HYBRID_SKILLS.md" "${BASE_DIR}/docs/ANDREA_LOCKSTEP_ARCHITECTURE.md" "${BASE_DIR}/docs/ANDREA_ALEXA_INTEGRATION.md" "${BASE_DIR}/scripts/setup_admin.sh" "${BASE_DIR}/scripts/env_loader.py" "${BASE_DIR}/scripts/cursor_api_common.py" "${BASE_DIR}/scripts/handoff_context.py" "${BASE_DIR}/scripts/exhaustive_feature_check.sh" "${BASE_DIR}/scripts/andrea_capabilities.py" "${BASE_DIR}/scripts/andrea_reliability_probes.sh" "${BASE_DIR}/scripts/dotenv_set_key.py" "${BASE_DIR}/scripts/openclaw_apply_openai_key.sh" "${BASE_DIR}/scripts/andrea_readiness_grade.py" "${BASE_DIR}/scripts/andrea_security_sanity.sh" "${BASE_DIR}/scripts/andrea_slo_check.sh" "${BASE_DIR}/scripts/andrea_doctor.sh" "${BASE_DIR}/scripts/andrea_model_guard.sh" "${BASE_DIR}/scripts/andrea_openclaw_enforce.sh" "${BASE_DIR}/scripts/andrea_release_gate.sh" "${BASE_DIR}/scripts/andrea_slo_telegram.sh" "${BASE_DIR}/scripts/andrea_slo_telegram_probe.py" "${BASE_DIR}/scripts/andrea_sync_server.py" "${BASE_DIR}/scripts/andrea_sync_health.py" "${BASE_DIR}/scripts/andrea_sync_cursor_report.py"; do
   [[ -f "$f" ]] || { echo "Missing file: $f" >&2; exit 1; }
 done
 bash -n "${BASE_DIR}/scripts/setup_admin.sh"
@@ -27,6 +27,12 @@ python3 -m py_compile "${BASE_DIR}/scripts/andrea_capabilities.py"
 python3 -m py_compile "${BASE_DIR}/scripts/andrea_readiness_grade.py"
 python3 -m py_compile "${BASE_DIR}/scripts/andrea_slo_telegram_probe.py"
 python3 -m py_compile "${BASE_DIR}/scripts/dotenv_set_key.py"
+python3 -m py_compile "${BASE_DIR}/scripts/andrea_sync_server.py"
+python3 -m py_compile "${BASE_DIR}/scripts/andrea_sync_health.py"
+python3 -m py_compile "${BASE_DIR}/scripts/andrea_sync_cursor_report.py"
+while IFS= read -r _py; do
+  python3 -m py_compile "$_py"
+done < <(find "${BASE_DIR}/services" -name "*.py" 2>/dev/null | sort)
 
 echo "[2/9] Python syntax compile..."
 python3 -m py_compile "$CLI"

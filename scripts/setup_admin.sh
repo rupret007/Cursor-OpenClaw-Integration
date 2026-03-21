@@ -180,6 +180,9 @@ main() {
     local brave_answers="${BRAVE_ANSWERS_API_KEY:-${BRAVE_API_KEY:-}}"
     brave_answers="${brave_answers//$'\r'/}"
     brave_answers="${brave_answers//$'\n'/}"
+    if [ -z "${brave_answers// }" ] && [ -n "${brave_search// }" ]; then
+      brave_answers="$brave_search"
+    fi
     local minimax_key="${MINIMAX_API_KEY:-}"
     minimax_key="${minimax_key//$'\r'/}"
     minimax_key="${minimax_key//$'\n'/}"

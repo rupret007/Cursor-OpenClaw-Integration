@@ -117,6 +117,7 @@ bash scripts/andrea_slo_check.sh
 | [ANDREA_DEVOPS_RUNBOOK.md](ANDREA_DEVOPS_RUNBOOK.md) | Branch/PR + GitHub + fallbacks |
 | [ANDREA_COMMS_PRODUCTIVITY.md](ANDREA_COMMS_PRODUCTIVITY.md) | Telegram + routines + memory policy |
 | [ANDREA_READINESS_REPORT.md](ANDREA_READINESS_REPORT.md) | Final readiness template / last run |
+| [ANDREA_OPENCLAW_HYBRID_SKILLS.md](ANDREA_OPENCLAW_HYBRID_SKILLS.md) | Hybrid expansion (Apple/Google/Waves 1–3) |
 | [docs/DEPLOYMENT.md](DEPLOYMENT.md) | Branch + deployment baseline |
 
 ---
@@ -126,3 +127,23 @@ bash scripts/andrea_slo_check.sh
 When adding a new secret key to `.env.example`, update `SECRET_KEYS` in `scripts/andrea_capabilities.py` so the matrix stays accurate.
 
 Run `bash scripts/andrea_security_sanity.sh` before merging changes that touch env or provider wiring; use `STRICT=1` locally if you want backup-file warnings to fail the check.
+
+---
+
+## 9. Hybrid daily workflow (Apple + Google + meta lane)
+
+Use this after Wave 1 skills are installed/auth’d (see **[ANDREA_OPENCLAW_HYBRID_SKILLS.md](ANDREA_OPENCLAW_HYBRID_SKILLS.md)**).
+
+**Typical loop**
+
+1. **Morning snapshot** — `python3 scripts/andrea_capabilities.py --json` (hybrid rows are `ready` or `ready_with_limits`; core OpenClaw skills must be `✓ ready` in `openclaw skills list`).
+2. **Capture** — Apple Notes / Reminders / Things via their OpenClaw skills once `memo` / `remindctl` / `things` are on `PATH`.
+3. **Google** — Mail/Calendar/Drive via `gog` after CLI install + OAuth per skill metadata.
+4. **Compress** — URLs/transcripts via `summarize`; trawl prior sessions via `session-logs` (needs `jq` + `rg`).
+5. **Gate** — `bash scripts/andrea_release_gate.sh` before merging infra changes; for live OpenClaw hygiene: `OPENCLAW_ENFORCE=1 MODEL_GUARD_ON_FAIL=1 bash scripts/andrea_doctor.sh`.
+
+**Strict eligibility (optional)** — When hybrid CLIs are meant to be mandatory on a machine, set `ANDREA_OPENCLAW_ELIGIBLE_SKILLS` to a CSV of skill keys and run `bash scripts/andrea_openclaw_enforce.sh` (requires `jq`). Example keys: `apple-notes`, `gog`, `session-logs`.
+
+**Voice (Wave 3, nice-to-have)** — Enable the `voice-call` plugin in OpenClaw config (`plugins.entries.voice-call.enabled`), then confirm `openclaw skills info voice-call --json` shows `"eligible": true`. Re-run doctor + release gate to confirm **no regression** on core grades.
+
+**Refresh protocol** — After pulling repo changes: `cp -R skills/cursor_handoff ~/.openclaw/workspace/skills/` → `openclaw gateway restart` → `openclaw skills check`.

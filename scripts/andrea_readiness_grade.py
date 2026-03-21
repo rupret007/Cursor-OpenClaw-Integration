@@ -21,7 +21,9 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 CAP = REPO / "scripts" / "andrea_capabilities.py"
 
-SOFT_LIMITS_THRESHOLD = 12  # many optional integrations absent → still OK but grade B
+# Hybrid lane adds many optional rows (skills + CLIs). Keep this high enough that a healthy
+# core stack can still grade A while optional/hybrid gaps remain visible as ready_with_limits.
+SOFT_LIMITS_THRESHOLD = 65
 
 
 def run_capabilities() -> dict:

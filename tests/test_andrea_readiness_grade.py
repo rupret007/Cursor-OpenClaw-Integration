@@ -66,15 +66,17 @@ class TestAndreaReadinessGrade(unittest.TestCase):
         self.assertTrue(any("critical_blocked" in r for r in reasons))
 
     def test_grade_b_high_limits(self) -> None:
+        thr = self._mod.SOFT_LIMITS_THRESHOLD
+        over = thr + 1
         rows = [
             {"id": f"opt:{n}", "status": "ready_with_limits", "critical": False}
-            for n in range(15)
+            for n in range(over)
         ]
         g, reasons = self._mod.grade_from_payload(
             {
                 "ok": True,
                 "rows": rows,
-                "summary": {"blocked": 0, "ready_with_limits": 15},
+                "summary": {"blocked": 0, "ready_with_limits": over},
             }
         )
         self.assertEqual(g, "B")

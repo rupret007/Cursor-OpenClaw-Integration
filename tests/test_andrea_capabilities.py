@@ -49,6 +49,34 @@ class TestAndreaCapabilities(unittest.TestCase):
         by_detail = {r.detail: r.status for r in rows}
         self.assertEqual(by_detail.get("cursor_handoff"), "ready")
         self.assertEqual(by_detail.get("github"), "ready")
+        self.assertEqual(by_detail.get("gh-issues"), "ready")
+
+    def test_parse_openclaw_skill_states_table(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "scripts"))
+        import andrea_capabilities as ac  # noqa: E402
+
+        snippet = (
+            "┌───────────┬─────────────────────────┬──────────┬──────────┐\n"
+            "│ ✓ ready   │ 📦 cursor_handoff       │ desc     │ src      │\n"
+            "│ ✗ missing │ 📝 apple-notes          │ desc     │ bundled  │\n"
+        )
+        states = ac._parse_openclaw_skill_states(snippet)
+        self.assertEqual(states.get("cursor_handoff"), "ready")
+        self.assertEqual(states.get("apple-notes"), "missing")
+
+    def test_expected_skills_include_hybrid_wave1(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "scripts"))
+        import andrea_capabilities as ac  # noqa: E402
+
+        for name in (
+            "apple-notes",
+            "apple-reminders",
+            "things-mac",
+            "gog",
+            "summarize",
+            "session-logs",
+        ):
+            self.assertIn(name, ac.EXPECTED_OPENCLAW_SKILLS)
 
 
 if __name__ == "__main__":

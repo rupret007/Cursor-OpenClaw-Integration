@@ -11,6 +11,10 @@ Usage:
 
 Environment:
   ANDREA_REPO_ROOT  optional override for repo root (default: parent of scripts/)
+
+OpenClaw skills:
+  Core / optional / hybrid keys are defined in this module. Hybrid install matrix:
+  docs/ANDREA_OPENCLAW_HYBRID_SKILLS.md
 """
 from __future__ import annotations
 
@@ -35,19 +39,56 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 from env_loader import parse_env_line  # noqa: E402
 
-# Skills we expect when OpenClaw is healthy (substring match in `openclaw skills list` output).
-EXPECTED_OPENCLAW_SKILLS = (
+# Core skills: must show ✓ ready in `openclaw skills list` (not merely present in catalog).
+CORE_OPENCLAW_SKILLS = (
     "cursor_handoff",
     "github",
     "gh-issues",
-    "gemini",
     "telegram",
     "brave-api-search",
     "add-minimax-provider",
 )
 
+# Bundled skills that may legitimately stay ✗ missing until an optional CLI exists.
+OPENCLAW_SKILLS_OPTIONAL_MISSING = ("gemini",)
+
+# Hybrid assistant lane (Waves 1–3). ✗ missing → ready_with_limits (install per hybrid doc).
+HYBRID_OPENCLAW_SKILLS = (
+    "apple-notes",
+    "apple-reminders",
+    "things-mac",
+    "gog",
+    "summarize",
+    "session-logs",
+    "coding-agent",
+    "tmux",
+    "peekaboo",
+    "voice-call",
+)
+
+# Back-compat for docs/tests: union of all OpenClaw skill keys we track in the matrix.
+EXPECTED_OPENCLAW_SKILLS = tuple(
+    dict.fromkeys(
+        CORE_OPENCLAW_SKILLS + OPENCLAW_SKILLS_OPTIONAL_MISSING + HYBRID_OPENCLAW_SKILLS
+    )
+)
+
 # Optional integration binary (limits if missing); curl/git are listed explicitly below.
 OPTIONAL_BINARIES = ("gemini",)
+
+# Hybrid CLIs we surface explicitly (in addition to OpenClaw skill rows).
+HYBRID_OPTIONAL_BINARIES = (
+    "memo",
+    "remindctl",
+    "things",
+    "gog",
+    "summarize",
+    "rg",
+    "tmux",
+    "peekaboo",
+    "codex",
+    "claude",
+)
 
 # Secrets: boolean presence only (.env file + process environment).
 SECRET_KEYS = (
@@ -145,28 +186,84 @@ def _openclaw_skills() -> Tuple[str, str, str]:
     return "ready", out + err, ""
 
 
+def _parse_openclaw_skill_states(skills_blob: str) -> Dict[str, str]:
+    """
+    Parse `openclaw skills list` table rows into {skill_key: ready|missing}.
+    Only rows whose first cell is ✓ ready / ✗ missing are recorded (skips continuations).
+    """
+    states: Dict[str, str] = {}
+    for line in skills_blob.splitlines():
+        m = re.match(r"^\s*│\s*(✓ ready|✗ missing)\s*│\s*([^│]+)│", line)
+        if not m:
+            continue
+        raw_status, skill_cell = m.group(1), m.group(2)
+        flag = "ready" if raw_status.startswith("✓") else "missing"
+        parts = skill_cell.split()
+        if not parts:
+            continue
+        key = parts[-1]
+        states[key] = flag
+    return states
+
+
+def _skill_listed_fallback(skills_blob: str, name: str) -> bool:
+    lower = skills_blob.lower()
+    needle = name.replace("_", " ").lower()
+    return name.lower() in lower or needle in lower
+
+
+def _skill_row_for(
+    name: str,
+    tier: str,
+    skills_blob: str,
+    states: Dict[str, str],
+) -> Row:
+    st = states.get(name)
+    listed = _skill_listed_fallback(skills_blob, name)
+    if st == "ready":
+        status = "ready"
+        note = "openclaw skills list: ✓ ready"
+    elif st == "missing":
+        if tier == "core":
+            status = "blocked"
+            note = "openclaw skills list: ✗ missing (requirements not satisfied)"
+        else:
+            status = "ready_with_limits"
+            note = "openclaw skills list: ✗ missing (install CLI / config per docs/ANDREA_OPENCLAW_HYBRID_SKILLS.md)"
+    elif not states and listed:
+        # Tests / non-table captures: preserve legacy substring behavior.
+        status = "ready"
+        note = "substring match in skills list (table parse unavailable)"
+    elif listed:
+        status = "ready_with_limits"
+        note = "skill not parsed from table; substring match only — check openclaw output format"
+    else:
+        status = "blocked" if tier == "core" else "ready_with_limits"
+        note = (
+            "not detected in openclaw skills list output"
+            if tier == "core"
+            else "skill not listed in this openclaw install"
+        )
+    critical = tier == "core" and status == "blocked"
+    return Row(
+        id=f"skill:{name}",
+        category="openclaw_skill",
+        detail=name,
+        status=status,
+        notes=note,
+        critical=critical,
+    )
+
+
 def _skill_rows(skills_blob: str) -> List[Row]:
     rows: List[Row] = []
-    lower = skills_blob.lower()
-    for name in EXPECTED_OPENCLAW_SKILLS:
-        needle = name.replace("_", " ").lower()
-        found = name.lower() in lower or needle in lower
-        if found:
-            st = "ready"
-            note = "listed by openclaw skills list (name match)"
-        else:
-            st = "blocked"
-            note = "not detected in openclaw skills list output"
-        rows.append(
-            Row(
-                id=f"skill:{name}",
-                category="openclaw_skill",
-                detail=name,
-                status=st,
-                notes=note,
-                critical=False,
-            )
-        )
+    states = _parse_openclaw_skill_states(skills_blob)
+    for name in CORE_OPENCLAW_SKILLS:
+        rows.append(_skill_row_for(name, "core", skills_blob, states))
+    for name in OPENCLAW_SKILLS_OPTIONAL_MISSING:
+        rows.append(_skill_row_for(name, "optional", skills_blob, states))
+    for name in HYBRID_OPENCLAW_SKILLS:
+        rows.append(_skill_row_for(name, "hybrid", skills_blob, states))
     return rows
 
 
@@ -268,8 +365,25 @@ def build_matrix() -> List[Row]:
             critical=False,
         )
     )
-    if oc_status != "blocked":
+    # Avoid false "blocked" core skills when `skills list` failed but returned empty/partial output.
+    if oc_status != "blocked" and (
+        "✓ ready" in oc_out or "✗ missing" in oc_out
+    ):
         rows.extend(_skill_rows(oc_out))
+    for name in HYBRID_OPTIONAL_BINARIES:
+        present = _which(name)
+        rows.append(
+            Row(
+                id=f"hybrid_bin:{name}",
+                category="hybrid_tool",
+                detail=name,
+                status="ready" if present else "ready_with_limits",
+                notes="on PATH"
+                if present
+                else "optional CLI for hybrid lane (see docs/ANDREA_OPENCLAW_HYBRID_SKILLS.md)",
+                critical=False,
+            )
+        )
 
     gh_st, gh_note = _gh_auth_state()
     rows.append(
@@ -398,6 +512,7 @@ def main() -> int:
         },
         "meta": {
             "model_policy_doc": "docs/ANDREA_MODEL_POLICY.md",
+            "hybrid_skills_doc": "docs/ANDREA_OPENCLAW_HYBRID_SKILLS.md",
             "openclaw_probe_timeout_units": "ms",
             "readiness_grade_script": "scripts/andrea_readiness_grade.py",
             "security_sanity_script": "scripts/andrea_security_sanity.sh",

@@ -16,7 +16,10 @@ WORKSPACE_SKILLS_DIR="${HOME}/.openclaw/workspace/skills"
 REPO_SKILL_DIR="${BASE_DIR}/skills/cursor_handoff"
 
 OPENCLAW_PROBE_MS="${OPENCLAW_PROBE_MS:-30000}"
-REQUIRED_SKILLS="${ANDREA_REQUIRED_OPENCLAW_SKILLS:-cursor_handoff,github,gh-issues,telegram,add-minimax-provider,brave-api-search}"
+# Default includes hybrid catalog keys (always listed by OpenClaw; use ANDREA_OPENCLAW_ELIGIBLE_SKILLS for strict readiness).
+_DEFAULT_REQUIRED_SKILLS="cursor_handoff,github,gh-issues,telegram,add-minimax-provider,brave-api-search,apple-notes,apple-reminders,things-mac,gog,summarize,session-logs,coding-agent,tmux,peekaboo,voice-call"
+REQUIRED_SKILLS="${ANDREA_REQUIRED_OPENCLAW_SKILLS:-${_DEFAULT_REQUIRED_SKILLS}}"
+ELIGIBLE_SKILLS="${ANDREA_OPENCLAW_ELIGIBLE_SKILLS:-}"
 SYNC_SKILL=1
 RESTART_GATEWAY=1
 PROBE_MODELS=1
@@ -40,6 +43,11 @@ Options:
   --no-model-guard             Skip model guard remediation when probe fails
   --dry-run                    Print actions only; no mutations
   -h, --help                   Show help
+
+Environment:
+  ANDREA_REQUIRED_OPENCLAW_SKILLS   CSV of skills that must appear in \`openclaw skills list\`
+  ANDREA_OPENCLAW_ELIGIBLE_SKILLS   CSV; when non-empty, require each skill \`eligible: true\` (needs jq)
+  ANDREA_OPENCLAW_SKILLS_CHECK      Set to 1 to print \`openclaw skills check\` (non-fatal)
 EOF
 }
 
@@ -101,6 +109,43 @@ check_required_skills() {
   [[ "$missing" -eq 0 ]] || die "missing required skills: ${missing}"
 }
 
+check_eligible_skills() {
+  [[ -n "$ELIGIBLE_SKILLS" ]] || return 0
+  note "validate eligible skills (ANDREA_OPENCLAW_ELIGIBLE_SKILLS)"
+  command -v jq >/dev/null 2>&1 || die "jq not on PATH (required for eligible skill checks)"
+  local failed=0
+  IFS=',' read -r -a elig <<<"$ELIGIBLE_SKILLS"
+  for raw in "${elig[@]}"; do
+    local s
+    s="$(echo "$raw" | tr -d '[:space:]')"
+    [[ -n "$s" ]] || continue
+    local json
+    json="$(openclaw skills info "$s" --json 2>/dev/null)" || {
+      warn "skills info failed for: $s"
+      failed=$((failed + 1))
+      continue
+    }
+    if echo "$json" | jq -e '.eligible == true' >/dev/null 2>&1; then
+      note "eligible skill: $s"
+    else
+      warn "skill not eligible: $s ($(echo "$json" | jq -c '.missing' 2>/dev/null || echo "{}"))"
+      failed=$((failed + 1))
+    fi
+  done
+  [[ "$failed" -eq 0 ]] || die "eligible skill checks failed: ${failed}"
+}
+
+maybe_skills_check() {
+  if [[ "${ANDREA_OPENCLAW_SKILLS_CHECK:-0}" != "1" ]]; then
+    return 0
+  fi
+  note "openclaw skills check (informational)"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    return 0
+  fi
+  openclaw skills check || true
+}
+
 probe_models() {
   note "probe models with timeout=${OPENCLAW_PROBE_MS}ms"
   if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -129,6 +174,8 @@ main() {
     restart_gateway
   fi
   check_required_skills
+  maybe_skills_check
+  check_eligible_skills
   if [[ "$PROBE_MODELS" -eq 1 ]]; then
     probe_models
   fi

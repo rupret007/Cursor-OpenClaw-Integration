@@ -118,3 +118,8 @@ User asks: "Fix failing tests and push branch for PR."
 
 - Use read-only: `false`
 - Provide branch and ask Cursor to produce test summary + PR-ready result
+
+## Related operator docs
+
+- Hybrid OpenClaw expansion (Apple/Google productivity, execution lane, optional voice): repo `docs/ANDREA_OPENCLAW_HYBRID_SKILLS.md`
+- Day-to-day gates: `docs/ANDREA_OPERATIONS_PLAYBOOK.md`

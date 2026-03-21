@@ -43,6 +43,13 @@ class TestAndreaWrapUpPrereqsScript(unittest.TestCase):
             text=True,
         )
 
+    def test_prereqs_script_contains_guardrails(self) -> None:
+        text = PREREQ.read_text(encoding="utf-8")
+        self.assertIn("ANDREA_SYNC_INTERNAL_TOKEN", text)
+        self.assertIn("/v1/health", text)
+        self.assertIn("python3 scripts/andrea_sync_server.py", text)
+        self.assertIn("Ready: bash scripts/andrea_full_cycle.sh", text)
+
 
 if __name__ == "__main__":
     unittest.main()

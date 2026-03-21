@@ -74,6 +74,15 @@ class TestAndreaSyncHTTP(unittest.TestCase):
         self.assertIn("kill_switch", data)
         self.assertIn("capability_digest_age_seconds", data)
 
+    def test_status_ok(self) -> None:
+        req = urllib.request.Request(self._url("/v1/status"), method="GET")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            self.assertEqual(resp.status, 200)
+            data = json.loads(resp.read().decode("utf-8"))
+        self.assertTrue(data.get("ok"))
+        self.assertIn("kill_switch", data)
+        self.assertIn("capabilities", data)
+
     def test_command_create_and_fetch_task(self) -> None:
         body = json.dumps(
             {
@@ -195,6 +204,11 @@ class TestAndreaSyncHTTP(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError) as ctx:
             urllib.request.urlopen(req_c, timeout=5)
         self.assertEqual(ctx.exception.code, 503)
+        req_s = urllib.request.Request(self._url("/v1/status"), method="GET")
+        with urllib.request.urlopen(req_s, timeout=5) as resp_s:
+            self.assertEqual(resp_s.status, 200)
+            status_body = json.loads(resp_s.read().decode("utf-8"))
+        self.assertTrue(status_body["kill_switch"]["engaged"])
         rel = json.dumps(
             {
                 "command_type": "KillSwitchRelease",
@@ -207,6 +221,24 @@ class TestAndreaSyncHTTP(unittest.TestCase):
         )
         with urllib.request.urlopen(req_r, timeout=5) as r:
             self.assertEqual(r.status, 200)
+        create_after_release = json.dumps(
+            {
+                "command_type": "CreateTask",
+                "channel": "cli",
+                "external_id": "http-ks-released",
+                "payload": {"summary": "allowed"},
+            }
+        ).encode("utf-8")
+        req_ok = urllib.request.Request(
+            self._url("/v1/commands"),
+            data=create_after_release,
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req_ok, timeout=5) as resp_ok:
+            self.assertEqual(resp_ok.status, 200)
+            data_ok = json.loads(resp_ok.read().decode("utf-8"))
+        self.assertTrue(data_ok.get("ok"))
 
     def test_skill_absence_endpoint_after_publish(self) -> None:
         auth = {

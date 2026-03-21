@@ -312,6 +312,16 @@ bash skills/cursor_handoff/scripts/test_handoff.sh
 RUN_LIVE_API=1 bash scripts/exhaustive_feature_check.sh
 ```
 
+**Live operator cycle** (needs `andrea_sync` running + `ANDREA_SYNC_INTERNAL_TOKEN`):
+
+```bash
+export ANDREA_SYNC_INTERNAL_TOKEN='…'
+export ANDREA_SYNC_URL='http://127.0.0.1:8765'
+bash scripts/andrea_full_cycle.sh
+```
+
+See [docs/ANDREA_OPERATIONS_PLAYBOOK.md](docs/ANDREA_OPERATIONS_PLAYBOOK.md) for skip flags (`SKIP_GIT`, `SKIP_KILL_DRILL`, etc.).
+
 **Overnight / soak:** safe to loop `RUN_LIVE_API=1 bash scripts/exhaustive_feature_check.sh` or your own agent workflows; avoid high `list-agents` limits or tight polling against production so you don’t hit rate limits.
 
 **Exit codes (`cursor_openclaw.py`):** `0` success, `2` usage/validation error, `4` HTTP/API failure.

@@ -93,6 +93,23 @@ python3 scripts/andrea_lockstep_telegram_e2e.py wait-telegram-task --timeout-sec
 curl -sS "http://127.0.0.1:8765/v1/tasks/tsk_…" | python3 -m json.tool
 ```
 
+## Automation (full cycle)
+
+Use the repo orchestrator (runs from any cwd; it `cd`s to the repo):
+
+```bash
+cd /path/to/Cursor-OpenClaw-Integration
+export ANDREA_SYNC_INTERNAL_TOKEN='…'
+export ANDREA_SYNC_URL='http://127.0.0.1:8765'
+# optional for webhook-info step:
+export TELEGRAM_BOT_TOKEN='…'
+export ANDREA_SYNC_TELEGRAM_SECRET='…'
+bash scripts/andrea_full_cycle.sh
+```
+
+- **zsh:** always use **real paths**, not `/path/to/...`. URLs with `?` are quoted inside the script.
+- **Optional wait for a Telegram message** in the DB: `ANDREA_FULL_CYCLE_WAIT_TELEGRAM=1 bash scripts/andrea_full_cycle.sh`
+
 ## Refresh / restart checklist
 
 1. `git pull --ff-only origin main`

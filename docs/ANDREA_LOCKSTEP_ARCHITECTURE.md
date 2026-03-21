@@ -80,6 +80,10 @@ Design/gap analysis: [ANDREA_LOCKSTEP_REVIEW_FINDINGS.md](ANDREA_LOCKSTEP_REVIEW
 
 Templates + installer: `scripts/macos/install_andrea_launchagents.sh` (optional `cloudflared` + OpenClaw login refresh). Put secrets in `~/andrea-lockstep.env`.
 
+## Operator full cycle
+
+`bash scripts/andrea_full_cycle.sh` — git pull, `/v1/health` + `/v1/status`, capability publish, policy probe, optional `openclaw gateway restart`, communication smoke, kill-switch drill, optional Telegram `webhook-info`. Requires `ANDREA_SYNC_INTERNAL_TOKEN` and a running `andrea_sync` server at `ANDREA_SYNC_URL`.
+
 ## Operations
 
 Telegram ingest over the public internet: [ANDREA_TELEGRAM_LOCKSTEP_E2E.md](ANDREA_TELEGRAM_LOCKSTEP_E2E.md).

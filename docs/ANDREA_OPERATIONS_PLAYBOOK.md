@@ -76,6 +76,7 @@ bash scripts/andrea_slo_check.sh
 
 | Step | Command |
 |------|---------|
+| **Daily wrap-up (operator)** | Step-by-step: [ANDREA_WRAP_UP_DAILY.md](ANDREA_WRAP_UP_DAILY.md) — `bash scripts/andrea_wrap_up_prereqs.sh` → `bash scripts/andrea_full_cycle.sh` → `bash scripts/test_integration.sh` |
 | Unit + integration | `bash scripts/test_integration.sh` |
 | Live comm smoke (optional) | `RUN_COMM_SMOKE=1 ANDREA_SYNC_URL=http://127.0.0.1:8765 bash scripts/test_integration.sh` or `bash scripts/andrea_communication_smoke.sh` |
 | Full operator cycle (local) | From repo: `export ANDREA_SYNC_INTERNAL_TOKEN=…` then `bash scripts/andrea_full_cycle.sh` (pull, health, publish digest, policy, gateway restart, smoke, kill-switch drill). Skips: `SKIP_GIT=1`, `SKIP_GATEWAY_RESTART=1`, `SKIP_COMM_SMOKE=1`, `SKIP_KILL_DRILL=1`, `SKIP_TELEGRAM_E2E=1`. |
@@ -116,6 +117,7 @@ bash scripts/andrea_slo_check.sh
 
 | Document | Purpose |
 |----------|---------|
+| [ANDREA_WRAP_UP_DAILY.md](ANDREA_WRAP_UP_DAILY.md) | End-of-day operator sequence (prereqs, full cycle, offline gate) |
 | [ANDREA_SECURITY.md](ANDREA_SECURITY.md) | Secrets, redaction, gateway token, rotation |
 | [ANDREA_MODEL_POLICY.md](ANDREA_MODEL_POLICY.md) | fast/balanced/deep profiles + rate-limit playbook |
 | [ANDREA_CAPABILITY_MATRIX.md](ANDREA_CAPABILITY_MATRIX.md) | Live readiness matrix |

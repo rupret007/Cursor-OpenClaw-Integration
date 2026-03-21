@@ -77,6 +77,7 @@ python3 -m py_compile "${BASE_DIR}/scripts/andrea_sync_publish_capabilities.py" 
 bash -n "${BASE_DIR}/scripts/andrea_kill_switch.sh" || fail "bash -n andrea_kill_switch"
 bash -n "${BASE_DIR}/scripts/andrea_communication_smoke.sh" || fail "bash -n andrea_communication_smoke"
 bash -n "${BASE_DIR}/scripts/andrea_full_cycle.sh" || fail "bash -n andrea_full_cycle"
+bash -n "${BASE_DIR}/scripts/andrea_wrap_up_prereqs.sh" || fail "bash -n andrea_wrap_up_prereqs"
 bash -n "${BASE_DIR}/scripts/macos/install_andrea_launchagents.sh" || fail "bash -n install_andrea_launchagents"
 while IFS= read -r _syncpy; do
   python3 -m py_compile "$_syncpy" || fail "py_compile $_syncpy"

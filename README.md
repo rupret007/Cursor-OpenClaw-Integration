@@ -51,6 +51,7 @@ Hardened **Cursor Cloud Agents** integration toolkit for **OpenClaw** and shell 
 │   ├── exhaustive_feature_check.sh  # offline sweep of both CLIs (+ optional live API)
 │   ├── andrea_capabilities.py      # Andrea runtime capability matrix (live readiness)
 │   ├── andrea_reliability_probes.sh # deterministic probes + capability snapshot
+│   ├── dotenv_set_key.py     # merge one .env key without full wizard overwrite
 │   └── test_integration.sh
 ├── skills/
 │   └── cursor_handoff/        # vendored skill (sync to ~/.openclaw/workspace/skills/)
@@ -99,6 +100,13 @@ If `./.env` already exists and you want to replace it:
 
 ```bash
 bash scripts/setup_admin.sh --batch --force
+```
+
+**Persist a single secret without re-running the full wizard** (merges into `./.env`, keeps other keys; sets both `GH_TOKEN` and `GITHUB_TOKEN` by default):
+
+```bash
+python3 scripts/dotenv_set_key.py GH_TOKEN --skill
+# hidden prompt on TTY, or:  python3 scripts/dotenv_set_key.py GH_TOKEN --value "$GH_TOKEN" --skill
 ```
 
 It will:

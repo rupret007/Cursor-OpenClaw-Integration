@@ -64,7 +64,7 @@ python3 scripts/andrea_capabilities.py --strict
 |---------|-----|
 | `CURSOR_API_KEY missing` | `export CURSOR_API_KEY=…` or `bash scripts/setup_admin.sh` |
 | `401` from Cursor API | Rotate key; check `CURSOR_BASE_URL` / `CURSOR_AUTH_MODE` |
-| `gh` not logged in | `gh auth login` or set `GH_TOKEN` / `GITHUB_TOKEN` in `.env` |
+| `gh` not logged in | `gh auth login` or set `GH_TOKEN` / `GITHUB_TOKEN` in `.env` (merge without full wizard: `python3 scripts/dotenv_set_key.py GH_TOKEN --skill`) |
 | `openclaw` / skill missing | Install OpenClaw; `cp -R skills/cursor_handoff ~/.openclaw/workspace/skills/`; `openclaw gateway restart` |
 | SSL errors in Python | See README: `SSL_CERT_FILE` + `certifi` |
 | Tests fail | Fix on a branch; do not merge to `main` until green |

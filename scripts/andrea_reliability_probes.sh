@@ -8,6 +8,7 @@ BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CLI="${BASE_DIR}/scripts/cursor_openclaw.py"
 CAP="${BASE_DIR}/scripts/andrea_capabilities.py"
 RUN_LIVE_PROBES="${RUN_LIVE_PROBES:-0}"
+RUN_CURSOR_LIVE_PROBE="${RUN_CURSOR_LIVE_PROBE:-0}"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "OK  $*"; }
@@ -38,6 +39,9 @@ pass "py_compile andrea_capabilities.py"
 python3 -m py_compile "${BASE_DIR}/scripts/andrea_readiness_grade.py" || fail "py_compile andrea_readiness_grade"
 pass "py_compile andrea_readiness_grade.py"
 
+python3 -m py_compile "${BASE_DIR}/scripts/cursor_live_execution_probe.py" || fail "py_compile cursor_live_execution_probe"
+pass "py_compile cursor_live_execution_probe.py"
+
 [[ -f "$CAP" ]] || fail "missing andrea_capabilities.py"
 [[ -f "$CLI" ]] || fail "missing cursor_openclaw.py"
 
@@ -52,6 +56,16 @@ echo "-------- Andrea capability snapshot (non-strict) --------"
 python3 "$CAP" --json | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("ok") is True; assert "rows" in d; assert "summary" in d' \
   || fail "andrea_capabilities json shape"
 pass "andrea_capabilities.py --json"
+
+if [[ "$RUN_CURSOR_LIVE_PROBE" == "1" ]]; then
+  echo "-------- cursor live execution probe (offline) --------"
+  "${ENV_NO_SECRETS[@]}" python3 "${BASE_DIR}/scripts/cursor_live_execution_probe.py" --self-test --json \
+    | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("ok") is True; assert d.get("probe") == "cursor_live_execution_probe"' \
+    || fail "cursor live execution probe"
+  pass "cursor_live_execution_probe.py --self-test"
+else
+  echo "(Skip cursor live probe: set RUN_CURSOR_LIVE_PROBE=1)"
+fi
 
 if [[ "$RUN_LIVE_PROBES" == "1" ]]; then
   echo "-------- LIVE: gh auth status --------"

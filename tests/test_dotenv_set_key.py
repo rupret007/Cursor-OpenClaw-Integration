@@ -53,6 +53,30 @@ class TestDotenvSetKey(unittest.TestCase):
             self.assertIn("tok123", data)
             self.assertNotIn("GITHUB_TOKEN", data)
 
+    def test_enable_openai_sets_both(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env_path = Path(tmp) / ".env"
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "OPENAI_API_KEY",
+                    "--enable-openai",
+                    "--value",
+                    "sk-test",
+                    "--env-file",
+                    str(env_path),
+                ],
+                cwd=str(REPO_ROOT),
+                check=True,
+                capture_output=True,
+            )
+            data = env_path.read_text(encoding="utf-8")
+            self.assertIn("OPENAI_API_KEY", data)
+            self.assertIn("sk-test", data)
+            self.assertIn("OPENAI_API_ENABLED", data)
+            self.assertIn('"1"', data)
+
     def test_github_alias_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             env_path = Path(tmp) / ".env"

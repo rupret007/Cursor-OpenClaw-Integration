@@ -109,6 +109,15 @@ python3 scripts/dotenv_set_key.py GH_TOKEN --skill
 # hidden prompt on TTY, or:  python3 scripts/dotenv_set_key.py GH_TOKEN --value "$GH_TOKEN" --skill
 ```
 
+**OpenAI (platform API key + enable flag for this repo’s CLIs/skills):**
+
+```bash
+python3 scripts/dotenv_set_key.py OPENAI_API_KEY --enable-openai --skill
+openclaw gateway restart
+```
+
+See [docs/OPENCLAW_SKILL.md](docs/OPENCLAW_SKILL.md) for how `OPENAI_API_ENABLED` gates usage and how this relates to OpenClaw’s own provider settings.
+
 It will:
 
 - Prompt for **CURSOR_API_KEY** (hidden input) and optional **CURSOR_BASE_URL** / **CURSOR_AUTH_MODE**
@@ -266,7 +275,7 @@ See [.env.example](.env.example) and [skills/cursor_handoff/.env.example](skills
 | `CURSOR_BASE_URL` | No | Default `https://api.cursor.com`; if set, must start with `http://` or `https://` |
 | `CURSOR_AUTH_MODE` | No | `auto`, `basic`, `bearer` |
 | `OPENAI_API_KEY` | No | Optional; API key from [OpenAI platform](https://platform.openai.com/). Does **not** use ChatGPT Plus — use an API key with billing enabled. |
-| `OPENAI_API_ENABLED` | No | When `1`, `true`, or `yes` (case-insensitive), future OpenAI features may use `OPENAI_API_KEY`. Otherwise the key is stored but ignored. `bash scripts/setup_admin.sh` can set both. |
+| `OPENAI_API_ENABLED` | No | When `1`, `true`, or `yes` (case-insensitive), code paths that respect this flag may use `OPENAI_API_KEY`; otherwise the key is ignored. Use `bash scripts/setup_admin.sh` or `python3 scripts/dotenv_set_key.py OPENAI_API_KEY --enable-openai --skill`. See [docs/OPENCLAW_SKILL.md](docs/OPENCLAW_SKILL.md). |
 | `GH_TOKEN` / `GITHUB_TOKEN` | No | Optional GitHub token for `gh`/GitHub-related OpenClaw skills (if they use env-based auth). |
 | `GEMINI_API_KEY` | No | Optional Gemini key for Gemini skills/CLIs. |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | No | Optional Telegram bot credentials (skill-dependent). |

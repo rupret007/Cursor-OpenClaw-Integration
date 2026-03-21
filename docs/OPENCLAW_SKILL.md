@@ -19,6 +19,24 @@
 2. Optional: copy `.env.example` to `.env` inside the skill folder and set `CURSOR_API_KEY` (or rely on gateway/shell env).  
    The setup wizard can also write additional integration keys (`GH_TOKEN`, `GEMINI_API_KEY`, `TELEGRAM_BOT_TOKEN`, `BRAVE_SEARCH_API_KEY`, `MINIMAX_API_KEY`, etc.) into both repo and skill `.env` for cross-skill convenience.
 
+## OpenAI API (`OPENAI_API_KEY` + `OPENAI_API_ENABLED`)
+
+This integration repo and **`cursor_handoff`** treat OpenAI as an **optional platform API** (from [platform.openai.com](https://platform.openai.com) — billing-enabled API key, **not** ChatGPT Plus).
+
+| Mechanism | Role |
+|-----------|------|
+| **`OPENAI_API_KEY`** | Stored in repo `.env` and/or `~/.openclaw/workspace/skills/cursor_handoff/.env` when you use the wizard or `scripts/dotenv_set_key.py`. |
+| **`OPENAI_API_ENABLED`** | Must be **`1`**, **`true`**, or **`yes`** (case-insensitive) or tools **must not** use the key. This is enforced in `cursor_openclaw.py` / `cursor_handoff.py` diagnostics (`parse_openai_enabled`). |
+
+**One-shot merge (repo + skill `.env`, key + enabled):**
+
+```bash
+python3 scripts/dotenv_set_key.py OPENAI_API_KEY --enable-openai --skill
+openclaw gateway restart
+```
+
+**OpenClaw product note:** Gateway routing, model pickers, and any first-party OpenClaw “use OpenAI” toggles may live in **OpenClaw’s own** workspace or UI in addition to these env vars. If a feature still cannot see the key, check OpenClaw’s documentation for provider/environment injection for your version — this repo guarantees the **skill + shell CLIs** see `OPENAI_*` when they load the same `.env` files as documented above.
+
 3. Restart gateway:
 
    ```bash

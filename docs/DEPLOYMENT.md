@@ -30,8 +30,8 @@ git pull origin main
 | `CURSOR_API_KEY` | Yes (for live API) | Cursor API key (export in shell and/or put in repo-root `.env`; `cursor_openclaw.py` and `cursor_handoff.py` auto-load `.env` without overriding existing exports) |
 | `CURSOR_BASE_URL` | No | Default `https://api.cursor.com`; must be `http://` or `https://` if set |
 | `CURSOR_AUTH_MODE` | No | `auto` (default), `basic`, or `bearer` |
-| `OPENAI_API_KEY` | No | Optional OpenAI API key (not ChatGPT Plus). Stored for optional/future features; never required for Cursor Cloud Agents. |
-| `OPENAI_API_ENABLED` | No | `1` / `true` / `yes` (case-insensitive) to allow use of `OPENAI_API_KEY` when implemented; otherwise off. Set via `bash scripts/setup_admin.sh` or `.env`. |
+| `OPENAI_API_KEY` | No | Optional OpenAI API key (not ChatGPT Plus). Never required for Cursor Cloud Agents. |
+| `OPENAI_API_ENABLED` | No | `1` / `true` / `yes` (case-insensitive) or integrations that gate on this flag will ignore the key. Set via `bash scripts/setup_admin.sh`, `.env`, or `python3 scripts/dotenv_set_key.py OPENAI_API_KEY --enable-openai --skill`. See [OPENCLAW_SKILL.md](OPENCLAW_SKILL.md) (OpenAI section). |
 | `GH_TOKEN` / `GITHUB_TOKEN` | No | Optional GitHub token for OpenClaw GitHub skills if env auth is used. |
 | `GEMINI_API_KEY` | No | Optional Gemini key for Gemini skills/CLI. |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | No | Optional Telegram bot credentials (skill/plugin dependent). |

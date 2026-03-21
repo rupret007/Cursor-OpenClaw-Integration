@@ -8,6 +8,7 @@ Usage:
   python3 scripts/dotenv_set_key.py GH_TOKEN --value 'ghp_...'
   printf '%s' "$GH_TOKEN" | python3 scripts/dotenv_set_key.py GH_TOKEN
   python3 scripts/dotenv_set_key.py GH_TOKEN --skill      # also ~/.openclaw/.../cursor_handoff/.env
+  python3 scripts/dotenv_set_key.py OPENAI_API_KEY --enable-openai --skill   # key + OPENAI_API_ENABLED=1
 
 For GH_TOKEN or GITHUB_TOKEN, the other name is set to the same value unless --no-github-alias.
 """
@@ -28,6 +29,20 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from env_loader import parse_env_line  # noqa: E402
+
+
+def _env_file_has_truthy_openai_enabled(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    for line in text.splitlines():
+        p = parse_env_line(line)
+        if p and p[0] == "OPENAI_API_ENABLED":
+            return p[1].strip().lower() in ("1", "true", "yes", "on")
+    return False
 
 
 def _read_value(args: argparse.Namespace) -> str:
@@ -85,6 +100,11 @@ def main() -> int:
         action="store_true",
         help="Do not set GITHUB_TOKEN when setting GH_TOKEN (or vice versa)",
     )
+    ap.add_argument(
+        "--enable-openai",
+        action="store_true",
+        help="When setting OPENAI_API_KEY, also set OPENAI_API_ENABLED to 1 (required for tools that gate on it)",
+    )
     args = ap.parse_args()
     key = args.key.strip()
     if not KEY_RE.match(key):
@@ -98,8 +118,22 @@ def main() -> int:
     if key in ("GH_TOKEN", "GITHUB_TOKEN") and not args.no_github_alias:
         other = "GITHUB_TOKEN" if key == "GH_TOKEN" else "GH_TOKEN"
         updates[other] = val
+    if key == "OPENAI_API_KEY":
+        if args.enable_openai:
+            updates["OPENAI_API_ENABLED"] = "1"
 
     target = args.env_file or (REPO_ROOT / ".env")
+    if (
+        key == "OPENAI_API_KEY"
+        and not args.enable_openai
+        and sys.stderr.isatty()
+        and not _env_file_has_truthy_openai_enabled(target)
+    ):
+        print(
+            "Hint: integrations ignore OPENAI_API_KEY unless OPENAI_API_ENABLED is truthy. "
+            "Re-run with --enable-openai or set OPENAI_API_ENABLED to 1.",
+            file=sys.stderr,
+        )
     upsert_env_file(target, updates)
     print(f"Updated {target} (mode 600). Keys: {', '.join(sorted(updates))}")
 

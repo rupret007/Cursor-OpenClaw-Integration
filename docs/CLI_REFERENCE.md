@@ -14,7 +14,7 @@ Global options (before subcommand):
 
 `--id` values must be plain agent identifiers (letters, digits, `._:-` only) — not URLs — to avoid ambiguous paths.
 
-`create-agent` accepts **either** `--repository` **or** `--pr-url`, not both.
+`create-agent` accepts **either** `--repository` **or** `--pr-url`, not both. Provide **`--prompt` and/or `--intent` and/or `--triage-repo`** (at least one): `--intent` is one of `code-review`, `refactor`, `release-notes`, `brief` (scaffolded task); `--triage-repo` prepends a non-secret repo snapshot (local path).
 
 Subcommands:
 
@@ -28,7 +28,7 @@ Subcommands:
 | `conversation` | `--id` |
 | `artifacts` | `--id` |
 | `artifact-download-url` | `--id`, `--path` |
-| `create-agent` | `--prompt`, `--branch-name`, repo **or** `--pr-url`; `--dry-run`, polling flags |
+| `create-agent` | `--branch-name`, repo **or** `--pr-url`; **`--prompt` / `--intent` / `--triage-repo`** (see above); `--dry-run`, polling flags |
 | `followup` | `--id`, `--prompt` |
 | `stop-agent` | `--id` |
 | `delete-agent` | `--id` |
@@ -44,7 +44,9 @@ API contract aligns with [Cursor Cloud Agents API](https://cursor.com/docs/cloud
 | Flag | Description |
 |------|-------------|
 | `--repo` | Local path, `https://github.com/...`, or `owner/repo` |
-| `--prompt` | Task text (omit only with `--diagnose`) |
+| `--prompt` | Task text (optional if `--intent` or `--triage` + local `--repo`) |
+| `--intent` | `code-review`, `refactor`, `release-notes`, or `brief` — prepends a structured scaffold |
+| `--triage` | Prepend repo triage block; **requires local** `--repo` path (not URL-only) |
 | `--read-only` | `true` / `false` |
 | `--mode` | `auto`, `api`, `cli` |
 | `--branch` | Optional; default generated `openclaw/task-YYYYMMDD-HHMMSS` |

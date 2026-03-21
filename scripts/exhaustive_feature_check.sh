@@ -41,6 +41,7 @@ ENV_NO_SECRETS=(
 
 echo "======== cursor_openclaw.py ========"
 python3 -m py_compile "${BASE_DIR}/scripts/cursor_api_common.py" || fail "py_compile cursor_api_common"
+python3 -m py_compile "${BASE_DIR}/scripts/handoff_context.py" || fail "py_compile handoff_context"
 python3 -m py_compile "$CLI" || fail "py_compile cursor_openclaw"
 pass "py_compile cursor_openclaw + cursor_api_common"
 
@@ -114,6 +115,23 @@ env CURSOR_API_KEY=dummy_test_key python3 "$CLI" --json create-agent \
   --dry-run | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("dry_run") is True' || fail "create dry-run"
 pass "create-agent --dry-run payload"
 
+env CURSOR_API_KEY=dummy_test_key python3 "$CLI" --json create-agent \
+  --intent release-notes \
+  --repository "https://github.com/foo/bar" \
+  --ref main \
+  --branch-name "cursor/intent" \
+  --dry-run | python3 -c 'import json,sys; d=json.load(sys.stdin); t=d["payload"]["prompt"]["text"]; assert "release notes" in t.lower(), t[:200]' || fail "create-agent --intent dry-run"
+pass "create-agent --intent dry-run"
+
+env CURSOR_API_KEY=dummy_test_key python3 "$CLI" --json create-agent \
+  --triage-repo "${BASE_DIR}" \
+  --prompt "smoke" \
+  --repository "https://github.com/foo/bar" \
+  --ref main \
+  --branch-name "cursor/triage" \
+  --dry-run | python3 -c 'import json,sys; d=json.load(sys.stdin); assert "Pre-handoff repo triage" in d["payload"]["prompt"]["text"]' || fail "create-agent triage-repo"
+pass "create-agent --triage-repo dry-run"
+
 # create-agent with pr-url (mutually exclusive source)
 env CURSOR_API_KEY=dummy_test_key python3 "$CLI" --json create-agent \
   --prompt "p" \
@@ -139,6 +157,7 @@ echo "======== cursor_handoff.py ========"
 python3 -m py_compile "$HANDOFF" || fail "py_compile handoff"
 python3 -m py_compile "${BASE_DIR}/skills/cursor_handoff/scripts/env_loader.py" || fail "py_compile env_loader"
 python3 -m py_compile "${BASE_DIR}/skills/cursor_handoff/scripts/cursor_api_common.py" || fail "py_compile cursor_api_common"
+python3 -m py_compile "${BASE_DIR}/skills/cursor_handoff/scripts/handoff_context.py" || fail "py_compile handoff_context"
 
 python3 "$HANDOFF" --help >/dev/null || fail "handoff --help"
 pass "handoff --help"
@@ -164,6 +183,17 @@ echo "$out" | grep -q "Dry run" || fail "handoff dry-run no key"
 pass "handoff --dry-run without API key"
 
 expect_fail "handoff empty prompt" python3 "$HANDOFF" --repo "$BASE_DIR" --prompt ""
+
+expect_fail "handoff triage without local repo" \
+  python3 "$HANDOFF" --repo "https://github.com/foo/bar" --triage --prompt "x" --dry-run
+
+CURSOR_API_KEY=dummy_test_key python3 "$HANDOFF" --repo "$BASE_DIR" --intent code-review --dry-run --json \
+  | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("intent")=="code-review"' || fail "handoff intent dry-run"
+pass "handoff --intent dry-run"
+
+CURSOR_API_KEY=dummy_test_key python3 "$HANDOFF" --repo "$BASE_DIR" --triage --dry-run --json \
+  | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("triage") is True; assert "Pre-handoff" in (d.get("prompt_preview") or "")' || fail "handoff triage dry-run"
+pass "handoff --triage dry-run"
 
 expect_fail "handoff invalid read_only" python3 "$HANDOFF" --repo "$BASE_DIR" --prompt "x" --read-only maybe
 

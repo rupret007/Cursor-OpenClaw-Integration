@@ -36,6 +36,9 @@ class CursorOpenClawTests(unittest.TestCase):
             branch_name="b",
             poll_attempts=-1,
             poll_interval_seconds=1.0,
+            prompt="x",
+            intent=None,
+            triage_repo="",
         )
         with self.assertRaises(ValueError):
             MODULE.validate_command_args(bad)
@@ -44,6 +47,9 @@ class CursorOpenClawTests(unittest.TestCase):
             branch_name="b",
             poll_attempts=0,
             poll_interval_seconds=-0.5,
+            prompt="x",
+            intent=None,
+            triage_repo="",
         )
         with self.assertRaises(ValueError):
             MODULE.validate_command_args(bad2)
@@ -52,8 +58,21 @@ class CursorOpenClawTests(unittest.TestCase):
             branch_name="b",
             poll_attempts=0,
             poll_interval_seconds=0.0,
+            prompt="x",
+            intent=None,
+            triage_repo="",
         )
         MODULE.validate_command_args(ok)
+        ok_intent = types.SimpleNamespace(
+            command="create-agent",
+            branch_name="b",
+            poll_attempts=0,
+            poll_interval_seconds=0.0,
+            prompt="",
+            intent="brief",
+            triage_repo="",
+        )
+        MODULE.validate_command_args(ok_intent)
         skip = types.SimpleNamespace(command="whoami")
         MODULE.validate_command_args(skip)
 
@@ -63,9 +82,26 @@ class CursorOpenClawTests(unittest.TestCase):
             branch_name="evil\ninj",
             poll_attempts=0,
             poll_interval_seconds=0.0,
+            prompt="x",
+            intent=None,
+            triage_repo="",
         )
         with self.assertRaises(ValueError):
             MODULE.validate_command_args(bad)
+
+    def test_validate_command_args_create_needs_body(self):
+        bad = types.SimpleNamespace(
+            command="create-agent",
+            branch_name="b",
+            poll_attempts=0,
+            poll_interval_seconds=0.0,
+            prompt="",
+            intent=None,
+            triage_repo="",
+        )
+        with self.assertRaises(ValueError) as ctx:
+            MODULE.validate_command_args(bad)
+        self.assertIn("prompt", str(ctx.exception).lower())
 
     def test_validate_common_args(self):
         ok = types.SimpleNamespace(timeout_seconds=30, retries=2, retry_backoff_seconds=0.5)

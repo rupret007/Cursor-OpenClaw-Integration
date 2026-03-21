@@ -56,7 +56,7 @@
 
 - Add companion `cursor_ops` command set:
   - list/status/followup/stop/delete/conversation/artifacts/download-url.
-- Add intent template system (`--intent` + context bundle support).
+- **Done (partial):** intent template system + pre-handoff triage — `scripts/handoff_context.py`, `cursor_openclaw.py create-agent --intent/--triage-repo`, `cursor_handoff.py --intent/--triage`.
 - Add output schema normalization for all command paths.
 
 **Definition of done**

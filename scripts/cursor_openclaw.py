@@ -28,8 +28,9 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 import env_loader  # noqa: E402
 import cursor_api_common  # noqa: E402
+import handoff_context  # noqa: E402
 
-VERSION = "1.1.4"
+VERSION = "1.2.0"
 
 TERMINAL_STATUSES = {"FINISHED", "FAILED", "CANCELLED", "STOPPED", "EXPIRED"}
 
@@ -164,7 +165,7 @@ def require_one_of(repo: str, pr_url: str) -> None:
         raise ValueError("Provide --repository or --pr-url.")
 
 
-def build_create_payload(args: argparse.Namespace) -> Dict[str, Any]:
+def build_create_payload(args: argparse.Namespace, prompt_text: Optional[str] = None) -> Dict[str, Any]:
     source: Dict[str, Any]
     if args.pr_url:
         source = {"prUrl": args.pr_url}
@@ -179,8 +180,9 @@ def build_create_payload(args: argparse.Namespace) -> Dict[str, Any]:
         if args.open_as_cursor_github_app:
             target["skipReviewerRequest"] = args.skip_reviewer_request
 
+    text = args.prompt if prompt_text is None else prompt_text
     return {
-        "prompt": {"text": args.prompt},
+        "prompt": {"text": text},
         "model": args.model,
         "source": source,
         "target": target,
@@ -212,6 +214,11 @@ def validate_command_args(args: argparse.Namespace) -> None:
             raise ValueError("--poll-attempts must be >= 0")
         if args.poll_interval_seconds < 0:
             raise ValueError("--poll-interval-seconds must be >= 0")
+        has_prompt = bool((args.prompt or "").strip())
+        intent = getattr(args, "intent", None)
+        has_triage = bool((getattr(args, "triage_repo", "") or "").strip())
+        if not has_prompt and intent is None and not has_triage:
+            raise ValueError("Provide --prompt and/or --intent, and/or --triage-repo.")
 
 
 def parse_args() -> argparse.Namespace:
@@ -241,7 +248,18 @@ def parse_args() -> argparse.Namespace:
     p_art_dl.add_argument("--path", required=True)
 
     p_create = sub.add_parser("create-agent")
-    p_create.add_argument("--prompt", required=True)
+    p_create.add_argument("--prompt", default="", help="Task text (optional if --intent or --triage-repo)")
+    p_create.add_argument(
+        "--intent",
+        default=None,
+        choices=list(handoff_context.INTENT_IDS),
+        help="Scaffold: code-review | refactor | release-notes | brief",
+    )
+    p_create.add_argument(
+        "--triage-repo",
+        default="",
+        help="Local directory; prepends non-secret repo snapshot to prompt",
+    )
     p_create.add_argument("--repository", default="")
     p_create.add_argument("--ref", default="")
     p_create.add_argument("--pr-url", default="")
@@ -341,7 +359,21 @@ def handle(cfg: Config, args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
 
     if args.command == "create-agent":
         require_one_of(args.repository, args.pr_url)
-        payload = build_create_payload(args)
+        triage_path: Optional[Path] = None
+        tr = (getattr(args, "triage_repo", "") or "").strip()
+        if tr:
+            triage_path = Path(tr).expanduser().resolve()
+            if not triage_path.is_dir():
+                raise ValueError("--triage-repo must be an existing directory")
+        intent = getattr(args, "intent", None)
+        if intent or triage_path is not None:
+            try:
+                prompt_body = handoff_context.compose_handoff_body(args.prompt or "", intent, triage_path)
+            except ValueError as err:
+                raise ValueError(str(err)) from err
+        else:
+            prompt_body = (args.prompt or "").strip()
+        payload = build_create_payload(args, prompt_body)
         if args.dry_run:
             return 0, {"status": 0, "dry_run": True, "payload": payload}
         status, data, raw, auth_mode = client.request("POST", "/v0/agents", body=payload)

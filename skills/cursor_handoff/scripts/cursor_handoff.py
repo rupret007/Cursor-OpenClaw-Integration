@@ -41,8 +41,9 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 import env_loader  # noqa: E402
 import cursor_api_common  # noqa: E402
+import handoff_context  # noqa: E402
 
-VERSION = "1.2.3"
+VERSION = "1.3.0"
 
 EXIT_OK = 0
 EXIT_VALIDATION = 2
@@ -378,7 +379,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--repo", default="", help="Local repo path, GitHub URL, or owner/repo")
     parser.add_argument("--branch", default="", help="Target branch name (optional)")
-    parser.add_argument("--prompt", default="", help="Task prompt for Cursor")
+    parser.add_argument("--prompt", default="", help="Task prompt for Cursor (optional if --intent or --triage)")
+    parser.add_argument(
+        "--intent",
+        default=None,
+        choices=list(handoff_context.INTENT_IDS),
+        help="Optional scaffold: code-review | refactor | release-notes | brief",
+    )
+    parser.add_argument(
+        "--triage",
+        action="store_true",
+        help="Prepend repo triage (git status, tree summary). Requires local --repo directory.",
+    )
     parser.add_argument(
         "--mode",
         choices=["api", "cli", "auto"],
@@ -509,10 +521,6 @@ def main() -> int:
         return EXIT_VALIDATION
 
     prompt_text = args.prompt.strip()
-    if not args.diagnose and not prompt_text:
-        payload = {"ok": False, "error": "--prompt cannot be empty unless --diagnose is used"}
-        emit_json(payload) if args.json else emit_text(payload)
-        return EXIT_VALIDATION
 
     local_repo: Optional[Path] = None
     input_repo_url: Optional[str] = None
@@ -524,6 +532,23 @@ def main() -> int:
         local_repo, input_repo_url, repo_err = normalize_repo_input(args.repo)
         if repo_err:
             payload = {"ok": False, "error": repo_err}
+            emit_json(payload) if args.json else emit_text(payload)
+            return EXIT_VALIDATION
+
+        if args.triage and local_repo is None:
+            payload = {
+                "ok": False,
+                "error": "--triage requires a local repository path for --repo (not a bare URL/slug).",
+            }
+            emit_json(payload) if args.json else emit_text(payload)
+            return EXIT_VALIDATION
+
+        has_body = bool(prompt_text) or args.intent is not None or (args.triage and local_repo is not None)
+        if not has_body:
+            payload = {
+                "ok": False,
+                "error": "Provide --prompt and/or --intent, and/or --triage with a local repo",
+            }
             emit_json(payload) if args.json else emit_text(payload)
             return EXIT_VALIDATION
 
@@ -543,9 +568,26 @@ def main() -> int:
             emit_json(payload) if args.json else emit_text(payload)
             return EXIT_VALIDATION
     include_branch_in_prompt = branch_from_user or (not read_only)
-    final_prompt = build_handoff_prompt(
-        prompt_text, read_only=read_only, branch=branch, include_branch=include_branch_in_prompt
-    )
+    if args.diagnose:
+        inner_task = ""
+    else:
+        triage_path: Optional[Path] = local_repo if (args.triage and local_repo is not None) else None
+        try:
+            if args.intent or args.triage:
+                inner_task = handoff_context.compose_handoff_body(prompt_text, args.intent, triage_path)
+            else:
+                inner_task = prompt_text
+        except ValueError as err:
+            payload = {"ok": False, "error": str(err)}
+            emit_json(payload) if args.json else emit_text(payload)
+            return EXIT_VALIDATION
+
+    if not args.diagnose:
+        final_prompt = build_handoff_prompt(
+            inner_task, read_only=read_only, branch=branch, include_branch=include_branch_in_prompt
+        )
+    else:
+        final_prompt = ""
 
     cli_wrapper = skill_root / "scripts" / "cursor_cli_fallback.sh"
     cli_binary = detect_cli_binary()
@@ -619,6 +661,8 @@ def main() -> int:
             "backend": backend if backend else "unavailable",
             "backend_error": backend_error,
             "mode_requested": requested_mode,
+            "intent": args.intent,
+            "triage": args.triage,
             "read_only": read_only,
             "branch": branch,
             "repo_input": args.repo,

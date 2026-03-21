@@ -54,6 +54,9 @@ Hardened **Cursor Cloud Agents** integration toolkit for **OpenClaw** and shell 
 │   ├── andrea_security_sanity.sh     # repo secret-pattern sanity checks
 │   ├── andrea_slo_check.sh         # grade + optional OpenClaw model probe
 │   ├── andrea_doctor.sh            # one-pass: security + grade + probes + probe
+│   ├── andrea_release_gate.sh      # STRICT security + grade not C + test_integration
+│   ├── andrea_slo_telegram.sh      # timed Telegram getMe SLO (token from env only)
+│   ├── handoff_context.py          # shared intent templates + repo triage text
 │   ├── andrea_reliability_probes.sh # deterministic probes + capability snapshot
 │   ├── dotenv_set_key.py     # merge one .env key without full wizard overwrite
 │   ├── openclaw_apply_openai_key.sh  # openclaw onboard --openai-api-key from .env
@@ -238,7 +241,16 @@ bash scripts/andrea_doctor.sh
 
 ```bash
 bash scripts/andrea_slo_check.sh
+# Optional Telegram latency (needs TELEGRAM_BOT_TOKEN): TELEGRAM_SLO=1 bash scripts/andrea_slo_check.sh
 ```
+
+**Pre-release gate** (strict security warnings fail, readiness not Grade C, full integration):
+
+```bash
+bash scripts/andrea_release_gate.sh
+```
+
+**Cursor handoff intents** (same templates as `create-agent --intent`): `code-review`, `refactor`, `release-notes`, `brief`; optional `--triage` on local repo — see [docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md) and `skills/cursor_handoff/SKILL.md`.
 
 **Reliability probes** (deterministic env for `diagnose` + JSON shape checks):
 

@@ -77,6 +77,8 @@ bash scripts/andrea_slo_check.sh
 | Security sanity (repo) | `bash scripts/andrea_security_sanity.sh` |
 | Readiness grade (A/B/C) | `python3 scripts/andrea_readiness_grade.py` |
 | SLO check (grade + probe) | `bash scripts/andrea_slo_check.sh` |
+| Telegram getMe SLO (optional) | `TELEGRAM_SLO=1 bash scripts/andrea_slo_check.sh` (needs `TELEGRAM_BOT_TOKEN`) |
+| Release gate (strict) | `bash scripts/andrea_release_gate.sh` |
 | Reliability probes | `bash scripts/andrea_reliability_probes.sh` |
 | Live API (optional) | `RUN_LIVE_API=1 bash scripts/exhaustive_feature_check.sh` |
 | Live host tools (optional) | `RUN_LIVE_PROBES=1 bash scripts/andrea_reliability_probes.sh` |
@@ -93,6 +95,8 @@ bash scripts/andrea_slo_check.sh
 | `openclaw` / skill missing | Install OpenClaw; `cp -R skills/cursor_handoff ~/.openclaw/workspace/skills/`; `openclaw gateway restart` |
 | SSL errors in Python | See README: `SSL_CERT_FILE` + `certifi` |
 | Tests fail | Fix on a branch; do not merge to `main` until green |
+| Readiness **Grade C** | `python3 scripts/andrea_capabilities.py` — unblock **blocked** rows (often `github:auth`: `gh auth login` or `python3 scripts/dotenv_set_key.py GH_TOKEN --skill`) |
+| Pre-release strict gate | `bash scripts/andrea_release_gate.sh` |
 
 ---
 

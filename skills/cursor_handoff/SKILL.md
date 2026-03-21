@@ -58,6 +58,24 @@ Before handoff, convert the user request into a clean implementation prompt:
 - Ask Cursor to summarize changes/results concisely.
 - Avoid leaking secrets or unrelated private context.
 
+### Intent templates (recommended)
+
+For repeatable quality, pass **`--intent`** with optional extra detail in **`--prompt`**:
+
+| Intent | Use when |
+|--------|----------|
+| `code-review` | Read-only review, risks, test gaps |
+| `refactor` | Safe cleanup with behavior preserved |
+| `release-notes` | User-facing notes from recent work |
+| `brief` | Product/creative brief structure |
+
+Example (API mode, local clone):  
+`python3 scripts/cursor_handoff.py --repo /path/to/clone --intent code-review --prompt "Focus on auth and payments" --read-only true --dry-run --json`
+
+### Pre-handoff triage
+
+With a **local** repo path, add **`--triage`** to prepend a short non-secret snapshot (git branch/status, top-level files, common project markers). Improves first-pass context without pasting secrets.
+
 ## Execution Workflow
 
 1. Resolve repo path (or repository URL for API mode).
@@ -68,6 +86,7 @@ Before handoff, convert the user request into a clean implementation prompt:
    - `auto` to prefer API and fallback to CLI
 4. Run:
    - `python3 scripts/cursor_handoff.py --repo "<repo>" --prompt "<prompt>" --mode auto --read-only <true|false> --json`
+   - Or with intent/triage: add `--intent code-review` and/or `--triage` (local `--repo` only).
 5. Return compact chat summary in this order:
    - backend used
    - read-only vs edit

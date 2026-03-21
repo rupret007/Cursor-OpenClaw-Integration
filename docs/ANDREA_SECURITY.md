@@ -36,6 +36,21 @@ bash scripts/andrea_security_sanity.sh
 
 This verifies (among other checks) that `.env` is not tracked, scans tracked code for high-signal secret patterns, and warns on common OpenClaw backup files in `$HOME`.
 
+Use **`STRICT=1`** (or `STRICT_SECURITY=1` with `andrea_doctor.sh`) so backup-file warnings fail the check — recommended before releases.
+
+---
+
+## 3.1 OpenClaw host alignment checklist
+
+On the machine running the gateway:
+
+- **Never** copy `~/.openclaw/openclaw.json` into this git repo (sanity script enforces this for tracked files).
+- **Prefer** provider credentials via **environment** or **SecretRef** / ref-style onboarding supported by your OpenClaw version, instead of long-lived plaintext keys in JSON (see upstream docs for your release).
+- After changing config or tokens: **`openclaw gateway restart`** and run `bash scripts/andrea_doctor.sh` (or `bash scripts/andrea_slo_check.sh`).
+- **Prune** stale `*.bak` under `~/.openclaw/` once the active config is verified (see §5).
+
+**Pre-release automation:** `bash scripts/andrea_release_gate.sh` runs strict security sanity, fails on readiness **Grade C**, then `scripts/test_integration.sh`.
+
 ---
 
 ## 4. Gateway token hygiene
@@ -63,7 +78,7 @@ This verifies (among other checks) that `.env` is not tracked, scans tracked cod
 4. Telegram: **revoke** bot token with BotFather; set new token in OpenClaw channel config.
 5. Brave / other search keys: rotate in provider dashboard.
 6. GitHub: revoke PAT; issue new fine-scoped token.
-7. Run `bash scripts/andrea_doctor.sh` and confirm **Grade A** after rotation.
+7. Run `bash scripts/andrea_doctor.sh` (or `bash scripts/andrea_release_gate.sh` before shipping) and confirm **Grade A** / **B** with no blockers after rotation.
 
 ---
 

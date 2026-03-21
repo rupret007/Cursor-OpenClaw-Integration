@@ -6,7 +6,7 @@ CLI="${BASE_DIR}/scripts/cursor_openclaw.py"
 TEST_FILE="${BASE_DIR}/tests/test_cursor_openclaw.py"
 
 echo "[1/9] Validate required files..."
-for f in "$CLI" "$TEST_FILE" "${BASE_DIR}/README.md" "${BASE_DIR}/.env.example" "${BASE_DIR}/scripts/setup_admin.sh" "${BASE_DIR}/scripts/env_loader.py" "${BASE_DIR}/scripts/cursor_api_common.py" "${BASE_DIR}/scripts/exhaustive_feature_check.sh" "${BASE_DIR}/scripts/andrea_capabilities.py" "${BASE_DIR}/scripts/andrea_reliability_probes.sh" "${BASE_DIR}/scripts/dotenv_set_key.py" "${BASE_DIR}/scripts/openclaw_apply_openai_key.sh" "${BASE_DIR}/scripts/andrea_readiness_grade.py" "${BASE_DIR}/scripts/andrea_security_sanity.sh" "${BASE_DIR}/scripts/andrea_slo_check.sh" "${BASE_DIR}/scripts/andrea_doctor.sh"; do
+for f in "$CLI" "$TEST_FILE" "${BASE_DIR}/README.md" "${BASE_DIR}/.env.example" "${BASE_DIR}/scripts/setup_admin.sh" "${BASE_DIR}/scripts/env_loader.py" "${BASE_DIR}/scripts/cursor_api_common.py" "${BASE_DIR}/scripts/handoff_context.py" "${BASE_DIR}/scripts/exhaustive_feature_check.sh" "${BASE_DIR}/scripts/andrea_capabilities.py" "${BASE_DIR}/scripts/andrea_reliability_probes.sh" "${BASE_DIR}/scripts/dotenv_set_key.py" "${BASE_DIR}/scripts/openclaw_apply_openai_key.sh" "${BASE_DIR}/scripts/andrea_readiness_grade.py" "${BASE_DIR}/scripts/andrea_security_sanity.sh" "${BASE_DIR}/scripts/andrea_slo_check.sh" "${BASE_DIR}/scripts/andrea_doctor.sh" "${BASE_DIR}/scripts/andrea_release_gate.sh" "${BASE_DIR}/scripts/andrea_slo_telegram.sh" "${BASE_DIR}/scripts/andrea_slo_telegram_probe.py"; do
   [[ -f "$f" ]] || { echo "Missing file: $f" >&2; exit 1; }
 done
 bash -n "${BASE_DIR}/scripts/setup_admin.sh"
@@ -16,10 +16,14 @@ bash -n "${BASE_DIR}/scripts/openclaw_apply_openai_key.sh"
 bash -n "${BASE_DIR}/scripts/andrea_security_sanity.sh"
 bash -n "${BASE_DIR}/scripts/andrea_slo_check.sh"
 bash -n "${BASE_DIR}/scripts/andrea_doctor.sh"
+bash -n "${BASE_DIR}/scripts/andrea_release_gate.sh"
+bash -n "${BASE_DIR}/scripts/andrea_slo_telegram.sh"
 python3 -m py_compile "${BASE_DIR}/scripts/env_loader.py"
 python3 -m py_compile "${BASE_DIR}/scripts/cursor_api_common.py"
+python3 -m py_compile "${BASE_DIR}/scripts/handoff_context.py"
 python3 -m py_compile "${BASE_DIR}/scripts/andrea_capabilities.py"
 python3 -m py_compile "${BASE_DIR}/scripts/andrea_readiness_grade.py"
+python3 -m py_compile "${BASE_DIR}/scripts/andrea_slo_telegram_probe.py"
 python3 -m py_compile "${BASE_DIR}/scripts/dotenv_set_key.py"
 
 echo "[2/9] Python syntax compile..."
@@ -35,6 +39,14 @@ CURSOR_API_KEY="dummy_test_key" python3 "$CLI" \
   --repository "https://github.com/foo/bar" \
   --ref main \
   --branch-name "cursor/test" \
+  --dry-run >/dev/null
+
+CURSOR_API_KEY="dummy_test_key" python3 "$CLI" \
+  --json create-agent \
+  --intent code-review \
+  --repository "https://github.com/foo/bar" \
+  --ref main \
+  --branch-name "cursor/intent-only" \
   --dry-run >/dev/null
 
 echo "[5/9] Diagnostic command..."

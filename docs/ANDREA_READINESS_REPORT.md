@@ -71,6 +71,23 @@ Record the letter grade and reasons:
 
 ---
 
+## 1.2 Service level objectives (targets)
+
+Tune numbers to your environment; record **observed** values in §2 after each run.
+
+| SLO | Target (default) | How to measure |
+|-----|------------------|----------------|
+| **Readiness grade** | **A** preferred; **B** acceptable if no blockers | `python3 scripts/andrea_readiness_grade.py` |
+| **`andrea_doctor` wall time** | &lt; 120s with `SKIP_OPENCLAW_PROBE=1` | `time bash scripts/andrea_doctor.sh` |
+| **OpenClaw model probe** | Completes within CLI `--probe-timeout` (ms) | `bash scripts/andrea_slo_check.sh` — note `openclaw_probe_wall_ms=…` line |
+| **Telegram Bot API `getMe`** | &lt; 8000ms round-trip | `TELEGRAM_BOT_TOKEN=… bash scripts/andrea_slo_telegram.sh` or `TELEGRAM_SLO=1 bash scripts/andrea_slo_check.sh` |
+| **Integration suite** | Green on `main` | `bash scripts/test_integration.sh` |
+| **Strict pre-release** | Gate passes before shipping | `bash scripts/andrea_release_gate.sh` |
+
+**Environment knobs:** `TELEGRAM_SLO_MAX_MS`, `OPENCLAW_PROBE_MS`, `TELEGRAM_SLO_SKIP=1`, `SKIP_OPENCLAW_PROBE=1`.
+
+---
+
 ## 2. Summary (human)
 
 - **Readiness grade (A/B/C):** _(letter + reasons from `andrea_readiness_grade.py`)_  

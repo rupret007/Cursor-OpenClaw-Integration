@@ -9,7 +9,8 @@ End-to-end path: **Telegram** → **HTTPS webhook** → **local `andrea_sync`** 
 | Variable | Purpose |
 |----------|---------|
 | `TELEGRAM_BOT_TOKEN` | BotFather token for `setWebhook` / `getWebhookInfo` |
-| `ANDREA_SYNC_TELEGRAM_SECRET` | Must match query param `?secret=` on the webhook URL |
+| `ANDREA_SYNC_TELEGRAM_SECRET` | Optional query param `?secret=` on the webhook URL (fallback) |
+| `ANDREA_SYNC_TELEGRAM_WEBHOOK_SECRET` | Recommended: Telegram `secret_token` → header `X-Telegram-Bot-Api-Secret-Token` (set by `andrea_lockstep_telegram_e2e.py` when non-empty) |
 | `ANDREA_SYNC_INTERNAL_TOKEN` | For `/v1/internal/events` (not required for Telegram ingest only) |
 
 2. **`andrea_sync` running** on `ANDREA_SYNC_URL` (default `http://127.0.0.1:8765`):

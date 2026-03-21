@@ -168,9 +168,24 @@ def cmd_set_webhook() -> int:
         return 1
     token = os.environ["TELEGRAM_BOT_TOKEN"].strip()
     secret = os.environ["ANDREA_SYNC_TELEGRAM_SECRET"].strip()
-    wh_url = build_webhook_url(public, secret)
+    header_sec = (
+        os.environ.get("ANDREA_SYNC_TELEGRAM_WEBHOOK_SECRET") or ""
+    ).strip() or secret
+    use_query = os.environ.get("ANDREA_SYNC_TELEGRAM_URL_QUERY", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+    )
+    wh_url = (
+        build_webhook_url(public, secret)
+        if use_query and secret
+        else f"{public.rstrip('/')}/v1/telegram/webhook"
+    )
     print("webhook_url:", redact_url(wh_url))
-    res = telegram_post("setWebhook", token, {"url": wh_url, "drop_pending_updates": False})
+    payload: dict = {"url": wh_url, "drop_pending_updates": False}
+    if header_sec:
+        payload["secret_token"] = header_sec[:256]
+    res = telegram_post("setWebhook", token, payload)
     print(json.dumps(res, indent=2))
     return 0 if res.get("ok") else 1
 

@@ -104,7 +104,9 @@ bash scripts/andrea_slo_check.sh
 | Readiness **Grade C** | `python3 scripts/andrea_capabilities.py` — unblock **blocked** rows (often `github:auth`: `gh auth login` or `python3 scripts/dotenv_set_key.py GH_TOKEN --skill`) |
 | Pre-release strict gate | `bash scripts/andrea_release_gate.sh` |
 | Lockstep server down | Start `python3 scripts/andrea_sync_server.py`; check `ANDREA_SYNC_URL` + `python3 scripts/andrea_sync_health.py` |
-| Telegram webhook 403 | Match `?secret=` to `ANDREA_SYNC_TELEGRAM_SECRET`; re-run `setWebhook` with full URL |
+| Lockstep kill switch engaged | `GET /v1/status` shows `kill_switch.engaged`; run `bash scripts/andrea_kill_switch.sh release` (needs `ANDREA_SYNC_INTERNAL_TOKEN`) or clear env/file per [ANDREA_LOCKSTEP_ARCHITECTURE.md](ANDREA_LOCKSTEP_ARCHITECTURE.md) |
+| Capability / “missing skill” drift | Publish snapshot: `python3 scripts/andrea_sync_publish_capabilities.py`; channels should call `GET /v1/policy/skill-absence?skill=…` before denying a skill |
+| Telegram webhook 403 | Match `?secret=` to `ANDREA_SYNC_TELEGRAM_SECRET` and/or header to `ANDREA_SYNC_TELEGRAM_WEBHOOK_SECRET`; re-run `setWebhook` |
 
 ---
 
@@ -123,6 +125,7 @@ bash scripts/andrea_slo_check.sh
 | [ANDREA_LOCKSTEP_ARCHITECTURE.md](ANDREA_LOCKSTEP_ARCHITECTURE.md) | Telegram/Alexa/Cursor shared command bus + SQLite event store |
 | [ANDREA_ALEXA_INTEGRATION.md](ANDREA_ALEXA_INTEGRATION.md) | Alexa Custom Skill endpoint + HTTPS notes |
 | [ANDREA_TELEGRAM_LOCKSTEP_E2E.md](ANDREA_TELEGRAM_LOCKSTEP_E2E.md) | Telegram webhook + cloudflared + lockstep verification |
+| [ANDREA_LOCKSTEP_REVIEW_FINDINGS.md](ANDREA_LOCKSTEP_REVIEW_FINDINGS.md) | Lockstep security/awareness review notes |
 | [docs/DEPLOYMENT.md](DEPLOYMENT.md) | Branch + deployment baseline |
 
 ---

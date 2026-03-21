@@ -1,9 +1,13 @@
 """Command bus: validate commands, enforce idempotency, append events."""
 from __future__ import annotations
 
+import json
 import sqlite3
-from typing import Any, Dict, Optional, Tuple
+import time
+from typing import Any, Dict, Optional, Set, Tuple
 
+from .kill_switch import engage_kill_switch, is_kill_switch_engaged, release_kill_switch
+from .policy import META_DIGEST_KEY, META_DIGEST_TS_KEY
 from .schema import (
     Channel,
     CommandEnvelope,
@@ -13,11 +17,20 @@ from .schema import (
     validate_command_type,
 )
 from .store import (
+    SYSTEM_TASK_ID,
     append_event,
     claim_idempotency_or_get_existing,
     create_task,
+    ensure_system_task,
+    set_meta,
     task_exists,
 )
+
+_ADMIN_COMMAND_TYPES: Set[CommandType] = {
+    CommandType.PUBLISH_CAPABILITY_SNAPSHOT,
+    CommandType.KILL_SWITCH_ENGAGE,
+    CommandType.KILL_SWITCH_RELEASE,
+}
 
 
 def handle_command(conn: sqlite3.Connection, body: Dict[str, Any]) -> Dict[str, Any]:
@@ -34,6 +47,10 @@ def handle_command(conn: sqlite3.Connection, body: Dict[str, Any]) -> Dict[str, 
         channel = Channel(str(ch_raw))
     except ValueError:
         return {"ok": False, "error": f"unknown channel: {ch_raw}"}
+    if ctype in _ADMIN_COMMAND_TYPES and channel != Channel.INTERNAL:
+        return {"ok": False, "error": "admin commands require channel=internal"}
+    if is_kill_switch_engaged(conn) and ctype not in (CommandType.KILL_SWITCH_RELEASE,):
+        return {"ok": False, "error": "kill_switch_engaged"}
     payload = body.get("payload") if isinstance(body.get("payload"), dict) else {}
     task_id_in = body.get("task_id")
     ext_id = body.get("external_id")
@@ -63,6 +80,12 @@ def handle_command(conn: sqlite3.Connection, body: Dict[str, Any]) -> Dict[str, 
         return _handle_create_task(conn, env, idem)
     if ctype == CommandType.ALEXA_UTTERANCE:
         return _handle_alexa(conn, env, idem)
+    if ctype == CommandType.PUBLISH_CAPABILITY_SNAPSHOT:
+        return _handle_publish_capability_snapshot(conn, env)
+    if ctype == CommandType.KILL_SWITCH_ENGAGE:
+        return _handle_kill_switch_engage(conn, env)
+    if ctype == CommandType.KILL_SWITCH_RELEASE:
+        return _handle_kill_switch_release(conn, env)
     return {"ok": False, "error": f"unhandled command_type: {ctype.value}"}
 
 
@@ -295,6 +318,55 @@ def _handle_alexa(conn: sqlite3.Connection, env: CommandEnvelope, idem: str) -> 
             {"text": text, "channel": Channel.ALEXA.value},
         )
     return {"ok": True, "task_id": tid, "deduped": False}
+
+
+def _handle_publish_capability_snapshot(
+    conn: sqlite3.Connection, env: CommandEnvelope
+) -> Dict[str, Any]:
+    ensure_system_task(conn)
+    blob = dict(env.payload)
+    blob["published_ts"] = time.time()
+    set_meta(conn, META_DIGEST_KEY, json.dumps(blob, ensure_ascii=False))
+    set_meta(conn, META_DIGEST_TS_KEY, str(blob["published_ts"]))
+    rows = blob.get("rows") if isinstance(blob.get("rows"), list) else []
+    excerpt = json.dumps({"summary": blob.get("summary"), "row_count": len(rows)})[
+        :480
+    ]
+    _append(
+        conn,
+        SYSTEM_TASK_ID,
+        EventType.CAPABILITY_SNAPSHOT,
+        {"summary_json_excerpt": excerpt, "channel": env.channel.value},
+    )
+    return {"ok": True, "published_ts": blob["published_ts"]}
+
+
+def _handle_kill_switch_engage(conn: sqlite3.Connection, env: CommandEnvelope) -> Dict[str, Any]:
+    ensure_system_task(conn)
+    engage_kill_switch(
+        conn,
+        reason=str(env.payload.get("reason") or ""),
+        source=str(env.payload.get("source") or env.channel.value),
+    )
+    _append(
+        conn,
+        SYSTEM_TASK_ID,
+        EventType.KILL_SWITCH_ENGAGED,
+        {"reason": env.payload.get("reason", ""), "source": env.channel.value},
+    )
+    return {"ok": True, "kill_switch": True}
+
+
+def _handle_kill_switch_release(conn: sqlite3.Connection, env: CommandEnvelope) -> Dict[str, Any]:
+    ensure_system_task(conn)
+    release_kill_switch(conn)
+    _append(
+        conn,
+        SYSTEM_TASK_ID,
+        EventType.KILL_SWITCH_RELEASED,
+        {"source": env.channel.value},
+    )
+    return {"ok": True, "kill_switch": False}
 
 
 def append_internal_event(

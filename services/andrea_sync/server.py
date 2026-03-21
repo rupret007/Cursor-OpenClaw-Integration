@@ -14,8 +14,17 @@ from typing import Any, Callable, Dict, Optional
 from .adapters import alexa as alexa_adapt
 from .adapters import telegram as tg_adapt
 from .bus import handle_command
+from .kill_switch import is_kill_switch_engaged, kill_switch_status
+from .policy import digest_age_seconds, evaluate_skill_absence_claim, get_capability_digest
 from .projector import project_task_dict
-from .store import connect, get_task_channel, list_tasks, load_events_for_task, migrate
+from .store import (
+    connect,
+    ensure_system_task,
+    get_task_channel,
+    list_tasks,
+    load_events_for_task,
+    migrate,
+)
 
 
 def _repo_root() -> Path:
@@ -34,11 +43,15 @@ class SyncServer:
         self.db_path = default_db_path()
         self.conn = connect(self.db_path)
         migrate(self.conn)
+        ensure_system_task(self.conn)
         self.lock = threading.Lock()
         self.queue: Queue[Callable[[], None]] = Queue()
         self._worker = threading.Thread(target=self._run_queue, daemon=True)
         self._worker.start()
         self.telegram_secret = os.environ.get("ANDREA_SYNC_TELEGRAM_SECRET", "")
+        self.telegram_header_secret = os.environ.get(
+            "ANDREA_SYNC_TELEGRAM_WEBHOOK_SECRET", ""
+        )
         self.internal_token = os.environ.get("ANDREA_SYNC_INTERNAL_TOKEN", "")
 
     def _run_queue(self) -> None:
@@ -71,6 +84,18 @@ def make_handler(server: SyncServer) -> type:
             auth = self.headers.get("Authorization") or ""
             return auth == f"Bearer {server.internal_token}"
 
+        _ADMIN_COMMAND_TYPES = frozenset(
+            {
+                "PublishCapabilitySnapshot",
+                "KillSwitchEngage",
+                "KillSwitchRelease",
+            }
+        )
+
+        def _commands_require_internal(self, body: Dict[str, Any]) -> bool:
+            ct = str(body.get("command_type") or body.get("type") or "")
+            return ct in self._ADMIN_COMMAND_TYPES
+
         def _send(self, code: int, body: bytes, content_type: str = "application/json") -> None:
             self.send_response(code)
             self.send_header("Content-Type", content_type)
@@ -90,14 +115,64 @@ def make_handler(server: SyncServer) -> type:
             parsed = urllib.parse.urlparse(self.path)
             path = parsed.path
             if path == "/v1/health":
-                body = json.dumps(
-                    {
-                        "ok": True,
-                        "service": "andrea_sync",
-                        "db": str(server.db_path),
-                    }
-                ).encode("utf-8")
-                self._send(200, body)
+
+                def health_body(c: sqlite3.Connection) -> bytes:
+                    ks = kill_switch_status(c)
+                    age = digest_age_seconds(c)
+                    return json.dumps(
+                        {
+                            "ok": True,
+                            "service": "andrea_sync",
+                            "db": str(server.db_path),
+                            "kill_switch": ks,
+                            "capability_digest_age_seconds": age,
+                        }
+                    ).encode("utf-8")
+
+                self._send(200, server.with_lock(health_body))
+                return
+            if path == "/v1/status":
+                def status_body(c: sqlite3.Connection) -> bytes:
+                    cap = get_capability_digest(c)
+                    ks = kill_switch_status(c)
+                    return json.dumps(
+                        {
+                            "ok": True,
+                            "service": "andrea_sync",
+                            "db": str(server.db_path),
+                            "kill_switch": ks,
+                            "capabilities": cap,
+                        },
+                        indent=2,
+                    ).encode("utf-8")
+
+                self._send(200, server.with_lock(status_body))
+                return
+            if path == "/v1/capabilities":
+
+                def cap_body(c: sqlite3.Connection) -> bytes:
+                    info = get_capability_digest(c)
+                    return json.dumps(info, indent=2).encode("utf-8")
+
+                self._send(200, server.with_lock(cap_body))
+                return
+            if path == "/v1/policy/skill-absence":
+                qs = urllib.parse.parse_qs(parsed.query)
+                sk = (qs.get("skill") or [""])[0].strip()
+                if not sk:
+                    self._send(400, b'{"error":"skill query param required"}')
+                    return
+
+                def pol(c: sqlite3.Connection) -> bytes:
+                    raw_ttl = (qs.get("max_age_seconds") or [""])[0].strip()
+                    try:
+                        ttl = float(raw_ttl) if raw_ttl else 900.0
+                    except ValueError:
+                        ttl = 900.0
+                    ev = evaluate_skill_absence_claim(c, sk, max_age_seconds=ttl)
+                    return json.dumps(ev, indent=2).encode("utf-8")
+
+                self._send(200, server.with_lock(pol))
                 return
             if path.startswith("/v1/tasks/") and len(path) > len("/v1/tasks/"):
                 tid = path.split("/v1/tasks/", 1)[1].split("?", 1)[0].strip()
@@ -155,6 +230,21 @@ def make_handler(server: SyncServer) -> type:
             path = parsed.path
             if path == "/v1/commands":
                 body = self._read_json()
+                if self._commands_require_internal(body) and not self._auth_internal():
+                    self._send(401, b'{"error":"unauthorized"}')
+                    return
+
+                def ks_block(c: sqlite3.Connection) -> bool:
+                    return is_kill_switch_engaged(c)
+
+                if server.with_lock(ks_block):
+                    ct = str(body.get("command_type") or body.get("type") or "")
+                    if ct != "KillSwitchRelease":
+                        self._send(
+                            503,
+                            b'{"ok":false,"error":"kill_switch_engaged"}',
+                        )
+                        return
 
                 def run(c: sqlite3.Connection) -> bytes:
                     return json.dumps(handle_command(c, body), indent=2).encode("utf-8")
@@ -169,12 +259,23 @@ def make_handler(server: SyncServer) -> type:
                     self._send(200, out)
                 else:
                     err = str(result.get("error") or "").lower()
-                    code = 404 if "unknown task" in err else 400
+                    if "kill_switch_engaged" in err:
+                        code = 503
+                    elif "unknown task" in err:
+                        code = 404
+                    else:
+                        code = 400
                     self._send(code, out)
                 return
             if path == "/v1/internal/events":
                 if not self._auth_internal():
                     self._send(401, b'{"error":"unauthorized"}')
+                    return
+                if server.with_lock(is_kill_switch_engaged):
+                    self._send(
+                        503,
+                        b'{"ok":false,"error":"kill_switch_engaged"}',
+                    )
                     return
                 body = self._read_json()
                 task_id = body.get("task_id")
@@ -212,9 +313,21 @@ def make_handler(server: SyncServer) -> type:
                     self._send(code, raw)
                 return
             if path == "/v1/telegram/webhook":
+                if server.with_lock(is_kill_switch_engaged):
+                    self._send(
+                        503,
+                        b'{"ok":false,"error":"kill_switch_engaged"}',
+                    )
+                    return
                 q = urllib.parse.parse_qs(parsed.query)
                 sec = (q.get("secret") or [""])[0]
-                if not tg_adapt.verify_webhook_secret(sec, server.telegram_secret):
+                hdr = self.headers.get("X-Telegram-Bot-Api-Secret-Token") or ""
+                if not tg_adapt.verify_telegram_webhook(
+                    sec,
+                    hdr,
+                    query_configured=server.telegram_secret,
+                    header_configured=server.telegram_header_secret,
+                ):
                     self._send(403, b'{"error":"forbidden"}')
                     return
                 update = self._read_json()
@@ -233,6 +346,12 @@ def make_handler(server: SyncServer) -> type:
                 self._send(200, b'{"ok":true}')
                 return
             if path == "/v1/alexa":
+                if server.with_lock(is_kill_switch_engaged):
+                    self._send(
+                        503,
+                        b'{"ok":false,"error":"kill_switch_engaged"}',
+                    )
+                    return
                 body = self._read_json()
                 cmd, resp = alexa_adapt.parse_alexa_body(body)
 

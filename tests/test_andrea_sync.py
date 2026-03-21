@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import json
+import os
 import sys
 import tempfile
 import unittest
@@ -15,6 +15,7 @@ if str(REPO_ROOT) not in sys.path:
 from services.andrea_sync.adapters import alexa as alexa_adapt  # noqa: E402
 from services.andrea_sync.adapters import telegram as tg_adapt  # noqa: E402
 from services.andrea_sync.bus import handle_command  # noqa: E402
+from services.andrea_sync.policy import evaluate_skill_absence_claim  # noqa: E402
 from services.andrea_sync.projector import project_task_dict  # noqa: E402
 from services.andrea_sync.schema import CommandType, EventType, TaskStatus, normalize_idempotency_base  # noqa: E402
 from services.andrea_sync.store import connect, migrate  # noqa: E402
@@ -25,15 +26,22 @@ class TestAndreaSync(unittest.TestCase):
         self._tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         self._tmp.close()
         self.db_path = Path(self._tmp.name)
+        self._prev_db = os.environ.get("ANDREA_SYNC_DB")
+        os.environ["ANDREA_SYNC_DB"] = str(self.db_path)
         self.conn = connect(self.db_path)
         migrate(self.conn)
 
     def tearDown(self) -> None:
         self.conn.close()
+        if self._prev_db is None:
+            os.environ.pop("ANDREA_SYNC_DB", None)
+        else:
+            os.environ["ANDREA_SYNC_DB"] = self._prev_db
         self.db_path.unlink(missing_ok=True)
         for suf in ("-wal", "-shm"):
             p = Path(str(self.db_path) + suf)
             p.unlink(missing_ok=True)
+        Path(str(self.db_path) + ".kill").unlink(missing_ok=True)
 
     def test_idempotency_duplicate_command(self) -> None:
         body = {
@@ -146,6 +154,73 @@ class TestAndreaSync(unittest.TestCase):
         assert cmd is not None
         self.assertEqual(cmd["command_type"], "AlexaUtterance")
         self.assertIn("Captured", resp["response"]["outputSpeech"]["text"])
+
+    def test_publish_capability_requires_internal_channel(self) -> None:
+        r = handle_command(
+            self.conn,
+            {
+                "command_type": "PublishCapabilitySnapshot",
+                "channel": "cli",
+                "payload": {"rows": [], "summary": {}},
+            },
+        )
+        self.assertFalse(r.get("ok"))
+
+    def test_publish_capability_internal_and_verify_before_deny(self) -> None:
+        r = handle_command(
+            self.conn,
+            {
+                "command_type": "PublishCapabilitySnapshot",
+                "channel": "internal",
+                "payload": {
+                    "rows": [{"id": "skill:telegram", "status": "ready"}],
+                    "summary": {},
+                },
+            },
+        )
+        self.assertTrue(r.get("ok"))
+        ev = evaluate_skill_absence_claim(self.conn, "telegram", max_age_seconds=900.0)
+        self.assertFalse(ev.get("may_claim_absent"))
+
+    def test_kill_switch_blocks_then_release(self) -> None:
+        e = handle_command(
+            self.conn,
+            {
+                "command_type": "KillSwitchEngage",
+                "channel": "internal",
+                "payload": {"reason": "test"},
+            },
+        )
+        self.assertTrue(e.get("ok"))
+        blocked = handle_command(
+            self.conn,
+            {
+                "command_type": "CreateTask",
+                "channel": "cli",
+                "external_id": "ks1",
+                "payload": {"summary": "nope"},
+            },
+        )
+        self.assertFalse(blocked.get("ok"))
+        rel = handle_command(
+            self.conn,
+            {
+                "command_type": "KillSwitchRelease",
+                "channel": "internal",
+                "payload": {},
+            },
+        )
+        self.assertTrue(rel.get("ok"))
+        ok = handle_command(
+            self.conn,
+            {
+                "command_type": "CreateTask",
+                "channel": "cli",
+                "external_id": "ks2",
+                "payload": {"summary": "yes"},
+            },
+        )
+        self.assertTrue(ok.get("ok"))
 
 
 if __name__ == "__main__":

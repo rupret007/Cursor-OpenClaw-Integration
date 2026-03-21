@@ -58,6 +58,7 @@ class TestAndreaSyncHTTP(unittest.TestCase):
             else:
                 os.environ[key] = val
         Path(cls._dbpath).unlink(missing_ok=True)
+        Path(cls._dbpath + ".kill").unlink(missing_ok=True)
         for suf in ("-wal", "-shm"):
             Path(cls._dbpath + suf).unlink(missing_ok=True)
 
@@ -70,6 +71,8 @@ class TestAndreaSyncHTTP(unittest.TestCase):
             self.assertEqual(resp.status, 200)
             data = json.loads(resp.read().decode("utf-8"))
         self.assertTrue(data.get("ok"))
+        self.assertIn("kill_switch", data)
+        self.assertIn("capability_digest_age_seconds", data)
 
     def test_command_create_and_fetch_task(self) -> None:
         body = json.dumps(
@@ -142,6 +145,171 @@ class TestAndreaSyncHTTP(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError) as ctx:
             urllib.request.urlopen(req, timeout=5)
         self.assertEqual(ctx.exception.code, 403)
+
+    def test_admin_command_requires_internal_auth(self) -> None:
+        body = json.dumps(
+            {
+                "command_type": "KillSwitchEngage",
+                "channel": "internal",
+                "payload": {"reason": "x"},
+            }
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            self._url("/v1/commands"),
+            data=body,
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(req, timeout=5)
+        self.assertEqual(ctx.exception.code, 401)
+
+    def test_kill_switch_blocks_commands_http(self) -> None:
+        auth = {
+            "Authorization": "Bearer internal-test-token",
+            "Content-Type": "application/json",
+        }
+        engage = json.dumps(
+            {
+                "command_type": "KillSwitchEngage",
+                "channel": "internal",
+                "payload": {"reason": "t"},
+            }
+        ).encode("utf-8")
+        req_e = urllib.request.Request(
+            self._url("/v1/commands"), data=engage, method="POST", headers=auth
+        )
+        with urllib.request.urlopen(req_e, timeout=5) as r:
+            self.assertEqual(r.status, 200)
+        create = json.dumps(
+            {
+                "command_type": "CreateTask",
+                "channel": "cli",
+                "external_id": "http-ks",
+                "payload": {"summary": "blocked"},
+            }
+        ).encode("utf-8")
+        req_c = urllib.request.Request(
+            self._url("/v1/commands"), data=create, method="POST", headers=auth
+        )
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(req_c, timeout=5)
+        self.assertEqual(ctx.exception.code, 503)
+        rel = json.dumps(
+            {
+                "command_type": "KillSwitchRelease",
+                "channel": "internal",
+                "payload": {},
+            }
+        ).encode("utf-8")
+        req_r = urllib.request.Request(
+            self._url("/v1/commands"), data=rel, method="POST", headers=auth
+        )
+        with urllib.request.urlopen(req_r, timeout=5) as r:
+            self.assertEqual(r.status, 200)
+
+    def test_skill_absence_endpoint_after_publish(self) -> None:
+        auth = {
+            "Authorization": "Bearer internal-test-token",
+            "Content-Type": "application/json",
+        }
+        pub = json.dumps(
+            {
+                "command_type": "PublishCapabilitySnapshot",
+                "channel": "internal",
+                "payload": {
+                    "rows": [{"id": "skill:telegram", "status": "ready"}],
+                    "summary": {},
+                },
+            }
+        ).encode("utf-8")
+        req_p = urllib.request.Request(
+            self._url("/v1/commands"), data=pub, method="POST", headers=auth
+        )
+        with urllib.request.urlopen(req_p, timeout=5) as r:
+            self.assertEqual(r.status, 200)
+        req_g = urllib.request.Request(
+            self._url("/v1/policy/skill-absence?skill=telegram"), method="GET"
+        )
+        with urllib.request.urlopen(req_g, timeout=5) as r:
+            self.assertEqual(r.status, 200)
+            data = json.loads(r.read().decode("utf-8"))
+        self.assertFalse(data.get("may_claim_absent"))
+
+
+class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
+    """Webhook auth via X-Telegram-Bot-Api-Secret-Token only (no query secret)."""
+
+    _httpd: ThreadingHTTPServer
+    _srv: object
+    _port: int
+    _thread: threading.Thread
+    _dbpath: str
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        fd, cls._dbpath = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        cls._env_backup = {}
+        for key in (
+            "ANDREA_SYNC_DB",
+            "ANDREA_SYNC_TELEGRAM_SECRET",
+            "ANDREA_SYNC_TELEGRAM_WEBHOOK_SECRET",
+            "ANDREA_SYNC_INTERNAL_TOKEN",
+        ):
+            cls._env_backup[key] = os.environ.get(key)
+        os.environ["ANDREA_SYNC_DB"] = cls._dbpath
+        os.environ["ANDREA_SYNC_TELEGRAM_SECRET"] = ""
+        os.environ["ANDREA_SYNC_TELEGRAM_WEBHOOK_SECRET"] = "hdrsecret"
+        os.environ["ANDREA_SYNC_INTERNAL_TOKEN"] = "internal-test-token"
+
+        from services.andrea_sync.server import SyncServer, make_handler
+
+        cls._srv = SyncServer()
+        cls._httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(cls._srv))
+        cls._port = cls._httpd.server_address[1]
+        cls._thread = threading.Thread(target=cls._httpd.serve_forever, daemon=True)
+        cls._thread.start()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._httpd.shutdown()
+        cls._httpd.server_close()
+        for key, val in cls._env_backup.items():
+            if val is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = val
+        Path(cls._dbpath).unlink(missing_ok=True)
+        Path(cls._dbpath + ".kill").unlink(missing_ok=True)
+        for suf in ("-wal", "-shm"):
+            Path(cls._dbpath + suf).unlink(missing_ok=True)
+
+    def _url(self, path: str) -> str:
+        return f"http://127.0.0.1:{self._port}{path}"
+
+    def test_telegram_webhook_accepts_header_secret(self) -> None:
+        body = json.dumps(
+            {
+                "update_id": 42,
+                "message": {
+                    "text": "hi",
+                    "chat": {"id": 1},
+                    "from": {"id": 2},
+                },
+            }
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            self._url("/v1/telegram/webhook"),
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "X-Telegram-Bot-Api-Secret-Token": "hdrsecret",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            self.assertEqual(resp.status, 200)
 
 
 if __name__ == "__main__":

@@ -141,3 +141,26 @@ def list_tasks(conn: sqlite3.Connection, limit: int = 50) -> List[Dict[str, Any]
         (limit,),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+SYSTEM_TASK_ID = "tsk_system_lockstep"
+
+
+def get_meta(conn: sqlite3.Connection, key: str) -> Optional[str]:
+    row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    return str(row["value"]) if row else None
+
+
+def set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute(
+        "INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, value),
+    )
+    conn.commit()
+
+
+def ensure_system_task(conn: sqlite3.Connection) -> None:
+    """Reserved task row for global audit events (capabilities, kill switch)."""
+    if task_exists(conn, SYSTEM_TASK_ID):
+        return
+    create_task(conn, SYSTEM_TASK_ID, "internal")

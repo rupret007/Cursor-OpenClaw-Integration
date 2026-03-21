@@ -73,6 +73,9 @@ python3 -m py_compile "${BASE_DIR}/scripts/andrea_sync_server.py" || fail "py_co
 python3 -m py_compile "${BASE_DIR}/scripts/andrea_sync_health.py" || fail "py_compile andrea_sync_health"
 python3 -m py_compile "${BASE_DIR}/scripts/andrea_sync_cursor_report.py" || fail "py_compile andrea_sync_cursor_report"
 python3 -m py_compile "${BASE_DIR}/scripts/andrea_lockstep_telegram_e2e.py" || fail "py_compile andrea_lockstep_telegram_e2e"
+python3 -m py_compile "${BASE_DIR}/scripts/andrea_sync_publish_capabilities.py" || fail "py_compile andrea_sync_publish_capabilities"
+bash -n "${BASE_DIR}/scripts/andrea_kill_switch.sh" || fail "bash -n andrea_kill_switch"
+bash -n "${BASE_DIR}/scripts/macos/install_andrea_launchagents.sh" || fail "bash -n install_andrea_launchagents"
 while IFS= read -r _syncpy; do
   python3 -m py_compile "$_syncpy" || fail "py_compile $_syncpy"
 done < <(find "${BASE_DIR}/services" -name "*.py" 2>/dev/null | sort)

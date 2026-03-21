@@ -37,6 +37,9 @@ class CommandType(str, Enum):
     CURSOR_STOP = "CursorStop"
     REPORT_CURSOR_EVENT = "ReportCursorEvent"  # lifecycle from cursor_openclaw / handoff
     ALEXA_UTTERANCE = "AlexaUtterance"
+    PUBLISH_CAPABILITY_SNAPSHOT = "PublishCapabilitySnapshot"
+    KILL_SWITCH_ENGAGE = "KillSwitchEngage"
+    KILL_SWITCH_RELEASE = "KillSwitchRelease"
 
 
 # --- Event types (facts, append-only) ---
@@ -54,6 +57,9 @@ class EventType(str, Enum):
     JOB_FAILED = "JobFailed"
     HUMAN_APPROVAL_REQUIRED = "HumanApprovalRequired"
     EXTERNAL_REF = "ExternalRef"  # telegram update_id, alexa request id, etc.
+    CAPABILITY_SNAPSHOT = "CapabilitySnapshot"
+    KILL_SWITCH_ENGAGED = "KillSwitchEngaged"
+    KILL_SWITCH_RELEASED = "KillSwitchReleased"
 
 
 # --- Task status (projected) ---
@@ -177,6 +183,12 @@ def legal_task_transition(
         ), None
     if event == EventType.COMMAND_DEDUPED:
         return True, None
+    if event in (
+        EventType.CAPABILITY_SNAPSHOT,
+        EventType.KILL_SWITCH_ENGAGED,
+        EventType.KILL_SWITCH_RELEASED,
+    ):
+        return True, None
     return True, None
 
 
@@ -210,3 +222,7 @@ def fold_projection(
         proj.last_error = None
         if payload.get("summary"):
             proj.summary = str(payload["summary"])[:500]
+    if event_type == EventType.CAPABILITY_SNAPSHOT:
+        proj.meta["last_capability_excerpt"] = str(payload.get("summary_json_excerpt", ""))[:500]
+    if event_type in (EventType.KILL_SWITCH_ENGAGED, EventType.KILL_SWITCH_RELEASED):
+        proj.meta["kill_switch_last"] = event_type.value

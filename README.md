@@ -226,6 +226,7 @@ Full steps and flow: [docs/OPENCLAW_SKILL.md](docs/OPENCLAW_SKILL.md).
 | [docs/ANDREA_MODEL_POLICY.md](docs/ANDREA_MODEL_POLICY.md) | Model profiles + fallbacks + rate limits |
 | [docs/ANDREA_LOCKSTEP_ARCHITECTURE.md](docs/ANDREA_LOCKSTEP_ARCHITECTURE.md) | Telegram / Alexa / Cursor shared lockstep bus + SQLite store |
 | [docs/ANDREA_TELEGRAM_LOCKSTEP_E2E.md](docs/ANDREA_TELEGRAM_LOCKSTEP_E2E.md) | Telegram webhook + `cloudflared` + `scripts/andrea_lockstep_telegram_e2e.py` |
+| [docs/ANDREA_LOCKSTEP_REVIEW_FINDINGS.md](docs/ANDREA_LOCKSTEP_REVIEW_FINDINGS.md) | Lockstep awareness / kill-switch / webhook review notes |
 | [docs/ANDREA_ALEXA_INTEGRATION.md](docs/ANDREA_ALEXA_INTEGRATION.md) | Alexa Custom Skill HTTPS endpoint notes |
 
 **Startup self-check:**

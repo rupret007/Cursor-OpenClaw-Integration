@@ -59,6 +59,16 @@ python3 scripts/cursor_openclaw.py --json create-agent \
 
 ---
 
+## 2.5 Model profiles (OpenClaw)
+
+Use **structured profiles** (`fast` / `balanced` / `deep`) instead of one-off edits. Maps to `openclaw models set`, fallbacks, and Telegram `/model` overrides — including **rate-limit / cooldown** escape hatches.
+
+Full table + CLI recipes: **[ANDREA_MODEL_POLICY.md](ANDREA_MODEL_POLICY.md)**.
+
+**Reminder:** OpenClaw `--probe-timeout` values are **milliseconds** (30s → `30000`).
+
+---
+
 ## 3. OpenClaw `cursor_handoff` lane
 
 For OpenClaw-driven handoff (API-first, CLI fallback):
@@ -104,6 +114,7 @@ Remove `--dry-run` only after the human expects a real launch.
 ## 6. Related docs
 
 - [ANDREA_CAPABILITY_MATRIX.md](ANDREA_CAPABILITY_MATRIX.md) — live readiness
+- [ANDREA_MODEL_POLICY.md](ANDREA_MODEL_POLICY.md) — model order, fallbacks, `/model`
 - [ANDREA_AUTONOMY_POLICY.md](ANDREA_AUTONOMY_POLICY.md) — when to confirm vs execute
 - [docs/CLI_REFERENCE.md](CLI_REFERENCE.md) — Cursor CLI flags
 - [docs/OPENCLAW_SKILL.md](OPENCLAW_SKILL.md) — skill install & flows

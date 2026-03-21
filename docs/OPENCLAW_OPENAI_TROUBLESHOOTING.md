@@ -36,8 +36,11 @@ OpenClaw docs: [OpenAI provider](https://docs.openclaw.ai/providers/openai).
 
    ```bash
    openclaw gateway restart
-   openclaw models status --probe
+   # --probe-timeout is in MILLISECONDS (e.g. 30s → 30000)
+   openclaw models status --probe --probe-timeout 30000 --probe-concurrency 1
    ```
+
+   Security / redaction when sharing logs: [ANDREA_SECURITY.md](ANDREA_SECURITY.md).
 
 ## Interactive alternative
 

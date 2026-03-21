@@ -50,6 +50,10 @@ Hardened **Cursor Cloud Agents** integration toolkit for **OpenClaw** and shell 
 │   ├── setup_admin.sh       # interactive .env + optional OpenClaw skill install
 │   ├── exhaustive_feature_check.sh  # offline sweep of both CLIs (+ optional live API)
 │   ├── andrea_capabilities.py      # Andrea runtime capability matrix (live readiness)
+│   ├── andrea_readiness_grade.py   # A/B/C grade from capability JSON
+│   ├── andrea_security_sanity.sh     # repo secret-pattern sanity checks
+│   ├── andrea_slo_check.sh         # grade + optional OpenClaw model probe
+│   ├── andrea_doctor.sh            # one-pass: security + grade + probes + probe
 │   ├── andrea_reliability_probes.sh # deterministic probes + capability snapshot
 │   ├── dotenv_set_key.py     # merge one .env key without full wizard overwrite
 │   ├── openclaw_apply_openai_key.sh  # openclaw onboard --openai-api-key from .env
@@ -213,11 +217,27 @@ Full steps and flow: [docs/OPENCLAW_SKILL.md](docs/OPENCLAW_SKILL.md).
 | [docs/ANDREA_DEVOPS_RUNBOOK.md](docs/ANDREA_DEVOPS_RUNBOOK.md) | Task → branch → test → PR + GitHub fallbacks |
 | [docs/ANDREA_COMMS_PRODUCTIVITY.md](docs/ANDREA_COMMS_PRODUCTIVITY.md) | Telegram + productivity routines |
 | [docs/ANDREA_READINESS_REPORT.md](docs/ANDREA_READINESS_REPORT.md) | Readiness template / sign-off |
+| [docs/ANDREA_SECURITY.md](docs/ANDREA_SECURITY.md) | Secrets, redaction, gateway token, rotation |
+| [docs/ANDREA_MODEL_POLICY.md](docs/ANDREA_MODEL_POLICY.md) | Model profiles + fallbacks + rate limits |
 
 **Startup self-check:**
 
 ```bash
 python3 scripts/andrea_capabilities.py
+```
+
+**Masterclass health (one command):** security sanity + capability snapshot + **A/B/C** grade + reliability probes + optional `openclaw models status --probe`. OpenClaw **`--probe-timeout` is in milliseconds** (e.g. 30s → `30000`).
+
+```bash
+bash scripts/andrea_doctor.sh
+# SKIP_OPENCLAW_PROBE=1 bash scripts/andrea_doctor.sh
+# STRICT_SECURITY=1 bash scripts/andrea_doctor.sh   # fail on backup warnings too
+```
+
+**SLO gate** (grade + probe):
+
+```bash
+bash scripts/andrea_slo_check.sh
 ```
 
 **Reliability probes** (deterministic env for `diagnose` + JSON shape checks):
@@ -250,7 +270,7 @@ bash scripts/test_integration.sh
 bash skills/cursor_handoff/scripts/test_handoff.sh
 ```
 
-`test_integration.sh` runs **`scripts/andrea_reliability_probes.sh`** then ends with **`scripts/exhaustive_feature_check.sh`** (every subcommand `--help`, validation paths, handoff diagnose/dry-run modes). Optional live API smoke:
+`test_integration.sh` runs **`scripts/andrea_security_sanity.sh`**, **`scripts/andrea_reliability_probes.sh`**, a non-fatal **`andrea_readiness_grade.py`** smoke, then **`scripts/exhaustive_feature_check.sh`** (every subcommand `--help`, validation paths, handoff diagnose/dry-run modes). Optional live API smoke:
 
 ```bash
 RUN_LIVE_API=1 bash scripts/exhaustive_feature_check.sh
@@ -289,6 +309,7 @@ See [.env.example](.env.example) and [skills/cursor_handoff/.env.example](skills
 ## Security
 
 - Never commit API keys or paste them into assistant chats.
+- Full operator checklist: **[docs/ANDREA_SECURITY.md](docs/ANDREA_SECURITY.md)** — env-first secrets, redaction-safe diagnostics, gateway token rotation, `bash scripts/andrea_security_sanity.sh`.
 - `diagnose` redacts Cursor and OpenAI keys by default; avoid `--show-key` in shared logs.
 - Prefer short-lived keys and rotate if exposed.
 - Treat agent outputs and artifact URLs as sensitive until reviewed.

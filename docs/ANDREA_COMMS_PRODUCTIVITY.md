@@ -34,15 +34,58 @@ Escalate to the human when:
 - Never paste raw API keys into Telegram.
 - Prefer references (“key rotated”, “token updated in .env”) over secret material.
 
+### 1.5 Session memory governance (OpenClaw)
+
+Persistent memory improves continuity but needs **explicit policy** so trust stays high.
+
+| Topic | Guideline |
+|-------|-----------|
+| **What to store** | Task context, preferences, recurring constraints — not passwords, full `.env`, or raw tokens |
+| **TTL / pruning** | Periodically review stored notes; delete stale project context after closure |
+| **Redaction** | Treat memory like logs — if you wouldn’t paste it in a ticket, don’t let the bot retain it |
+| **User-controlled wipe** | Use OpenClaw’s documented memory reset / per-session clear paths when the user asks for a “clean slate” (exact command depends on OpenClaw version — prefer gateway docs + `openclaw doctor`) |
+| **Recovery drill** | After wipe, re-run `bash scripts/andrea_doctor.sh` (from this repo) and confirm **grade A** |
+
+See also [ANDREA_SECURITY.md](ANDREA_SECURITY.md) for redaction-safe diagnostics.
+
 ---
 
 ## 2. Productivity routines
 
 ### 2.1 Daily
 
-- **Morning:** capability snapshot (`python3 scripts/andrea_capabilities.py`) on active dev days.
+- **Morning:** one-line health — `bash scripts/andrea_doctor.sh` or `python3 scripts/andrea_capabilities.py` on active dev days.
 - **Plan:** top 3 outcomes; blockers explicit.
 - **Shutdown:** handoff note — what landed, what’s queued, commands to resume.
+
+**Daily brief template** (paste into notes or Telegram to yourself):
+
+```text
+Date:
+Top 3:
+- 
+- 
+- 
+Blockers:
+Carry to tomorrow:
+Commands to resume:
+  cd … && bash scripts/andrea_doctor.sh
+```
+
+**End-of-day handoff template** (for Andrea / human operator):
+
+```text
+EOD — 
+Shipped:
+- 
+In progress:
+- 
+Risk / decisions needed:
+- 
+Tomorrow first action:
+- 
+Memory / privacy: anything to wipe or avoid retaining? (y/n + note)
+```
 
 ### 2.2 Weekly
 
@@ -74,5 +117,7 @@ See [.env.example](../.env.example): `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`. P
 ## 4. Related docs
 
 - [ANDREA_CAPABILITY_MATRIX.md](ANDREA_CAPABILITY_MATRIX.md)
+- [ANDREA_MODEL_POLICY.md](ANDREA_MODEL_POLICY.md) — `/model`, fallbacks, probe timeouts (**ms**)
 - [ANDREA_AUTONOMY_POLICY.md](ANDREA_AUTONOMY_POLICY.md)
 - [ANDREA_OPERATIONS_PLAYBOOK.md](ANDREA_OPERATIONS_PLAYBOOK.md)
+- [ANDREA_SECURITY.md](ANDREA_SECURITY.md)

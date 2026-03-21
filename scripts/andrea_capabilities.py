@@ -396,6 +396,13 @@ def main() -> int:
             "ready_with_limits": sum(1 for r in rows if r.status == "ready_with_limits"),
             "blocked": sum(1 for r in rows if r.status == "blocked"),
         },
+        "meta": {
+            "model_policy_doc": "docs/ANDREA_MODEL_POLICY.md",
+            "openclaw_probe_timeout_units": "ms",
+            "readiness_grade_script": "scripts/andrea_readiness_grade.py",
+            "security_sanity_script": "scripts/andrea_security_sanity.sh",
+            "doctor_script": "scripts/andrea_doctor.sh",
+        },
     }
     if args.json:
         print(json.dumps(payload, indent=2))

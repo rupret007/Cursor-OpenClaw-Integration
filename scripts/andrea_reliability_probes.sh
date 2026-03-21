@@ -35,6 +35,9 @@ echo "======== Andrea reliability probes ========"
 python3 -m py_compile "${BASE_DIR}/scripts/andrea_capabilities.py" || fail "py_compile andrea_capabilities"
 pass "py_compile andrea_capabilities.py"
 
+python3 -m py_compile "${BASE_DIR}/scripts/andrea_readiness_grade.py" || fail "py_compile andrea_readiness_grade"
+pass "py_compile andrea_readiness_grade.py"
+
 [[ -f "$CAP" ]] || fail "missing andrea_capabilities.py"
 [[ -f "$CLI" ]] || fail "missing cursor_openclaw.py"
 

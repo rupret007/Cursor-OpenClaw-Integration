@@ -8,6 +8,7 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CAP_SCRIPT = REPO_ROOT / "scripts" / "andrea_capabilities.py"
@@ -77,6 +78,36 @@ class TestAndreaCapabilities(unittest.TestCase):
             "session-logs",
         ):
             self.assertIn(name, ac.EXPECTED_OPENCLAW_SKILLS)
+
+    def test_gh_auth_state_reads_dotenv_without_process_env(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "scripts"))
+        import andrea_capabilities as ac  # noqa: E402
+
+        saved = {k: os.environ.pop(k) for k in ("GH_TOKEN", "GITHUB_TOKEN") if k in os.environ}
+        try:
+            with mock.patch.object(ac, "_which", return_value=True), mock.patch.object(
+                ac,
+                "_run_capture",
+                return_value=(1, "", "not logged in"),
+            ):
+                st, note = ac._gh_auth_state(
+                    {"GH_TOKEN": "ghp_test_dummy"},
+                    {},
+                )
+            self.assertEqual(st, "ready_with_limits")
+            self.assertIn("repo .env", note)
+        finally:
+            os.environ.update(saved)
+
+    def test_github_token_present_false_when_empty(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "scripts"))
+        import andrea_capabilities as ac  # noqa: E402
+
+        saved = {k: os.environ.pop(k) for k in ("GH_TOKEN", "GITHUB_TOKEN") if k in os.environ}
+        try:
+            self.assertFalse(ac._github_token_present({}, {}))
+        finally:
+            os.environ.update(saved)
 
 
 if __name__ == "__main__":

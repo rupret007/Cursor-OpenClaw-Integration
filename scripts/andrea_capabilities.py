@@ -164,17 +164,48 @@ def _run_capture(
         return 124, "", "timeout"
 
 
-def _gh_auth_state() -> Tuple[str, str]:
+def _github_token_present(
+    dotenv_main: Dict[str, str],
+    dotenv_skill: Dict[str, str],
+) -> bool:
+    """True if GH_TOKEN or GITHUB_TOKEN is set in process env or either .env file."""
+    if os.environ.get("GH_TOKEN", "").strip() or os.environ.get("GITHUB_TOKEN", "").strip():
+        return True
+    for key in ("GH_TOKEN", "GITHUB_TOKEN"):
+        if dotenv_main.get(key, "").strip() or dotenv_skill.get(key, "").strip():
+            return True
+    return False
+
+
+def _gh_auth_state(
+    dotenv_main: Dict[str, str],
+    dotenv_skill: Dict[str, str],
+) -> Tuple[str, str]:
     if not _which("gh"):
         return "blocked", "gh not on PATH"
     code, out, err = _run_capture(["gh", "auth", "status"], timeout=15.0)
     blob = (out + "\n" + err).lower()
     if code == 0 and ("logged in" in blob or "authenticated" in blob or "token:" in blob):
         return "ready", "gh reports authenticated session"
-    token = bool(os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN"))
+    token = _github_token_present(dotenv_main, dotenv_skill)
     if token:
-        return "ready_with_limits", "gh CLI session not confirmed; GH_TOKEN/GITHUB_TOKEN present"
-    return "blocked", "gh not authenticated and no GH_TOKEN/GITHUB_TOKEN in environment"
+        src = []
+        if os.environ.get("GH_TOKEN", "").strip() or os.environ.get("GITHUB_TOKEN", "").strip():
+            src.append("process env")
+        for label, store in (
+            ("repo .env", dotenv_main),
+            ("cursor_handoff .env", dotenv_skill),
+        ):
+            for key in ("GH_TOKEN", "GITHUB_TOKEN"):
+                if store.get(key, "").strip():
+                    src.append(label)
+                    break
+        detail = ", ".join(dict.fromkeys(src)) if src else "env files"
+        return (
+            "ready_with_limits",
+            f"gh CLI session not confirmed; GH_TOKEN/GITHUB_TOKEN present ({detail})",
+        )
+    return "blocked", "gh not authenticated and no GH_TOKEN/GITHUB_TOKEN in environment or .env files"
 
 
 def _openclaw_skills() -> Tuple[str, str, str]:
@@ -385,7 +416,7 @@ def build_matrix() -> List[Row]:
             )
         )
 
-    gh_st, gh_note = _gh_auth_state()
+    gh_st, gh_note = _gh_auth_state(dotenv_main, dotenv_skill)
     rows.append(
         Row(
             id="github:auth",

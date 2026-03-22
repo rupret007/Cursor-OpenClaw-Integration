@@ -14,6 +14,39 @@ SPEC.loader.exec_module(MODULE)  # type: ignore[attr-defined]
 
 
 class CursorOpenClawTests(unittest.TestCase):
+    def test_coerce_artifact_paths(self):
+        self.assertEqual(MODULE._coerce_artifact_paths(["a.txt", " b.txt "]), ["a.txt", "b.txt"])
+        payload = {
+            "artifacts": [
+                {"path": "reports/out.md"},
+                {"artifactPath": "build/log.txt"},
+                {"name": "screenshot.png"},
+                {"id": "artifact-1"},
+            ]
+        }
+        self.assertEqual(
+            MODULE._coerce_artifact_paths(payload),
+            ["reports/out.md", "build/log.txt", "screenshot.png", "artifact-1"],
+        )
+        self.assertEqual(MODULE._coerce_artifact_paths({"unexpected": 1}), [])
+
+    def test_safe_index_name(self):
+        self.assertEqual(MODULE._safe_index_name("bc-123"), "bc-123")
+        self.assertEqual(MODULE._safe_index_name("bc 123/abc"), "bc-123-abc")
+        self.assertEqual(MODULE._safe_index_name("///"), "agent")
+
+    def test_build_artifact_index_markdown(self):
+        md = MODULE._build_artifact_index_markdown(
+            "bc-1",
+            ["a.txt", "b.txt"],
+            {"a.txt": "https://example.com/a"},
+        )
+        self.assertIn("Cursor Artifact Index", md)
+        self.assertIn("`a.txt`", md)
+        self.assertIn("[link](https://example.com/a)", md)
+        self.assertIn("`b.txt`", md)
+        self.assertIn("_(unavailable)_", md)
+
     def test_parse_bool(self):
         self.assertTrue(MODULE.parse_bool("true"))
         self.assertTrue(MODULE.parse_bool("YES"))

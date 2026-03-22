@@ -20,6 +20,11 @@ FULL_DIALOGUE_RE = re.compile(
     r"show all (?:steps|handoffs|dialogue)|visible collaboration|show the llm dialogue)\b",
     re.I,
 )
+STOP_ONGOING_RE = re.compile(
+    r"\b(?:stop|cancel|terminate|end)\b.*\b(?:job|jobs|task|tasks)\b.*\b(?:ongoing|active|running|current|in progress)\b"
+    r"|\b(?:stop|cancel|terminate|end)\b.*\b(?:all|any)\b.*\b(?:job|jobs|task|tasks)\b",
+    re.I,
+)
 
 
 def _normalize_spaces(text: str) -> str:
@@ -72,6 +77,10 @@ def extract_routing_hints(text: str) -> Dict[str, Any]:
     }
 
 
+def is_stop_ongoing_request(text: str) -> bool:
+    return bool(STOP_ONGOING_RE.search(str(text or "")))
+
+
 def update_to_command(update: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
     Return a command body for bus.handle_command, or None if no user text to process.
@@ -108,6 +117,10 @@ def update_to_command(update: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "from_username": (msg.get("from") or {}).get("username"),
         "auto_cursor_job": False,
     }
+    if is_stop_ongoing_request(str(text)):
+        payload["stop_ongoing_jobs"] = True
+        payload["stop_scope"] = "chat_user_thread"
+        payload["stop_reason_text"] = routing["raw_text"][:500]
     if thread_id is not None:
         payload["message_thread_id"] = thread_id
     return {

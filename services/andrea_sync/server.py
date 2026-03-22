@@ -28,7 +28,7 @@ from .kill_switch import is_kill_switch_engaged, kill_switch_status
 from .observability import metric_log, structured_log
 from .policy import digest_age_seconds, evaluate_skill_absence_claim, get_capability_digest
 from .projector import project_task_dict
-from .schema import EventType
+from .schema import EventType, TaskStatus
 from .telegram_continuation import attach_continuation_if_applicable
 from .store import (
     append_event,
@@ -67,6 +67,14 @@ def default_db_path() -> Path:
 
 
 TERMINAL_CURSOR_STATUSES = frozenset({"FINISHED", "FAILED", "CANCELLED", "STOPPED", "EXPIRED"})
+ACTIVE_TASK_STATUSES = frozenset(
+    {
+        TaskStatus.CREATED.value,
+        TaskStatus.QUEUED.value,
+        TaskStatus.RUNNING.value,
+        TaskStatus.AWAITING_APPROVAL.value,
+    }
+)
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -192,6 +200,68 @@ class SyncServer:
                 print(f"andrea_sync worker error: {e}", flush=True)
             finally:
                 self.queue.task_done()
+
+    def _stop_active_telegram_tasks(
+        self,
+        *,
+        chat_id: Any,
+        from_user: Any,
+        message_thread_id: Any,
+        reason_text: str,
+    ) -> int:
+        if chat_id is None:
+            return 0
+
+        def same_user(a: Any, b: Any) -> bool:
+            if a is None and b is None:
+                return True
+            if a is None or b is None:
+                return False
+            try:
+                return int(a) == int(b)
+            except (TypeError, ValueError):
+                return str(a) == str(b)
+
+        def same_thread(a: Any, b: Any) -> bool:
+            if a is None and b is None:
+                return True
+            if a is None or b is None:
+                return False
+            return str(a) == str(b)
+
+        stopped = 0
+        for row in list_tasks(self.conn, limit=500):
+            if str(row.get("channel") or "") != "telegram":
+                continue
+            task_id = str(row.get("task_id") or "")
+            if not task_id:
+                continue
+            projection = project_task_dict(self.conn, task_id, "telegram")
+            if str(projection.get("status") or "") not in ACTIVE_TASK_STATUSES:
+                continue
+            meta = projection.get("meta")
+            telegram_meta = meta.get("telegram") if isinstance(meta, dict) else {}
+            if not isinstance(telegram_meta, dict):
+                continue
+            if str(telegram_meta.get("chat_id")) != str(chat_id):
+                continue
+            if not same_user(from_user, telegram_meta.get("from_user")):
+                continue
+            if not same_thread(message_thread_id, telegram_meta.get("message_thread_id")):
+                continue
+            append_event(
+                self.conn,
+                task_id,
+                EventType.JOB_FAILED,
+                {
+                    "error": "stopped_by_user",
+                    "message": "User requested stopping ongoing jobs in this chat context.",
+                    "reason_text": reason_text[:500],
+                    "source": "telegram_stop_all",
+                },
+            )
+            stopped += 1
+        return stopped
 
     def _expected_webhook_url(self) -> str:
         return tg_adapt.build_webhook_url(
@@ -1832,6 +1902,20 @@ def make_handler(server: SyncServer) -> type:
                 cmd = tg_adapt.update_to_command(update)
                 if not cmd:
                     self._send(200, b'{"ok":true}')
+                    return
+                payload = cmd.get("payload") if isinstance(cmd.get("payload"), dict) else {}
+                if payload.get("stop_ongoing_jobs"):
+                    def stop(c: sqlite3.Connection) -> Dict[str, Any]:
+                        stopped_count = server._stop_active_telegram_tasks(
+                            chat_id=payload.get("chat_id"),
+                            from_user=payload.get("from_user"),
+                            message_thread_id=payload.get("message_thread_id"),
+                            reason_text=str(payload.get("stop_reason_text") or payload.get("text") or ""),
+                        )
+                        return {"ok": True, "stopped": stopped_count}
+
+                    result = server.with_lock(stop)
+                    self._send(200, json.dumps(result).encode("utf-8"))
                     return
 
                 def run(c: sqlite3.Connection) -> Dict[str, Any]:

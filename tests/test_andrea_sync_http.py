@@ -678,6 +678,69 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
             else:
                 os.environ["ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS"] = prev_cont
 
+    def test_telegram_stop_all_ongoing_jobs_stops_active_chat_tasks(self) -> None:
+        created_ids: list[str] = []
+        for external_id, message_id in (("stop-all-1", 8101), ("stop-all-2", 8102)):
+            result = self._srv.with_lock(
+                lambda c: handle_command(
+                    c,
+                    {
+                        "command_type": "SubmitUserMessage",
+                        "channel": "telegram",
+                        "external_id": external_id,
+                        "payload": {
+                            "text": "please run this task",
+                            "routing_text": "please run this task",
+                            "chat_id": 7001,
+                            "from_user": 88,
+                            "message_id": message_id,
+                        },
+                    },
+                )
+            )
+            self.assertTrue(result.get("ok"))
+            created_ids.append(str(result["task_id"]))
+            self._srv.with_lock(
+                lambda c, tid=result["task_id"]: append_event(
+                    c,
+                    tid,
+                    EventType.JOB_QUEUED,
+                    {"kind": "cursor", "prompt_excerpt": "please run this task"},
+                )
+            )
+
+        stop_body = json.dumps(
+            {
+                "update_id": 880001,
+                "message": {
+                    "text": "Stop all jobs ongoing with you and .",
+                    "message_id": 880002,
+                    "chat": {"id": 7001, "type": "private"},
+                    "from": {"id": 88},
+                },
+            }
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            self._url("/v1/telegram/webhook"),
+            data=stop_body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "X-Telegram-Bot-Api-Secret-Token": "hdrsecret",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            self.assertEqual(resp.status, 200)
+            out = json.loads(resp.read().decode("utf-8"))
+        self.assertEqual(out.get("stopped"), 2)
+
+        for tid in created_ids:
+            req_task = urllib.request.Request(self._url(f"/v1/tasks/{tid}"), method="GET")
+            with urllib.request.urlopen(req_task, timeout=5) as resp_task:
+                detail = json.loads(resp_task.read().decode("utf-8"))
+            self.assertEqual(detail["task"]["status"], "failed")
+            self.assertEqual(detail["task"]["last_error"], "stopped_by_user")
+
     def test_telegram_greeting_routes_direct_without_cursor_task(self) -> None:
         body = json.dumps(
             {

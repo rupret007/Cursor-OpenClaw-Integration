@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import time
 from pathlib import Path
@@ -104,6 +105,55 @@ def claim_idempotency_or_get_existing(
     return new_task_id, True
 
 
+def delete_meta(conn: sqlite3.Connection, key: str) -> None:
+    conn.execute("DELETE FROM meta WHERE key = ?", (key,))
+    conn.commit()
+
+
+def claim_scoped_idempotency(
+    conn: sqlite3.Connection, key: str, task_id: str
+) -> str:
+    """
+    Idempotency for operations on an existing task (Telegram retries, cursor reports).
+
+    Returns:
+        'fresh' — first time this key was claimed for this task_id
+        'duplicate' — same key and same task_id (safe retry)
+        'conflict' — key exists for a different task_id (should not happen)
+    """
+    row = conn.execute(
+        "SELECT task_id FROM idempotency WHERE idempotency_key = ?",
+        (key,),
+    ).fetchone()
+    if row:
+        existing = str(row["task_id"])
+        if existing == task_id:
+            return "duplicate"
+        return "conflict"
+    ts = time.time()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row2 = conn.execute(
+            "SELECT task_id FROM idempotency WHERE idempotency_key = ?",
+            (key,),
+        ).fetchone()
+        if row2:
+            conn.rollback()
+            existing = str(row2["task_id"])
+            if existing == task_id:
+                return "duplicate"
+            return "conflict"
+        conn.execute(
+            "INSERT INTO idempotency(idempotency_key, task_id, created_at) VALUES (?,?,?)",
+            (key, task_id, ts),
+        )
+        conn.commit()
+        return "fresh"
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def claim_idempotency_and_create_task(
     conn: sqlite3.Connection,
     key: str,
@@ -159,6 +209,11 @@ def load_events_for_task(
         try:
             payload = json.loads(r["payload_json"] or "{}")
         except json.JSONDecodeError:
+            if os.environ.get("ANDREA_SYNC_JSON_PARSE_WARNINGS", "0") == "1":
+                print(
+                    f"andrea_sync JSON parse warning: task={task_id} seq={r['seq']}",
+                    flush=True,
+                )
             payload = {}
         try:
             seq = int(r["seq"])
@@ -293,6 +348,45 @@ def list_recent_telegram_task_ids(conn: sqlite3.Connection, limit: int = 25) -> 
         LIMIT ?
         """,
         (Channel.TELEGRAM.value, SYSTEM_TASK_ID, limit),
+    ).fetchall()
+    return [str(r["task_id"]) for r in rows]
+
+
+def list_telegram_task_ids_for_chat(
+    conn: sqlite3.Connection,
+    chat_id: Any,
+    *,
+    limit: int = 25,
+) -> List[str]:
+    """
+    Telegram tasks that have at least one UserMessage with this chat_id,
+    ordered by task updated_at (best-effort per-chat continuation lookup).
+    """
+    if chat_id is None:
+        return []
+    cid = str(chat_id).strip()
+    rows = conn.execute(
+        """
+        SELECT t.task_id
+        FROM tasks t
+        WHERE t.channel = ?
+          AND t.task_id != ?
+          AND EXISTS (
+            SELECT 1 FROM events e
+            WHERE e.task_id = t.task_id
+              AND e.event_type = ?
+              AND CAST(json_extract(e.payload_json, '$.chat_id') AS TEXT) = ?
+          )
+        ORDER BY t.updated_at DESC
+        LIMIT ?
+        """,
+        (
+            Channel.TELEGRAM.value,
+            SYSTEM_TASK_ID,
+            EventType.USER_MESSAGE.value,
+            cid,
+            limit,
+        ),
     ).fetchall()
     return [str(r["task_id"]) for r in rows]
 

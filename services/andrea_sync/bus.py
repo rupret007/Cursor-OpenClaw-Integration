@@ -1,6 +1,7 @@
 """Command bus: validate commands, enforce idempotency, append events."""
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import time
@@ -14,12 +15,14 @@ from .schema import (
     CommandType,
     EventType,
     new_task_id,
+    normalize_scoped_idempotency_key,
     validate_command_type,
 )
 from .store import (
     SYSTEM_TASK_ID,
     append_event,
     claim_idempotency_and_create_task,
+    claim_scoped_idempotency,
     ensure_system_task,
     set_meta,
     task_exists,
@@ -116,6 +119,26 @@ def _append(
     conn: sqlite3.Connection, task_id: str, et: EventType, payload: Dict[str, Any]
 ) -> int:
     return append_event(conn, task_id, et, payload)
+
+
+def _user_message_scoped_idempotency_key(env: CommandEnvelope) -> Optional[str]:
+    """Stable dedupe key for SubmitUserMessage on an existing task (e.g. Telegram retries)."""
+    if not env.task_id:
+        return None
+    if env.idempotency_key and str(env.idempotency_key).strip():
+        return normalize_scoped_idempotency_key(
+            str(env.task_id),
+            str(env.idempotency_key).strip(),
+            env.command_type.value,
+        )
+    ext = (env.external_id or "").strip()
+    if ext:
+        return normalize_scoped_idempotency_key(
+            env.channel.value,
+            f"{ext}|{env.task_id}",
+            env.command_type.value,
+        )
+    return None
 
 
 def _handle_create_task(
@@ -250,6 +273,23 @@ def _handle_user_message(
     tid = env.task_id
     if not task_exists(conn, tid):
         return {"ok": False, "error": f"unknown task_id: {tid}"}
+    scoped = _user_message_scoped_idempotency_key(env)
+    if scoped:
+        outcome = claim_scoped_idempotency(conn, scoped, tid)
+        if outcome == "conflict":
+            return {"ok": False, "error": "idempotency_key_conflict"}
+        if outcome == "duplicate":
+            _append(
+                conn,
+                tid,
+                EventType.COMMAND_DEDUPED,
+                {
+                    "command_type": env.command_type.value,
+                    "idempotency_key": scoped,
+                    "scoped": True,
+                },
+            )
+            return {"ok": True, "task_id": tid, "deduped": True}
     _append(
         conn,
         tid,
@@ -287,7 +327,10 @@ def _handle_user_message(
             conn,
             tid,
             EventType.EXTERNAL_REF,
-            {"kind": "telegram_update", "ref": env.external_id},
+            {
+                "kind": f"{env.channel.value}_update",
+                "ref": env.external_id,
+            },
         )
     return {"ok": True, "task_id": tid}
 
@@ -371,6 +414,26 @@ def _handle_cursor_report(conn: sqlite3.Connection, env: CommandEnvelope, idem: 
     if env.payload.get("payload") is not None and not isinstance(env.payload.get("payload"), dict):
         return {"ok": False, "error": "payload.payload must be a JSON object"}
     inner = env.payload.get("payload") if isinstance(env.payload.get("payload"), dict) else {}
+    inner_canon = json.dumps(inner, sort_keys=True, ensure_ascii=False, default=str)
+    inner_hash = hashlib.sha256(inner_canon.encode("utf-8")).hexdigest()[:32]
+    report_key = normalize_scoped_idempotency_key(
+        str(tid), f"{cet.value}|{inner_hash}", "ReportCursorEvent"
+    )
+    outcome = claim_scoped_idempotency(conn, report_key, tid)
+    if outcome == "conflict":
+        return {"ok": False, "error": "cursor_report_idempotency_conflict"}
+    if outcome == "duplicate":
+        _append(
+            conn,
+            tid,
+            EventType.COMMAND_DEDUPED,
+            {
+                "command_type": "ReportCursorEvent",
+                "idempotency_key": report_key,
+                "scoped": True,
+            },
+        )
+        return {"ok": True, "task_id": tid, "deduped": True}
     _append(conn, tid, EventType.COMMAND_RECEIVED, {"command_type": "ReportCursorEvent"})
     _append(conn, tid, cet, inner)
     return {"ok": True, "task_id": tid}

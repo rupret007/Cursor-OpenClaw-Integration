@@ -84,6 +84,14 @@ def normalize_idempotency_base(channel: str, external_id: str, command_type: str
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
 
 
+def normalize_scoped_idempotency_key(
+    scope_a: str, scope_b: str, command_type: str
+) -> str:
+    """Stable key for idempotency rows scoped to an existing task or report payload."""
+    raw = f"{scope_a}|{scope_b}|{command_type}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+
+
 def new_task_id() -> str:
     return f"tsk_{uuid.uuid4().hex[:16]}"
 

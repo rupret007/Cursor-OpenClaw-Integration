@@ -208,6 +208,8 @@ def _handle_user_message(
             "from_user": env.payload.get("from_user"),
             "from_username": env.payload.get("from_username"),
         }
+        if env.payload.get("message_thread_id") is not None:
+            um["message_thread_id"] = env.payload.get("message_thread_id")
         if env.payload.get("telegram_continuation"):
             um["telegram_continuation"] = True
         if env.payload.get("telegram_continuation_anchor_message_id") is not None:
@@ -271,6 +273,8 @@ def _handle_user_message(
         "from_user": env.payload.get("from_user"),
         "from_username": env.payload.get("from_username"),
     }
+    if env.payload.get("message_thread_id") is not None:
+        um2["message_thread_id"] = env.payload.get("message_thread_id")
     if env.payload.get("telegram_continuation"):
         um2["telegram_continuation"] = True
     if env.payload.get("telegram_continuation_anchor_message_id") is not None:

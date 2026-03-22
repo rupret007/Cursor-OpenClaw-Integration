@@ -134,11 +134,11 @@ def format_ack_message(
     if worker_label == "OpenClaw":
         body = [
             "Andrea:",
-            "I got your message and queued it for OpenClaw.",
+            "OpenClaw is taking point — it coordinates first, then delegates to Cursor when the repo needs execution.",
             "",
-            "What happened:",
-            "- Andrea created a task and will keep this thread updated.",
-            "- OpenClaw will handle this directly or bring in Cursor if the work needs deeper repo execution.",
+            "What happens next:",
+            "- OpenClaw runs the coordination / handoff pass (same flow as before).",
+            "- Status updates are threaded under your message so this chat stays readable.",
             *([preferred_model_note] if preferred_model_note else []),
             *([routing_note] if routing_note else []),
             "",
@@ -152,7 +152,7 @@ def format_ack_message(
             "Andrea:",
             "I got your message and queued it for Cursor.",
             "",
-            "What happened:",
+            "What happens next:",
             "- Andrea created a task and will keep this thread updated.",
             "- Cursor will be started automatically.",
             *([preferred_model_note] if preferred_model_note else []),
@@ -171,25 +171,14 @@ def format_continuation_notice(
     chunk_preview: str = "",
 ) -> str:
     """Short Telegram copy when a follow-up message was merged onto the current task."""
-    preview = _clip(chunk_preview, 120)
+    preview = _clip(chunk_preview, 100)
     lines = [
         "Andrea:",
-        "I attached this message to your current task (same thread) so OpenClaw/Cursor stay aligned.",
-        "",
-        "What happened:",
-        "- This looks like a continuation of your last prompt, not a separate request.",
-        "- Andrea kept one logical task instead of starting a duplicate job.",
+        f"Merged with your current task `{task_id}` — OpenClaw keeps one coordination run (no duplicate job).",
     ]
     if preview:
-        lines.extend(["", f"Latest chunk: {preview}"])
-    lines.extend(
-        [
-            "",
-            "Technical details:",
-            f"- Task: {task_id}",
-            "- Note: continuation merged",
-        ]
-    )
+        lines.append(f"Latest chunk: {preview}")
+    lines.append("Reply is threaded under your first message.")
     return "\n".join(lines)
 
 

@@ -302,11 +302,15 @@ class SyncServer:
         if not self._claim_notification_attempt(marker):
             return
         try:
+            reply_anchor = telegram_meta.get("first_user_message_id")
+            if reply_anchor is None:
+                reply_anchor = telegram_meta.get("message_id")
             tg_adapt.send_text_message(
                 bot_token=self.telegram_bot_token,
                 chat_id=chat_id,
                 text=text,
-                reply_to_message_id=telegram_meta.get("message_id"),
+                reply_to_message_id=reply_anchor,
+                message_thread_id=telegram_meta.get("message_thread_id"),
             )
 
             def mark(c: sqlite3.Connection) -> None:

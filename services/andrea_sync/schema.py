@@ -232,10 +232,16 @@ def fold_projection(
                 telegram_meta["continuation_count"] = int(
                     telegram_meta.get("continuation_count") or 0
                 ) + 1
+            # Anchor for Telegram reply threading: keep status updates under the first user message.
+            if payload.get("message_id") is not None and telegram_meta.get(
+                "first_user_message_id"
+            ) is None:
+                telegram_meta["first_user_message_id"] = payload.get("message_id")
             for src_key, dst_key in (
                 ("chat_id", "chat_id"),
                 ("chat_type", "chat_type"),
                 ("message_id", "message_id"),
+                ("message_thread_id", "message_thread_id"),
                 ("from_user", "from_user"),
                 ("from_username", "from_username"),
             ):

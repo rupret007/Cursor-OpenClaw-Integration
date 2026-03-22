@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import os
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -123,11 +125,13 @@ class TestLockstepTelegramE2EHelpers(unittest.TestCase):
                 with mock.patch.object(e2e, "check_env", return_value=0):
                     with mock.patch.object(e2e, "telegram_api", side_effect=responses):
                         with mock.patch.object(e2e.time, "sleep") as sleep_mock:
-                            rc = e2e.cmd_webhook_info(
-                                require_match=True,
-                                attempts=2,
-                                retry_delay_sec=0.01,
-                            )
+                            out = io.StringIO()
+                            with redirect_stdout(out):
+                                rc = e2e.cmd_webhook_info(
+                                    require_match=True,
+                                    attempts=2,
+                                    retry_delay_sec=0.01,
+                                )
         self.assertEqual(rc, 0)
         sleep_mock.assert_called_once()
 

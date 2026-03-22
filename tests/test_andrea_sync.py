@@ -1182,6 +1182,26 @@ class TestAndreaSync(unittest.TestCase):
         self.assertFalse(result.get("ok"))
         self.assertIn("json object", str(result.get("error", "")).lower())
 
+    def test_load_events_for_task_skips_malformed_seq_or_ts_rows(self) -> None:
+        fake_conn = mock.Mock()
+        fake_conn.execute.return_value.fetchall.return_value = [
+            {
+                "seq": 1,
+                "ts": 123.0,
+                "event_type": EventType.JOB_PROGRESS.value,
+                "payload_json": "{}",
+            },
+            {
+                "seq": 2,
+                "ts": None,
+                "event_type": EventType.JOB_PROGRESS.value,
+                "payload_json": "{}",
+            },
+        ]
+        events = load_events_for_task(fake_conn, "tsk_demo")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0][2], EventType.JOB_PROGRESS.value)
+
     def test_alexa_parse_intent(self) -> None:
         body = {
             "session": {"sessionId": "s1"},

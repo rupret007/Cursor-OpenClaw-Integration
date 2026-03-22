@@ -160,7 +160,12 @@ def load_events_for_task(
             payload = json.loads(r["payload_json"] or "{}")
         except json.JSONDecodeError:
             payload = {}
-        out.append((int(r["seq"]), float(r["ts"]), str(r["event_type"]), payload))
+        try:
+            seq = int(r["seq"])
+            ts = float(r["ts"])
+        except (TypeError, ValueError):
+            continue
+        out.append((seq, ts, str(r["event_type"]), payload))
     return out
 
 

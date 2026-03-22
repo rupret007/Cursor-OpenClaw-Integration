@@ -51,6 +51,24 @@ Environment:
 EOF
 }
 
+normalize_timeout_ms() {
+  local raw="${1:-}"
+  [[ -n "$raw" ]] || return 1
+  if [[ "$raw" =~ ^[0-9]+$ ]]; then
+    echo "$raw"
+    return 0
+  fi
+  if [[ "$raw" =~ ^[0-9]+ms$ ]]; then
+    echo "${raw%ms}"
+    return 0
+  fi
+  if [[ "$raw" =~ ^[0-9]+s$ ]]; then
+    echo "$(( ${raw%s} * 1000 ))"
+    return 0
+  fi
+  return 1
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --required-skills) REQUIRED_SKILLS="${2:-}"; shift 2 ;;
@@ -65,10 +83,12 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ "$OPENCLAW_PROBE_MS" =~ ^[0-9]+$ ]] || die "--probe-timeout-ms must be integer milliseconds"
+OPENCLAW_PROBE_MS="$(normalize_timeout_ms "$OPENCLAW_PROBE_MS")" || die "--probe-timeout-ms must be integer milliseconds (or Nms / Ns)"
 [[ -n "$REQUIRED_SKILLS" ]] || die "--required-skills cannot be empty"
 
-command -v openclaw >/dev/null 2>&1 || die "openclaw not on PATH"
+if [[ "$DRY_RUN" -ne 1 ]]; then
+  command -v openclaw >/dev/null 2>&1 || die "openclaw not on PATH"
+fi
 [[ -d "$BASE_DIR" ]] || die "repo base missing: $BASE_DIR"
 
 sync_skill() {
@@ -91,6 +111,10 @@ restart_gateway() {
 
 check_required_skills() {
   note "validate required skills list"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    note "(dry-run) would validate required skills: ${REQUIRED_SKILLS}"
+    return 0
+  fi
   local out
   out="$(openclaw skills list)"
   local missing=0
@@ -112,6 +136,10 @@ check_required_skills() {
 check_eligible_skills() {
   [[ -n "$ELIGIBLE_SKILLS" ]] || return 0
   note "validate eligible skills (ANDREA_OPENCLAW_ELIGIBLE_SKILLS)"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    note "(dry-run) would validate eligible skills: ${ELIGIBLE_SKILLS}"
+    return 0
+  fi
   command -v jq >/dev/null 2>&1 || die "jq not on PATH (required for eligible skill checks)"
   local failed=0
   IFS=',' read -r -a elig <<<"$ELIGIBLE_SKILLS"

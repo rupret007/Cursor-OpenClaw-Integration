@@ -47,6 +47,24 @@ Options:
 EOF
 }
 
+normalize_timeout_ms() {
+  local raw="${1:-}"
+  [[ -n "$raw" ]] || return 1
+  if [[ "$raw" =~ ^[0-9]+$ ]]; then
+    echo "$raw"
+    return 0
+  fi
+  if [[ "$raw" =~ ^[0-9]+ms$ ]]; then
+    echo "${raw%ms}"
+    return 0
+  fi
+  if [[ "$raw" =~ ^[0-9]+s$ ]]; then
+    echo "$(( ${raw%s} * 1000 ))"
+    return 0
+  fi
+  return 1
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --order) ORDER="${2:-}"; shift 2 ;;
@@ -58,7 +76,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ "$PROBE_MS" =~ ^[0-9]+$ ]] || die "--probe-timeout-ms must be integer milliseconds"
+PROBE_MS="$(normalize_timeout_ms "$PROBE_MS")" || die "--probe-timeout-ms must be integer milliseconds (or Nms / Ns)"
 [[ -n "$ORDER" ]] || die "--order cannot be empty"
 
 if [[ "$DRY_RUN" -ne 1 ]] && ! command -v openclaw >/dev/null 2>&1; then

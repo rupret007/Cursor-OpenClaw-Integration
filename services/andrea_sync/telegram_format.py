@@ -169,12 +169,18 @@ def format_continuation_notice(
     task_id: str,
     *,
     chunk_preview: str = "",
+    worker_label: str = "OpenClaw",
 ) -> str:
     """Short Telegram copy when a follow-up message was merged onto the current task."""
     preview = _clip(chunk_preview, 100)
+    lane_line = "OpenClaw keeps one coordination run"
+    if worker_label == "OpenClaw and Cursor":
+        lane_line = "OpenClaw and Cursor keep one shared execution thread"
+    elif worker_label == "Cursor":
+        lane_line = "Cursor keeps one execution run"
     lines = [
         "Andrea:",
-        f"Merged with your current task `{task_id}` — OpenClaw keeps one coordination run (no duplicate job).",
+        f"Merged with your current task `{task_id}` — {lane_line} (no duplicate job).",
     ]
     if preview:
         lines.append(f"Latest chunk: {preview}")
@@ -182,15 +188,24 @@ def format_continuation_notice(
     return "\n".join(lines)
 
 
-def format_late_chunk_notice(task_id: str) -> str:
-    """User text arrived after OpenClaw already started; may not be in the current run."""
+def format_late_chunk_notice(task_id: str, *, worker_label: str = "OpenClaw") -> str:
+    """User text arrived after execution already started; may not be in the current run."""
+    if worker_label == "OpenClaw and Cursor":
+        headline = "I received another message while OpenClaw and Cursor were already running for this task."
+        meaning = "- Your latest text is saved on the task timeline, but the in-flight collaboration may not include it."
+    elif worker_label == "Cursor":
+        headline = "I received another message while Cursor was already running for this task."
+        meaning = "- Your latest text is saved on the task timeline, but the in-flight Cursor run may not include it."
+    else:
+        headline = "I received another message while OpenClaw was already running for this task."
+        meaning = "- Your latest text is saved on the task timeline, but the in-flight OpenClaw run may not include it."
     return "\n".join(
         [
             "Andrea:",
-            "I received another message while OpenClaw was already running for this task.",
+            headline,
             "",
             "What this means:",
-            "- Your latest text is saved on the task timeline, but the in-flight OpenClaw run may not include it.",
+            meaning,
             "- For a follow-up that must change execution, send a new request after this one finishes.",
             "",
             f"Task: `{task_id}`",
@@ -334,8 +349,10 @@ def format_final_message(
         if pr_url:
             if worker_label == "OpenClaw and Cursor" or delegated_to_cursor:
                 andrea_line = "I finished your request and there is a PR ready to review."
-            else:
+            elif worker_label == "OpenClaw":
                 andrea_line = "I finished your request and OpenClaw completed it successfully."
+            else:
+                andrea_line = "I finished your request and Cursor prepared a PR for review."
         elif summary_sentence:
             andrea_line = f"I finished your request. {summary_sentence}"
         else:
@@ -343,26 +360,31 @@ def format_final_message(
     else:
         andrea_line = "I could not complete your request successfully, but I captured the failure details below."
 
+    if completed:
+        if worker_label == "OpenClaw and Cursor" or delegated_to_cursor:
+            happened_line = "- OpenClaw coordinated this task and Cursor finished the heavy execution."
+        elif worker_label == "OpenClaw":
+            happened_line = "- OpenClaw finished processing this task."
+        else:
+            happened_line = "- Cursor finished processing this task."
+    else:
+        if worker_label == "OpenClaw and Cursor" or delegated_to_cursor:
+            happened_line = "- OpenClaw and Cursor did not complete this task successfully."
+        elif worker_label == "OpenClaw":
+            happened_line = "- OpenClaw ended in a failed state for this task."
+        else:
+            happened_line = "- Cursor ended in a failed state for this task."
+
     lines = [
         "Andrea:",
         andrea_line,
         "",
         "What happened:",
-        (
-            "- OpenClaw coordinated this task and Cursor finished the heavy execution."
-            if completed and (worker_label == "OpenClaw and Cursor" or delegated_to_cursor)
-            else "- OpenClaw finished processing this task."
-            if completed and worker_label == "OpenClaw"
-            else "- Cursor finished processing this task."
-            if completed
-            else "- OpenClaw ended in a failed state for this task."
-            if worker_label == "OpenClaw"
-            else "- Cursor ended in a failed state for this task."
-        ),
+        happened_line,
     ]
     if completed and pr_url:
         lines.append("- A PR is available for review.")
-    elif completed and summary_sentence:
+    elif completed and summary_sentence and not andrea_line.endswith(summary_sentence):
         lines.append(f"- Outcome: {summary_sentence}")
     elif not completed and last_error:
         lines.append(f"- Failure: {_clip(last_error, 220)}")
@@ -384,7 +406,8 @@ def format_final_message(
     else:
         preferred_model_note = _preferred_model_note(preferred_model_label)
         if preferred_model_note:
-            lines.extend(["", preferred_model_note[2:]])
+            note_body = preferred_model_note[2:] if preferred_model_note.startswith("- ") else preferred_model_note
+            lines.extend(["", note_body])
 
     lines.extend(
         [

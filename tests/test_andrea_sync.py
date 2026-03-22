@@ -24,11 +24,13 @@ from services.andrea_sync.schema import CommandType, EventType, TaskStatus, norm
 from services.andrea_sync.store import (  # noqa: E402
     append_event,
     connect,
+    get_meta,
     list_tasks,
     list_telegram_task_ids_for_chat,
     load_events_for_task,
     load_recent_telegram_history,
     migrate,
+    set_meta,
 )
 from services.andrea_sync.andrea_router import route_message  # noqa: E402
 from services.andrea_sync.telegram_format import (  # noqa: E402
@@ -575,6 +577,39 @@ class TestAndreaSync(unittest.TestCase):
         self.assertTrue(r_dup.get("ok"))
         self.assertTrue(r_dup.get("deduped"))
 
+    def test_submit_user_message_without_external_id_creates_distinct_tasks(self) -> None:
+        first = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "payload": {
+                    "text": "first orphan message",
+                    "chat_id": 91001,
+                    "message_id": 1,
+                    "from_user": 1,
+                },
+            },
+        )
+        second = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "payload": {
+                    "text": "second orphan message",
+                    "chat_id": 91001,
+                    "message_id": 2,
+                    "from_user": 1,
+                },
+            },
+        )
+        self.assertTrue(first.get("ok"))
+        self.assertTrue(second.get("ok"))
+        self.assertNotEqual(first["task_id"], second["task_id"])
+        self.assertFalse(first.get("deduped"))
+        self.assertFalse(second.get("deduped"))
+
     def test_report_cursor_event_idempotent_same_payload(self) -> None:
         created = handle_command(
             self.conn,
@@ -964,6 +999,17 @@ class TestAndreaSync(unittest.TestCase):
         self.assertIn("OpenClaw said:", text)
         self.assertIn("OpenClaw session: sess_demo", text)
 
+    def test_telegram_final_message_for_cursor_pr_mentions_cursor(self) -> None:
+        text = format_final_message(
+            "tsk_demo",
+            status="completed",
+            summary="Implemented the fix and opened a PR.",
+            worker_label="Cursor",
+            pr_url="https://github.com/example/repo/pull/2",
+        )
+        self.assertIn("Cursor prepared a PR for review", text)
+        self.assertNotIn("OpenClaw completed it successfully", text)
+
     def test_telegram_final_message_uses_openclaw_model_speaker_label(self) -> None:
         text = format_final_message(
             "tsk_demo",
@@ -997,6 +1043,17 @@ class TestAndreaSync(unittest.TestCase):
         self.assertIn("could not complete", text)
         self.assertIn("Failure:", text)
         self.assertIn("Error: cursor_status_failed", text)
+
+    def test_telegram_final_message_failed_hybrid_mentions_both_workers(self) -> None:
+        text = format_final_message(
+            "tsk_demo",
+            status="failed",
+            summary="The collaboration failed before completion.",
+            last_error="handoff_failed",
+            worker_label="OpenClaw and Cursor",
+            delegated_to_cursor=True,
+        )
+        self.assertIn("OpenClaw and Cursor did not complete this task successfully", text)
 
     def test_server_followups_route_greeting_direct(self) -> None:
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
@@ -1860,6 +1917,64 @@ class TestAndreaSync(unittest.TestCase):
             server._schedule_cursor_execution(created["task_id"])
         thread_cls.assert_called_once()
         thread_instance.start.assert_called_once()
+
+    def test_run_delegated_job_clears_executor_started_marker(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        marker = server._meta_key("executor_started", "tsk_demo")
+        set_meta(server.conn, marker, "123.0")
+        with mock.patch.object(server, "_task_execution_lane", return_value="direct_cursor"):
+            with mock.patch.object(server, "_run_cursor_job") as run_cursor:
+                server._run_delegated_job("tsk_demo")
+        run_cursor.assert_called_once_with("tsk_demo")
+        self.assertIsNone(get_meta(server.conn, marker))
+
+    def test_telegram_followups_prefer_openclaw_raw_text_when_summary_is_generic(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "1"
+        os.environ["TELEGRAM_BOT_TOKEN"] = "telegram-test-token"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        created = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-openclaw-generic-summary",
+                "payload": {
+                    "text": "please do the heavier backend work",
+                    "chat_id": 10001,
+                    "message_id": 10,
+                    "from_user": 7,
+                },
+            },
+        )
+        append_event(
+            server.conn,
+            created["task_id"],
+            EventType.JOB_STARTED,
+            {"backend": "openclaw", "runner": "openclaw", "execution_lane": "openclaw_hybrid"},
+        )
+        append_event(
+            server.conn,
+            created["task_id"],
+            EventType.JOB_COMPLETED,
+            {
+                "summary": "OpenClaw completed the delegated task.",
+                "backend": "openclaw",
+                "runner": "openclaw",
+                "raw_text": "Implemented the actual fix and updated the docs with the final behavior.",
+            },
+        )
+        snapshot = server._task_snapshot(created["task_id"])
+        assert snapshot is not None
+        with mock.patch.object(tg_adapt, "send_text_message") as send_mock:
+            server._handle_telegram_followups(created["task_id"], snapshot)
+        sent_text = send_mock.call_args.kwargs["text"]
+        self.assertIn("Implemented the actual fix and updated the docs", sent_text)
 
     def test_publish_capability_requires_internal_channel(self) -> None:
         r = handle_command(

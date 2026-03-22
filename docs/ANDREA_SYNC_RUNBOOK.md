@@ -17,6 +17,7 @@ When `ANDREA_SYNC_BACKGROUND_ENABLED=1`, the server sets meta `andrea_bridge:exe
 **Mitigation:**
 
 - Set `ANDREA_SYNC_EXECUTOR_STARTED_TTL_SECONDS` to a positive value (e.g. `14400` for 4h) to allow reclaim after the TTL.
+- **Important:** TTL must be **greater than the longest expected job** (OpenClaw/Cursor run). If TTL expires while the first runner is still alive, a **second runner** can start for the same task.
 - Or delete the meta key manually (SQLite `DELETE FROM meta WHERE key LIKE 'andrea_bridge:executor_started:%'`).
 
 ## Schema / migrations

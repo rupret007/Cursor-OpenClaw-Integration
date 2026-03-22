@@ -492,6 +492,19 @@ class TestAndreaSyncHTTP(unittest.TestCase):
         finally:
             self._srv.alexa_edge_token = prev
 
+    def test_alexa_rejects_invalid_json_body(self) -> None:
+        req = urllib.request.Request(
+            self._url("/v1/alexa"),
+            data=b"\xff\xfe\xfd",
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(req, timeout=5)
+        self.assertEqual(ctx.exception.code, 400)
+        body = json.loads(ctx.exception.read().decode("utf-8"))
+        self.assertEqual(body["error"], "invalid_json")
+
 
 class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
     """Webhook auth via X-Telegram-Bot-Api-Secret-Token only (no query secret)."""

@@ -8,11 +8,20 @@ import ssl
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from typing import Mapping
+
 
 def _cert_url_allowed(url: str) -> bool:
     u = url.strip().lower()
     return u.startswith("https://s3.amazonaws.com/echo.api/")
+
+
+class _RejectCertRedirects(urllib.request.HTTPRedirectHandler):
+    """Do not follow redirects when fetching Alexa signing certificates."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        raise ValueError("alexa_cert_url_redirect")
 
 
 def alexa_signature_verification_enabled() -> bool:
@@ -26,7 +35,7 @@ def verify_alexa_http_request(
     expected_application_id: str,
 ) -> None:
     """
-    Validate Alexa POST: timestamp freshness, applicationId, and request signature.
+    Validate Alexa POST: signature on raw body (per Amazon), then JSON checks.
 
     Requires: pip install cryptography
     Env: ANDREA_ALEXA_VERIFY_SIGNATURES=1 and ANDREA_ALEXA_SKILL_ID (application id).
@@ -40,52 +49,49 @@ def verify_alexa_http_request(
 
     try:
         from cryptography import x509
-        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives import hashes
         from cryptography.hazmat.primitives.asymmetric import padding
-    except ImportError as exc:  # pragma: no cover - optional dependency
+        from cryptography.x509 import DNSName
+        from cryptography.x509.oid import ExtensionOID
+    except ImportError as exc:  # pragma: no cover
         raise RuntimeError(
             "Install the 'cryptography' package to enable ANDREA_ALEXA_VERIFY_SIGNATURES"
         ) from exc
 
-    try:
-        body = json.loads(body_bytes.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError("invalid JSON body") from exc
-
-    session = body.get("session") or {}
-    app = (session.get("application") or {}).get("applicationId") or ""
-    if app != expected_application_id.strip():
-        raise ValueError("alexa applicationId mismatch")
-
-    request_block = body.get("request") or {}
-    ts = request_block.get("timestamp")
-    if not ts:
-        raise ValueError("missing request.timestamp")
-    try:
-        from datetime import datetime
-
-        req_time = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
-        skew = abs(time.time() - req_time.timestamp())
-        if skew > 150:
-            raise ValueError("request timestamp outside allowed skew")
-    except (TypeError, ValueError) as exc:
-        raise ValueError("invalid request.timestamp") from exc
+    def _validate_leaf_certificate(leaf: x509.Certificate) -> None:
+        now = datetime.now(timezone.utc)
+        nb = leaf.not_valid_before_utc
+        na = leaf.not_valid_after_utc
+        if now < nb or now > na:
+            raise ValueError("alexa_cert_outside_validity_window")
+        try:
+            san_ext = leaf.extensions.get_extension_for_oid(ExtensionOID.SUBJECT_ALTERNATIVE_NAME)
+        except x509.ExtensionNotFound as exc:
+            raise ValueError("alexa_cert_missing_san") from exc
+        dns_names = san_ext.value.get_values_for_type(DNSName)
+        if "echo-api.amazon.com" not in dns_names:
+            raise ValueError("alexa_cert_san_mismatch")
 
     lower = {str(k).lower(): str(v).strip() for k, v in headers.items() if v is not None}
     cert_url = lower.get("signaturecertchainurl")
     signature_b64 = lower.get("signature")
     if not cert_url or not signature_b64:
-        raise ValueError("missing Signature or SignatureCertChainUrl headers")
+        raise ValueError("alexa_missing_signature_headers")
 
     cert_url_s = str(cert_url).strip()
     if not _cert_url_allowed(cert_url_s):
-        raise ValueError("untrusted SignatureCertChainUrl")
+        raise ValueError("alexa_untrusted_cert_url")
 
+    ctx = ssl.create_default_context()
+    opener = urllib.request.build_opener(
+        _RejectCertRedirects(),
+        urllib.request.HTTPSHandler(context=ctx),
+    )
     try:
-        with urllib.request.urlopen(cert_url_s, timeout=10, context=ssl.create_default_context()) as resp:
+        with opener.open(cert_url_s, timeout=10) as resp:
             pem_chain = resp.read()
-    except (urllib.error.URLError, OSError) as exc:
-        raise ValueError(f"failed to download cert chain: {exc}") from exc
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        raise ValueError("alexa_cert_fetch_failed") from exc
 
     try:
         try:
@@ -93,14 +99,14 @@ def verify_alexa_http_request(
         except TypeError:
             signature = base64.b64decode(signature_b64)
     except (TypeError, ValueError) as exc:
-        raise ValueError("invalid Signature base64") from exc
+        raise ValueError("alexa_invalid_signature_base64") from exc
 
     certs = _split_pem_certs(pem_chain.decode("utf-8", errors="replace"))
     if not certs:
-        raise ValueError("empty certificate chain")
+        raise ValueError("alexa_empty_certificate_chain")
 
-    leaf_pem = certs[0].encode("utf-8")
-    leaf = x509.load_pem_x509_certificate(leaf_pem)
+    leaf = x509.load_pem_x509_certificate(certs[0].encode("utf-8"))
+    _validate_leaf_certificate(leaf)
     public_key = leaf.public_key()
 
     try:
@@ -111,7 +117,36 @@ def verify_alexa_http_request(
             hashes.SHA1(),
         )
     except Exception as exc:  # noqa: BLE001
-        raise ValueError("signature verification failed") from exc
+        raise ValueError("alexa_signature_verification_failed") from exc
+
+    try:
+        body = json.loads(body_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("alexa_invalid_json_body") from exc
+    if not isinstance(body, dict):
+        raise ValueError("alexa_invalid_json_body")
+
+    session = body.get("session") or {}
+    context = body.get("context") or {}
+    app = (session.get("application") or {}).get("applicationId") or (
+        ((context.get("System") or {}).get("application") or {}).get("applicationId") or ""
+    )
+    if app != expected_application_id.strip():
+        raise ValueError("alexa_application_id_mismatch")
+
+    request_block = body.get("request") or {}
+    ts = request_block.get("timestamp")
+    if not ts:
+        raise ValueError("alexa_missing_request_timestamp")
+    try:
+        req_time = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        skew = abs(time.time() - req_time.timestamp())
+        if skew > 150:
+            raise ValueError("alexa_timestamp_skew")
+    except (TypeError, ValueError) as exc:
+        if str(exc) == "alexa_timestamp_skew":
+            raise
+        raise ValueError("alexa_invalid_request_timestamp") from exc
 
 
 def _split_pem_certs(pem_text: str) -> list[str]:

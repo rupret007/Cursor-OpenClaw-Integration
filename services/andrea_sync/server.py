@@ -498,6 +498,18 @@ class SyncServer:
             return "OpenClaw and Cursor"
         return "Cursor"
 
+    def _telegram_final_summary_text(self, projection: Dict[str, Any]) -> str:
+        summary = str(projection.get("summary") or "").strip()
+        openclaw_meta = self._projection_meta(projection, "openclaw")
+        raw_text = str(openclaw_meta.get("raw_text") or "").strip()
+        generic_openclaw_summaries = {
+            "",
+            "OpenClaw completed the delegated task.",
+        }
+        if summary not in generic_openclaw_summaries:
+            return summary
+        return raw_text or summary
+
     def _send_telegram_progress_updates(
         self,
         task_id: str,
@@ -568,19 +580,24 @@ class SyncServer:
         if snapshot.get("channel") != "telegram":
             return
         events = snapshot.get("events") or []
-        for _seq, _ts, et, payload in reversed(events):
+        worker_label = self._telegram_worker_label(snapshot["projection"], running=True)
+        for seq, _ts, et, payload in reversed(events):
             if et != EventType.USER_MESSAGE.value or not isinstance(payload, dict):
                 continue
             if not payload.get("telegram_continuation"):
-                return
+                continue
             preview = str(payload.get("routing_text") or payload.get("text") or "")
             mid = payload.get("message_id")
-            phase = f"continuation_{mid}" if mid is not None else "continuation_unknown"
+            phase = f"continuation_{mid}" if mid is not None else f"continuation_unknown_{seq}"
             try:
                 self._send_telegram_message_once(
                     task_id,
                     phase,
-                    format_continuation_notice(task_id, chunk_preview=preview),
+                    format_continuation_notice(
+                        task_id,
+                        chunk_preview=preview,
+                        worker_label=worker_label,
+                    ),
                 )
             except Exception as exc:  # noqa: BLE001
                 print(f"andrea_sync telegram continuation notice error: {exc}", flush=True)
@@ -611,12 +628,17 @@ class SyncServer:
                 latest_mid = pl.get("message_id")
         if latest_um_seq <= last_job_started:
             return
-        phase = f"late_chunk_{latest_mid}" if latest_mid is not None else "late_chunk"
+        phase = (
+            f"late_chunk_{latest_mid}"
+            if latest_mid is not None
+            else f"late_chunk_seq_{latest_um_seq}"
+        )
+        worker_label = self._telegram_worker_label(snapshot["projection"], running=True)
         try:
             self._send_telegram_message_once(
                 task_id,
                 phase,
-                format_late_chunk_notice(task_id),
+                format_late_chunk_notice(task_id, worker_label=worker_label),
             )
         except Exception as exc:  # noqa: BLE001
             print(f"andrea_sync telegram late-chunk notice error: {exc}", flush=True)
@@ -714,7 +736,7 @@ class SyncServer:
                     format_final_message(
                         task_id,
                         status=status,
-                        summary=str(projection.get("summary") or ""),
+                        summary=self._telegram_final_summary_text(projection),
                         pr_url=str(cursor_meta.get("pr_url") or ""),
                         agent_url=str(cursor_meta.get("agent_url") or ""),
                         last_error=str(projection.get("last_error") or ""),
@@ -1114,6 +1136,7 @@ class SyncServer:
         return f"Cursor finished with status {terminal_status}."
 
     def _run_delegated_job(self, task_id: str) -> None:
+        marker = self._meta_key("executor_started", task_id)
         try:
             execution_lane = self._task_execution_lane(task_id)
             if execution_lane == "openclaw_hybrid":
@@ -1130,6 +1153,11 @@ class SyncServer:
                     "execution_lane": self._task_execution_lane(task_id),
                 },
             )
+        finally:
+            def clear(c: sqlite3.Connection) -> None:
+                delete_meta(c, marker)
+
+            self.with_lock(clear)
 
     def _run_openclaw_job(self, task_id: str) -> None:
         prompt = self._extract_cursor_prompt(task_id)
@@ -1859,7 +1887,17 @@ def make_handler(server: SyncServer) -> type:
                     if auth != f"Bearer {expected}" and edge != expected:
                         self._send(401, b'{"error":"unauthorized"}')
                         return
-                length = int(self.headers.get("Content-Length") or "0")
+                try:
+                    length = int(self.headers.get("Content-Length") or "0")
+                except ValueError:
+                    self._send(400, b'{"error":"invalid_content_length"}')
+                    return
+                if length < 0:
+                    self._send(400, b'{"error":"invalid_content_length"}')
+                    return
+                if length > 262144:
+                    self._send(413, b'{"error":"body_too_large"}')
+                    return
                 raw = self.rfile.read(length) if length else b"{}"
                 try:
                     verify_alexa_http_request(
@@ -1872,13 +1910,12 @@ def make_handler(server: SyncServer) -> type:
                     metric_log("alexa_verify_failed")
                     self._send(
                         400,
-                        json.dumps({"error": "alexa_verify_failed", "detail": str(exc)}).encode(
-                            "utf-8"
-                        ),
+                        json.dumps({"error": "alexa_verify_failed"}).encode("utf-8"),
                     )
                     return
                 except RuntimeError as exc:
                     structured_log("alexa_verify_misconfig", error=str(exc))
+                    metric_log("alexa_verify_misconfig")
                     self._send(
                         500,
                         json.dumps({"error": "alexa_verify_misconfig"}).encode("utf-8"),
@@ -1886,8 +1923,12 @@ def make_handler(server: SyncServer) -> type:
                     return
                 try:
                     body = json.loads(raw.decode("utf-8") or "{}")
-                except json.JSONDecodeError:
-                    body = {}
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    self._send(400, b'{"error":"invalid_json"}')
+                    return
+                if not isinstance(body, dict):
+                    self._send(400, b'{"error":"invalid_json"}')
+                    return
                 resp = server._process_alexa_request(body)
                 out = alexa_adapt.build_response_json(resp)
                 self._send(200, out, content_type="application/json;charset=utf-8")

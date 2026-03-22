@@ -240,7 +240,8 @@ def load_recent_telegram_history(
 ) -> List[Dict[str, str]]:
     if chat_id is None:
         return []
-    params: List[Any] = [Channel.TELEGRAM.value, EventType.USER_MESSAGE.value, chat_id]
+    cid = str(chat_id).strip()
+    params: List[Any] = [Channel.TELEGRAM.value, EventType.USER_MESSAGE.value, cid]
     exclude_clause = ""
     if exclude_task_id:
         exclude_clause = "AND e.task_id != ?"
@@ -253,7 +254,7 @@ def load_recent_telegram_history(
         JOIN tasks t ON t.task_id = e.task_id
         WHERE t.channel = ?
           AND e.event_type = ?
-          AND json_extract(e.payload_json, '$.chat_id') = ?
+          AND CAST(json_extract(e.payload_json, '$.chat_id') AS TEXT) = ?
           {exclude_clause}
         GROUP BY e.task_id
         ORDER BY last_seq DESC

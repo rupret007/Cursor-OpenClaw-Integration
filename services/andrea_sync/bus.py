@@ -5,6 +5,7 @@ import hashlib
 import json
 import sqlite3
 import time
+import uuid
 from typing import Any, Dict, Optional, Set, Tuple
 
 from .kill_switch import engage_kill_switch, is_kill_switch_engaged, release_kill_switch
@@ -185,7 +186,15 @@ def _handle_user_message(
     conn: sqlite3.Connection, env: CommandEnvelope, idem: str
 ) -> Dict[str, Any]:
     if not env.task_id:
-        tid, is_new, deduped = _ensure_task(conn, env, idem)
+        # Without external_id / idempotency_key, do not collapse all channel messages into one task.
+        idem_use = idem
+        if not (env.external_id or "").strip() and not (env.idempotency_key or "").strip():
+            idem_use = normalize_scoped_idempotency_key(
+                "submit_user_message",
+                uuid.uuid4().hex,
+                env.command_type.value,
+            )
+        tid, is_new, deduped = _ensure_task(conn, env, idem_use)
         if tid is None:
             return {"ok": False, "error": "task resolution failed"}
         if deduped:
@@ -193,7 +202,7 @@ def _handle_user_message(
                 conn,
                 tid,
                 EventType.COMMAND_DEDUPED,
-                {"command_type": env.command_type.value, "idempotency_key": idem},
+                {"command_type": env.command_type.value, "idempotency_key": idem_use},
             )
             return {"ok": True, "task_id": tid, "deduped": True}
         summary = str(
@@ -332,7 +341,7 @@ def _handle_user_message(
                 "ref": env.external_id,
             },
         )
-    return {"ok": True, "task_id": tid}
+    return {"ok": True, "task_id": tid, "deduped": False}
 
 
 def _handle_create_cursor_job(
@@ -346,7 +355,10 @@ def _handle_create_cursor_job(
             conn,
             tid,
             EventType.COMMAND_DEDUPED,
-            {"command_type": env.command_type.value},
+            {
+                "command_type": env.command_type.value,
+                "idempotency_key": idem,
+            },
         )
         return {"ok": True, "task_id": tid, "deduped": True}
     if is_new:
@@ -428,7 +440,7 @@ def _handle_cursor_report(conn: sqlite3.Connection, env: CommandEnvelope, idem: 
             tid,
             EventType.COMMAND_DEDUPED,
             {
-                "command_type": "ReportCursorEvent",
+                "command_type": env.command_type.value,
                 "idempotency_key": report_key,
                 "scoped": True,
             },

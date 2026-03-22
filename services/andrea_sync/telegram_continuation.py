@@ -145,11 +145,25 @@ def _find_continuation_candidate(
 
 def _merge_anchor_routing(payload: Dict[str, Any], prev_telegram_meta: Dict[str, Any]) -> None:
     """Preserve collaboration / routing from the first chunk of a split prompt."""
+    default_values = {
+        "routing_hint": "auto",
+        "collaboration_mode": "auto",
+        "visibility_mode": "summary",
+        "preferred_model_family": "",
+        "preferred_model_label": "",
+    }
     for key in _STR_MERGE_KEYS:
+        current = payload.get(key)
+        default = default_values.get(key, "")
+        if current is not None and str(current).strip() not in {"", default}:
+            continue
         val = prev_telegram_meta.get(key)
         if val is not None and str(val).strip() != "":
             payload[key] = val
     for key in _LIST_MERGE_KEYS:
+        current = payload.get(key)
+        if isinstance(current, list) and current:
+            continue
         val = prev_telegram_meta.get(key)
         if isinstance(val, list) and val:
             payload[key] = list(val)

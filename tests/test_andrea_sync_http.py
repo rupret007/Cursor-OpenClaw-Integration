@@ -390,7 +390,9 @@ class TestAndreaSyncHTTP(unittest.TestCase):
         with urllib.request.urlopen(req, timeout=10) as resp:
             self.assertEqual(resp.status, 200)
             data = json.loads(resp.read().decode("utf-8"))
-        self.assertIn("send one summary to telegram", data["response"]["outputSpeech"]["text"].lower())
+        speech = data["response"]["outputSpeech"]["text"].lower()
+        self.assertIn("background", speech)
+        self.assertNotIn("telegram", speech)
         detail = None
         for _ in range(40):
             req_tasks = urllib.request.Request(self._url("/v1/tasks?limit=20"), method="GET")

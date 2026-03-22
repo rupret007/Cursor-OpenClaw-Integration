@@ -27,11 +27,19 @@ def voice_safe_text(text: str, *, default: str = "Okay.", limit: int = MAX_SPOKE
     return cut + "..."
 
 
-def build_ack_response(utterance: str, *, delegated: bool) -> Dict[str, Any]:
+def build_ack_response(
+    utterance: str,
+    *,
+    delegated: bool,
+    telegram_summary_expected: bool = True,
+) -> Dict[str, Any]:
     if delegated:
-        speech = (
-            "I started working on that. I will keep the voice reply short and send one summary to Telegram when it finishes."
-        )
+        if telegram_summary_expected:
+            speech = (
+                "I started working on that. I will keep the voice reply short and send one summary to Telegram when it finishes."
+            )
+        else:
+            speech = "I started working on that. I will keep the voice reply short while the rest continues in the background."
     else:
         speech = voice_safe_text(utterance, default="Okay.")
     return _response(speech, session_should_end=True)

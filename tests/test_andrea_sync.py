@@ -48,6 +48,8 @@ class TestAndreaSync(unittest.TestCase):
         self._prev_telegram_chat_id = os.environ.get("TELEGRAM_CHAT_ID")
         self._prev_public_base = os.environ.get("ANDREA_SYNC_PUBLIC_BASE")
         self._prev_webhook_autofix = os.environ.get("ANDREA_SYNC_TELEGRAM_WEBHOOK_AUTOFIX")
+        self._prev_telegram_auto_cursor = os.environ.get("ANDREA_SYNC_TELEGRAM_AUTO_CURSOR")
+        self._prev_delegated_execution = os.environ.get("ANDREA_SYNC_DELEGATED_EXECUTION_ENABLED")
         self._prev_openai_enabled = os.environ.get("OPENAI_API_ENABLED")
         self._prev_openai_key = os.environ.get("OPENAI_API_KEY")
         self._prev_delegate_lane = os.environ.get("ANDREA_TELEGRAM_DELEGATE_LANE")
@@ -87,6 +89,14 @@ class TestAndreaSync(unittest.TestCase):
             os.environ.pop("ANDREA_SYNC_TELEGRAM_WEBHOOK_AUTOFIX", None)
         else:
             os.environ["ANDREA_SYNC_TELEGRAM_WEBHOOK_AUTOFIX"] = self._prev_webhook_autofix
+        if self._prev_telegram_auto_cursor is None:
+            os.environ.pop("ANDREA_SYNC_TELEGRAM_AUTO_CURSOR", None)
+        else:
+            os.environ["ANDREA_SYNC_TELEGRAM_AUTO_CURSOR"] = self._prev_telegram_auto_cursor
+        if self._prev_delegated_execution is None:
+            os.environ.pop("ANDREA_SYNC_DELEGATED_EXECUTION_ENABLED", None)
+        else:
+            os.environ["ANDREA_SYNC_DELEGATED_EXECUTION_ENABLED"] = self._prev_delegated_execution
         if self._prev_openai_enabled is None:
             os.environ.pop("OPENAI_API_ENABLED", None)
         else:
@@ -995,6 +1005,16 @@ class TestAndreaSync(unittest.TestCase):
         self.assertNotIn("`", text)
         self.assertIn("pull request", text.lower())
 
+    def test_alexa_delegated_ack_omits_telegram_when_summary_disabled(self) -> None:
+        response = alexa_adapt.build_ack_response(
+            "do the work",
+            delegated=True,
+            telegram_summary_expected=False,
+        )
+        speech = response["response"]["outputSpeech"]["text"].lower()
+        self.assertIn("background", speech)
+        self.assertNotIn("telegram", speech)
+
     def test_alexa_process_direct_request_returns_spoken_reply(self) -> None:
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
         os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
@@ -1041,9 +1061,41 @@ class TestAndreaSync(unittest.TestCase):
             }
         )
         self.assertTrue(response["response"]["shouldEndSession"])
-        self.assertIn("send one summary to telegram", response["response"]["outputSpeech"]["text"].lower())
+        speech = response["response"]["outputSpeech"]["text"].lower()
+        self.assertIn("background", speech)
+        self.assertNotIn("telegram", speech)
         tasks = list_tasks(server.conn, limit=5)
         self.assertTrue(any(task["channel"] == "alexa" for task in tasks))
+
+    def test_alexa_process_delegate_request_without_summary_uses_background_ack(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        os.environ["ANDREA_SYNC_ALEXA_SUMMARY_TO_TELEGRAM"] = "0"
+        os.environ.pop("TELEGRAM_CHAT_ID", None)
+        os.environ.pop("ANDREA_SYNC_ALEXA_SUMMARY_CHAT_ID", None)
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        response = server._process_alexa_request(
+            {
+                "session": {"sessionId": "alexa-session-3"},
+                "request": {
+                    "type": "IntentRequest",
+                    "requestId": "alexa-req-3",
+                    "intent": {
+                        "name": "AndreaCaptureIntent",
+                        "slots": {
+                            "utterance": {
+                                "value": "please inspect the repo and fix the failing tests"
+                            }
+                        },
+                    },
+                },
+            }
+        )
+        speech = response["response"]["outputSpeech"]["text"].lower()
+        self.assertIn("background", speech)
+        self.assertNotIn("telegram", speech)
 
     def test_alexa_completed_task_sends_single_telegram_summary(self) -> None:
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "1"
@@ -1126,6 +1178,71 @@ class TestAndreaSync(unittest.TestCase):
         self.assertIn("Handled by: Andrea directly", sent_text)
         self.assertIn("I am doing well and ready to help.", sent_text)
         self.assertNotIn("Handled by: Cursor", sent_text)
+
+    def test_alexa_created_task_from_commands_routes_direct_reply(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        created = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.ALEXA_UTTERANCE.value,
+                "channel": "alexa",
+                "external_id": "alexa-command-direct-1",
+                "payload": {
+                    "utterance": "how are you today",
+                    "routing_text": "how are you today",
+                    "session_id": "sess-command-direct-1",
+                },
+            },
+        )
+        snapshot = server._task_snapshot(created["task_id"])
+        assert snapshot is not None
+        server._handle_alexa_followups(created["task_id"], snapshot)
+        final_snapshot = server._task_snapshot(created["task_id"])
+        assert final_snapshot is not None
+        self.assertEqual(final_snapshot["projection"]["status"], "completed")
+        self.assertEqual(final_snapshot["projection"]["meta"]["assistant"]["route"], "direct")
+
+    def test_alexa_schedule_execution_ignores_telegram_auto_cursor_flag(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "1"
+        os.environ["ANDREA_SYNC_DELEGATED_EXECUTION_ENABLED"] = "1"
+        os.environ["ANDREA_SYNC_TELEGRAM_AUTO_CURSOR"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        created = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.ALEXA_UTTERANCE.value,
+                "channel": "alexa",
+                "external_id": "alexa-command-delegate-1",
+                "payload": {
+                    "utterance": "please inspect the repo and fix the failing tests",
+                    "routing_text": "please inspect the repo and fix the failing tests",
+                    "session_id": "sess-command-delegate-1",
+                },
+            },
+        )
+        append_event(
+            server.conn,
+            created["task_id"],
+            EventType.JOB_QUEUED,
+            {
+                "kind": "openclaw",
+                "execution_lane": "openclaw_hybrid",
+                "runner": "openclaw",
+            },
+        )
+        with mock.patch("services.andrea_sync.server.threading.Thread") as thread_cls:
+            thread_instance = mock.Mock()
+            thread_cls.return_value = thread_instance
+            server._schedule_cursor_execution(created["task_id"])
+        thread_cls.assert_called_once()
+        thread_instance.start.assert_called_once()
 
     def test_publish_capability_requires_internal_channel(self) -> None:
         r = handle_command(

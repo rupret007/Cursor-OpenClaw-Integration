@@ -35,6 +35,9 @@ git pull origin main
 | `GH_TOKEN` / `GITHUB_TOKEN` | No | Optional GitHub token for OpenClaw GitHub skills if env auth is used. |
 | `GEMINI_API_KEY` | No | Optional Gemini key for Gemini skills/CLI. |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | No | Optional Telegram bot credentials (skill/plugin dependent). |
+| `ANDREA_SYNC_ALEXA_EDGE_TOKEN` | No | Recommended for Alexa rollout; shared secret the public Alexa edge forwards to local `/v1/alexa`. |
+| `ANDREA_SYNC_ALEXA_SUMMARY_TO_TELEGRAM` / `ANDREA_SYNC_ALEXA_SUMMARY_CHAT_ID` | No | Alexa session summary controls; summary mirroring is on by default and can target a dedicated Telegram chat. |
+| `ANDREA_SYNC_DELEGATED_EXECUTION_ENABLED` | No | Global kill switch for delegated Alexa/OpenClaw/Cursor execution (`1` by default). |
 | `ANDREA_SYNC_PUBLIC_BASE` | No | Public HTTPS origin for Telegram webhook self-heal and reboot-stable ingress. Required for persistent Telegram webhook recovery. |
 | `CLOUDFLARED_TUNNEL_TOKEN` | No | Named Cloudflare tunnel token for reboot-stable `cloudflared` LaunchAgent startup. |
 | `ANDREA_LOCALTUNNEL_SUBDOMAIN` | No | Fallback stable-ish localtunnel subdomain for hosts that do not have `cloudflared` available. |
@@ -57,6 +60,8 @@ bash skills/cursor_handoff/scripts/test_handoff.sh
 ```
 
 **Andrea operator docs:** [ANDREA_OPERATIONS_PLAYBOOK.md](ANDREA_OPERATIONS_PLAYBOOK.md).
+
+**Alexa rollout docs:** [ANDREA_ALEXA_USER_SETUP.md](ANDREA_ALEXA_USER_SETUP.md), [ANDREA_ALEXA_INTEGRATION.md](ANDREA_ALEXA_INTEGRATION.md), and [ALEXA_CLOUD_EDGE_TEMPLATE.md](ALEXA_CLOUD_EDGE_TEMPLATE.md).
 
 ## OpenClaw gateway
 

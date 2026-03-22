@@ -97,6 +97,7 @@ class SyncServer:
         ensure_system_task(self.conn)
         self.lock = threading.Lock()
         self._routing_inflight: set[str] = set()
+        self._notification_inflight: set[str] = set()
         self.queue: Queue[Callable[[], None]] = Queue()
         self._worker = threading.Thread(target=self._run_queue, daemon=True)
         self._worker.start()
@@ -120,6 +121,9 @@ class SyncServer:
         self.internal_token = os.environ.get("ANDREA_SYNC_INTERNAL_TOKEN", "")
         self.alexa_edge_token = os.environ.get("ANDREA_SYNC_ALEXA_EDGE_TOKEN", "").strip()
         self.background_enabled = _env_bool("ANDREA_SYNC_BACKGROUND_ENABLED", True)
+        self.delegated_execution_enabled = _env_bool(
+            "ANDREA_SYNC_DELEGATED_EXECUTION_ENABLED", True
+        )
         self.telegram_auto_cursor = _env_bool("ANDREA_SYNC_TELEGRAM_AUTO_CURSOR", True)
         self.telegram_notifier_enabled = _env_bool("ANDREA_SYNC_TELEGRAM_NOTIFIER", True)
         self.alexa_summary_to_telegram = _env_bool("ANDREA_SYNC_ALEXA_SUMMARY_TO_TELEGRAM", True)
@@ -232,6 +236,23 @@ class SyncServer:
 
         self.with_lock(release)
 
+    def _claim_notification_attempt(self, marker: str) -> bool:
+        def claim(c: sqlite3.Connection) -> bool:
+            if marker in self._notification_inflight:
+                return False
+            if get_meta(c, marker) is not None:
+                return False
+            self._notification_inflight.add(marker)
+            return True
+
+        return self.with_lock(claim)
+
+    def _finish_notification_attempt(self, marker: str) -> None:
+        def release(_c: sqlite3.Connection) -> None:
+            self._notification_inflight.discard(marker)
+
+        self.with_lock(release)
+
     def _task_snapshot(self, task_id: str) -> Optional[Dict[str, Any]]:
         def read(c: sqlite3.Connection) -> Optional[Dict[str, Any]]:
             channel = get_task_channel(c, task_id)
@@ -260,23 +281,22 @@ class SyncServer:
         if chat_id is None:
             return
         marker = self._meta_key(f"telegram_sent_{phase}", task_id)
-
-        def already_sent(c: sqlite3.Connection) -> bool:
-            return get_meta(c, marker) is not None
-
-        if self.with_lock(already_sent):
+        if not self._claim_notification_attempt(marker):
             return
-        tg_adapt.send_text_message(
-            bot_token=self.telegram_bot_token,
-            chat_id=chat_id,
-            text=text,
-            reply_to_message_id=telegram_meta.get("message_id"),
-        )
+        try:
+            tg_adapt.send_text_message(
+                bot_token=self.telegram_bot_token,
+                chat_id=chat_id,
+                text=text,
+                reply_to_message_id=telegram_meta.get("message_id"),
+            )
 
-        def mark(c: sqlite3.Connection) -> None:
-            set_meta(c, marker, str(time.time()))
+            def mark(c: sqlite3.Connection) -> None:
+                set_meta(c, marker, str(time.time()))
 
-        self.with_lock(mark)
+            self.with_lock(mark)
+        finally:
+            self._finish_notification_attempt(marker)
 
     def _send_telegram_chat_message_once(
         self,
@@ -294,22 +314,21 @@ class SyncServer:
         ):
             return
         marker = self._meta_key(f"telegram_sent_{phase}", task_id)
-
-        def already_sent(c: sqlite3.Connection) -> bool:
-            return get_meta(c, marker) is not None
-
-        if self.with_lock(already_sent):
+        if not self._claim_notification_attempt(marker):
             return
-        tg_adapt.send_text_message(
-            bot_token=self.telegram_bot_token,
-            chat_id=chat_id,
-            text=text,
-        )
+        try:
+            tg_adapt.send_text_message(
+                bot_token=self.telegram_bot_token,
+                chat_id=chat_id,
+                text=text,
+            )
 
-        def mark(c: sqlite3.Connection) -> None:
-            set_meta(c, marker, str(time.time()))
+            def mark(c: sqlite3.Connection) -> None:
+                set_meta(c, marker, str(time.time()))
 
-        self.with_lock(mark)
+            self.with_lock(mark)
+        finally:
+            self._finish_notification_attempt(marker)
 
     def _recent_telegram_history(self, task_id: str) -> list[dict[str, str]]:
         snapshot = self._task_snapshot(task_id)
@@ -537,6 +556,13 @@ class SyncServer:
     ) -> None:
         projection = snapshot["projection"]
         status = str(projection.get("status") or "")
+        if status == "created":
+            self._route_task_with_decision(
+                task_id,
+                history=[],
+                source="alexa_commands_ingress",
+            )
+            return
         if status == "queued":
             self._schedule_delegated_execution(task_id)
             return
@@ -666,10 +692,17 @@ class SyncServer:
         return alexa_adapt.build_ack_response(
             "I started working on that.",
             delegated=True,
+            telegram_summary_expected=bool(
+                self.alexa_summary_to_telegram and self.alexa_summary_chat_id
+            ),
         )
 
     def _schedule_cursor_execution(self, task_id: str) -> None:
-        if not self.background_enabled or not self.telegram_auto_cursor:
+        if not self.background_enabled or not self.delegated_execution_enabled:
+            return
+        snapshot = self._task_snapshot(task_id)
+        channel = snapshot["channel"] if snapshot else ""
+        if channel == "telegram" and not self.telegram_auto_cursor:
             return
         marker = self._meta_key("executor_started", task_id)
 

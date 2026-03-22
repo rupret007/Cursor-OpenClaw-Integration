@@ -5,7 +5,7 @@ Use this sequence at end of day or before a release.
 ## 1. Live prerequisites (optional but recommended)
 
 ```bash
-cd /Users/andreabot/repos/Cursor-OpenClaw-Integration
+cd /path/to/Cursor-OpenClaw-Integration
 export ANDREA_SYNC_INTERNAL_TOKEN='...'
 export ANDREA_SYNC_URL='http://127.0.0.1:8765'   # default if unset
 bash scripts/andrea_wrap_up_prereqs.sh
@@ -14,7 +14,7 @@ bash scripts/andrea_wrap_up_prereqs.sh
 Before this step, make sure `andrea_sync` is already running, for example:
 
 ```bash
-cd /Users/andreabot/repos/Cursor-OpenClaw-Integration
+cd /path/to/Cursor-OpenClaw-Integration
 export ANDREA_SYNC_INTERNAL_TOKEN='...'
 export ANDREA_SYNC_TELEGRAM_SECRET='...'   # if you use Telegram ingest
 python3 scripts/andrea_sync_server.py
@@ -49,6 +49,12 @@ Always safe to run; does not require a running sync server (unless you set `RUN_
 
 ```bash
 bash scripts/test_integration.sh
+```
+
+Before pushing or shipping, prefer the stricter release gate:
+
+```bash
+bash scripts/andrea_release_gate.sh
 ```
 
 ## Minimum recurring commands

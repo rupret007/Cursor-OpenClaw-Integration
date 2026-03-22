@@ -68,3 +68,14 @@ def handler(event, context):
 - Keep the edge stateless.
 - Keep long-running work in Andrea/OpenClaw/Cursor; Alexa should get a short reply and Telegram should receive the richer summary.
 - If you later add account linking, let the edge map Amazon identity to your own user/session data before forwarding.
+
+## Production notes
+
+- Do not point the edge at `localhost`; the edge needs a real backhaul path to the machine running `andrea_sync`.
+- Good backhaul options include:
+  - Tailscale or another private network path to the host
+  - a Cloudflare/cloud tunnel path to a private origin
+  - a tightly scoped reverse proxy you control
+- If you use API Gateway or another managed edge, decode the request body when the platform marks it as base64-encoded before forwarding it.
+- The edge should return valid Alexa response JSON even when the local backend returns an operational error such as `401`, `503`, or a timeout.
+- Heavy work should still resolve as a short Alexa acknowledgement plus background execution, not a long synchronous edge request.

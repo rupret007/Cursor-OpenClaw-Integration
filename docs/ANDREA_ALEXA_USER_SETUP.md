@@ -4,7 +4,7 @@ This is the **human-friendly setup guide** for getting AndreaBot talking through
 
 Goal:
 
-- you say `Alexa, ask AndreaBot ...`
+- you say `Alexa, ask Andrea Bot ...`
 - Alexa speaks a short Andrea reply
 - deeper work still goes through Andrea -> OpenClaw -> Cursor when needed
 - Telegram receives one compact summary for the Alexa session so everything stays in sync
@@ -66,6 +66,7 @@ Recommended:
 export ANDREA_SYNC_ALEXA_EDGE_TOKEN='long-random-secret'
 export ANDREA_SYNC_ALEXA_SUMMARY_TO_TELEGRAM=1
 export ANDREA_SYNC_ALEXA_SUMMARY_CHAT_ID='YOUR_TELEGRAM_CHAT_ID'
+export ANDREA_SYNC_DELEGATED_EXECUTION_ENABLED=1
 ```
 
 Then restart the backend:
@@ -84,8 +85,15 @@ What these do:
   enables one Telegram summary per Alexa task/session
 - `ANDREA_SYNC_ALEXA_SUMMARY_CHAT_ID`
   controls which Telegram chat gets the summary
+- `ANDREA_SYNC_DELEGATED_EXECUTION_ENABLED=1`
+  allows delegated Alexa work to continue into OpenClaw/Cursor
 
 If you omit `ANDREA_SYNC_ALEXA_SUMMARY_CHAT_ID`, Andrea falls back to `TELEGRAM_CHAT_ID`.
+
+Notes:
+
+- Alexa summaries are enabled by default today
+- set `ANDREA_SYNC_ALEXA_SUMMARY_TO_TELEGRAM=0` only if you intentionally want no Telegram mirror
 
 ## Step 2. Stand up the public HTTPS edge
 
@@ -123,6 +131,12 @@ Suggested invocation name:
 That gives you the natural phrase:
 
 - `Alexa, ask Andrea Bot how are you`
+
+Naming rule:
+
+- skill display name can stay `AndreaBot`
+- invocation name should be the spoken form `andrea bot`
+- keep the spoken phrase consistent across the Alexa app, docs, and testing
 
 Tip:
 
@@ -269,6 +283,12 @@ What should happen:
   - Andrea/OpenClaw/Cursor do the heavier work behind the scenes
   - Telegram receives one compact summary when done
 
+If heavier work never starts, confirm:
+
+- `ANDREA_SYNC_BACKGROUND_ENABLED=1`
+- `ANDREA_SYNC_DELEGATED_EXECUTION_ENABLED=1`
+- OpenClaw and Cursor are healthy on the host
+
 ## Step 9. Roll out to Fire TV Cube / Fire Stick
 
 Once the iPhone path feels stable:
@@ -318,7 +338,7 @@ curl -sS http://127.0.0.1:8765/v1/status | python3 -m json.tool
 Check:
 
 - `TELEGRAM_BOT_TOKEN`
-- `ANDREA_SYNC_ALEXA_SUMMARY_TO_TELEGRAM=1`
+- `ANDREA_SYNC_ALEXA_SUMMARY_TO_TELEGRAM` is not disabled
 - `ANDREA_SYNC_ALEXA_SUMMARY_CHAT_ID` or `TELEGRAM_CHAT_ID`
 
 ### Alexa works for simple requests but heavy work never finishes
@@ -328,6 +348,7 @@ Check:
 - OpenClaw gateway health
 - `cursor_handoff` skill health
 - Cursor credentials
+- `ANDREA_SYNC_DELEGATED_EXECUTION_ENABLED=1`
 - `bash scripts/andrea_full_cycle.sh`
 
 ### Alexa keeps talking too much

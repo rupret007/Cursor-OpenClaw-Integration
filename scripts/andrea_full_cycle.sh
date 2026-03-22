@@ -41,6 +41,9 @@ export ANDREA_SYNC_URL="${ANDREA_SYNC_URL:-http://127.0.0.1:8765}"
 export ANDREA_SYNC_URL="${ANDREA_SYNC_URL%/}"
 
 if [[ "${SKIP_GIT:-0}" != "1" ]]; then
+  current_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+  [[ "$current_branch" == "main" ]] || die "current branch is '${current_branch:-unknown}'; switch to main or set SKIP_GIT=1"
+  [[ -z "$(git status --porcelain)" ]] || die "working tree is not clean; commit/stash changes or set SKIP_GIT=1"
   say "git pull --ff-only origin main"
   git pull --ff-only origin main
 else

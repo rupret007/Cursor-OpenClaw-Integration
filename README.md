@@ -370,6 +370,9 @@ See [.env.example](.env.example) and [skills/cursor_handoff/.env.example](skills
 | `GH_TOKEN` / `GITHUB_TOKEN` | No | Optional GitHub token for `gh`/GitHub-related OpenClaw skills (if they use env-based auth). |
 | `GEMINI_API_KEY` | No | Optional Gemini key for Gemini skills/CLIs. |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | No | Optional Telegram bot credentials (skill-dependent). |
+| `ANDREA_SYNC_ALEXA_EDGE_TOKEN` | No | Recommended for Alexa rollout; shared secret between the public Alexa edge and local `/v1/alexa`. |
+| `ANDREA_SYNC_ALEXA_SUMMARY_TO_TELEGRAM` / `ANDREA_SYNC_ALEXA_SUMMARY_CHAT_ID` | No | Controls whether Alexa sessions mirror one summary to Telegram and which chat receives it. |
+| `ANDREA_SYNC_DELEGATED_EXECUTION_ENABLED` | No | Global on/off switch for delegated Alexa/OpenClaw/Cursor execution. |
 | `BRAVE_SEARCH_API_KEY` / `BRAVE_ANSWERS_API_KEY` | No | Optional Brave Search skill keys (`brave-api-search` expects both names; answers key may reuse search key). |
 | `MINIMAX_API_KEY` | No | Optional MiniMax provider key for MiniMax integrations. |
 | `SSL_CERT_FILE` | No | Optional path to CA bundle for Python TLS (macOS `CERTIFICATE_VERIFY_FAILED`); see README troubleshooting. |

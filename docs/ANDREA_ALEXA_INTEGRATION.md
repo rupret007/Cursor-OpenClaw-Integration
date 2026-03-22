@@ -10,11 +10,17 @@ If you want the user-facing, click-by-click setup path, start with [ANDREA_ALEXA
 
 ## UX rules
 
-- Invocation stays explicit: `Alexa, ask AndreaBot ...`
+- Invocation stays explicit: `Alexa, ask Andrea Bot ...`
 - Alexa answers briefly and in plain spoken language.
 - Delegated or long-running work should not dump technical detail into voice.
 - Telegram receives exactly one compact summary per Alexa task/session when the work finishes.
 - Andrea stays the narrator even when OpenClaw or Cursor do the heavy lifting behind the scenes.
+
+Canonical example:
+
+- skill display name: `AndreaBot`
+- invocation name in Alexa Developer Console: `andrea bot`
+- spoken phrase: `Alexa, ask Andrea Bot how are you today`
 
 ## Current runtime behavior
 
@@ -43,9 +49,11 @@ When an Alexa task reaches `completed` or `failed`, Andrea can send one compact 
 
 Relevant env vars:
 
-- `ANDREA_SYNC_ALEXA_SUMMARY_TO_TELEGRAM=1`
+- `ANDREA_SYNC_ALEXA_SUMMARY_TO_TELEGRAM=1` (enabled by default; set `0` to disable)
 - `ANDREA_SYNC_ALEXA_SUMMARY_CHAT_ID=<chat id>`
 - fallback: `TELEGRAM_CHAT_ID`
+- `ANDREA_SYNC_DELEGATED_EXECUTION_ENABLED=1` to allow delegated Alexa/OpenClaw/Cursor work globally
+- `ANDREA_SYNC_TELEGRAM_AUTO_CURSOR=1` only controls Telegram auto-execution, not Alexa
 
 ## Recommended deployment
 
@@ -72,6 +80,7 @@ The local Andrea server now supports this optional token and rejects unauthorize
 - Run `python3 scripts/andrea_sync_server.py`
 - Keep Telegram configured if you want Alexa session summaries mirrored there
 - Keep the OpenClaw/Cursor stack running so delegated Alexa requests can complete end-to-end
+- If `ANDREA_SYNC_ALEXA_EDGE_TOKEN` is set, local/manual `curl` requests must include the bearer token too
 
 ## Security and certification
 
@@ -99,6 +108,7 @@ Example:
 ```bash
 curl -sS -X POST http://127.0.0.1:8765/v1/alexa \
   -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $ANDREA_SYNC_ALEXA_EDGE_TOKEN" \
   -d '{
     "session":{"sessionId":"amzn-session-demo"},
     "request":{
@@ -111,6 +121,8 @@ curl -sS -X POST http://127.0.0.1:8765/v1/alexa \
     }
   }'
 ```
+
+If `ANDREA_SYNC_ALEXA_EDGE_TOKEN` is unset, you can omit the `Authorization` header for local testing.
 
 ## Device rollout
 

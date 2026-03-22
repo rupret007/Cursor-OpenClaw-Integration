@@ -191,28 +191,30 @@ def _handle_user_message(
                 EventType.TASK_CREATED,
                 {"summary": summary, "channel": env.channel.value},
             )
-        _append(
-            conn,
-            tid,
-            EventType.USER_MESSAGE,
-            {
-                "text": env.payload.get("text", ""),
-                "routing_text": env.payload.get("routing_text", ""),
-                "mention_targets": env.payload.get("mention_targets", []),
-                "model_mentions": env.payload.get("model_mentions", []),
-                "preferred_model_family": env.payload.get("preferred_model_family", ""),
-                "preferred_model_label": env.payload.get("preferred_model_label", ""),
-                "routing_hint": env.payload.get("routing_hint", ""),
-                "collaboration_mode": env.payload.get("collaboration_mode", ""),
-                "visibility_mode": env.payload.get("visibility_mode", ""),
-                "channel": env.channel.value,
-                "chat_id": env.payload.get("chat_id"),
-                "chat_type": env.payload.get("chat_type"),
-                "message_id": env.payload.get("message_id"),
-                "from_user": env.payload.get("from_user"),
-                "from_username": env.payload.get("from_username"),
-            },
-        )
+        um: Dict[str, Any] = {
+            "text": env.payload.get("text", ""),
+            "routing_text": env.payload.get("routing_text", ""),
+            "mention_targets": env.payload.get("mention_targets", []),
+            "model_mentions": env.payload.get("model_mentions", []),
+            "preferred_model_family": env.payload.get("preferred_model_family", ""),
+            "preferred_model_label": env.payload.get("preferred_model_label", ""),
+            "routing_hint": env.payload.get("routing_hint", ""),
+            "collaboration_mode": env.payload.get("collaboration_mode", ""),
+            "visibility_mode": env.payload.get("visibility_mode", ""),
+            "channel": env.channel.value,
+            "chat_id": env.payload.get("chat_id"),
+            "chat_type": env.payload.get("chat_type"),
+            "message_id": env.payload.get("message_id"),
+            "from_user": env.payload.get("from_user"),
+            "from_username": env.payload.get("from_username"),
+        }
+        if env.payload.get("telegram_continuation"):
+            um["telegram_continuation"] = True
+        if env.payload.get("telegram_continuation_anchor_message_id") is not None:
+            um["telegram_continuation_anchor_message_id"] = env.payload.get(
+                "telegram_continuation_anchor_message_id"
+            )
+        _append(conn, tid, EventType.USER_MESSAGE, um)
         if env.external_id:
             _append(
                 conn,
@@ -252,28 +254,30 @@ def _handle_user_message(
         EventType.COMMAND_RECEIVED,
         {"command_type": env.command_type.value},
     )
-    _append(
-        conn,
-        tid,
-        EventType.USER_MESSAGE,
-        {
-            "text": env.payload.get("text", ""),
-            "routing_text": env.payload.get("routing_text", ""),
-            "mention_targets": env.payload.get("mention_targets", []),
-            "model_mentions": env.payload.get("model_mentions", []),
-            "preferred_model_family": env.payload.get("preferred_model_family", ""),
-            "preferred_model_label": env.payload.get("preferred_model_label", ""),
-            "routing_hint": env.payload.get("routing_hint", ""),
-            "collaboration_mode": env.payload.get("collaboration_mode", ""),
-            "visibility_mode": env.payload.get("visibility_mode", ""),
-            "channel": env.channel.value,
-            "chat_id": env.payload.get("chat_id"),
-            "chat_type": env.payload.get("chat_type"),
-            "message_id": env.payload.get("message_id"),
-            "from_user": env.payload.get("from_user"),
-            "from_username": env.payload.get("from_username"),
-        },
-    )
+    um2: Dict[str, Any] = {
+        "text": env.payload.get("text", ""),
+        "routing_text": env.payload.get("routing_text", ""),
+        "mention_targets": env.payload.get("mention_targets", []),
+        "model_mentions": env.payload.get("model_mentions", []),
+        "preferred_model_family": env.payload.get("preferred_model_family", ""),
+        "preferred_model_label": env.payload.get("preferred_model_label", ""),
+        "routing_hint": env.payload.get("routing_hint", ""),
+        "collaboration_mode": env.payload.get("collaboration_mode", ""),
+        "visibility_mode": env.payload.get("visibility_mode", ""),
+        "channel": env.channel.value,
+        "chat_id": env.payload.get("chat_id"),
+        "chat_type": env.payload.get("chat_type"),
+        "message_id": env.payload.get("message_id"),
+        "from_user": env.payload.get("from_user"),
+        "from_username": env.payload.get("from_username"),
+    }
+    if env.payload.get("telegram_continuation"):
+        um2["telegram_continuation"] = True
+    if env.payload.get("telegram_continuation_anchor_message_id") is not None:
+        um2["telegram_continuation_anchor_message_id"] = env.payload.get(
+            "telegram_continuation_anchor_message_id"
+        )
+    _append(conn, tid, EventType.USER_MESSAGE, um2)
     if env.external_id:
         _append(
             conn,

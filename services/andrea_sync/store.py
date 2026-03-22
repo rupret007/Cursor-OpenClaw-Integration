@@ -276,6 +276,27 @@ def list_tasks(conn: sqlite3.Connection, limit: int = 50) -> List[Dict[str, Any]
     return [dict(r) for r in rows]
 
 
+def get_task_updated_at(conn: sqlite3.Connection, task_id: str) -> Optional[float]:
+    row = conn.execute(
+        "SELECT updated_at FROM tasks WHERE task_id = ?", (task_id,)
+    ).fetchone()
+    return float(row["updated_at"]) if row else None
+
+
+def list_recent_telegram_task_ids(conn: sqlite3.Connection, limit: int = 25) -> List[str]:
+    """Most recently touched Telegram tasks (excluding the reserved system task)."""
+    rows = conn.execute(
+        """
+        SELECT task_id FROM tasks
+        WHERE channel = ? AND task_id != ?
+        ORDER BY updated_at DESC
+        LIMIT ?
+        """,
+        (Channel.TELEGRAM.value, SYSTEM_TASK_ID, limit),
+    ).fetchall()
+    return [str(r["task_id"]) for r in rows]
+
+
 SYSTEM_TASK_ID = "tsk_system_lockstep"
 
 

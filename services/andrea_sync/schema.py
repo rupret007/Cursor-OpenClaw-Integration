@@ -221,6 +221,17 @@ def fold_projection(
             proj.summary = snippet
         if payload.get("channel") == Channel.TELEGRAM.value:
             telegram_meta = proj.meta.setdefault("telegram", {})
+            chunk_for_acc = routing_text or str(payload.get("text") or "").strip()
+            if chunk_for_acc:
+                prior_acc = str(telegram_meta.get("accumulated_prompt") or "").strip()
+                if prior_acc:
+                    telegram_meta["accumulated_prompt"] = prior_acc + "\n\n" + chunk_for_acc
+                else:
+                    telegram_meta["accumulated_prompt"] = chunk_for_acc
+            if payload.get("telegram_continuation"):
+                telegram_meta["continuation_count"] = int(
+                    telegram_meta.get("continuation_count") or 0
+                ) + 1
             for src_key, dst_key in (
                 ("chat_id", "chat_id"),
                 ("chat_type", "chat_type"),

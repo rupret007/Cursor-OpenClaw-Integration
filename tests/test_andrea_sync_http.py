@@ -598,6 +598,89 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
         self.assertEqual(detail["task"]["meta"]["execution"]["lane"], "openclaw_hybrid")
         self.assertEqual(detail["task"]["meta"]["cursor"]["kind"], "openclaw")
 
+    def test_telegram_webhook_split_prompt_coalesces_one_task(self) -> None:
+        prev_cont = os.environ.get("ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS")
+        os.environ["ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS"] = "300"
+        try:
+            headers = {
+                "Content-Type": "application/json",
+                "X-Telegram-Bot-Api-Secret-Token": "hdrsecret",
+            }
+            body1 = json.dumps(
+                {
+                    "update_id": 9001,
+                    "message": {
+                        "text": "@Andrea @Cursor collaborate on the spec section A",
+                        "message_id": 90001,
+                        "chat": {"id": 5050, "type": "private"},
+                        "from": {"id": 6060},
+                    },
+                }
+            ).encode("utf-8")
+            req1 = urllib.request.Request(
+                self._url("/v1/telegram/webhook"),
+                data=body1,
+                method="POST",
+                headers=headers,
+            )
+            with urllib.request.urlopen(req1, timeout=5) as resp:
+                self.assertEqual(resp.status, 200)
+            body2 = json.dumps(
+                {
+                    "update_id": 9002,
+                    "message": {
+                        "text": "Section B: acceptance criteria and rollout.",
+                        "message_id": 90002,
+                        "chat": {"id": 5050, "type": "private"},
+                        "from": {"id": 6060},
+                    },
+                }
+            ).encode("utf-8")
+            req2 = urllib.request.Request(
+                self._url("/v1/telegram/webhook"),
+                data=body2,
+                method="POST",
+                headers=headers,
+            )
+            with urllib.request.urlopen(req2, timeout=5) as resp:
+                self.assertEqual(resp.status, 200)
+
+            last_detail: dict | None = None
+            for _ in range(80):
+                req_tasks = urllib.request.Request(self._url("/v1/tasks?limit=50"), method="GET")
+                with urllib.request.urlopen(req_tasks, timeout=5) as resp_tasks:
+                    tasks = json.loads(resp_tasks.read().decode("utf-8"))["tasks"]
+                hits = 0
+                for row in tasks:
+                    if row.get("channel") != "telegram":
+                        continue
+                    tid = row["task_id"]
+                    req_task = urllib.request.Request(
+                        self._url(f"/v1/tasks/{tid}"), method="GET"
+                    )
+                    with urllib.request.urlopen(req_task, timeout=5) as resp_task:
+                        detail = json.loads(resp_task.read().decode("utf-8"))
+                    tg = detail["task"].get("meta", {}).get("telegram", {})
+                    if tg.get("chat_id") == 5050:
+                        hits += 1
+                        last_detail = detail
+                if hits == 1 and last_detail is not None:
+                    tg = last_detail["task"]["meta"]["telegram"]
+                    if tg.get("continuation_count") == 1:
+                        acc = str(tg.get("accumulated_prompt") or "")
+                        self.assertIn("section a", acc.lower())
+                        self.assertIn("section b", acc.lower())
+                        break
+                time.sleep(0.05)
+            else:
+                self.fail("expected one coalesced telegram task for chat 5050 with continuation_count=1")
+            self.assertEqual(hits, 1)
+        finally:
+            if prev_cont is None:
+                os.environ.pop("ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS", None)
+            else:
+                os.environ["ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS"] = prev_cont
+
     def test_telegram_greeting_routes_direct_without_cursor_task(self) -> None:
         body = json.dumps(
             {

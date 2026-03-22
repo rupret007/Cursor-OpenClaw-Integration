@@ -304,6 +304,154 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(proj["meta"]["telegram"]["message_id"], 42)
         self.assertEqual(proj["meta"]["cursor"]["prompt_excerpt"], "review the bridge")
 
+    def test_telegram_continuation_merges_second_chunk_same_task(self) -> None:
+        from services.andrea_sync.telegram_continuation import attach_continuation_if_applicable
+
+        prev = os.environ.get("ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS")
+        os.environ["ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS"] = "300"
+        try:
+            cmd1 = tg_adapt.update_to_command(
+                {
+                    "update_id": 501,
+                    "message": {
+                        "text": "@Andrea @Cursor please collaborate on repo cleanup part one",
+                        "message_id": 1001,
+                        "chat": {"id": 4242, "type": "private"},
+                        "from": {"id": 99, "username": "u1"},
+                    },
+                }
+            )
+            self.assertIsNotNone(cmd1)
+            assert cmd1 is not None
+            r1 = handle_command(self.conn, cmd1)
+            self.assertTrue(r1.get("ok"))
+            tid = r1["task_id"]
+
+            cmd2 = tg_adapt.update_to_command(
+                {
+                    "update_id": 502,
+                    "message": {
+                        "text": "Definition of done: tests pass and docs updated.",
+                        "message_id": 1002,
+                        "chat": {"id": 4242, "type": "private"},
+                        "from": {"id": 99, "username": "u1"},
+                    },
+                }
+            )
+            self.assertIsNotNone(cmd2)
+            assert cmd2 is not None
+            self.assertTrue(attach_continuation_if_applicable(self.conn, cmd2))
+            self.assertEqual(cmd2["task_id"], tid)
+            self.assertTrue(cmd2["payload"].get("telegram_continuation"))
+            self.assertEqual(cmd2["payload"]["collaboration_mode"], "collaborative")
+            self.assertEqual(cmd2["payload"]["routing_hint"], "collaborate")
+
+            r2 = handle_command(self.conn, cmd2)
+            self.assertTrue(r2.get("ok"))
+            self.assertEqual(r2["task_id"], tid)
+
+            proj = project_task_dict(self.conn, tid, "telegram")
+            self.assertEqual(proj["meta"]["telegram"].get("continuation_count"), 1)
+            acc = str(proj["meta"]["telegram"].get("accumulated_prompt") or "")
+            self.assertIn("part one", acc.lower())
+            self.assertIn("definition of done", acc.lower())
+        finally:
+            if prev is None:
+                os.environ.pop("ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS", None)
+            else:
+                os.environ["ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS"] = prev
+
+    def test_telegram_continuation_does_not_merge_new_cursor_mention(self) -> None:
+        from services.andrea_sync.telegram_continuation import attach_continuation_if_applicable
+
+        prev = os.environ.get("ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS")
+        os.environ["ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS"] = "300"
+        try:
+            cmd1 = tg_adapt.update_to_command(
+                {
+                    "update_id": 601,
+                    "message": {
+                        "text": "@Andrea just a question about the plan",
+                        "message_id": 2001,
+                        "chat": {"id": 9191, "type": "private"},
+                        "from": {"id": 77, "username": "u2"},
+                    },
+                }
+            )
+            assert cmd1
+            r1 = handle_command(self.conn, cmd1)
+            tid1 = r1["task_id"]
+
+            cmd2 = tg_adapt.update_to_command(
+                {
+                    "update_id": 602,
+                    "message": {
+                        "text": "@Cursor please implement the feature now",
+                        "message_id": 2002,
+                        "chat": {"id": 9191, "type": "private"},
+                        "from": {"id": 77, "username": "u2"},
+                    },
+                }
+            )
+            assert cmd2
+            self.assertFalse(attach_continuation_if_applicable(self.conn, cmd2))
+            self.assertIsNone(cmd2.get("task_id"))
+
+            r2 = handle_command(self.conn, cmd2)
+            self.assertTrue(r2.get("ok"))
+            self.assertNotEqual(r2["task_id"], tid1)
+        finally:
+            if prev is None:
+                os.environ.pop("ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS", None)
+            else:
+                os.environ["ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS"] = prev
+
+    def test_telegram_continuation_ignores_completed_task(self) -> None:
+        from services.andrea_sync.telegram_continuation import attach_continuation_if_applicable
+
+        prev = os.environ.get("ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS")
+        os.environ["ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS"] = "300"
+        try:
+            cmd1 = tg_adapt.update_to_command(
+                {
+                    "update_id": 701,
+                    "message": {
+                        "text": "hello from telegram",
+                        "message_id": 3001,
+                        "chat": {"id": 1313, "type": "private"},
+                        "from": {"id": 5, "username": "u3"},
+                    },
+                }
+            )
+            assert cmd1
+            r1 = handle_command(self.conn, cmd1)
+            tid = r1["task_id"]
+            append_event(
+                self.conn,
+                tid,
+                EventType.ASSISTANT_REPLIED,
+                {"text": "done", "route": "direct", "reason": "test"},
+            )
+
+            cmd2 = tg_adapt.update_to_command(
+                {
+                    "update_id": 702,
+                    "message": {
+                        "text": "second chunk without mentions",
+                        "message_id": 3002,
+                        "chat": {"id": 1313, "type": "private"},
+                        "from": {"id": 5, "username": "u3"},
+                    },
+                }
+            )
+            assert cmd2
+            self.assertFalse(attach_continuation_if_applicable(self.conn, cmd2))
+        finally:
+            if prev is None:
+                os.environ.pop("ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS", None)
+            else:
+                os.environ["ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS"] = prev
+
     def test_router_greeting_stays_direct(self) -> None:
         decision = route_message("hi andrea how are you?")
         self.assertEqual(decision.mode, "direct")

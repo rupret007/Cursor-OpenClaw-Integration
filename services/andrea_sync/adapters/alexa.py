@@ -2,8 +2,15 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from typing import Any, Dict, Optional, Tuple
+
+
+_KEEP_TALKING_RE = re.compile(
+    r"^\s*(?:ok(?:ay)?\s*[,;:]?\s*)?(?:can\s+i\s+)?still\s+talk\s+to\s+andrea\s*\??\s*$",
+    re.IGNORECASE,
+)
 
 
 def parse_alexa_body(body: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
@@ -42,6 +49,11 @@ def parse_alexa_body(body: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Di
         if not utterance:
             return None, _response(
                 "I did not catch that. Try: ask Andrea to note buy milk.",
+                session_should_end=False,
+            )
+        if _KEEP_TALKING_RE.match(utterance):
+            return None, _response(
+                "Yes, you can still talk to Andrea. What should I capture or delegate?",
                 session_should_end=False,
             )
         req_id = req.get("requestId") or session_id

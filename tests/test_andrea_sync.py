@@ -314,6 +314,25 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(cmd["command_type"], "AlexaUtterance")
         self.assertIn("Captured", resp["response"]["outputSpeech"]["text"])
 
+    def test_alexa_can_i_still_talk_to_andrea(self) -> None:
+        body = {
+            "session": {"sessionId": "s1"},
+            "request": {
+                "type": "IntentRequest",
+                "requestId": "r2",
+                "intent": {
+                    "name": "AndreaCaptureIntent",
+                    "slots": {
+                        "utterance": {"value": "Ok can I still talk to Andrea"},
+                    },
+                },
+            },
+        }
+        cmd, resp = alexa_adapt.parse_alexa_body(body)
+        self.assertIsNone(cmd)
+        self.assertIn("Yes, you can still talk to Andrea", resp["response"]["outputSpeech"]["text"])
+        self.assertFalse(resp["response"]["shouldEndSession"])
+
     def test_publish_capability_requires_internal_channel(self) -> None:
         r = handle_command(
             self.conn,

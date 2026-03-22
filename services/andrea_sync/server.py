@@ -39,6 +39,7 @@ from .telegram_format import (
     format_alexa_session_summary,
     format_direct_message,
     format_final_message,
+    format_progress_message,
     format_running_message,
 )
 
@@ -405,6 +406,16 @@ class SyncServer:
         telegram_meta = self._projection_meta(snapshot["projection"], "telegram")
         return str(telegram_meta.get("collaboration_mode") or "auto").strip() or "auto"
 
+    def _task_visibility_mode(self, task_id: str) -> str:
+        snapshot = self._task_snapshot(task_id)
+        if not snapshot:
+            return "summary"
+        execution_meta = self._projection_meta(snapshot["projection"], "execution")
+        if execution_meta.get("visibility_mode"):
+            return str(execution_meta.get("visibility_mode")).strip()
+        telegram_meta = self._projection_meta(snapshot["projection"], "telegram")
+        return str(telegram_meta.get("visibility_mode") or "summary").strip() or "summary"
+
     def _task_mention_targets(self, task_id: str) -> list[str]:
         snapshot = self._task_snapshot(task_id)
         if not snapshot:
@@ -437,6 +448,48 @@ class SyncServer:
         if execution_meta.get("delegated_to_cursor"):
             return "OpenClaw and Cursor"
         return "Cursor"
+
+    def _send_telegram_progress_updates(
+        self,
+        task_id: str,
+        snapshot: Dict[str, Any],
+    ) -> None:
+        projection = snapshot["projection"]
+        execution_meta = self._projection_meta(projection, "execution")
+        telegram_meta = self._projection_meta(projection, "telegram")
+        openclaw_meta = self._projection_meta(projection, "openclaw")
+        visibility_mode = str(
+            execution_meta.get("visibility_mode") or telegram_meta.get("visibility_mode") or "summary"
+        ).strip() or "summary"
+        for seq, _ts, event_type, payload in snapshot["events"]:
+            if event_type != EventType.JOB_PROGRESS.value or not isinstance(payload, dict):
+                continue
+            progress_text = str(payload.get("message") or "").strip()
+            force_telegram_note = bool(payload.get("force_telegram_note"))
+            if not progress_text:
+                continue
+            if visibility_mode != "full" and not force_telegram_note:
+                continue
+            try:
+                self._send_telegram_message_once(
+                    task_id,
+                    f"progress_{seq}",
+                    format_progress_message(
+                        task_id,
+                        progress_text=progress_text,
+                        worker_label=self._telegram_worker_label(projection, running=True),
+                        routing_hint=str(execution_meta.get("routing_hint") or telegram_meta.get("routing_hint") or ""),
+                        collaboration_mode=str(
+                            execution_meta.get("collaboration_mode")
+                            or telegram_meta.get("collaboration_mode")
+                            or ""
+                        ),
+                        provider=str(payload.get("provider") or openclaw_meta.get("provider") or ""),
+                        model=str(payload.get("model") or openclaw_meta.get("model") or ""),
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(f"andrea_sync telegram progress update error: {exc}", flush=True)
 
     def _queue_task_followups(self, task_id: str) -> None:
         if not task_id:
@@ -508,6 +561,7 @@ class SyncServer:
         execution_meta = self._projection_meta(projection, "execution")
         if status == "running":
             agent_url = cursor_meta.get("agent_url")
+            openclaw_meta = self._projection_meta(projection, "openclaw")
             try:
                 self._send_telegram_message_once(
                     task_id,
@@ -519,12 +573,17 @@ class SyncServer:
                         delegated_to_cursor=bool(execution_meta.get("delegated_to_cursor")),
                         routing_hint=str(execution_meta.get("routing_hint") or ""),
                         collaboration_mode=str(execution_meta.get("collaboration_mode") or ""),
+                        provider=str(openclaw_meta.get("provider") or ""),
+                        model=str(openclaw_meta.get("model") or ""),
                     ),
                 )
             except Exception as exc:  # noqa: BLE001
                 print(f"andrea_sync telegram running update error: {exc}", flush=True)
+            self._send_telegram_progress_updates(task_id, snapshot)
             return
         if status in {"completed", "failed"}:
+            self._send_telegram_progress_updates(task_id, snapshot)
+            openclaw_meta = self._projection_meta(projection, "openclaw")
             try:
                 self._send_telegram_message_once(
                     task_id,
@@ -540,10 +599,12 @@ class SyncServer:
                         delegated_to_cursor=bool(execution_meta.get("delegated_to_cursor")),
                         backend=str(execution_meta.get("backend") or ""),
                         openclaw_session_id=str(
-                            self._projection_meta(projection, "openclaw").get("session_id") or ""
+                            openclaw_meta.get("session_id") or ""
                         ),
                         routing_hint=str(execution_meta.get("routing_hint") or ""),
                         collaboration_mode=str(execution_meta.get("collaboration_mode") or ""),
+                        provider=str(openclaw_meta.get("provider") or ""),
+                        model=str(openclaw_meta.get("model") or ""),
                     ),
                 )
             except Exception as exc:  # noqa: BLE001
@@ -631,6 +692,7 @@ class SyncServer:
                         "runner": "openclaw" if kind == "openclaw" else "cursor",
                         "routing_hint": str(user_payload.get("routing_hint") or "auto"),
                         "collaboration_mode": decision.collaboration_mode,
+                        "visibility_mode": str(user_payload.get("visibility_mode") or "summary"),
                         "mention_targets": user_payload.get("mention_targets", []),
                     },
                 )
@@ -908,6 +970,7 @@ class SyncServer:
     def _run_openclaw_job(self, task_id: str) -> None:
         prompt = self._extract_cursor_prompt(task_id)
         collaboration_mode = self._task_collaboration_mode(task_id)
+        visibility_mode = self._task_visibility_mode(task_id)
         routing_hint = self._task_routing_hint(task_id)
         if not prompt:
             self._append_task_event(
@@ -918,6 +981,7 @@ class SyncServer:
                     "message": "No Telegram text was available to send to OpenClaw.",
                     "backend": "openclaw",
                     "execution_lane": "openclaw_hybrid",
+                    "visibility_mode": visibility_mode,
                 },
             )
             return
@@ -931,8 +995,27 @@ class SyncServer:
                 "status": "submitted",
                 "routing_hint": routing_hint,
                 "collaboration_mode": collaboration_mode,
+                "visibility_mode": visibility_mode,
             },
         )
+        if visibility_mode == "full" and collaboration_mode in {"cursor_primary", "collaborative"}:
+            self._append_task_event(
+                task_id,
+                EventType.JOB_PROGRESS,
+                {
+                    "message": (
+                        "OpenClaw is starting the coordination pass. It should use Gemini 2.5 for broad planning, "
+                        "Minimax 2.7 for alternate critique, OpenAI for precise synthesis, and Cursor for the heavy repo execution."
+                    ),
+                    "backend": "openclaw",
+                    "execution_lane": "openclaw_hybrid",
+                    "runner": "openclaw",
+                    "routing_hint": routing_hint,
+                    "collaboration_mode": collaboration_mode,
+                    "visibility_mode": visibility_mode,
+                    "force_telegram_note": True,
+                },
+            )
         try:
             result = self._create_openclaw_job(
                 task_id,
@@ -956,6 +1039,8 @@ class SyncServer:
                         "delegated_to_cursor": True,
                         "routing_hint": routing_hint,
                         "collaboration_mode": collaboration_mode,
+                        "visibility_mode": visibility_mode,
+                        "force_telegram_note": True,
                     },
                 )
                 self._run_cursor_job(task_id)
@@ -971,6 +1056,7 @@ class SyncServer:
                     "runner": "openclaw",
                     "routing_hint": routing_hint,
                     "collaboration_mode": collaboration_mode,
+                    "visibility_mode": visibility_mode,
                 },
             )
             return
@@ -990,7 +1076,39 @@ class SyncServer:
             "raw_status": _clip(result.get("status"), 120) or None,
             "routing_hint": routing_hint,
             "collaboration_mode": collaboration_mode,
+            "visibility_mode": visibility_mode,
+            "raw_text": _clip(result.get("raw_text"), 4000) or None,
         }
+        if visibility_mode == "full":
+            notes = _clip(result.get("raw_text") or result.get("summary") or "", 700)
+            progress_message = "OpenClaw completed the coordination pass."
+            if result.get("delegated_to_cursor"):
+                progress_message = (
+                    "OpenClaw completed the coordination pass and involved Cursor for the heavier execution."
+                )
+            elif collaboration_mode in {"cursor_primary", "collaborative"}:
+                progress_message = (
+                    "OpenClaw completed the coordination pass, but Andrea may still escalate to Cursor to honor the collaboration request."
+                )
+            if notes:
+                progress_message += f" Notes: {notes}"
+            self._append_task_event(
+                task_id,
+                EventType.JOB_PROGRESS,
+                {
+                    "message": progress_message,
+                    "backend": "openclaw",
+                    "execution_lane": "openclaw_hybrid",
+                    "runner": "openclaw",
+                    "provider": _clip(result.get("provider"), 120) or None,
+                    "model": _clip(result.get("model"), 200) or None,
+                    "routing_hint": routing_hint,
+                    "collaboration_mode": collaboration_mode,
+                    "visibility_mode": visibility_mode,
+                    "raw_text": _clip(result.get("raw_text"), 4000) or None,
+                    "force_telegram_note": True,
+                },
+            )
         requires_cursor = collaboration_mode in {"cursor_primary", "collaborative"}
         if result.get("ok") and requires_cursor and not result.get("delegated_to_cursor"):
             self._append_task_event(
@@ -1007,6 +1125,8 @@ class SyncServer:
                     "delegated_to_cursor": True,
                     "routing_hint": routing_hint,
                     "collaboration_mode": collaboration_mode,
+                    "visibility_mode": visibility_mode,
+                    "force_telegram_note": True,
                 },
             )
             self._run_cursor_job(task_id)
@@ -1021,16 +1141,24 @@ class SyncServer:
                 **payload,
                 "error": "openclaw_execution_failed",
                 "message": _clip(result.get("summary") or result.get("raw_text") or "OpenClaw failed.", 1500),
+                "visibility_mode": visibility_mode,
+                "raw_text": _clip(result.get("raw_text"), 4000) or None,
             },
         )
 
     def _run_cursor_job(self, task_id: str) -> None:
         prompt = self._extract_cursor_prompt(task_id)
+        visibility_mode = self._task_visibility_mode(task_id)
+        collaboration_mode = self._task_collaboration_mode(task_id)
         if not prompt:
             self._append_task_event(
                 task_id,
                 EventType.JOB_FAILED,
-                {"error": "missing_prompt", "message": "No Telegram text was available to send to Cursor."},
+                {
+                    "error": "missing_prompt",
+                    "message": "No Telegram text was available to send to Cursor.",
+                    "visibility_mode": visibility_mode,
+                },
             )
             return
         try:
@@ -1039,7 +1167,11 @@ class SyncServer:
             self._append_task_event(
                 task_id,
                 EventType.JOB_FAILED,
-                {"error": "cursor_submit_failed", "message": _clip(exc, 1500)},
+                {
+                    "error": "cursor_submit_failed",
+                    "message": _clip(exc, 1500),
+                    "visibility_mode": visibility_mode,
+                },
             )
             return
         agent_id = _clip(created.get("agent_id"), 200)
@@ -1056,8 +1188,26 @@ class SyncServer:
                 "agent_url": agent_url or None,
                 "pr_url": pr_url or None,
                 "status": initial_status,
+                "visibility_mode": visibility_mode,
             },
         )
+        if visibility_mode == "full" and collaboration_mode in {"cursor_primary", "collaborative"}:
+            self._append_task_event(
+                task_id,
+                EventType.JOB_PROGRESS,
+                {
+                    "message": (
+                        "Cursor has started the heavy execution pass after the Andrea/OpenClaw coordination step."
+                    ),
+                    "backend": "cursor",
+                    "runner": "cursor",
+                    "cursor_agent_id": agent_id or None,
+                    "agent_url": agent_url or None,
+                    "pr_url": pr_url or None,
+                    "visibility_mode": visibility_mode,
+                    "force_telegram_note": True,
+                },
+            )
         if not agent_id:
             self._append_task_event(
                 task_id,
@@ -1067,6 +1217,7 @@ class SyncServer:
                     "message": "Cursor submission succeeded but no agent id was returned.",
                     "agent_url": agent_url or None,
                     "pr_url": pr_url or None,
+                    "visibility_mode": visibility_mode,
                 },
             )
             return
@@ -1100,6 +1251,7 @@ class SyncServer:
                     "cursor_agent_id": agent_id,
                     "agent_url": agent_url or None,
                     "pr_url": pr_url or None,
+                    "visibility_mode": visibility_mode,
                 },
             )
             return
@@ -1116,6 +1268,7 @@ class SyncServer:
                     "pr_url": pr_url or None,
                     "status": latest_status,
                     "raw_status": latest_response.get("status"),
+                    "visibility_mode": visibility_mode,
                 },
             )
             return
@@ -1130,6 +1283,7 @@ class SyncServer:
                     "agent_url": agent_url or None,
                     "pr_url": pr_url or None,
                     "raw_status": latest_response.get("status"),
+                    "visibility_mode": visibility_mode,
                 },
             )
             return
@@ -1145,6 +1299,7 @@ class SyncServer:
                 "agent_url": agent_url or None,
                 "pr_url": pr_url or None,
                 "raw_status": latest_response.get("status"),
+                "visibility_mode": visibility_mode,
             },
         )
 

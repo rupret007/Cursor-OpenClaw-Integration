@@ -32,6 +32,7 @@ from services.andrea_sync.telegram_format import (  # noqa: E402
     format_ack_message,
     format_direct_message,
     format_final_message,
+    format_progress_message,
     format_running_message,
 )
 
@@ -217,6 +218,15 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(routing["collaboration_mode"], "collaborative")
         self.assertEqual(routing["mention_targets"], ["andrea", "cursor"])
         self.assertEqual(routing["routing_text"], "please work together on this")
+        self.assertEqual(routing["visibility_mode"], "summary")
+
+    def test_telegram_extract_routing_hints_detects_full_dialogue_mode(self) -> None:
+        routing = tg_adapt.extract_routing_hints(
+            "@Andrea @Cursor work together and show the full dialogue while you do it"
+        )
+        self.assertEqual(routing["routing_hint"], "collaborate")
+        self.assertEqual(routing["collaboration_mode"], "collaborative")
+        self.assertEqual(routing["visibility_mode"], "full")
 
     def test_telegram_update_to_command_with_cursor_mention(self) -> None:
         cmd = tg_adapt.update_to_command(
@@ -469,6 +479,19 @@ class TestAndreaSync(unittest.TestCase):
         )
         self.assertIn("OpenClaw and Cursor are actively working", text)
 
+    def test_telegram_progress_message_format(self) -> None:
+        text = format_progress_message(
+            "tsk_demo",
+            progress_text="OpenClaw completed the triage pass and Cursor is taking the repo-heavy execution.",
+            worker_label="OpenClaw and Cursor",
+            collaboration_mode="collaborative",
+            provider="google",
+            model="gemini-2.5-flash",
+        )
+        self.assertIn("coordination update", text.lower())
+        self.assertIn("gemini-2.5-flash", text)
+        self.assertIn("work together", text.lower())
+
     def test_telegram_final_message_separates_andrea_from_cursor(self) -> None:
         text = format_final_message(
             "tsk_demo",
@@ -659,6 +682,99 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(proj["status"], TaskStatus.QUEUED.value)
         self.assertEqual(proj["meta"]["execution"]["routing_hint"], "cursor")
         self.assertEqual(proj["meta"]["execution"]["collaboration_mode"], "cursor_primary")
+
+    def test_server_followups_collaborative_full_visibility_sets_execution_meta(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        result = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-collab-full",
+                "payload": {
+                    "text": "@Andrea @Cursor work together and show the full dialogue",
+                    "routing_text": "work together and show the full dialogue",
+                    "routing_hint": "collaborate",
+                    "collaboration_mode": "collaborative",
+                    "visibility_mode": "full",
+                    "mention_targets": ["andrea", "cursor"],
+                    "chat_id": 1,
+                    "message_id": 301,
+                },
+            },
+        )
+        server._handle_task_followups(result["task_id"])
+        proj = project_task_dict(server.conn, result["task_id"], "telegram")
+        self.assertEqual(proj["status"], TaskStatus.QUEUED.value)
+        self.assertEqual(proj["meta"]["telegram"]["visibility_mode"], "full")
+        self.assertEqual(proj["meta"]["execution"]["visibility_mode"], "full")
+
+    def test_server_running_followups_emit_progress_message_for_full_visibility(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "1"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        os.environ["TELEGRAM_BOT_TOKEN"] = "test-token"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        created = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-progress-full",
+                "payload": {
+                    "text": "@Andrea @Cursor work together and show the full dialogue",
+                    "routing_text": "work together and show the full dialogue",
+                    "routing_hint": "collaborate",
+                    "collaboration_mode": "collaborative",
+                    "visibility_mode": "full",
+                    "mention_targets": ["andrea", "cursor"],
+                    "chat_id": 777,
+                    "message_id": 302,
+                },
+            },
+        )
+        append_event(
+            server.conn,
+            created["task_id"],
+            EventType.JOB_STARTED,
+            {
+                "backend": "openclaw",
+                "execution_lane": "openclaw_hybrid",
+                "runner": "openclaw",
+                "routing_hint": "collaborate",
+                "collaboration_mode": "collaborative",
+                "visibility_mode": "full",
+                "provider": "google",
+                "model": "gemini-2.5-flash",
+            },
+        )
+        append_event(
+            server.conn,
+            created["task_id"],
+            EventType.JOB_PROGRESS,
+            {
+                "message": "OpenClaw completed the triage pass and Cursor is preparing the execution step.",
+                "backend": "openclaw",
+                "runner": "openclaw",
+                "provider": "google",
+                "model": "gemini-2.5-flash",
+                "visibility_mode": "full",
+                "force_telegram_note": True,
+            },
+        )
+        snapshot = server._task_snapshot(created["task_id"])
+        assert snapshot is not None
+        with mock.patch.object(tg_adapt, "send_text_message") as send_mock:
+            server._handle_telegram_followups(created["task_id"], snapshot)
+        sent_texts = [call.kwargs["text"] for call in send_mock.call_args_list]
+        self.assertEqual(len(sent_texts), 2)
+        self.assertTrue(any("actively working" in text.lower() for text in sent_texts))
+        self.assertTrue(any("coordination update" in text.lower() for text in sent_texts))
 
     def test_server_openclaw_only_job_completes(self) -> None:
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"

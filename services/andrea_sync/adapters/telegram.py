@@ -14,6 +14,11 @@ COLLABORATION_RE = re.compile(
     r"\b(work together|team up|collaborate|both of you|double-?check|second opinion)\b",
     re.I,
 )
+FULL_DIALOGUE_RE = re.compile(
+    r"\b(full dialogue|near-?full|show (?:me )?(?:the )?(?:dialogue|conversation|back-and-forth|handoffs)|"
+    r"show all (?:steps|handoffs|dialogue)|visible collaboration|show the llm dialogue)\b",
+    re.I,
+)
 
 
 def _normalize_spaces(text: str) -> str:
@@ -39,12 +44,16 @@ def extract_routing_hints(text: str) -> Dict[str, Any]:
         collaboration_mode = "collaborative"
     elif routing_hint == "andrea":
         collaboration_mode = "andrea_primary"
+    visibility_mode = "summary"
+    if FULL_DIALOGUE_RE.search(raw_text):
+        visibility_mode = "full"
     return {
         "raw_text": raw_text,
         "routing_text": cleaned,
         "mention_targets": mention_targets,
         "routing_hint": routing_hint,
         "collaboration_mode": collaboration_mode,
+        "visibility_mode": visibility_mode,
     }
 
 
@@ -76,6 +85,7 @@ def update_to_command(update: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             "mention_targets": routing["mention_targets"],
             "routing_hint": routing["routing_hint"],
             "collaboration_mode": routing["collaboration_mode"],
+            "visibility_mode": routing["visibility_mode"],
             "chat_id": chat_id,
             "chat_type": chat.get("type"),
             "message_id": message_id,

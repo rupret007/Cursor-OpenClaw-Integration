@@ -237,6 +237,8 @@ def fold_projection(
                 telegram_meta["mention_targets"] = [str(v) for v in mention_targets[:5]]
             if payload.get("collaboration_mode"):
                 telegram_meta["collaboration_mode"] = str(payload.get("collaboration_mode"))
+            if payload.get("visibility_mode"):
+                telegram_meta["visibility_mode"] = str(payload.get("visibility_mode"))
             if routing_text:
                 telegram_meta["routing_text"] = routing_text[:500]
             if snippet:
@@ -279,6 +281,8 @@ def fold_projection(
             execution_meta["routing_hint"] = str(payload["routing_hint"])
         if payload.get("collaboration_mode"):
             execution_meta["collaboration_mode"] = str(payload["collaboration_mode"])
+        if payload.get("visibility_mode"):
+            execution_meta["visibility_mode"] = str(payload["visibility_mode"])
         mention_targets = payload.get("mention_targets")
         if isinstance(mention_targets, list):
             execution_meta["mention_targets"] = [str(v) for v in mention_targets[:5]]
@@ -330,6 +334,11 @@ def fold_projection(
         if payload.get("model"):
             openclaw_meta = proj.meta.setdefault("openclaw", {})
             openclaw_meta["model"] = str(payload["model"])
+        if payload.get("visibility_mode"):
+            execution_meta["visibility_mode"] = str(payload["visibility_mode"])
+        if payload.get("raw_text"):
+            openclaw_meta = proj.meta.setdefault("openclaw", {})
+            openclaw_meta["raw_text"] = str(payload["raw_text"])[:4000]
     if event_type == EventType.JOB_PROGRESS:
         execution_meta = proj.meta.setdefault("execution", {})
         if payload.get("backend"):
@@ -355,6 +364,17 @@ def fold_projection(
             cursor_meta["agent_url"] = str(payload["agent_url"])
         if payload.get("pr_url"):
             cursor_meta["pr_url"] = str(payload["pr_url"])
+        if payload.get("provider"):
+            openclaw_meta = proj.meta.setdefault("openclaw", {})
+            openclaw_meta["provider"] = str(payload["provider"])
+        if payload.get("model"):
+            openclaw_meta = proj.meta.setdefault("openclaw", {})
+            openclaw_meta["model"] = str(payload["model"])
+        if payload.get("visibility_mode"):
+            execution_meta["visibility_mode"] = str(payload["visibility_mode"])
+        if payload.get("raw_text"):
+            openclaw_meta = proj.meta.setdefault("openclaw", {})
+            openclaw_meta["raw_text"] = str(payload["raw_text"])[:4000]
     if event_type == EventType.JOB_FAILED:
         proj.last_error = str(payload.get("error") or payload.get("message") or "failed")[:2000]
         execution_meta = proj.meta.setdefault("execution", {})
@@ -393,6 +413,11 @@ def fold_projection(
         if payload.get("model"):
             openclaw_meta = proj.meta.setdefault("openclaw", {})
             openclaw_meta["model"] = str(payload["model"])
+        if payload.get("visibility_mode"):
+            execution_meta["visibility_mode"] = str(payload["visibility_mode"])
+        if payload.get("raw_text"):
+            openclaw_meta = proj.meta.setdefault("openclaw", {})
+            openclaw_meta["raw_text"] = str(payload["raw_text"])[:4000]
     if event_type == EventType.JOB_COMPLETED:
         proj.last_error = None
         if payload.get("summary"):
@@ -433,6 +458,11 @@ def fold_projection(
         if payload.get("model"):
             openclaw_meta = proj.meta.setdefault("openclaw", {})
             openclaw_meta["model"] = str(payload["model"])
+        if payload.get("visibility_mode"):
+            execution_meta["visibility_mode"] = str(payload["visibility_mode"])
+        if payload.get("raw_text"):
+            openclaw_meta = proj.meta.setdefault("openclaw", {})
+            openclaw_meta["raw_text"] = str(payload["raw_text"])[:4000]
     if event_type == EventType.CAPABILITY_SNAPSHOT:
         proj.meta["last_capability_excerpt"] = str(payload.get("summary_json_excerpt", ""))[:500]
     if event_type in (EventType.KILL_SWITCH_ENGAGED, EventType.KILL_SWITCH_RELEASED):

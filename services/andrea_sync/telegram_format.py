@@ -44,6 +44,14 @@ def _first_sentence(text: str, limit: int = 180) -> str:
     return _clip(clean, limit)
 
 
+def _model_label(provider: str = "", model: str = "") -> str:
+    clean_provider = _normalize_whitespace(provider)
+    clean_model = _normalize_whitespace(model)
+    if clean_provider and clean_model:
+        return f"{clean_provider} / {clean_model}"
+    return clean_model or clean_provider
+
+
 def _routing_note(routing_hint: str, collaboration_mode: str) -> str:
     hint = str(routing_hint or "").strip().lower()
     collab = str(collaboration_mode or "").strip().lower()
@@ -121,6 +129,40 @@ def format_ack_message(
     )
 
 
+def format_progress_message(
+    task_id: str,
+    *,
+    progress_text: str,
+    worker_label: str = "OpenClaw",
+    routing_hint: str = "",
+    collaboration_mode: str = "",
+    provider: str = "",
+    model: str = "",
+) -> str:
+    routing_note = _routing_note(routing_hint, collaboration_mode)
+    headline = "Collaboration update."
+    if worker_label == "OpenClaw and Cursor":
+        headline = "OpenClaw and Cursor coordination update."
+    elif worker_label == "OpenClaw":
+        headline = "OpenClaw coordination update."
+    elif worker_label == "Cursor":
+        headline = "Cursor execution update."
+    model_label = _model_label(provider, model)
+    lines = [
+        "Andrea:",
+        headline,
+        "",
+        "What happened:",
+        f"- {_clip(_normalize_whitespace(progress_text), 700)}",
+    ]
+    if model_label:
+        lines.append(f"- Active OpenClaw model: {model_label}")
+    if routing_note:
+        lines.append(routing_note)
+    lines.extend(["", *_footer_lines(task_id, "running")])
+    return "\n".join(lines)
+
+
 def format_direct_message(reply_text: str) -> str:
     clean = _normalize_whitespace(reply_text)
     return "\n".join(
@@ -139,6 +181,8 @@ def format_running_message(
     delegated_to_cursor: bool = False,
     routing_hint: str = "",
     collaboration_mode: str = "",
+    provider: str = "",
+    model: str = "",
 ) -> str:
     if delegated_to_cursor and worker_label == "OpenClaw":
         worker_label = "OpenClaw and Cursor"
@@ -169,6 +213,9 @@ def format_running_message(
         *([_routing_note(routing_hint, collaboration_mode)] if _routing_note(routing_hint, collaboration_mode) else []),
         "",
     ]
+    model_label = _model_label(provider, model)
+    if model_label:
+        lines.insert(len(lines) - 1, f"- OpenClaw is currently coordinating with {model_label}.")
     lines.extend(_footer_lines(task_id, "running", agent_url=agent_url))
     return "\n".join(lines)
 
@@ -187,6 +234,8 @@ def format_final_message(
     openclaw_session_id: str = "",
     routing_hint: str = "",
     collaboration_mode: str = "",
+    provider: str = "",
+    model: str = "",
 ) -> str:
     if backend == "openclaw" and worker_label == "Cursor":
         worker_label = "OpenClaw"
@@ -246,6 +295,9 @@ def format_final_message(
                 summary_excerpt,
             ]
         )
+    model_label = _model_label(provider, model)
+    if model_label:
+        lines.extend(["", f"OpenClaw model used: {model_label}"])
 
     lines.extend(
         [

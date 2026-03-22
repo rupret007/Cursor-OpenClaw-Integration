@@ -126,3 +126,4 @@ User asks: "Fix failing tests and push branch for PR."
 - Day-to-day gates: `docs/ANDREA_OPERATIONS_PLAYBOOK.md`
 - **Lockstep bus** (Telegram/Alexa/Cursor shared task timeline): `docs/ANDREA_LOCKSTEP_ARCHITECTURE.md` — after spawning a Cursor job, report lifecycle with `scripts/andrea_sync_cursor_report.py` so all channels stay aligned.
 - Telegram intent hints: `@Andrea` means keep it direct when possible, `@Cursor` means Cursor-first collaboration, and `@Andrea @Cursor` / `work together` / `double-check` means OpenClaw and Cursor should collaborate before the final answer.
+- For the aggressive Telegram tri-LLM sprint mode, OpenClaw should coordinate model use by strength: Gemini 2.5 for broad planning, Minimax 2.7 for alternate critique, OpenAI for precise synthesis, and Cursor for heavy repo execution.

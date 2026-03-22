@@ -133,6 +133,7 @@ The Telegram bridge now supports lightweight addressing hints in the message tex
 - `@Andrea ...` tells the bot to keep the turn in Andrea's direct assistant lane when possible.
 - `@Cursor ...` tells Andrea/OpenClaw to run a Cursor-first collaboration pass instead of replying directly.
 - `@Andrea @Cursor ...` or natural phrases like `work together`, `team up`, or `double-check` tell the system to have OpenClaw and Cursor collaborate before the final answer.
+- Add phrases like `show the full dialogue`, `show all handoffs`, or `visible collaboration` when you want the Telegram thread to expose richer collaboration updates for an intentional sprint-style session.
 
 These tags are stripped from the delegated prompt before it is sent downstream, so they control routing without polluting the actual work request.
 
@@ -186,6 +187,7 @@ The post-login bootstrap waits for `andrea_sync`, syncs `skills/cursor_handoff` 
 - Direct Cursor fallback remains available if you explicitly set `ANDREA_TELEGRAM_DELEGATE_LANE=direct_cursor` or if `ANDREA_OPENCLAW_FALLBACK_TO_CURSOR=1` is allowed during an OpenClaw launch failure
 - OpenClaw automation uses `openclaw agent --agent "${ANDREA_OPENCLAW_AGENT_ID:-main}"`, so the OpenClaw gateway and the mirrored `cursor_handoff` skill both need to stay healthy on the host
 - When the user explicitly asks for Cursor collaboration (`@Cursor` or collaborative phrasing), the hybrid runner is expected to involve Cursor before it finalizes the answer; if OpenClaw returns without doing so, `andrea_sync` escalates to Cursor directly to honor that request
+- For the most aggressive one-hour collaboration experiment, use [ANDREA_TELEGRAM_TRI_LLM_SPRINT.md](ANDREA_TELEGRAM_TRI_LLM_SPRINT.md)
 
 ## Refresh / restart checklist
 

@@ -207,9 +207,11 @@ python3 scripts/andrea_sync_server.py
 **Telegram:** Point BotFather `setWebhook` to  
 `https://your-public-host/v1/telegram/webhook?secret=...` (same value as `ANDREA_SYNC_TELEGRAM_SECRET`) or use the header secret path. The handler returns `200` immediately, creates a task, routes simple turns through Andrea directly, and sends delegated work into the OpenClaw hybrid lane first. OpenClaw can then finish the task itself or escalate to Cursor via `cursor_handoff`.
 
-**Addressing rules:** `@Andrea` prefers the direct Andrea lane, `@Cursor` requests Cursor-first collaboration, and `@Andrea @Cursor` or phrasing like `work together` / `double-check` requests joint OpenClaw + Cursor handling.
+**Addressing rules:** `@Andrea` prefers the direct Andrea lane, `@Cursor` requests Cursor-first collaboration, and `@Andrea @Cursor` or phrasing like `work together` / `double-check` requests joint OpenClaw + Cursor handling. Add phrases like `show the full dialogue`, `show all handoffs`, or `visible collaboration` when you want a much richer Telegram collaboration stream for an intentional sprint session.
 
 **E2E helper (cloudflared + setWebhook + verify):** see [ANDREA_TELEGRAM_LOCKSTEP_E2E.md](ANDREA_TELEGRAM_LOCKSTEP_E2E.md) and `python3 scripts/andrea_lockstep_telegram_e2e.py tunnel-and-webhook`.
+
+**Tri-LLM sprint mode:** for an aggressive one-hour Telegram-visible collaboration session, use [ANDREA_TELEGRAM_TRI_LLM_SPRINT.md](ANDREA_TELEGRAM_TRI_LLM_SPRINT.md). That guide explains how to request full collaboration visibility, how OpenClaw should use Gemini/Minimax/OpenAI by strength, and how Cursor fits into the execution lane.
 
 **Alexa:** Publish a Custom Skill whose public endpoint is your cloud edge, and have that edge forward into `https://your-private-or-local-host/v1/alexa`. Set `ANDREA_SYNC_ALEXA_EDGE_TOKEN` on both sides so the local Andrea endpoint only accepts forwarded edge traffic. The repo includes a reference Lambda-style forwarder at `scripts/alexa_edge_lambda.py`. For the human setup walkthrough, use [ANDREA_ALEXA_USER_SETUP.md](ANDREA_ALEXA_USER_SETUP.md). For the lower-level integration details, see [ANDREA_ALEXA_INTEGRATION.md](ANDREA_ALEXA_INTEGRATION.md) and [ALEXA_CLOUD_EDGE_TEMPLATE.md](ALEXA_CLOUD_EDGE_TEMPLATE.md).
 

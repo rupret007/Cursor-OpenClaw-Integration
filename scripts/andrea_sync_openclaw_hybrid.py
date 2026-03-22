@@ -41,12 +41,22 @@ def _build_prompt(
             "- The user explicitly asked for Cursor. You should coordinate the handoff, but you must involve "
             "Cursor before giving the final answer unless the request is only a routing clarification.\n"
             "- After Cursor is involved, synthesize the outcome back into a concise assistant answer.\n"
+            "- Use OpenClaw for triage and coordination first, then move the repo-heavy execution into Cursor.\n"
         )
     elif collab == "collaborative":
         collaboration_notes = (
-            "- The user wants Andrea/OpenClaw and Cursor to work together. Start with your own reasoning or skills, "
-            "then involve Cursor for a second pass, heavier repo work, browsing/tool use, or implementation.\n"
+            "- The user wants a visible collaboration sprint between Andrea/OpenClaw and Cursor.\n"
+            "- Start with your own reasoning or skills, then involve Cursor for a second pass, heavier repo work, "
+            "browsing/tool use, or implementation.\n"
+            "- Use model strengths deliberately when they are available inside OpenClaw:\n"
+            "  - Gemini 2.5 for broad planning, decomposition, and first-pass reasoning.\n"
+            "  - Minimax 2.7 for alternative critique, divergence, or second-opinion analysis.\n"
+            "  - OpenAI for precise synthesis, instruction following, and tool-friendly substeps.\n"
+            "  - Cursor for the heavy repo execution, code edits, and implementation follow-through.\n"
+            "- Do not call every model for every task. Use only the best model needed for each subtask.\n"
             "- Your final answer should reflect the combined result, not just one side.\n"
+            "- Include a short collaboration transcript in natural language before the LOCKSTEP_JSON marker. "
+            "Mention which model/provider or execution lane handled which part of the work.\n"
         )
     return (
         f"You are running inside Andrea's lockstep OpenClaw execution lane for task {task_id}.\n\n"
@@ -56,6 +66,7 @@ def _build_prompt(
         "- If the task is repo-heavy, coding-heavy, debugging-heavy, or PR-oriented, use the cursor_handoff skill rather than answering from general model reasoning alone.\n"
         "- If you offload work to Cursor, wait for the useful outcome and summarize it clearly.\n"
         "- Keep the user-facing answer concise and directly useful.\n"
+        "- When collaboration is requested, think like a coordinator: triage first, assign the right model/tool to the right subtask, then synthesize the result.\n"
         f"{collaboration_notes}"
         "- End your response with exactly one single-line marker in this format:\n"
         '  LOCKSTEP_JSON: {"delegated_to_cursor":false,"cursor_agent_url":"","cursor_agent_id":"","pr_url":"","summary":"","status":"completed"}\n'

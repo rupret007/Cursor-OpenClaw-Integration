@@ -31,6 +31,7 @@ Subcommands:
 | `create-agent` | `--branch-name`, repo **or** `--pr-url`; **`--prompt` / `--intent` / `--triage-repo`** (see above); `--dry-run`, polling flags |
 | `followup` | `--id`, `--prompt` |
 | `stop-agent` | `--id` |
+| `stop-all-jobs` | Stop all matching agents for a repo scope (defaults to `--repo .`). Safety guard: dry-run unless `--yes`. |
 | `delete-agent` | `--id` |
 
 Transient **network/SSL errors** are surfaced as retriable failures (same backoff as `5xx`). Outbound JSON bodies preserve Unicode (UTF-8, not `\\u` escapes).

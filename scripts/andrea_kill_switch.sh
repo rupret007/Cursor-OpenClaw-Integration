@@ -6,6 +6,7 @@
 #     bash scripts/andrea_kill_switch.sh engage "reason text"
 #   bash scripts/andrea_kill_switch.sh release
 #   bash scripts/andrea_kill_switch.sh status
+#   bash scripts/andrea_kill_switch.sh statue  # alias for status
 #   ANDREA_LAUNCHD_LABELS=com.andrea.andrea-sync,com.andrea.andrea-cloudflared \
 #     bash scripts/andrea_kill_switch.sh hard-stop "reason"
 #
@@ -17,6 +18,11 @@ TOKEN="${ANDREA_SYNC_INTERNAL_TOKEN:-}"
 
 cmd="${1:-status}"
 shift || true
+
+# Accept a common typo as a harmless alias for status.
+if [[ "$cmd" == "statue" ]]; then
+  cmd="status"
+fi
 
 if [[ "$cmd" != "status" && -z "$TOKEN" ]]; then
   echo "error: ANDREA_SYNC_INTERNAL_TOKEN required for $cmd" >&2
@@ -57,7 +63,7 @@ case "$cmd" in
     echo "Hard-stop: kill switch engaged + launchctl bootout attempted. OpenClaw may need manual stop." >&2
     ;;
   *)
-    echo "usage: $0 engage|release|status|hard-stop [reason...]" >&2
+    echo "usage: $0 engage|release|status|statue|hard-stop [reason...]" >&2
     exit 2
     ;;
 esac

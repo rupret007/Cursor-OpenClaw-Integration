@@ -95,7 +95,7 @@ Design/gap analysis: [ANDREA_LOCKSTEP_REVIEW_FINDINGS.md](ANDREA_LOCKSTEP_REVIEW
 
 ## macOS auto-start
 
-Templates + installer: `scripts/macos/install_andrea_launchagents.sh` (optional named `cloudflared`, optional OpenClaw login refresh, plus a post-login bootstrap step for capability publish + webhook ensure). The sync LaunchAgent sources repo `.env` first, then `~/andrea-lockstep.env` for per-machine overrides.
+Templates + installer: `scripts/macos/install_andrea_launchagents.sh` (optional named `cloudflared`, optional `localtunnel` fallback, optional OpenClaw login refresh, plus a post-login bootstrap step for capability publish + webhook ensure). The sync LaunchAgent sources repo `.env` first, then `~/andrea-lockstep.env` for per-machine overrides.
 
 This keeps the same assistant persona available across text-first Telegram now and voice-first Alexa later: Andrea answers first, then delegates when the work needs a heavier technical lane.
 

@@ -4,6 +4,7 @@
 # Usage:
 #   REPO_ROOT=/path/to/Cursor-OpenClaw-Integration bash scripts/macos/install_andrea_launchagents.sh
 #   CLOUDFLARED_TUNNEL_TOKEN=... bash scripts/macos/install_andrea_launchagents.sh --with-cloudflared
+#   bash scripts/macos/install_andrea_launchagents.sh --with-localtunnel
 #   bash scripts/macos/install_andrea_launchagents.sh --with-openclaw-refresh
 #   bash scripts/macos/install_andrea_launchagents.sh --load
 #
@@ -13,18 +14,26 @@ REPO_ROOT="${REPO_ROOT:-$BASE_DIR}"
 HOME_DIR="${HOME}"
 PY3="${PYTHON3:-$(command -v python3)}"
 CLOUDFLARED_BIN="${CLOUDFLARED_BIN:-$(command -v cloudflared || true)}"
+NPX_BIN="${NPX_BIN:-$(command -v npx || true)}"
 AGENT_DIR="${HOME_DIR}/Library/LaunchAgents"
 LOG_DIR="${HOME_DIR}/Library/Logs/andrea"
 WITH_CF=0
+WITH_LT=0
 WITH_OC=0
 LOAD_AFTER_INSTALL=0
 for a in "$@"; do
   case "$a" in
     --with-cloudflared) WITH_CF=1 ;;
+    --with-localtunnel) WITH_LT=1 ;;
     --with-openclaw-refresh) WITH_OC=1 ;;
     --load) LOAD_AFTER_INSTALL=1 ;;
   esac
 done
+
+if [[ "$WITH_CF" -eq 1 && "$WITH_LT" -eq 1 ]]; then
+  echo "error: choose either --with-cloudflared or --with-localtunnel, not both" >&2
+  exit 1
+fi
 
 mkdir -p "$AGENT_DIR" "$LOG_DIR"
 
@@ -35,6 +44,7 @@ render() {
     -e "s|__HOME__|${HOME_DIR//\\/\\\\}|g" \
     -e "s|__PYTHON3__|${PY3//\\/\\\\}|g" \
     -e "s|__CLOUDFLARED_BIN__|${CLOUDFLARED_BIN//\\/\\\\}|g" \
+    -e "s|__NPX_BIN__|${NPX_BIN//\\/\\\\}|g" \
     -e "s|__CLOUDFLARED_TUNNEL_TOKEN__|${CLOUDFLARED_TUNNEL_TOKEN:-REPLACE_ME}|g" \
     "$src" > "$dest"
 }
@@ -68,6 +78,16 @@ if [[ "$WITH_CF" -eq 1 ]]; then
   echo "Installed cloudflared agent using ${CLOUDFLARED_BIN}."
 fi
 
+if [[ "$WITH_LT" -eq 1 ]]; then
+  if [[ -z "${NPX_BIN}" ]]; then
+    echo "error: npx not found on PATH (needed for localtunnel fallback)" >&2
+    exit 1
+  fi
+  render "${BASE_DIR}/scripts/macos/com.andrea.andrea-localtunnel.plist.template" \
+    "${AGENT_DIR}/com.andrea.andrea-localtunnel.plist"
+  echo "Installed localtunnel agent using ${NPX_BIN}."
+fi
+
 if [[ "$WITH_OC" -eq 1 ]]; then
   render "${BASE_DIR}/scripts/macos/com.andrea.openclaw-gateway-refresh.plist.template" \
     "${AGENT_DIR}/com.andrea.openclaw-gateway-refresh.plist"
@@ -85,6 +105,9 @@ if [[ "$LOAD_AFTER_INSTALL" -eq 1 ]]; then
   load_agent "${AGENT_DIR}/com.andrea.andrea-post-login-bootstrap.plist"
   if [[ "$WITH_CF" -eq 1 ]]; then
     load_agent "${AGENT_DIR}/com.andrea.andrea-cloudflared.plist"
+  fi
+  if [[ "$WITH_LT" -eq 1 ]]; then
+    load_agent "${AGENT_DIR}/com.andrea.andrea-localtunnel.plist"
   fi
   if [[ "$WITH_OC" -eq 1 ]]; then
     load_agent "${AGENT_DIR}/com.andrea.openclaw-gateway-refresh.plist"

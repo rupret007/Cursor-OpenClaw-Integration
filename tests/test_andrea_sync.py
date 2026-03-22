@@ -242,6 +242,21 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(decision.mode, "direct")
         self.assertIn("reboot startup", decision.reply_text.lower())
 
+    def test_router_memory_prefers_substantive_history_over_generic_reply(self) -> None:
+        os.environ["OPENAI_API_ENABLED"] = "0"
+        os.environ.pop("OPENAI_API_KEY", None)
+        decision = route_message(
+            "Hi do you remember before?",
+            history=[
+                {"role": "user", "content": "Let's finish the reboot startup work."},
+                {
+                    "role": "assistant",
+                    "content": "I can help with that directly when it's lightweight, and I'll bring in Cursor when the task needs deeper technical work. Tell me what you need.",
+                },
+            ],
+        )
+        self.assertIn("reboot startup", decision.reply_text.lower())
+
     def test_load_recent_telegram_history_returns_prior_turns(self) -> None:
         first = handle_command(
             self.conn,

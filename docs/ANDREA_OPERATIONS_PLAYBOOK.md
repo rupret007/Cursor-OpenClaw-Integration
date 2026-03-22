@@ -71,6 +71,14 @@ export CLOUDFLARED_TUNNEL_TOKEN='...'
 bash scripts/macos/install_andrea_launchagents.sh --with-cloudflared --load
 ```
 
+Fallback for hosts without `cloudflared`:
+
+```bash
+cd /path/to/Cursor-OpenClaw-Integration
+export ANDREA_LOCALTUNNEL_SUBDOMAIN='fine-monkeys-shake'
+bash scripts/macos/install_andrea_launchagents.sh --with-localtunnel --load
+```
+
 This loads three key login jobs:
 
 - `com.andrea.andrea-sync` to keep the local lockstep server alive

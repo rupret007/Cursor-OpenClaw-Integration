@@ -37,6 +37,7 @@ git pull origin main
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | No | Optional Telegram bot credentials (skill/plugin dependent). |
 | `ANDREA_SYNC_PUBLIC_BASE` | No | Public HTTPS origin for Telegram webhook self-heal and reboot-stable ingress. Required for persistent Telegram webhook recovery. |
 | `CLOUDFLARED_TUNNEL_TOKEN` | No | Named Cloudflare tunnel token for reboot-stable `cloudflared` LaunchAgent startup. |
+| `ANDREA_LOCALTUNNEL_SUBDOMAIN` | No | Fallback stable-ish localtunnel subdomain for hosts that do not have `cloudflared` available. |
 | `BRAVE_SEARCH_API_KEY` / `BRAVE_ANSWERS_API_KEY` | No | Optional Brave Search keys (Brave skill expects these exact names). |
 | `MINIMAX_API_KEY` | No | Optional MiniMax key for MiniMax integrations. |
 | `SSL_CERT_FILE` | Sometimes on macOS | If Python reports `CERTIFICATE_VERIFY_FAILED`, set to certifi bundle (see README troubleshooting) |
@@ -87,6 +88,14 @@ Example:
 cd /path/to/Cursor-OpenClaw-Integration
 export CLOUDFLARED_TUNNEL_TOKEN='...'
 bash scripts/macos/install_andrea_launchagents.sh --with-cloudflared --load
+```
+
+Fallback when `cloudflared` is not available on the host:
+
+```bash
+cd /path/to/Cursor-OpenClaw-Integration
+export ANDREA_LOCALTUNNEL_SUBDOMAIN='fine-monkeys-shake'
+bash scripts/macos/install_andrea_launchagents.sh --with-localtunnel --load
 ```
 
 Recommended env location for persistent secrets/runtime:

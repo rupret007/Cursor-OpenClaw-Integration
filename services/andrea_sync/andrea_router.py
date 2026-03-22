@@ -41,6 +41,11 @@ MEMORY_RE = re.compile(
     r"\b(remember|before|earlier|last time|previous|our chat|our conversation|we talked|continue|resume|pick up)\b",
     re.I,
 )
+GENERIC_DIRECT_REPLY_RE = re.compile(
+    r"(i can help with that directly|i'm here and ready to help|what would you like to do|"
+    r"what would you like me to work on|tell me what you need)",
+    re.I,
+)
 META_CURSOR_RE = re.compile(r"\b(talk to cursor|have cursor|use cursor|delegate to cursor)\b", re.I)
 DELEGATE_KEYWORDS_RE = re.compile(
     r"\b(code|repo|repository|file|files|branch|commit|pull request|pr\b|debug|test suite|tests\b|"
@@ -95,10 +100,17 @@ def _history_hint(history: list[dict[str, str]] | None) -> str:
     if not history:
         return ""
     for turn in reversed(history):
-        if turn.get("role") == "assistant" and turn.get("content"):
+        if (
+            turn.get("role") == "assistant"
+            and turn.get("content")
+            and not GENERIC_DIRECT_REPLY_RE.search(str(turn.get("content") or ""))
+        ):
             return _clip(turn["content"], 180)
     for turn in reversed(history):
         if turn.get("role") == "user" and turn.get("content"):
+            return _clip(turn["content"], 180)
+    for turn in reversed(history):
+        if turn.get("role") == "assistant" and turn.get("content"):
             return _clip(turn["content"], 180)
     return ""
 

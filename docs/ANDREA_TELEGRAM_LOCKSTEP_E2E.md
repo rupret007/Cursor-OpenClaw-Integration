@@ -43,7 +43,7 @@ If Homebrew errors on permissions:
 sudo chown -R "$(whoami)" /usr/local/Homebrew
 ```
 
-For true reboot-stable operation, prefer a **named Cloudflare tunnel** with `CLOUDFLARED_TUNNEL_TOKEN` and the macOS LaunchAgent flow below. Quick tunnels are still fine for one-off testing, but they rotate and do not satisfy a reboot-ready setup.
+For true reboot-stable operation, prefer a **named Cloudflare tunnel** with `CLOUDFLARED_TUNNEL_TOKEN` and the macOS LaunchAgent flow below. If `cloudflared` is not available on the host, the repo also supports a managed `localtunnel` fallback via `ANDREA_LOCALTUNNEL_SUBDOMAIN`.
 
 Alternatively use **ngrok** or any HTTPS reverse proxy; then set `ANDREA_SYNC_PUBLIC_BASE` yourself (see below).
 
@@ -151,6 +151,14 @@ Use the repo LaunchAgents when you want the suite to come back after login witho
 cd /path/to/Cursor-OpenClaw-Integration
 export CLOUDFLARED_TUNNEL_TOKEN='...'
 bash scripts/macos/install_andrea_launchagents.sh --with-cloudflared --load
+```
+
+Fallback when `cloudflared` is not available:
+
+```bash
+cd /path/to/Cursor-OpenClaw-Integration
+export ANDREA_LOCALTUNNEL_SUBDOMAIN='fine-monkeys-shake'
+bash scripts/macos/install_andrea_launchagents.sh --with-localtunnel --load
 ```
 
 This installs and loads:

@@ -13,6 +13,10 @@ LOGIN_BOOTSTRAP = REPO_ROOT / "scripts" / "macos" / "andrea_post_login_bootstrap
 LOGIN_BOOTSTRAP_PLIST = (
     REPO_ROOT / "scripts" / "macos" / "com.andrea.andrea-post-login-bootstrap.plist.template"
 )
+LOCALTUNNEL_BOOTSTRAP = REPO_ROOT / "scripts" / "macos" / "andrea_localtunnel.sh"
+LOCALTUNNEL_PLIST = (
+    REPO_ROOT / "scripts" / "macos" / "com.andrea.andrea-localtunnel.plist.template"
+)
 
 
 class TestAndreaFullCycleScript(unittest.TestCase):
@@ -76,6 +80,21 @@ class TestAndreaLoginBootstrap(unittest.TestCase):
         )
         self.assertIn("com.andrea.andrea-post-login-bootstrap.plist", text)
         self.assertIn("--load", text)
+        self.assertIn("--with-localtunnel", text)
+
+    def test_localtunnel_script_exists(self) -> None:
+        self.assertTrue(LOCALTUNNEL_BOOTSTRAP.is_file(), str(LOCALTUNNEL_BOOTSTRAP))
+
+    def test_localtunnel_script_bash_syntax_ok(self) -> None:
+        subprocess.run(
+            ["bash", "-n", str(LOCALTUNNEL_BOOTSTRAP)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_localtunnel_template_exists(self) -> None:
+        self.assertTrue(LOCALTUNNEL_PLIST.is_file(), str(LOCALTUNNEL_PLIST))
 
 
 if __name__ == "__main__":

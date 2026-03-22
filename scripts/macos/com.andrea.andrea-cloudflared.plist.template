@@ -8,6 +8,8 @@
   <true/>
   <key>KeepAlive</key>
   <true/>
+  <key>ThrottleInterval</key>
+  <integer>15</integer>
   <key>ProgramArguments</key>
   <array>
     <string>__CLOUDFLARED_BIN__</string>

@@ -9,6 +9,10 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "andrea_full_cycle.sh"
 PREREQ = REPO_ROOT / "scripts" / "andrea_wrap_up_prereqs.sh"
+LOGIN_BOOTSTRAP = REPO_ROOT / "scripts" / "macos" / "andrea_post_login_bootstrap.sh"
+LOGIN_BOOTSTRAP_PLIST = (
+    REPO_ROOT / "scripts" / "macos" / "com.andrea.andrea-post-login-bootstrap.plist.template"
+)
 
 
 class TestAndreaFullCycleScript(unittest.TestCase):
@@ -49,6 +53,29 @@ class TestAndreaWrapUpPrereqsScript(unittest.TestCase):
         self.assertIn("/v1/health", text)
         self.assertIn("python3 scripts/andrea_sync_server.py", text)
         self.assertIn("Ready: bash scripts/andrea_full_cycle.sh", text)
+
+
+class TestAndreaLoginBootstrap(unittest.TestCase):
+    def test_login_bootstrap_script_exists(self) -> None:
+        self.assertTrue(LOGIN_BOOTSTRAP.is_file(), str(LOGIN_BOOTSTRAP))
+
+    def test_login_bootstrap_script_bash_syntax_ok(self) -> None:
+        subprocess.run(
+            ["bash", "-n", str(LOGIN_BOOTSTRAP)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_login_bootstrap_template_exists(self) -> None:
+        self.assertTrue(LOGIN_BOOTSTRAP_PLIST.is_file(), str(LOGIN_BOOTSTRAP_PLIST))
+
+    def test_install_script_mentions_post_login_agent(self) -> None:
+        text = (REPO_ROOT / "scripts" / "macos" / "install_andrea_launchagents.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("com.andrea.andrea-post-login-bootstrap.plist", text)
+        self.assertIn("--load", text)
 
 
 if __name__ == "__main__":

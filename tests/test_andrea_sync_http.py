@@ -19,6 +19,9 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from services.andrea_sync.telegram_format import format_final_message  # noqa: E402
+from services.andrea_sync.bus import handle_command  # noqa: E402
+from services.andrea_sync.schema import EventType  # noqa: E402
+from services.andrea_sync.store import append_event  # noqa: E402
 
 
 class TestAndreaSyncHTTP(unittest.TestCase):
@@ -460,6 +463,88 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
         self.assertEqual(detail["task"]["status"], "completed")
         self.assertEqual(detail["task"]["meta"]["assistant"]["route"], "direct")
         self.assertNotIn("cursor", detail["task"]["meta"])
+
+    def test_telegram_memory_question_uses_prior_chat_context(self) -> None:
+        prev_enabled = os.environ.get("OPENAI_API_ENABLED")
+        prev_key = os.environ.get("OPENAI_API_KEY")
+        os.environ["OPENAI_API_ENABLED"] = "0"
+        os.environ.pop("OPENAI_API_KEY", None)
+        try:
+            prior = handle_command(
+                self._srv.conn,
+                {
+                    "command_type": "SubmitUserMessage",
+                    "channel": "telegram",
+                    "external_id": "http-memory-prior",
+                    "payload": {
+                        "text": "Let's finish the reboot startup work.",
+                        "chat_id": 22,
+                        "message_id": 30,
+                    },
+                },
+            )
+            append_event(
+                self._srv.conn,
+                prior["task_id"],
+                EventType.ASSISTANT_REPLIED,
+                {
+                    "text": "We were working on reboot startup and Telegram memory.",
+                    "route": "direct",
+                    "reason": "history",
+                },
+            )
+            body = json.dumps(
+                {
+                    "update_id": 44,
+                    "message": {
+                        "text": "Hi do you remember before?",
+                        "message_id": 31,
+                        "chat": {"id": 22},
+                        "from": {"id": 3},
+                    },
+                }
+            ).encode("utf-8")
+            req = urllib.request.Request(
+                self._url("/v1/telegram/webhook"),
+                data=body,
+                method="POST",
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Telegram-Bot-Api-Secret-Token": "hdrsecret",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                self.assertEqual(resp.status, 200)
+            detail = None
+            for _ in range(40):
+                req_tasks = urllib.request.Request(self._url("/v1/tasks?limit=20"), method="GET")
+                with urllib.request.urlopen(req_tasks, timeout=5) as resp_tasks:
+                    tasks = json.loads(resp_tasks.read().decode("utf-8"))["tasks"]
+                telegram_tasks = [t for t in tasks if t["channel"] == "telegram"]
+                for task in telegram_tasks:
+                    req_task = urllib.request.Request(self._url(f"/v1/tasks/{task['task_id']}"), method="GET")
+                    with urllib.request.urlopen(req_task, timeout=5) as resp_task:
+                        candidate = json.loads(resp_task.read().decode("utf-8"))
+                    meta = candidate["task"].get("meta", {})
+                    if meta.get("telegram", {}).get("message_id") == 31:
+                        detail = candidate
+                        break
+                if detail and detail["task"]["status"] == "completed":
+                    break
+                time.sleep(0.05)
+            self.assertIsNotNone(detail)
+            assert detail is not None
+            self.assertIn("remember the recent conversation", detail["task"]["meta"]["assistant"]["last_reply"].lower())
+            self.assertIn("reboot startup", detail["task"]["meta"]["assistant"]["last_reply"].lower())
+        finally:
+            if prev_enabled is None:
+                os.environ.pop("OPENAI_API_ENABLED", None)
+            else:
+                os.environ["OPENAI_API_ENABLED"] = prev_enabled
+            if prev_key is None:
+                os.environ.pop("OPENAI_API_KEY", None)
+            else:
+                os.environ["OPENAI_API_KEY"] = prev_key
 
     def test_telegram_final_message_clips_long_cursor_excerpt(self) -> None:
         long_summary = "Implemented result. " + ("detail " * 300)

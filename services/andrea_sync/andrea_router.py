@@ -16,6 +16,16 @@ def _env_truthy(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return max(1, int(raw.strip()))
+    except ValueError:
+        return default
+
+
 def _normalize(text: str) -> str:
     return re.sub(r"\s+", " ", str(text or "").strip()).lower()
 
@@ -27,6 +37,10 @@ GREETING_RE = re.compile(
 THANKS_RE = re.compile(r"\b(thanks|thank you|appreciate it)\b", re.I)
 IDENTITY_RE = re.compile(r"\b(who are you|what can you do|what do you do)\b", re.I)
 HELP_RE = re.compile(r"^(help|help me|help please|i need help)\b", re.I)
+MEMORY_RE = re.compile(
+    r"\b(remember|before|earlier|last time|previous|our chat|our conversation|we talked|continue|resume|pick up)\b",
+    re.I,
+)
 META_CURSOR_RE = re.compile(r"\b(talk to cursor|have cursor|use cursor|delegate to cursor)\b", re.I)
 DELEGATE_KEYWORDS_RE = re.compile(
     r"\b(code|repo|repository|file|files|branch|commit|pull request|pr\b|debug|test suite|tests\b|"
@@ -49,7 +63,9 @@ def should_delegate_to_cursor(text: str) -> tuple[bool, str]:
     word_count = len(clean.split())
     if not clean:
         return False, "empty_or_whitespace"
-    if GREETING_RE.search(clean) or THANKS_RE.search(clean):
+    if THANKS_RE.search(clean):
+        return False, "greeting_or_social"
+    if GREETING_RE.search(clean) and not MEMORY_RE.search(clean) and word_count <= 6:
         return False, "greeting_or_social"
     if META_CURSOR_RE.search(clean):
         return False, "cursor_coordination_question"
@@ -66,6 +82,53 @@ def should_delegate_to_cursor(text: str) -> tuple[bool, str]:
     if word_count >= 45:
         return True, "longer_multi_step_request"
     return False, "balanced_default_direct"
+
+
+def _clip(text: str, limit: int = 220) -> str:
+    text = str(text or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _history_hint(history: list[dict[str, str]] | None) -> str:
+    if not history:
+        return ""
+    for turn in reversed(history):
+        if turn.get("role") == "assistant" and turn.get("content"):
+            return _clip(turn["content"], 180)
+    for turn in reversed(history):
+        if turn.get("role") == "user" and turn.get("content"):
+            return _clip(turn["content"], 180)
+    return ""
+
+
+def _contextual_fallback(text: str, history: list[dict[str, str]] | None = None) -> str:
+    clean = _normalize(text)
+    hint = _history_hint(history)
+    if MEMORY_RE.search(clean):
+        if hint:
+            return (
+                "Yes, I remember the recent conversation in this chat. "
+                f"The latest useful context I have is: {hint} What would you like to continue?"
+            )
+        return (
+            "I can remember the recent conversation in this chat once we build a little history together. "
+            "Tell me what you want to continue, and I'll pick it up from there."
+        )
+    if "anything else" in clean or "say more" in clean or "tell me more" in clean:
+        if hint:
+            return (
+                "Yes. Building on what we were just discussing, "
+                f"the most relevant recent context is: {hint}"
+            )
+        return "Yes. Tell me what direction you want to go next, and I'll expand from there."
+    if hint and ("?" in text or len(clean.split()) > 8):
+        return (
+            "I can answer that using the recent context from this chat. "
+            f"The latest useful thread I have is: {hint}"
+        )
+    return _heuristic_reply(text)
 
 
 def _heuristic_reply(text: str) -> str:
@@ -97,31 +160,39 @@ def _heuristic_reply(text: str) -> str:
     )
 
 
-def _openai_direct_reply(text: str) -> str:
+def _openai_direct_reply(text: str, history: list[dict[str, str]] | None = None) -> str:
     api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
     if not api_key or not _env_truthy("OPENAI_API_ENABLED", False):
         raise RuntimeError("openai_direct_disabled")
     model = (os.environ.get("ANDREA_DIRECT_OPENAI_MODEL") or "gpt-4o-mini").strip()
+    history_turns = _env_int("ANDREA_DIRECT_HISTORY_TURNS", 6)
     timeout_seconds = max(
         5,
         int((os.environ.get("ANDREA_DIRECT_OPENAI_TIMEOUT_SECONDS") or "25").strip()),
     )
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are Andrea, a warm and capable personal assistant. "
+                "Answer directly, naturally, and concisely. "
+                "Do not mention Cursor unless the user asks. "
+                "Use the recent conversation history when it is relevant, "
+                "but do not claim memories beyond what is provided in this chat context. "
+                "Keep replies short and useful for chat or voice."
+            ),
+        }
+    ]
+    for turn in (history or [])[-history_turns:]:
+        role = "assistant" if turn.get("role") == "assistant" else "user"
+        content = str(turn.get("content") or "").strip()
+        if content:
+            messages.append({"role": role, "content": content})
     payload = {
         "model": model,
         "temperature": 0.4,
         "max_tokens": 220,
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "You are Andrea, a warm and capable personal assistant. "
-                    "Answer directly, naturally, and concisely. "
-                    "Do not mention Cursor unless the user asks. "
-                    "Keep replies short and useful for chat/voice."
-                ),
-            },
-            {"role": "user", "content": str(text).strip()},
-        ],
+        "messages": [*messages, {"role": "user", "content": str(text).strip()}],
     }
     req = urllib.request.Request(
         "https://api.openai.com/v1/chat/completions",
@@ -157,10 +228,10 @@ def _openai_direct_reply(text: str) -> str:
     return text_out
 
 
-def build_direct_reply(text: str) -> str:
+def build_direct_reply(text: str, history: list[dict[str, str]] | None = None) -> str:
     clean = _normalize(text)
     if (
-        GREETING_RE.search(clean)
+        (GREETING_RE.search(clean) and not MEMORY_RE.search(clean) and len(clean.split()) <= 6)
         or THANKS_RE.search(clean)
         or IDENTITY_RE.search(clean)
         or META_CURSOR_RE.search(clean)
@@ -168,17 +239,17 @@ def build_direct_reply(text: str) -> str:
     ):
         return _heuristic_reply(text)
     try:
-        return _openai_direct_reply(text)
+        return _openai_direct_reply(text, history=history)
     except Exception:
-        return _heuristic_reply(text)
+        return _contextual_fallback(text, history=history)
 
 
-def route_message(text: str) -> AndreaRouteDecision:
+def route_message(text: str, history: list[dict[str, str]] | None = None) -> AndreaRouteDecision:
     delegate, reason = should_delegate_to_cursor(text)
     if delegate:
         return AndreaRouteDecision(mode="delegate", reason=reason)
     return AndreaRouteDecision(
         mode="direct",
         reason=reason,
-        reply_text=build_direct_reply(text),
+        reply_text=build_direct_reply(text, history=history),
     )

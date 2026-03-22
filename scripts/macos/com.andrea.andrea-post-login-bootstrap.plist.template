@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.andrea.andrea-post-login-bootstrap</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>WorkingDirectory</key>
+  <string>__REPO_ROOT__</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-lc</string>
+    <string>cd "__REPO_ROOT__" &amp;&amp; exec bash scripts/macos/andrea_post_login_bootstrap.sh</string>
+  </array>
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/andrea/andrea-post-login-bootstrap.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/andrea/andrea-post-login-bootstrap.err</string>
+</dict>
+</plist>

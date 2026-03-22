@@ -70,6 +70,7 @@ Commands without `idempotency_key` use a deterministic hash of `channel`, `exter
 2. `services/andrea_sync/server.py` applies Andrea-first routing:
    - direct Andrea reply for lightweight conversational/personal assistant turns
    - Cursor delegation for heavier repo, coding, debugging, or long-running work
+   - direct Andrea replies can also look at recent Telegram chat history before answering
 3. Delegated tasks are queued as `JobQueued`, then the built-in executor launches `skills/cursor_handoff/scripts/cursor_handoff.py` and polls agent status with `scripts/cursor_openclaw.py`.
 4. Delegated lifecycle is appended back into lockstep as `JobStarted`, `JobCompleted`, or `JobFailed`.
 5. The same server process posts Telegram replies from projected task state, not ad-hoc chat text.
@@ -94,7 +95,7 @@ Design/gap analysis: [ANDREA_LOCKSTEP_REVIEW_FINDINGS.md](ANDREA_LOCKSTEP_REVIEW
 
 ## macOS auto-start
 
-Templates + installer: `scripts/macos/install_andrea_launchagents.sh` (optional `cloudflared` + OpenClaw login refresh). The sync LaunchAgent sources repo `.env` first, then `~/andrea-lockstep.env` for per-machine overrides.
+Templates + installer: `scripts/macos/install_andrea_launchagents.sh` (optional named `cloudflared`, optional OpenClaw login refresh, plus a post-login bootstrap step for capability publish + webhook ensure). The sync LaunchAgent sources repo `.env` first, then `~/andrea-lockstep.env` for per-machine overrides.
 
 This keeps the same assistant persona available across text-first Telegram now and voice-first Alexa later: Andrea answers first, then delegates when the work needs a heavier technical lane.
 

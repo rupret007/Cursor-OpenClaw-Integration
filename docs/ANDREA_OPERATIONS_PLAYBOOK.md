@@ -63,6 +63,22 @@ Optional strict gate (fails if critical capabilities blocked):
 python3 scripts/andrea_capabilities.py --strict
 ```
 
+**Reboot-ready login path (macOS):**
+
+```bash
+cd /path/to/Cursor-OpenClaw-Integration
+export CLOUDFLARED_TUNNEL_TOKEN='...'
+bash scripts/macos/install_andrea_launchagents.sh --with-cloudflared --load
+```
+
+This loads three key login jobs:
+
+- `com.andrea.andrea-sync` to keep the local lockstep server alive
+- `com.andrea.andrea-cloudflared` for a stable named tunnel
+- `com.andrea.andrea-post-login-bootstrap` to sync the OpenClaw skill mirror, restart the gateway, publish capabilities, and ensure the Telegram webhook
+
+Put persistent overrides in `~/andrea-lockstep.env` when you want them to survive reboot without modifying the repo `.env`.
+
 SLO-style gate (grade + optional `openclaw models status --probe`; **probe timeout is ms**):
 
 ```bash
@@ -102,6 +118,7 @@ bash scripts/andrea_slo_check.sh
 | `401` from Cursor API | Rotate key; check `CURSOR_BASE_URL` / `CURSOR_AUTH_MODE` |
 | `gh` not logged in | `gh auth login` or set `GH_TOKEN` / `GITHUB_TOKEN` in `.env` (merge without full wizard: `python3 scripts/dotenv_set_key.py GH_TOKEN --skill`) |
 | `openclaw` / skill missing | Install OpenClaw; `cp -R skills/cursor_handoff ~/.openclaw/workspace/skills/`; `openclaw gateway restart` |
+| Reboot came back but Telegram is dark | Confirm the named tunnel LaunchAgent is loaded, `ANDREA_SYNC_PUBLIC_BASE` is set, and `python3 scripts/andrea_lockstep_telegram_e2e.py webhook-info` shows the stable webhook URL |
 | SSL errors in Python | See README: `SSL_CERT_FILE` + `certifi` |
 | Tests fail | Fix on a branch; do not merge to `main` until green |
 | Readiness **Grade C** | `python3 scripts/andrea_capabilities.py` — unblock **blocked** rows (often `github:auth`: `gh auth login` or `python3 scripts/dotenv_set_key.py GH_TOKEN --skill`) |
@@ -178,7 +195,7 @@ python3 scripts/andrea_sync_server.py
 ```
 
 **Telegram:** Point BotFather `setWebhook` to  
-`https://your-public-host/v1/telegram/webhook?secret=...` (same value as `ANDREA_SYNC_TELEGRAM_SECRET`) or use the header secret path. The handler returns `200` immediately, creates a task, queues Cursor work by default, and replies back to the same chat from projected task state.
+`https://your-public-host/v1/telegram/webhook?secret=...` (same value as `ANDREA_SYNC_TELEGRAM_SECRET`) or use the header secret path. The handler returns `200` immediately, creates a task, routes simple turns through Andrea directly, and delegates heavier work to Cursor when needed.
 
 **E2E helper (cloudflared + setWebhook + verify):** see [ANDREA_TELEGRAM_LOCKSTEP_E2E.md](ANDREA_TELEGRAM_LOCKSTEP_E2E.md) and `python3 scripts/andrea_lockstep_telegram_e2e.py tunnel-and-webhook`.
 

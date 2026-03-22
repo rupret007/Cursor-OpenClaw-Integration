@@ -35,6 +35,8 @@ git pull origin main
 | `GH_TOKEN` / `GITHUB_TOKEN` | No | Optional GitHub token for OpenClaw GitHub skills if env auth is used. |
 | `GEMINI_API_KEY` | No | Optional Gemini key for Gemini skills/CLI. |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | No | Optional Telegram bot credentials (skill/plugin dependent). |
+| `ANDREA_SYNC_PUBLIC_BASE` | No | Public HTTPS origin for Telegram webhook self-heal and reboot-stable ingress. Required for persistent Telegram webhook recovery. |
+| `CLOUDFLARED_TUNNEL_TOKEN` | No | Named Cloudflare tunnel token for reboot-stable `cloudflared` LaunchAgent startup. |
 | `BRAVE_SEARCH_API_KEY` / `BRAVE_ANSWERS_API_KEY` | No | Optional Brave Search keys (Brave skill expects these exact names). |
 | `MINIMAX_API_KEY` | No | Optional MiniMax key for MiniMax integrations. |
 | `SSL_CERT_FILE` | Sometimes on macOS | If Python reports `CERTIFICATE_VERIFY_FAILED`, set to certifi bundle (see README troubleshooting) |
@@ -68,6 +70,38 @@ openclaw skills list   # expect cursor_handoff ready if skill is installed in wo
 Optional clean replace if the skill had files removed upstream: `rm -rf ~/.openclaw/workspace/skills/cursor_handoff` then the same `cp -R`.
 
 The **canonical skill copy** for day-to-day OpenClaw may live under `~/.openclaw/workspace/skills/cursor_handoff/`. This repository includes a **mirror** under `skills/cursor_handoff/` for version control and CI.
+
+## Reboot-ready macOS startup
+
+For a reboot-stable local operator setup, use:
+
+- `andrea_sync` LaunchAgent
+- named `cloudflared` tunnel LaunchAgent
+- post-login Andrea bootstrap LaunchAgent
+
+The bootstrap step waits for `andrea_sync`, syncs the repo `cursor_handoff` skill into the OpenClaw workspace, restarts the OpenClaw gateway, publishes a fresh capability snapshot, and re-asserts the Telegram webhook when the required env is present.
+
+Example:
+
+```bash
+cd /path/to/Cursor-OpenClaw-Integration
+export CLOUDFLARED_TUNNEL_TOKEN='...'
+bash scripts/macos/install_andrea_launchagents.sh --with-cloudflared --load
+```
+
+Recommended env location for persistent secrets/runtime:
+
+- repo `.env` for project-scoped values
+- `~/andrea-lockstep.env` for machine-local overrides
+
+Key reboot-ready variables:
+
+- `TELEGRAM_BOT_TOKEN`
+- `ANDREA_SYNC_INTERNAL_TOKEN`
+- `ANDREA_SYNC_PUBLIC_BASE`
+- `CLOUDFLARED_TUNNEL_TOKEN`
+- `CURSOR_API_KEY`
+- `OPENAI_API_KEY` with `OPENAI_API_ENABLED=1` when you want memory-aware direct replies to use OpenAI
 
 ## GitHub authentication (push / CI)
 

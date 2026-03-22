@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple  # noqa: F401 used in list_tasks
 
-from .schema import EventType
+from .schema import Channel, EventType
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
@@ -162,6 +162,77 @@ def load_events_for_task(
             payload = {}
         out.append((int(r["seq"]), float(r["ts"]), str(r["event_type"]), payload))
     return out
+
+
+def _clip_text(value: Any, limit: int = 600) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
+
+
+def load_recent_telegram_history(
+    conn: sqlite3.Connection,
+    chat_id: Any,
+    *,
+    limit_turns: int = 6,
+    exclude_task_id: Optional[str] = None,
+) -> List[Dict[str, str]]:
+    if chat_id is None:
+        return []
+    params: List[Any] = [Channel.TELEGRAM.value, EventType.USER_MESSAGE.value, chat_id]
+    exclude_clause = ""
+    if exclude_task_id:
+        exclude_clause = "AND e.task_id != ?"
+        params.append(exclude_task_id)
+    params.append(max(1, int(limit_turns)))
+    rows = conn.execute(
+        f"""
+        SELECT e.task_id, MAX(e.seq) AS last_seq
+        FROM events e
+        JOIN tasks t ON t.task_id = e.task_id
+        WHERE t.channel = ?
+          AND e.event_type = ?
+          AND json_extract(e.payload_json, '$.chat_id') = ?
+          {exclude_clause}
+        GROUP BY e.task_id
+        ORDER BY last_seq DESC
+        LIMIT ?
+        """,
+        params,
+    ).fetchall()
+    task_ids = [str(row["task_id"]) for row in reversed(rows)]
+    history: List[Dict[str, str]] = []
+    for task_id in task_ids:
+        user_text = ""
+        assistant_text = ""
+        assistant_source = ""
+        for _seq, _ts, et_raw, payload in load_events_for_task(conn, task_id):
+            if et_raw == EventType.USER_MESSAGE.value and payload.get("text"):
+                user_text = _clip_text(payload.get("text"))
+            elif et_raw == EventType.ASSISTANT_REPLIED.value and payload.get("text"):
+                assistant_text = _clip_text(payload.get("text"))
+                assistant_source = "direct"
+            elif et_raw == EventType.JOB_COMPLETED.value and payload.get("summary"):
+                assistant_text = _clip_text(f"Cursor completed: {payload.get('summary')}")
+                assistant_source = "cursor"
+            elif et_raw == EventType.JOB_FAILED.value:
+                detail = payload.get("message") or payload.get("error")
+                if detail:
+                    assistant_text = _clip_text(f"Cursor failed: {detail}")
+                    assistant_source = "cursor"
+        if user_text:
+            history.append({"role": "user", "content": user_text, "task_id": task_id})
+        if assistant_text:
+            history.append(
+                {
+                    "role": "assistant",
+                    "content": assistant_text,
+                    "task_id": task_id,
+                    "source": assistant_source or "direct",
+                }
+            )
+    return history
 
 
 def task_exists(conn: sqlite3.Connection, task_id: str) -> bool:

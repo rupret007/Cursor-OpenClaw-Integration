@@ -31,7 +31,7 @@ python3 scripts/andrea_sync_server.py
 
 `scripts/andrea_sync_server.py` now loads repo `.env`, then cwd `.env`, then startup-safe overrides from `~/andrea-lockstep.env`, and finally `ANDREA_ENV_FILE` when set. That lets the same process handle webhook ingest, Cursor execution, Telegram replies, and webhook self-heal without requiring a separate export step.
 
-3. **`cloudflared` on PATH** (quick tunnel). Install:
+3. **`cloudflared` on PATH**. Install:
 
 ```bash
 brew install cloudflared
@@ -42,6 +42,8 @@ If Homebrew errors on permissions:
 ```bash
 sudo chown -R "$(whoami)" /usr/local/Homebrew
 ```
+
+For true reboot-stable operation, prefer a **named Cloudflare tunnel** with `CLOUDFLARED_TUNNEL_TOKEN` and the macOS LaunchAgent flow below. Quick tunnels are still fine for one-off testing, but they rotate and do not satisfy a reboot-ready setup.
 
 Alternatively use **ngrok** or any HTTPS reverse proxy; then set `ANDREA_SYNC_PUBLIC_BASE` yourself (see below).
 
@@ -105,6 +107,7 @@ There are now two Telegram lanes:
 
 - **Direct Andrea lane**
   - lightweight conversational/personal assistant turns
+  - can use recent conversation history from the same Telegram chat before replying
   - no unnecessary Cursor task noise in the chat
   - reply is usually just:
     - `Andrea:` concise direct answer
@@ -140,6 +143,24 @@ bash scripts/andrea_full_cycle.sh
 - **zsh:** always use **real paths**, not `/path/to/...`. URLs with `?` are quoted inside the script.
 - **Optional wait for a Telegram message** in the DB: `ANDREA_FULL_CYCLE_WAIT_TELEGRAM=1 bash scripts/andrea_full_cycle.sh`
 
+## Reboot-ready macOS setup
+
+Use the repo LaunchAgents when you want the suite to come back after login without opening a manual terminal:
+
+```bash
+cd /path/to/Cursor-OpenClaw-Integration
+export CLOUDFLARED_TUNNEL_TOKEN='...'
+bash scripts/macos/install_andrea_launchagents.sh --with-cloudflared --load
+```
+
+This installs and loads:
+
+- `com.andrea.andrea-sync`
+- `com.andrea.andrea-cloudflared`
+- `com.andrea.andrea-post-login-bootstrap`
+
+The post-login bootstrap waits for `andrea_sync`, syncs `skills/cursor_handoff` into the OpenClaw workspace, restarts the gateway, publishes the capability snapshot, and re-runs `set-webhook` when `TELEGRAM_BOT_TOKEN` and `ANDREA_SYNC_PUBLIC_BASE` are present.
+
 ## Refresh / restart checklist
 
 1. `git pull --ff-only origin main`
@@ -154,7 +175,7 @@ bash scripts/andrea_full_cycle.sh
 ## Operational notes
 
 - **403** on webhook: `?secret=` must equal `ANDREA_SYNC_TELEGRAM_SECRET` exactly.
-- **Stable hostname**: quick tunnels rotate; for a fixed URL use a **named Cloudflare tunnel** or your own TLS host, then install `scripts/macos/install_andrea_launchagents.sh --with-cloudflared`.
+- **Stable hostname**: quick tunnels rotate; for a fixed URL use a **named Cloudflare tunnel** or your own TLS host, then install `scripts/macos/install_andrea_launchagents.sh --with-cloudflared --load`.
 - **Runtime persistence**: the sync LaunchAgent sources repo `.env` plus `~/andrea-lockstep.env`, so `TELEGRAM_BOT_TOKEN`, `CURSOR_API_KEY`, and lockstep secrets survive login.
 - **Webhook self-heal**: if `ANDREA_SYNC_PUBLIC_BASE` is set, the running server checks Telegram webhook registration and re-applies it when another process clears it.
 

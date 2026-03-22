@@ -30,6 +30,7 @@ from .store import (
     get_task_channel,
     list_tasks,
     load_events_for_task,
+    load_recent_telegram_history,
     migrate,
     set_meta,
 )
@@ -258,6 +259,30 @@ class SyncServer:
 
         self.with_lock(mark)
 
+    def _recent_telegram_history(self, task_id: str) -> list[dict[str, str]]:
+        snapshot = self._task_snapshot(task_id)
+        if not snapshot or snapshot["channel"] != "telegram":
+            return []
+        projection_meta = snapshot["projection"].get("meta", {})
+        telegram_meta = (
+            projection_meta.get("telegram", {})
+            if isinstance(projection_meta, dict)
+            else {}
+        )
+        chat_id = telegram_meta.get("chat_id")
+        if chat_id is None:
+            return []
+
+        def read(c: sqlite3.Connection) -> list[dict[str, str]]:
+            return load_recent_telegram_history(
+                c,
+                chat_id,
+                limit_turns=_env_int("ANDREA_DIRECT_HISTORY_TURNS", 6),
+                exclude_task_id=task_id,
+            )
+
+        return self.with_lock(read)
+
     def _queue_task_followups(self, task_id: str) -> None:
         if not task_id:
             return
@@ -338,7 +363,7 @@ class SyncServer:
             return
         try:
             prompt = self._extract_cursor_prompt(task_id)
-            decision = route_message(prompt)
+            decision = route_message(prompt, history=self._recent_telegram_history(task_id))
             if decision.mode == "delegate":
                 applied = self._append_task_event(
                     task_id,

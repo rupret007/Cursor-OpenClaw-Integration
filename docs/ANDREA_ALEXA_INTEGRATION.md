@@ -6,6 +6,8 @@ Alexa is an **explicit voice doorway** into the same Andrea/OpenClaw/Cursor lock
 
 See [ALEXA_CLOUD_EDGE_TEMPLATE.md](ALEXA_CLOUD_EDGE_TEMPLATE.md) for the forwarding contract.
 
+If you want the user-facing, click-by-click setup path, start with [ANDREA_ALEXA_USER_SETUP.md](ANDREA_ALEXA_USER_SETUP.md).
+
 ## UX rules
 
 - Invocation stays explicit: `Alexa, ask AndreaBot ...`

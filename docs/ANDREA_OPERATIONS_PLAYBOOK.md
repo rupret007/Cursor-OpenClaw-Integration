@@ -156,6 +156,7 @@ bash scripts/andrea_slo_check.sh
 | [ANDREA_OPENCLAW_HYBRID_SKILLS.md](ANDREA_OPENCLAW_HYBRID_SKILLS.md) | Hybrid expansion (Apple/Google/Waves 1–3) |
 | [ANDREA_LOCKSTEP_ARCHITECTURE.md](ANDREA_LOCKSTEP_ARCHITECTURE.md) | Telegram/Alexa/Cursor shared command bus + SQLite event store |
 | [ANDREA_ALEXA_INTEGRATION.md](ANDREA_ALEXA_INTEGRATION.md) | Alexa Custom Skill endpoint + HTTPS notes |
+| [ANDREA_ALEXA_USER_SETUP.md](ANDREA_ALEXA_USER_SETUP.md) | Step-by-step human setup guide for the Alexa app + Developer Console |
 | [ANDREA_TELEGRAM_LOCKSTEP_E2E.md](ANDREA_TELEGRAM_LOCKSTEP_E2E.md) | Telegram webhook + cloudflared + lockstep verification |
 | [ANDREA_LOCKSTEP_REVIEW_FINDINGS.md](ANDREA_LOCKSTEP_REVIEW_FINDINGS.md) | Lockstep security/awareness review notes |
 | [docs/DEPLOYMENT.md](DEPLOYMENT.md) | Branch + deployment baseline |
@@ -210,7 +211,7 @@ python3 scripts/andrea_sync_server.py
 
 **E2E helper (cloudflared + setWebhook + verify):** see [ANDREA_TELEGRAM_LOCKSTEP_E2E.md](ANDREA_TELEGRAM_LOCKSTEP_E2E.md) and `python3 scripts/andrea_lockstep_telegram_e2e.py tunnel-and-webhook`.
 
-**Alexa:** Publish a Custom Skill whose public endpoint is your cloud edge, and have that edge forward into `https://your-private-or-local-host/v1/alexa`. Set `ANDREA_SYNC_ALEXA_EDGE_TOKEN` on both sides so the local Andrea endpoint only accepts forwarded edge traffic. See [ANDREA_ALEXA_INTEGRATION.md](ANDREA_ALEXA_INTEGRATION.md) and [ALEXA_CLOUD_EDGE_TEMPLATE.md](ALEXA_CLOUD_EDGE_TEMPLATE.md).
+**Alexa:** Publish a Custom Skill whose public endpoint is your cloud edge, and have that edge forward into `https://your-private-or-local-host/v1/alexa`. Set `ANDREA_SYNC_ALEXA_EDGE_TOKEN` on both sides so the local Andrea endpoint only accepts forwarded edge traffic. For the human setup walkthrough, use [ANDREA_ALEXA_USER_SETUP.md](ANDREA_ALEXA_USER_SETUP.md). For the lower-level integration details, see [ANDREA_ALEXA_INTEGRATION.md](ANDREA_ALEXA_INTEGRATION.md) and [ALEXA_CLOUD_EDGE_TEMPLATE.md](ALEXA_CLOUD_EDGE_TEMPLATE.md).
 
 **Delegated lifecycle:** Built-in Telegram execution now appends lifecycle automatically for both OpenClaw-only runs and OpenClaw-to-Cursor escalations. For manual or external runs, you can still emit events directly:
 

@@ -43,6 +43,7 @@ Hardened **Cursor Cloud Agents** integration toolkit for **OpenClaw**, shell wor
 │   ├── OPENCLAW_SKILL.md            # install skill, typical flows
 │   ├── CLI_REFERENCE.md             # flags and subcommands
 │   ├── ANDREA_*.md                  # Andrea max-autonomy: matrix, policy, runbooks, playbook
+│   ├── ANDREA_ALEXA_USER_SETUP.md   # user-facing Alexa app + Developer Console setup guide
 │   └── ALEXA_CLOUD_EDGE_TEMPLATE.md # Alexa public-edge forwarding contract
 ├── services/
 │   └── andrea_sync/           # lockstep bus, adapters, routing, HTTP server, formatting
@@ -237,6 +238,7 @@ Full steps and flow: [docs/OPENCLAW_SKILL.md](docs/OPENCLAW_SKILL.md).
 | [docs/ANDREA_TELEGRAM_LOCKSTEP_E2E.md](docs/ANDREA_TELEGRAM_LOCKSTEP_E2E.md) | Telegram webhook + `cloudflared` + `scripts/andrea_lockstep_telegram_e2e.py` |
 | [docs/ANDREA_LOCKSTEP_REVIEW_FINDINGS.md](docs/ANDREA_LOCKSTEP_REVIEW_FINDINGS.md) | Lockstep awareness / kill-switch / webhook review notes |
 | [docs/ANDREA_ALEXA_INTEGRATION.md](docs/ANDREA_ALEXA_INTEGRATION.md) | Alexa Custom Skill voice lane, Telegram session summaries, and rollout notes |
+| [docs/ANDREA_ALEXA_USER_SETUP.md](docs/ANDREA_ALEXA_USER_SETUP.md) | Step-by-step Alexa app + Developer Console setup guide for actual users/operators |
 | [docs/ALEXA_CLOUD_EDGE_TEMPLATE.md](docs/ALEXA_CLOUD_EDGE_TEMPLATE.md) | Recommended public-edge forwarding/auth contract for Alexa |
 
 **Startup self-check:**
@@ -302,6 +304,7 @@ bash scripts/andrea_reliability_probes.sh
 | [docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md) | Flags and subcommands for both CLIs |
 | [docs/ANDREA_OPERATIONS_PLAYBOOK.md](docs/ANDREA_OPERATIONS_PLAYBOOK.md) | Operator playbook for lockstep, reboot-ready startup, Telegram, and Alexa |
 | [docs/ANDREA_ALEXA_INTEGRATION.md](docs/ANDREA_ALEXA_INTEGRATION.md) | Alexa invocation model, short voice replies, Telegram summary behavior |
+| [docs/ANDREA_ALEXA_USER_SETUP.md](docs/ANDREA_ALEXA_USER_SETUP.md) | Human setup guide for getting AndreaBot working in the Alexa app and Developer Console |
 | [docs/ALEXA_CLOUD_EDGE_TEMPLATE.md](docs/ALEXA_CLOUD_EDGE_TEMPLATE.md) | Thin public-edge template for Alexa request verification and forwarding |
 | [openclaw-cursor-integration-roadmap.md](openclaw-cursor-integration-roadmap.md) | Phased integration plan |
 | [openclaw-cursor-integration-proposal.md](openclaw-cursor-integration-proposal.md) | Design notes / ideas |

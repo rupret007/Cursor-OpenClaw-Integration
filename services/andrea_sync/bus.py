@@ -159,16 +159,73 @@ def _handle_user_message(
     conn: sqlite3.Connection, env: CommandEnvelope, idem: str
 ) -> Dict[str, Any]:
     if not env.task_id:
-        merged = dict(env.payload)
-        merged.setdefault("summary", str(env.payload.get("text", ""))[:120])
-        body = {
-            "command_type": CommandType.CREATE_TASK.value,
-            "channel": env.channel.value,
-            "payload": merged,
-            "external_id": env.external_id,
-            "idempotency_key": env.idempotency_key,
+        tid, is_new, deduped = _ensure_task(conn, env, idem)
+        if tid is None:
+            return {"ok": False, "error": "task resolution failed"}
+        if deduped:
+            _append(
+                conn,
+                tid,
+                EventType.COMMAND_DEDUPED,
+                {"command_type": env.command_type.value, "idempotency_key": idem},
+            )
+            return {"ok": True, "task_id": tid, "deduped": True}
+        summary = str(env.payload.get("text", "") or env.payload.get("summary", ""))[:120]
+        if is_new:
+            _append(
+                conn,
+                tid,
+                EventType.COMMAND_RECEIVED,
+                {"command_type": env.command_type.value, "channel": env.channel.value},
+            )
+            _append(
+                conn,
+                tid,
+                EventType.TASK_CREATED,
+                {"summary": summary, "channel": env.channel.value},
+            )
+        _append(
+            conn,
+            tid,
+            EventType.USER_MESSAGE,
+            {
+                "text": env.payload.get("text", ""),
+                "channel": env.channel.value,
+                "chat_id": env.payload.get("chat_id"),
+                "chat_type": env.payload.get("chat_type"),
+                "message_id": env.payload.get("message_id"),
+                "from_user": env.payload.get("from_user"),
+                "from_username": env.payload.get("from_username"),
+            },
+        )
+        if env.external_id:
+            _append(
+                conn,
+                tid,
+                EventType.EXTERNAL_REF,
+                {"kind": f"{env.channel.value}_update", "ref": env.external_id},
+            )
+        queued_cursor_job = (
+            env.channel == Channel.TELEGRAM
+            and bool(env.payload.get("auto_cursor_job", False))
+        )
+        if queued_cursor_job:
+            _append(
+                conn,
+                tid,
+                EventType.JOB_QUEUED,
+                {
+                    "kind": "cursor",
+                    "prompt_excerpt": str(env.payload.get("text", ""))[:300],
+                    "source": "telegram_default",
+                },
+            )
+        return {
+            "ok": True,
+            "task_id": tid,
+            "deduped": False,
+            "queued_cursor_job": queued_cursor_job,
         }
-        return handle_command(conn, body)
     tid = env.task_id
     if not task_exists(conn, tid):
         return {"ok": False, "error": f"unknown task_id: {tid}"}
@@ -182,7 +239,15 @@ def _handle_user_message(
         conn,
         tid,
         EventType.USER_MESSAGE,
-        {"text": env.payload.get("text", ""), "channel": env.channel.value},
+        {
+            "text": env.payload.get("text", ""),
+            "channel": env.channel.value,
+            "chat_id": env.payload.get("chat_id"),
+            "chat_type": env.payload.get("chat_type"),
+            "message_id": env.payload.get("message_id"),
+            "from_user": env.payload.get("from_user"),
+            "from_username": env.payload.get("from_username"),
+        },
     )
     if env.external_id:
         _append(

@@ -7,6 +7,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -16,6 +17,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+from services.andrea_sync.telegram_format import format_final_message  # noqa: E402
 
 
 class TestAndreaSyncHTTP(unittest.TestCase):
@@ -34,11 +37,17 @@ class TestAndreaSyncHTTP(unittest.TestCase):
             "ANDREA_SYNC_DB",
             "ANDREA_SYNC_TELEGRAM_SECRET",
             "ANDREA_SYNC_INTERNAL_TOKEN",
+            "ANDREA_SYNC_BACKGROUND_ENABLED",
+            "ANDREA_SYNC_TELEGRAM_NOTIFIER",
+            "TELEGRAM_BOT_TOKEN",
         ):
             cls._env_backup[key] = os.environ.get(key)
         os.environ["ANDREA_SYNC_DB"] = cls._dbpath
         os.environ["ANDREA_SYNC_TELEGRAM_SECRET"] = "testhooksecret"
         os.environ["ANDREA_SYNC_INTERNAL_TOKEN"] = "internal-test-token"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["TELEGRAM_BOT_TOKEN"] = ""
 
         from services.andrea_sync.server import SyncServer, make_handler
 
@@ -288,12 +297,18 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
             "ANDREA_SYNC_TELEGRAM_SECRET",
             "ANDREA_SYNC_TELEGRAM_WEBHOOK_SECRET",
             "ANDREA_SYNC_INTERNAL_TOKEN",
+            "ANDREA_SYNC_BACKGROUND_ENABLED",
+            "ANDREA_SYNC_TELEGRAM_NOTIFIER",
+            "TELEGRAM_BOT_TOKEN",
         ):
             cls._env_backup[key] = os.environ.get(key)
         os.environ["ANDREA_SYNC_DB"] = cls._dbpath
         os.environ["ANDREA_SYNC_TELEGRAM_SECRET"] = ""
         os.environ["ANDREA_SYNC_TELEGRAM_WEBHOOK_SECRET"] = "hdrsecret"
         os.environ["ANDREA_SYNC_INTERNAL_TOKEN"] = "internal-test-token"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["TELEGRAM_BOT_TOKEN"] = ""
 
         from services.andrea_sync.server import SyncServer, make_handler
 
@@ -325,7 +340,8 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
             {
                 "update_id": 42,
                 "message": {
-                    "text": "hi",
+                    "text": "please inspect the repo and fix the tests",
+                    "message_id": 9,
                     "chat": {"id": 1},
                     "from": {"id": 2},
                 },
@@ -342,6 +358,83 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
         )
         with urllib.request.urlopen(req, timeout=5) as resp:
             self.assertEqual(resp.status, 200)
+        detail = None
+        for _ in range(40):
+            req_tasks = urllib.request.Request(self._url("/v1/tasks?limit=5"), method="GET")
+            with urllib.request.urlopen(req_tasks, timeout=5) as resp_tasks:
+                tasks = json.loads(resp_tasks.read().decode("utf-8"))["tasks"]
+            telegram_tasks = [t for t in tasks if t["channel"] == "telegram"]
+            if telegram_tasks:
+                tid = telegram_tasks[0]["task_id"]
+                req_task = urllib.request.Request(self._url(f"/v1/tasks/{tid}"), method="GET")
+                with urllib.request.urlopen(req_task, timeout=5) as resp_task:
+                    detail = json.loads(resp_task.read().decode("utf-8"))
+                if detail["task"]["status"] == "queued":
+                    break
+            time.sleep(0.05)
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertEqual(detail["task"]["status"], "queued")
+        self.assertEqual(detail["task"]["meta"]["telegram"]["chat_id"], 1)
+        self.assertEqual(detail["task"]["meta"]["telegram"]["message_id"], 9)
+
+    def test_telegram_greeting_routes_direct_without_cursor_task(self) -> None:
+        body = json.dumps(
+            {
+                "update_id": 43,
+                "message": {
+                    "text": "hi andrea how are you?",
+                    "message_id": 10,
+                    "chat": {"id": 2},
+                    "from": {"id": 3},
+                },
+            }
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            self._url("/v1/telegram/webhook"),
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "X-Telegram-Bot-Api-Secret-Token": "hdrsecret",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            self.assertEqual(resp.status, 200)
+        detail = None
+        for _ in range(40):
+            req_tasks = urllib.request.Request(self._url("/v1/tasks?limit=10"), method="GET")
+            with urllib.request.urlopen(req_tasks, timeout=5) as resp_tasks:
+                tasks = json.loads(resp_tasks.read().decode("utf-8"))["tasks"]
+            telegram_tasks = [t for t in tasks if t["channel"] == "telegram"]
+            for task in telegram_tasks:
+                req_task = urllib.request.Request(self._url(f"/v1/tasks/{task['task_id']}"), method="GET")
+                with urllib.request.urlopen(req_task, timeout=5) as resp_task:
+                    candidate = json.loads(resp_task.read().decode("utf-8"))
+                meta = candidate["task"].get("meta", {})
+                if meta.get("telegram", {}).get("message_id") == 10:
+                    detail = candidate
+                    break
+            if detail and detail["task"]["status"] == "completed":
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertEqual(detail["task"]["status"], "completed")
+        self.assertEqual(detail["task"]["meta"]["assistant"]["route"], "direct")
+        self.assertNotIn("cursor", detail["task"]["meta"])
+
+    def test_telegram_final_message_clips_long_cursor_excerpt(self) -> None:
+        long_summary = "Implemented result. " + ("detail " * 300)
+        text = format_final_message(
+            "tsk_demo",
+            status="completed",
+            summary=long_summary,
+            agent_url="https://cursor.com/agents/demo",
+        )
+        self.assertIn("Cursor said:", text)
+        self.assertIn("Technical details:", text)
+        self.assertLess(len(text), 1600)
 
 
 if __name__ == "__main__":

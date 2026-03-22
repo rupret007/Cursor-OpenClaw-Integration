@@ -38,7 +38,8 @@ render "${BASE_DIR}/scripts/macos/com.andrea.andrea-sync.plist.template" \
   "${AGENT_DIR}/com.andrea.andrea-sync.plist"
 
 echo "Installed ${AGENT_DIR}/com.andrea.andrea-sync.plist"
-echo "Put secrets in ~/andrea-lockstep.env (export ANDREA_SYNC_TELEGRAM_SECRET=... etc.) then:"
+echo "The sync LaunchAgent sources repo .env first, then ~/andrea-lockstep.env for overrides."
+echo "Put secrets/runtime overrides in ~/andrea-lockstep.env (export TELEGRAM_BOT_TOKEN=... etc.) then:"
 echo "  launchctl bootstrap gui/\$(id -u) ${AGENT_DIR}/com.andrea.andrea-sync.plist"
 
 if [[ "$WITH_CF" -eq 1 ]]; then

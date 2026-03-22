@@ -54,6 +54,11 @@ When the kill switch is engaged, Telegram/Alexa ingress and normal commands retu
 | `ANDREA_SYNC_DOCTOR` | Set `1` to run health during `andrea_doctor.sh` |
 | `ANDREA_SYNC_REQUIRED` | If `1`, health probe fails when URL unreachable |
 | `ANDREA_SYNC_VERBOSE` | `1` logs HTTP requests to stderr |
+| `TELEGRAM_BOT_TOKEN` | Needed for Telegram ACK/progress/final replies |
+| `CURSOR_API_KEY` | Needed for default Telegram -> Cursor executor flow |
+| `ANDREA_CURSOR_REPO` | Optional repo path for Telegram-triggered Cursor handoff (default repo root) |
+| `ANDREA_CURSOR_HANDOFF_MODE` | `auto` / `api` / `cli` for the built-in Telegram executor |
+| `ANDREA_SYNC_PUBLIC_BASE` | Public HTTPS origin for Telegram webhook self-heal |
 
 ## Idempotency
 
@@ -61,9 +66,20 @@ Commands without `idempotency_key` use a deterministic hash of `channel`, `exter
 
 ## Cursor / OpenClaw wiring
 
-1. OpenClaw (or Telegram) creates a task with `CreateCursorJob` or `SubmitUserMessage` then `CreateCursorJob`.
-2. After `cursor_handoff` / `cursor_openclaw` runs, shell wrappers or CI call `scripts/andrea_sync_cursor_report.py` with `JobStarted`, `JobProgress`, `JobCompleted`, or `JobFailed`.
-3. Downstream notifiers (future) read `GET /v1/tasks/{id}` and post summaries back to Telegram/Alexa from **projected state**, not ad-hoc chat text.
+1. A normal Telegram message lands on `/v1/telegram/webhook`, becomes `SubmitUserMessage`, and is persisted into lockstep first.
+2. `services/andrea_sync/server.py` applies Andrea-first routing:
+   - direct Andrea reply for lightweight conversational/personal assistant turns
+   - Cursor delegation for heavier repo, coding, debugging, or long-running work
+3. Delegated tasks are queued as `JobQueued`, then the built-in executor launches `skills/cursor_handoff/scripts/cursor_handoff.py` and polls agent status with `scripts/cursor_openclaw.py`.
+4. Delegated lifecycle is appended back into lockstep as `JobStarted`, `JobCompleted`, or `JobFailed`.
+5. The same server process posts Telegram replies from projected task state, not ad-hoc chat text.
+6. Telegram replies are formatted as:
+   - `Andrea:` user-facing answer first
+   - `What happened:` compressed execution summary
+   - `Cursor said:` short excerpt from agent output
+   - `Technical details:` task id, status, PR, agent URL
+7. Direct Andrea replies intentionally skip Cursor lifecycle noise.
+8. When `ANDREA_SYNC_PUBLIC_BASE` is configured, the server also self-heals Telegram webhook registration if another process clears it.
 
 ## Security
 
@@ -78,7 +94,9 @@ Design/gap analysis: [ANDREA_LOCKSTEP_REVIEW_FINDINGS.md](ANDREA_LOCKSTEP_REVIEW
 
 ## macOS auto-start
 
-Templates + installer: `scripts/macos/install_andrea_launchagents.sh` (optional `cloudflared` + OpenClaw login refresh). Put secrets in `~/andrea-lockstep.env`.
+Templates + installer: `scripts/macos/install_andrea_launchagents.sh` (optional `cloudflared` + OpenClaw login refresh). The sync LaunchAgent sources repo `.env` first, then `~/andrea-lockstep.env` for per-machine overrides.
+
+This keeps the same assistant persona available across text-first Telegram now and voice-first Alexa later: Andrea answers first, then delegates when the work needs a heavier technical lane.
 
 ## Operator full cycle
 

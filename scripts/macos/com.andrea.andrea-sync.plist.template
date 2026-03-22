@@ -14,7 +14,7 @@
   <array>
     <string>/bin/zsh</string>
     <string>-lc</string>
-    <string>test -f "${HOME}/andrea-lockstep.env" &amp;&amp; source "${HOME}/andrea-lockstep.env"; cd "__REPO_ROOT__" &amp;&amp; exec "__PYTHON3__" scripts/andrea_sync_server.py</string>
+    <string>test -f "__REPO_ROOT__/.env" &amp;&amp; source "__REPO_ROOT__/.env"; test -f "${HOME}/andrea-lockstep.env" &amp;&amp; source "${HOME}/andrea-lockstep.env"; cd "__REPO_ROOT__" &amp;&amp; exec "__PYTHON3__" scripts/andrea_sync_server.py</string>
   </array>
   <key>StandardOutPath</key>
   <string>__HOME__/Library/Logs/andrea/andrea-sync.log</string>

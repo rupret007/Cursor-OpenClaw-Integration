@@ -110,6 +110,8 @@ bash scripts/andrea_slo_check.sh
 | Lockstep kill switch engaged | `GET /v1/status` shows `kill_switch.engaged`; run `bash scripts/andrea_kill_switch.sh release` (needs `ANDREA_SYNC_INTERNAL_TOKEN`) or clear env/file per [ANDREA_LOCKSTEP_ARCHITECTURE.md](ANDREA_LOCKSTEP_ARCHITECTURE.md) |
 | Capability / “missing skill” drift | Publish snapshot: `python3 scripts/andrea_sync_publish_capabilities.py`; channels should call `GET /v1/policy/skill-absence?skill=…` before denying a skill |
 | Telegram webhook 403 | Match `?secret=` to `ANDREA_SYNC_TELEGRAM_SECRET` and/or header to `ANDREA_SYNC_TELEGRAM_WEBHOOK_SECRET`; re-run `setWebhook` |
+| Telegram ingests but no reply | Confirm `TELEGRAM_BOT_TOKEN` is loaded by `python3 scripts/andrea_sync_server.py`; inspect `/v1/tasks/{id}` for `meta.telegram.chat_id` and Cursor status |
+| Telegram task queues then fails immediately | Confirm `CURSOR_API_KEY` and repo `origin` are available for the built-in Cursor executor; inspect `/v1/tasks/{id}` `last_error` |
 
 ---
 
@@ -176,13 +178,13 @@ python3 scripts/andrea_sync_server.py
 ```
 
 **Telegram:** Point BotFather `setWebhook` to  
-`https://your-public-host/v1/telegram/webhook?secret=...` (same value as `ANDREA_SYNC_TELEGRAM_SECRET`). The handler returns `200` immediately and processes updates on a worker thread.
+`https://your-public-host/v1/telegram/webhook?secret=...` (same value as `ANDREA_SYNC_TELEGRAM_SECRET`) or use the header secret path. The handler returns `200` immediately, creates a task, queues Cursor work by default, and replies back to the same chat from projected task state.
 
 **E2E helper (cloudflared + setWebhook + verify):** see [ANDREA_TELEGRAM_LOCKSTEP_E2E.md](ANDREA_TELEGRAM_LOCKSTEP_E2E.md) and `python3 scripts/andrea_lockstep_telegram_e2e.py tunnel-and-webhook`.
 
 **Alexa:** Publish a Custom Skill whose HTTPS endpoint is `https://your-public-host/v1/alexa`. See [ANDREA_ALEXA_INTEGRATION.md](ANDREA_ALEXA_INTEGRATION.md) for certification, account linking, and signature verification.
 
-**Cursor lifecycle:** After agent state changes, emit events:
+**Cursor lifecycle:** Built-in Telegram execution now appends lifecycle automatically. For manual or external runs, you can still emit events directly:
 
 ```bash
 export ANDREA_SYNC_URL=http://127.0.0.1:8765

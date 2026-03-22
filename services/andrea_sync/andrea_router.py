@@ -1,0 +1,169 @@
+"""Andrea-first routing: direct assistant reply vs Cursor delegation."""
+from __future__ import annotations
+
+import json
+import os
+import re
+import urllib.error
+import urllib.request
+from dataclasses import dataclass
+
+
+def _env_truthy(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _normalize(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text or "").strip()).lower()
+
+
+GREETING_RE = re.compile(
+    r"\b(hi|hello|hey|good morning|good afternoon|good evening|how are you|how're you)\b",
+    re.I,
+)
+THANKS_RE = re.compile(r"\b(thanks|thank you|appreciate it)\b", re.I)
+IDENTITY_RE = re.compile(r"\b(who are you|what can you do|help me|help|what do you do)\b", re.I)
+META_CURSOR_RE = re.compile(r"\b(talk to cursor|have cursor|use cursor|delegate to cursor)\b", re.I)
+DELEGATE_KEYWORDS_RE = re.compile(
+    r"\b(code|repo|repository|file|files|branch|commit|pull request|pr\b|debug|test suite|tests\b|"
+    r"implement|implementation|fix|bug|refactor|edit|patch|script|service|restart|reload|deploy|"
+    r"openclaw|cursor|traceback|stack trace|lint|unit test|integration test|github)\b",
+    re.I,
+)
+PATH_RE = re.compile(r"[/~][\w.\-~/]+|`[^`]+`|\b\w+\.(py|ts|tsx|js|jsx|md|sh|json|yaml|yml)\b", re.I)
+
+
+@dataclass
+class AndreaRouteDecision:
+    mode: str
+    reason: str
+    reply_text: str = ""
+
+
+def should_delegate_to_cursor(text: str) -> tuple[bool, str]:
+    clean = _normalize(text)
+    if not clean:
+        return False, "empty_or_whitespace"
+    if GREETING_RE.search(clean) or THANKS_RE.search(clean):
+        return False, "greeting_or_social"
+    if IDENTITY_RE.search(clean):
+        return False, "assistant_identity_or_help"
+    if META_CURSOR_RE.search(clean):
+        return False, "cursor_coordination_question"
+    if DELEGATE_KEYWORDS_RE.search(clean):
+        return True, "technical_or_repo_request"
+    if PATH_RE.search(text):
+        return True, "path_or_code_reference"
+    word_count = len(clean.split())
+    if word_count <= 18:
+        return False, "short_general_request"
+    if word_count >= 45:
+        return True, "longer_multi_step_request"
+    return False, "balanced_default_direct"
+
+
+def _heuristic_reply(text: str) -> str:
+    clean = _normalize(text)
+    if GREETING_RE.search(clean):
+        if "how are you" in clean or "how're you" in clean:
+            return "Hi! I'm doing well, and I'm ready to help. What would you like me to work on?"
+        return "Hi! I'm here and ready to help. What would you like to do?"
+    if THANKS_RE.search(clean):
+        return "You're welcome. I'm ready for the next thing whenever you are."
+    if META_CURSOR_RE.search(clean):
+        return (
+            "Yes. I can coordinate with Cursor when the work needs heavier repo or coding help, "
+            "but I'll answer directly when I can handle it myself."
+        )
+    if IDENTITY_RE.search(clean):
+        return (
+            "I'm Andrea, your personal assistant layer here. I handle direct assistant requests myself "
+            "and bring in Cursor when the task needs deeper technical or repo work."
+        )
+    return (
+        "I can help with that directly when it's lightweight, and I'll bring in Cursor when the task "
+        "needs deeper technical work. Tell me what you need."
+    )
+
+
+def _openai_direct_reply(text: str) -> str:
+    api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
+    if not api_key or not _env_truthy("OPENAI_API_ENABLED", False):
+        raise RuntimeError("openai_direct_disabled")
+    model = (os.environ.get("ANDREA_DIRECT_OPENAI_MODEL") or "gpt-4o-mini").strip()
+    timeout_seconds = max(
+        5,
+        int((os.environ.get("ANDREA_DIRECT_OPENAI_TIMEOUT_SECONDS") or "25").strip()),
+    )
+    payload = {
+        "model": model,
+        "temperature": 0.4,
+        "max_tokens": 220,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You are Andrea, a warm and capable personal assistant. "
+                    "Answer directly, naturally, and concisely. "
+                    "Do not mention Cursor unless the user asks. "
+                    "Keep replies short and useful for chat/voice."
+                ),
+            },
+            {"role": "user", "content": str(text).strip()},
+        ],
+    }
+    req = urllib.request.Request(
+        "https://api.openai.com/v1/chat/completions",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as err:
+        raw = err.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"openai_direct_http_{err.code}:{raw[:300]}") from err
+    except urllib.error.URLError as err:
+        raise RuntimeError(f"openai_direct_transport:{err}") from err
+    choices = data.get("choices") if isinstance(data, dict) else None
+    if not isinstance(choices, list) or not choices:
+        raise RuntimeError("openai_direct_no_choices")
+    message = choices[0].get("message") if isinstance(choices[0], dict) else {}
+    content = message.get("content") if isinstance(message, dict) else ""
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                parts.append(str(item.get("text") or ""))
+        content = "\n".join(p for p in parts if p.strip())
+    text_out = str(content or "").strip()
+    if not text_out:
+        raise RuntimeError("openai_direct_empty_content")
+    return text_out
+
+
+def build_direct_reply(text: str) -> str:
+    if GREETING_RE.search(_normalize(text)) or THANKS_RE.search(_normalize(text)) or IDENTITY_RE.search(_normalize(text)) or META_CURSOR_RE.search(_normalize(text)):
+        return _heuristic_reply(text)
+    try:
+        return _openai_direct_reply(text)
+    except Exception:
+        return _heuristic_reply(text)
+
+
+def route_message(text: str) -> AndreaRouteDecision:
+    delegate, reason = should_delegate_to_cursor(text)
+    if delegate:
+        return AndreaRouteDecision(mode="delegate", reason=reason)
+    return AndreaRouteDecision(
+        mode="direct",
+        reason=reason,
+        reply_text=build_direct_reply(text),
+    )

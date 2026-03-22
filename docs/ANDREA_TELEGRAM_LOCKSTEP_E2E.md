@@ -1,6 +1,6 @@
 # Telegram lockstep E2E (andrea_sync)
 
-End-to-end path: **Telegram** → **HTTPS webhook** → **local `andrea_sync`** → **SQLite events** → **`GET /v1/tasks`**.
+End-to-end path: **Telegram** → **HTTPS webhook** → **local `andrea_sync`** → **SQLite events** → **Andrea-first routing** → either **direct Andrea reply** or **Cursor/OpenClaw job** → **Telegram reply**.
 
 ## Prerequisites
 
@@ -12,6 +12,9 @@ End-to-end path: **Telegram** → **HTTPS webhook** → **local `andrea_sync`** 
 | `ANDREA_SYNC_TELEGRAM_SECRET` | Optional query param `?secret=` on the webhook URL (fallback) |
 | `ANDREA_SYNC_TELEGRAM_WEBHOOK_SECRET` | Recommended: Telegram `secret_token` → header `X-Telegram-Bot-Api-Secret-Token` (set by `andrea_lockstep_telegram_e2e.py` when non-empty) |
 | `ANDREA_SYNC_INTERNAL_TOKEN` | For `/v1/internal/events` (not required for Telegram ingest only) |
+| `CURSOR_API_KEY` | Required if the default Telegram executor should launch Cursor Cloud agents |
+| `ANDREA_CURSOR_REPO` | Optional repo path the Telegram executor should hand to Cursor (default: current repo root) |
+| `ANDREA_SYNC_PUBLIC_BASE` | Public HTTPS base used for webhook autofix/self-heal |
 
 2. **`andrea_sync` running** on `ANDREA_SYNC_URL` (default `http://127.0.0.1:8765`):
 
@@ -22,6 +25,8 @@ export ANDREA_SYNC_INTERNAL_TOKEN='long-random'
 # optional: append same lines to .env
 python3 scripts/andrea_sync_server.py
 ```
+
+`scripts/andrea_sync_server.py` now loads repo `.env` automatically before startup-safe overrides from `~/andrea-lockstep.env`, so the same process can handle webhook ingest, Cursor execution, Telegram replies, and webhook self-heal.
 
 3. **`cloudflared` on PATH** (quick tunnel). Install:
 
@@ -93,6 +98,28 @@ python3 scripts/andrea_lockstep_telegram_e2e.py wait-telegram-task --timeout-sec
 curl -sS "http://127.0.0.1:8765/v1/tasks/tsk_…" | python3 -m json.tool
 ```
 
+There are now two Telegram lanes:
+
+- **Direct Andrea lane**
+  - lightweight conversational/personal assistant turns
+  - no unnecessary Cursor task noise in the chat
+  - reply is usually just:
+    - `Andrea:` concise direct answer
+
+- **Delegated Cursor lane**
+  - repo, coding, debugging, test, or longer-running work
+  - projected task should move through `queued` -> `running` -> `completed` or `failed`
+  - Telegram should receive:
+    - an immediate ACK in Andrea's voice
+    - a running/status note once Cursor accepts the work
+    - a final completion/failure reply with:
+      - `Andrea:` concise user-facing answer first
+      - `What happened:` short execution summary
+      - `Cursor said:` compact excerpt of the agent result
+      - `Technical details:` task id, status, PR, agent link
+
+This reply shape is intentionally optimized for future voice/Alexa reuse: the first Andrea sentence should stand on its own if spoken aloud.
+
 ## Automation (full cycle)
 
 Use the repo orchestrator (runs from any cwd; it `cd`s to the repo):
@@ -117,15 +144,16 @@ bash scripts/andrea_full_cycle.sh
 3. Start **`andrea_sync`** (same `ANDREA_SYNC_*` env as before)
 4. If using a quick tunnel: start **`cloudflared`** again → **new URL**
 5. Run **`set-webhook`** again with the new `ANDREA_SYNC_PUBLIC_BASE` (or `tunnel-and-webhook`)
-6. `python3 scripts/andrea_lockstep_telegram_e2e.py webhook-info` — confirm no delivery errors
-7. Send a test message → `wait-telegram-task` or `GET /v1/tasks`
+6. `python3 scripts/andrea_lockstep_telegram_e2e.py webhook-info` — confirm no delivery errors (or let the server reclaim the webhook automatically if `ANDREA_SYNC_PUBLIC_BASE` is set)
+7. Send a test message and wait for both the lockstep row and the Telegram ACK/final reply
 8. Optional: `ANDREA_SYNC_DOCTOR=1 ANDREA_SYNC_URL=http://127.0.0.1:8765 bash scripts/andrea_doctor.sh`
 
 ## Operational notes
 
 - **403** on webhook: `?secret=` must equal `ANDREA_SYNC_TELEGRAM_SECRET` exactly.
-- **Stable hostname**: quick tunnels rotate; for a fixed URL use a **named Cloudflare tunnel** or your own TLS host.
-- **OpenClaw / Cursor** visibility in Telegram is **separate** from lockstep ingest unless you add notifiers that read `GET /v1/tasks/{id}` and post back to Telegram.
+- **Stable hostname**: quick tunnels rotate; for a fixed URL use a **named Cloudflare tunnel** or your own TLS host, then install `scripts/macos/install_andrea_launchagents.sh --with-cloudflared`.
+- **Runtime persistence**: the sync LaunchAgent sources repo `.env` plus `~/andrea-lockstep.env`, so `TELEGRAM_BOT_TOKEN`, `CURSOR_API_KEY`, and lockstep secrets survive login.
+- **Webhook self-heal**: if `ANDREA_SYNC_PUBLIC_BASE` is set, the running server checks Telegram webhook registration and re-applies it when another process clears it.
 
 ## Reference
 

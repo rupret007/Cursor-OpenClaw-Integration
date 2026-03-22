@@ -50,6 +50,7 @@ class EventType(str, Enum):
     COMMAND_DEDUPED = "CommandDeduped"
     TASK_CREATED = "TaskCreated"
     USER_MESSAGE = "UserMessage"
+    ASSISTANT_REPLIED = "AssistantReplied"
     JOB_QUEUED = "JobQueued"
     JOB_STARTED = "JobStarted"
     JOB_PROGRESS = "JobProgress"
@@ -165,6 +166,10 @@ def legal_task_transition(
         if current in (TaskStatus.CANCELLED, TaskStatus.FAILED, TaskStatus.COMPLETED):
             return False, None
         return True, TaskStatus.COMPLETED
+    if event == EventType.ASSISTANT_REPLIED:
+        if current in (TaskStatus.CANCELLED, TaskStatus.FAILED, TaskStatus.COMPLETED):
+            return False, None
+        return True, TaskStatus.COMPLETED
     if event == EventType.JOB_FAILED:
         if current in (TaskStatus.COMPLETED, TaskStatus.CANCELLED):
             return False, None
@@ -210,18 +215,67 @@ def fold_projection(
         snippet = str(payload.get("text") or "")[:200]
         if snippet:
             proj.summary = snippet
+        if payload.get("channel") == Channel.TELEGRAM.value:
+            telegram_meta = proj.meta.setdefault("telegram", {})
+            for src_key, dst_key in (
+                ("chat_id", "chat_id"),
+                ("chat_type", "chat_type"),
+                ("message_id", "message_id"),
+                ("from_user", "from_user"),
+                ("from_username", "from_username"),
+            ):
+                if payload.get(src_key) is not None:
+                    telegram_meta[dst_key] = payload.get(src_key)
+            if snippet:
+                telegram_meta["last_text"] = snippet
+    if event_type == EventType.ASSISTANT_REPLIED:
+        assistant_meta = proj.meta.setdefault("assistant", {})
+        assistant_meta["route"] = str(payload.get("route") or "direct")
+        if payload.get("reason"):
+            assistant_meta["reason"] = str(payload.get("reason"))
+        reply_text = str(payload.get("text") or "").strip()
+        if reply_text:
+            assistant_meta["last_reply"] = reply_text[:2000]
     if event_type == EventType.JOB_QUEUED:
         if payload.get("cursor_agent_id"):
             proj.cursor_agent_id = str(payload["cursor_agent_id"])
+        cursor_meta = proj.meta.setdefault("cursor", {})
+        cursor_meta["kind"] = str(payload.get("kind") or "cursor")
+        if payload.get("prompt_excerpt"):
+            cursor_meta["prompt_excerpt"] = str(payload["prompt_excerpt"])[:300]
     if event_type == EventType.JOB_STARTED:
+        cursor_meta = proj.meta.setdefault("cursor", {})
         if payload.get("cursor_agent_id"):
             proj.cursor_agent_id = str(payload["cursor_agent_id"])
+            cursor_meta["cursor_agent_id"] = str(payload["cursor_agent_id"])
+        if payload.get("agent_url"):
+            cursor_meta["agent_url"] = str(payload["agent_url"])
+        if payload.get("pr_url"):
+            cursor_meta["pr_url"] = str(payload["pr_url"])
+        if payload.get("backend"):
+            cursor_meta["backend"] = str(payload["backend"])
     if event_type == EventType.JOB_FAILED:
         proj.last_error = str(payload.get("error") or payload.get("message") or "failed")[:2000]
+        cursor_meta = proj.meta.setdefault("cursor", {})
+        if payload.get("cursor_agent_id"):
+            proj.cursor_agent_id = str(payload["cursor_agent_id"])
+            cursor_meta["cursor_agent_id"] = str(payload["cursor_agent_id"])
+        if payload.get("agent_url"):
+            cursor_meta["agent_url"] = str(payload["agent_url"])
+        if payload.get("pr_url"):
+            cursor_meta["pr_url"] = str(payload["pr_url"])
     if event_type == EventType.JOB_COMPLETED:
         proj.last_error = None
         if payload.get("summary"):
             proj.summary = str(payload["summary"])[:500]
+        cursor_meta = proj.meta.setdefault("cursor", {})
+        if payload.get("cursor_agent_id"):
+            proj.cursor_agent_id = str(payload["cursor_agent_id"])
+            cursor_meta["cursor_agent_id"] = str(payload["cursor_agent_id"])
+        if payload.get("agent_url"):
+            cursor_meta["agent_url"] = str(payload["agent_url"])
+        if payload.get("pr_url"):
+            cursor_meta["pr_url"] = str(payload["pr_url"])
     if event_type == EventType.CAPABILITY_SNAPSHOT:
         proj.meta["last_capability_excerpt"] = str(payload.get("summary_json_excerpt", ""))[:500]
     if event_type in (EventType.KILL_SWITCH_ENGAGED, EventType.KILL_SWITCH_RELEASED):

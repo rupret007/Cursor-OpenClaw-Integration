@@ -19,6 +19,13 @@ from services.andrea_sync.policy import evaluate_skill_absence_claim  # noqa: E4
 from services.andrea_sync.projector import project_task_dict  # noqa: E402
 from services.andrea_sync.schema import CommandType, EventType, TaskStatus, normalize_idempotency_base  # noqa: E402
 from services.andrea_sync.store import connect, migrate  # noqa: E402
+from services.andrea_sync.andrea_router import route_message  # noqa: E402
+from services.andrea_sync.telegram_format import (  # noqa: E402
+    format_ack_message,
+    format_direct_message,
+    format_final_message,
+    format_running_message,
+)
 
 
 class TestAndreaSync(unittest.TestCase):
@@ -27,6 +34,8 @@ class TestAndreaSync(unittest.TestCase):
         self._tmp.close()
         self.db_path = Path(self._tmp.name)
         self._prev_db = os.environ.get("ANDREA_SYNC_DB")
+        self._prev_background = os.environ.get("ANDREA_SYNC_BACKGROUND_ENABLED")
+        self._prev_notifier = os.environ.get("ANDREA_SYNC_TELEGRAM_NOTIFIER")
         os.environ["ANDREA_SYNC_DB"] = str(self.db_path)
         self.conn = connect(self.db_path)
         migrate(self.conn)
@@ -37,6 +46,14 @@ class TestAndreaSync(unittest.TestCase):
             os.environ.pop("ANDREA_SYNC_DB", None)
         else:
             os.environ["ANDREA_SYNC_DB"] = self._prev_db
+        if self._prev_background is None:
+            os.environ.pop("ANDREA_SYNC_BACKGROUND_ENABLED", None)
+        else:
+            os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = self._prev_background
+        if self._prev_notifier is None:
+            os.environ.pop("ANDREA_SYNC_TELEGRAM_NOTIFIER", None)
+        else:
+            os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = self._prev_notifier
         self.db_path.unlink(missing_ok=True)
         for suf in ("-wal", "-shm"):
             p = Path(str(self.db_path) + suf)
@@ -125,8 +142,9 @@ class TestAndreaSync(unittest.TestCase):
                 "update_id": 99,
                 "message": {
                     "text": "hello",
+                    "message_id": 55,
                     "chat": {"id": 1},
-                    "from": {"id": 2},
+                    "from": {"id": 2, "username": "demo"},
                 },
             }
         )
@@ -134,6 +152,147 @@ class TestAndreaSync(unittest.TestCase):
         assert cmd is not None
         self.assertEqual(cmd["command_type"], "SubmitUserMessage")
         self.assertEqual(cmd["external_id"], "99")
+        self.assertFalse(cmd["payload"]["auto_cursor_job"])
+        self.assertEqual(cmd["payload"]["message_id"], 55)
+        self.assertEqual(cmd["payload"]["from_username"], "demo")
+
+    def test_telegram_user_message_auto_queues_cursor_job(self) -> None:
+        result = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-1",
+                "payload": {
+                    "text": "review the bridge",
+                    "chat_id": 777,
+                    "chat_type": "private",
+                    "message_id": 42,
+                    "from_user": 88,
+                    "from_username": "andrea",
+                    "auto_cursor_job": True,
+                },
+            },
+        )
+        self.assertTrue(result.get("ok"))
+        self.assertTrue(result.get("queued_cursor_job"))
+        proj = project_task_dict(self.conn, result["task_id"], "telegram")
+        self.assertEqual(proj["status"], TaskStatus.QUEUED.value)
+        self.assertEqual(proj["meta"]["telegram"]["chat_id"], 777)
+        self.assertEqual(proj["meta"]["telegram"]["message_id"], 42)
+        self.assertEqual(proj["meta"]["cursor"]["prompt_excerpt"], "review the bridge")
+
+    def test_router_greeting_stays_direct(self) -> None:
+        decision = route_message("hi andrea how are you?")
+        self.assertEqual(decision.mode, "direct")
+        self.assertIn("ready to help", decision.reply_text.lower())
+
+    def test_router_coding_request_delegates(self) -> None:
+        decision = route_message("Please inspect the repo, fix the failing tests, and open a PR.")
+        self.assertEqual(decision.mode, "delegate")
+
+    def test_router_meta_cursor_question_stays_direct(self) -> None:
+        decision = route_message("Can you talk to Cursor when needed?")
+        self.assertEqual(decision.mode, "direct")
+
+    def test_direct_message_format_is_short(self) -> None:
+        text = format_direct_message("Hi! I'm doing well and ready to help.")
+        self.assertEqual(text, "Andrea:\nHi! I'm doing well and ready to help.")
+
+    def test_telegram_ack_message_format(self) -> None:
+        text = format_ack_message("tsk_demo")
+        self.assertIn("Andrea:", text)
+        self.assertIn("What happened:", text)
+        self.assertIn("Technical details:", text)
+        self.assertIn("Task: tsk_demo", text)
+        self.assertIn("Status: queued", text)
+
+    def test_telegram_running_message_format(self) -> None:
+        text = format_running_message("tsk_demo", agent_url="https://cursor.com/agents/demo")
+        self.assertIn("Andrea:", text)
+        self.assertIn("Cursor is actively working", text)
+        self.assertIn("Technical details:", text)
+        self.assertIn("Agent: https://cursor.com/agents/demo", text)
+
+    def test_telegram_final_message_separates_andrea_from_cursor(self) -> None:
+        text = format_final_message(
+            "tsk_demo",
+            status="completed",
+            summary=(
+                "Implemented a new talk command.\n\n"
+                "### What changed\n"
+                "- Added CLI support\n"
+                "- Updated docs"
+            ),
+            pr_url="https://github.com/example/repo/pull/1",
+            agent_url="https://cursor.com/agents/demo",
+        )
+        self.assertIn("Andrea:", text)
+        self.assertIn("What happened:", text)
+        self.assertIn("Cursor said:", text)
+        self.assertIn("Technical details:", text)
+        self.assertIn("PR: https://github.com/example/repo/pull/1", text)
+        self.assertNotIn("### What changed", text)
+
+    def test_telegram_final_message_failed_uses_error_footer(self) -> None:
+        text = format_final_message(
+            "tsk_demo",
+            status="failed",
+            summary="The agent could not finish the request.",
+            last_error="cursor_status_failed",
+        )
+        self.assertIn("could not complete", text)
+        self.assertIn("Failure:", text)
+        self.assertIn("Error: cursor_status_failed", text)
+
+    def test_server_followups_route_greeting_direct(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        result = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-direct",
+                "payload": {
+                    "text": "hi andrea how are you?",
+                    "chat_id": 1,
+                    "message_id": 2,
+                },
+            },
+        )
+        server._handle_task_followups(result["task_id"])
+        proj = project_task_dict(server.conn, result["task_id"], "telegram")
+        self.assertEqual(proj["status"], TaskStatus.COMPLETED.value)
+        self.assertEqual(proj["meta"]["assistant"]["route"], "direct")
+        self.assertNotIn("cursor", proj["meta"])
+
+    def test_server_followups_route_repo_request_delegate(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        result = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-delegate",
+                "payload": {
+                    "text": "Please inspect the repo and fix the failing tests.",
+                    "chat_id": 1,
+                    "message_id": 3,
+                },
+            },
+        )
+        server._handle_task_followups(result["task_id"])
+        proj = project_task_dict(server.conn, result["task_id"], "telegram")
+        self.assertEqual(proj["status"], TaskStatus.QUEUED.value)
+        self.assertEqual(proj["meta"]["cursor"]["kind"], "cursor")
 
     def test_alexa_parse_intent(self) -> None:
         body = {

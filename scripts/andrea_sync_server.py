@@ -9,7 +9,10 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from scripts import env_loader  # noqa: E402
 from services.andrea_sync.server import main  # noqa: E402
+
+env_loader.merge_dotenv_paths([_ROOT / ".env", Path.cwd() / ".env"], override=False)
 
 if __name__ == "__main__":
     main()

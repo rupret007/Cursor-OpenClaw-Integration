@@ -8,6 +8,7 @@ Structured **profiles** so Andrea can switch behavior without ad-hoc guesswork. 
 
 | Profile | Primary (example) | Intent |
 |---------|-----------------|--------|
+| **masterclass** | Auto-discovers all configured model IDs and uses them as primary + ordered fallbacks | Max resilience, "use every available LLM" lane |
 | **fast** | `google/gemini-2.5-flash` | Low latency, everyday tasks |
 | **balanced** | `google/gemini-2.5-flash` + fallbacks `openai/gpt-5.3-codex`, `minimax/MiniMax-M2.5` | Default “personal assistant” |
 | **deep** | `openai/gpt-5.3-codex` or `google/gemini-3.1-pro-preview` | Harder reasoning / coding (higher cost) |
@@ -71,10 +72,18 @@ bash scripts/andrea_model_guard.sh
 
 Behavior:
 
-- Tries profile order (default: `balanced,fast,deep`)
+- Tries profile order (default: `masterclass,balanced,fast,deep`)
 - Applies model + fallbacks for each profile
 - Probes with OpenClaw (`--probe-timeout` in **ms**)
 - Stops on first successful profile, otherwise exits non-zero
+
+`masterclass` details:
+
+- Reads model inventory from `openclaw models list` and normalizes `provider/model` IDs.
+- Uses first discovered ID as primary, then configures all remaining discovered IDs as fallbacks.
+- Optional hard overrides:
+  - `ANDREA_MASTERCLASS_PRIMARY`
+  - `ANDREA_MASTERCLASS_FALLBACKS` (space-separated IDs)
 
 Useful forms:
 

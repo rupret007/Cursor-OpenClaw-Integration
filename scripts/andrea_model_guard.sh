@@ -4,12 +4,13 @@
 #
 # Usage:
 #   bash scripts/andrea_model_guard.sh
-#   bash scripts/andrea_model_guard.sh --order "balanced,fast,deep"
+#   bash scripts/andrea_model_guard.sh --order "masterclass,balanced,fast,deep"
 #   bash scripts/andrea_model_guard.sh --dry-run
 #
 # Env overrides:
 #   OPENCLAW_PROBE_MS=30000
-#   ANDREA_MODEL_GUARD_ORDER="balanced,fast,deep"
+#   ANDREA_MODEL_GUARD_ORDER="masterclass,balanced,fast,deep"
+#   ANDREA_MASTERCLASS_PRIMARY / ANDREA_MASTERCLASS_FALLBACKS
 #   ANDREA_FAST_PRIMARY / ANDREA_FAST_FALLBACKS
 #   ANDREA_BALANCED_PRIMARY / ANDREA_BALANCED_FALLBACKS
 #   ANDREA_DEEP_PRIMARY / ANDREA_DEEP_FALLBACKS
@@ -17,7 +18,7 @@ set -euo pipefail
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROBE_MS="${OPENCLAW_PROBE_MS:-30000}"
-ORDER="${ANDREA_MODEL_GUARD_ORDER:-balanced,fast,deep}"
+ORDER="${ANDREA_MODEL_GUARD_ORDER:-masterclass,balanced,fast,deep}"
 DRY_RUN=0
 RESTART_GATEWAY=1
 
@@ -29,6 +30,8 @@ BALANCED_FALLBACKS="${ANDREA_BALANCED_FALLBACKS:-openai/gpt-5.3-codex minimax/Mi
 
 DEEP_PRIMARY="${ANDREA_DEEP_PRIMARY:-openai/gpt-5.3-codex}"
 DEEP_FALLBACKS="${ANDREA_DEEP_FALLBACKS:-google/gemini-2.5-flash minimax/MiniMax-M2.5}"
+MASTERCLASS_PRIMARY="${ANDREA_MASTERCLASS_PRIMARY:-}"
+MASTERCLASS_FALLBACKS="${ANDREA_MASTERCLASS_FALLBACKS:-}"
 
 die() { echo "FAIL: $*" >&2; exit 1; }
 warn() { echo "WARN: $*" >&2; }
@@ -39,7 +42,7 @@ usage() {
 Andrea model guard
 
 Options:
-  --order "<csv>"         Profile order (default: balanced,fast,deep)
+  --order "<csv>"         Profile order (default: masterclass,balanced,fast,deep)
   --probe-timeout-ms N    Probe timeout in milliseconds (default from OPENCLAW_PROBE_MS or 30000)
   --dry-run               Print actions only; do not call openclaw
   --no-restart            Do not restart gateway after profile apply
@@ -67,6 +70,16 @@ fi
 
 profile_primary() {
   case "$1" in
+    masterclass)
+      if [[ -n "$MASTERCLASS_PRIMARY" ]]; then
+        echo "$MASTERCLASS_PRIMARY"
+      else
+        local models
+        models="$(all_model_ids)"
+        [[ -n "$models" ]] || return 1
+        echo "$models" | awk 'NF { print $1; exit }'
+      fi
+      ;;
     fast) echo "$FAST_PRIMARY" ;;
     balanced) echo "$BALANCED_PRIMARY" ;;
     deep) echo "$DEEP_PRIMARY" ;;
@@ -76,11 +89,44 @@ profile_primary() {
 
 profile_fallbacks() {
   case "$1" in
+    masterclass)
+      if [[ -n "$MASTERCLASS_FALLBACKS" ]]; then
+        echo "$MASTERCLASS_FALLBACKS"
+      else
+        local models primary
+        models="$(all_model_ids)"
+        primary="$(profile_primary masterclass)" || return 1
+        [[ -n "$models" ]] || return 1
+        echo "$models" | awk -v p="$primary" 'NF && $1 != p { out = out (out ? " " : "") $1 } END { print out }'
+      fi
+      ;;
     fast) echo "$FAST_FALLBACKS" ;;
     balanced) echo "$BALANCED_FALLBACKS" ;;
     deep) echo "$DEEP_FALLBACKS" ;;
     *) return 1 ;;
   esac
+}
+
+all_model_ids() {
+  local out
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    out="${MASTERCLASS_PRIMARY:-google/gemini-2.5-flash}
+openai/gpt-5.3-codex
+minimax/MiniMax-M2.5"
+  else
+    out="$(openclaw models list --all --plain 2>/dev/null || true)"
+    if [[ -z "$out" ]]; then
+      out="$(openclaw models list --plain 2>/dev/null || true)"
+    fi
+    if [[ -z "$out" ]]; then
+      out="$(openclaw models list 2>/dev/null || true)"
+    fi
+  fi
+  # Return normalized provider/model ids (one per line), preserving first-seen order.
+  printf '%s\n' "$out" \
+    | tr ' \t' '\n' \
+    | sed 's/^[",([]*//; s/[",)\]]*$//' \
+    | awk '/^[[:alnum:]_.-]+\/[[:alnum:]_.:-]+$/ && !seen[$0]++ { print $0 }'
 }
 
 apply_profile() {
@@ -125,7 +171,7 @@ main() {
     [[ -n "$p" ]] || continue
 
     if ! apply_profile "$p"; then
-      warn "unknown profile '${p}' (allowed: fast, balanced, deep)"
+      warn "unknown profile '${p}' (allowed: masterclass, fast, balanced, deep)"
       failures=$((failures + 1))
       continue
     fi

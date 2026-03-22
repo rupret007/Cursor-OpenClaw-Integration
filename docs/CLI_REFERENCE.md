@@ -28,6 +28,7 @@ Subcommands:
 | `conversation` | `--id` |
 | `artifacts` | `--id` |
 | `artifact-download-url` | `--id`, `--path` |
+| `artifact-index` | `--id`; writes Markdown artifact index file (`--index-file` optional) and can resolve per-artifact signed links with `--include-download-urls true/false` |
 | `create-agent` | `--branch-name`, repo **or** `--pr-url`; **`--prompt` / `--intent` / `--triage-repo`** (see above); `--dry-run`, polling flags |
 | `followup` | `--id`, `--prompt` |
 | `stop-agent` | `--id` |

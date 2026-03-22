@@ -103,6 +103,20 @@ class CursorOpenClawTests(unittest.TestCase):
             MODULE.validate_command_args(bad)
         self.assertIn("prompt", str(ctx.exception).lower())
 
+    def test_validate_command_args_talk_needs_prompt(self):
+        bad = types.SimpleNamespace(
+            command="talk",
+            prompt="",
+            poll_attempts=0,
+            poll_interval_seconds=0.0,
+            branch_name="openclaw/talk-20260101-000000",
+            repository="",
+            pr_url="",
+        )
+        with self.assertRaises(ValueError) as ctx:
+            MODULE.validate_command_args(bad)
+        self.assertIn("prompt", str(ctx.exception).lower())
+
     def test_validate_common_args(self):
         ok = types.SimpleNamespace(timeout_seconds=30, retries=2, retry_backoff_seconds=0.5)
         MODULE.validate_common_args(ok)

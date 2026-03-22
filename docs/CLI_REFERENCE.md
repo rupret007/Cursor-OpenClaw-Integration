@@ -29,6 +29,7 @@ Subcommands:
 | `artifacts` | `--id` |
 | `artifact-download-url` | `--id`, `--path` |
 | `create-agent` | `--branch-name`, repo **or** `--pr-url`; **`--prompt` / `--intent` / `--triage-repo`** (see above); `--dry-run`, polling flags |
+| `talk` | Convenience wrapper for `create-agent`: requires `--prompt`; infers `--repository` and `--ref` from `--repo-path` (default `.`) unless you pass `--repository` or `--pr-url` explicitly; supports `--dry-run` and polling flags |
 | `followup` | `--id`, `--prompt` |
 | `stop-agent` | `--id` |
 | `delete-agent` | `--id` |

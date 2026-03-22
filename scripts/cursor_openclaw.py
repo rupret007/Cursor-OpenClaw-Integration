@@ -14,12 +14,14 @@ import argparse
 import base64
 import json
 import os
+import subprocess
 import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -53,6 +55,46 @@ def parse_bool(value: str) -> bool:
     if lowered in {"0", "false", "no", "n"}:
         return False
     raise ValueError(f"Invalid boolean value: {value!r}. Use true|false.")
+
+
+def _now_branch_suffix() -> str:
+    # Keep it ASCII and filesystem/URL safe.
+    return datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+
+
+def _run_git(args: list[str], cwd: Optional[Path] = None) -> Tuple[int, str, str]:
+    proc = subprocess.run(
+        ["git", *args],
+        cwd=str(cwd) if cwd else None,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def infer_git_remote_url(repo_path: Path) -> Optional[str]:
+    code, out, _ = _run_git(["remote", "get-url", "origin"], cwd=repo_path)
+    if code != 0:
+        return None
+    value = out.strip()
+    if not value:
+        return None
+    if value.startswith("git@github.com:"):
+        value = "https://github.com/" + value.split("git@github.com:", 1)[1]
+    if value.endswith(".git"):
+        value = value[:-4]
+    return value
+
+
+def infer_git_ref(repo_path: Path) -> Optional[str]:
+    code, out, _ = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_path)
+    if code != 0:
+        return None
+    ref = out.strip()
+    if not ref or ref == "HEAD":
+        return None
+    return ref
 
 
 def normalize_base_url(raw: Optional[str]) -> str:
@@ -219,6 +261,16 @@ def validate_command_args(args: argparse.Namespace) -> None:
         has_triage = bool((getattr(args, "triage_repo", "") or "").strip())
         if not has_prompt and intent is None and not has_triage:
             raise ValueError("Provide --prompt and/or --intent, and/or --triage-repo.")
+    if args.command == "talk":
+        if args.poll_attempts < 0:
+            raise ValueError("--poll-attempts must be >= 0")
+        if args.poll_interval_seconds < 0:
+            raise ValueError("--poll-interval-seconds must be >= 0")
+        cursor_api_common.assert_no_newlines_or_nul(args.branch_name, "--branch-name")
+        if not (args.prompt or "").strip():
+            raise ValueError("Provide --prompt.")
+        if bool((args.repository or "").strip()) and bool((args.pr_url or "").strip()):
+            raise ValueError("Pass only one of --repository or --pr-url (not both).")
 
 
 def parse_args() -> argparse.Namespace:
@@ -271,6 +323,25 @@ def parse_args() -> argparse.Namespace:
     p_create.add_argument("--poll-attempts", type=int, default=0)
     p_create.add_argument("--poll-interval-seconds", type=float, default=3.0)
     p_create.add_argument("--dry-run", action="store_true")
+
+    p_talk = sub.add_parser("talk")
+    p_talk.add_argument("--prompt", required=True, help="Message/task for Cursor agent")
+    p_talk.add_argument(
+        "--repo-path",
+        default=".",
+        help="Local repository path used to infer --repository/--ref when not explicitly provided (default: .)",
+    )
+    p_talk.add_argument("--repository", default="", help="Explicit GitHub repo URL (skips inference)")
+    p_talk.add_argument("--ref", default="", help="Explicit git ref (skips inference; only with --repository)")
+    p_talk.add_argument("--pr-url", default="", help="Explicit GitHub PR URL (uses source.prUrl)")
+    p_talk.add_argument("--model", default="default")
+    p_talk.add_argument("--branch-name", default=f"openclaw/talk-{_now_branch_suffix()}")
+    p_talk.add_argument("--auto-create-pr", type=parse_bool, default=False)
+    p_talk.add_argument("--open-as-cursor-github-app", type=parse_bool, default=False)
+    p_talk.add_argument("--skip-reviewer-request", type=parse_bool, default=False)
+    p_talk.add_argument("--poll-attempts", type=int, default=0)
+    p_talk.add_argument("--poll-interval-seconds", type=float, default=3.0)
+    p_talk.add_argument("--dry-run", action="store_true")
 
     p_follow = sub.add_parser("followup")
     p_follow.add_argument("--id", required=True)
@@ -376,6 +447,72 @@ def handle(cfg: Config, args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
         payload = build_create_payload(args, prompt_body)
         if args.dry_run:
             return 0, {"status": 0, "dry_run": True, "payload": payload}
+        status, data, raw, auth_mode = client.request("POST", "/v0/agents", body=payload)
+        response = {"status": status, "auth_mode": auth_mode, "response": data or raw}
+        if status < 400 and args.poll_attempts > 0 and isinstance(data, dict) and data.get("id") is not None:
+            agent_id = str(data["id"]).strip()
+            current = data
+            try:
+                cursor_api_common.validate_agent_id(agent_id, flag_name="agent id from API")
+            except ValueError as err:
+                response["poll_skipped"] = str(err)
+            else:
+                for _ in range(args.poll_attempts):
+                    current_status = str(current.get("status", ""))
+                    if current_status in TERMINAL_STATUSES:
+                        break
+                    time.sleep(max(0.0, args.poll_interval_seconds))
+                    poll_status, poll_data, _, _ = client.request("GET", f"/v0/agents/{agent_id}")
+                    if poll_status >= 400:
+                        break
+                    current = poll_data
+                response["polled"] = current
+        return status, response
+
+    if args.command == "talk":
+        # A convenience wrapper around create-agent:
+        # - if --repository/--pr-url not provided, infer from local git repo
+        repository = (args.repository or "").strip()
+        pr_url = (args.pr_url or "").strip()
+        ref = (args.ref or "").strip()
+
+        if not repository and not pr_url:
+            repo_path = Path(args.repo_path).expanduser().resolve()
+            if not repo_path.is_dir():
+                raise ValueError("--repo-path must be an existing directory")
+            repository = infer_git_remote_url(repo_path) or ""
+            ref = ref or (infer_git_ref(repo_path) or "")
+            if not repository:
+                raise ValueError(
+                    "Could not infer repository from git remote 'origin'. "
+                    "Provide --repository or --pr-url (or run from a git clone with an origin remote)."
+                )
+
+        require_one_of(repository, pr_url)
+        if pr_url and ref:
+            raise ValueError("--ref cannot be used with --pr-url.")
+
+        # Reuse the create-agent payload shape.
+        class _Args:
+            prompt = args.prompt
+            repository = repository
+            ref = ref
+            pr_url = pr_url
+            model = args.model
+            branch_name = args.branch_name
+            auto_create_pr = args.auto_create_pr
+            open_as_cursor_github_app = args.open_as_cursor_github_app
+            skip_reviewer_request = args.skip_reviewer_request
+
+        payload = build_create_payload(_Args())
+        if args.dry_run:
+            return 0, {
+                "status": 0,
+                "dry_run": True,
+                "inferred": {"repository": repository or None, "ref": ref or None, "pr_url": pr_url or None},
+                "payload": payload,
+            }
+
         status, data, raw, auth_mode = client.request("POST", "/v0/agents", body=payload)
         response = {"status": status, "auth_mode": auth_mode, "response": data or raw}
         if status < 400 and args.poll_attempts > 0 and isinstance(data, dict) and data.get("id") is not None:

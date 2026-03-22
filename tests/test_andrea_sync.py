@@ -235,6 +235,22 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(routing["model_mentions"], ["gemini"])
         self.assertEqual(routing["routing_text"], "review this plan with Andrea")
 
+    def test_telegram_webhook_url_match_ignores_query_order(self) -> None:
+        self.assertTrue(
+            tg_adapt.webhook_urls_match(
+                "https://example.com/v1/telegram/webhook?x=1&secret=abc",
+                "https://example.com/v1/telegram/webhook?secret=abc&x=1",
+            )
+        )
+
+    def test_telegram_webhook_url_match_detects_drift(self) -> None:
+        self.assertFalse(
+            tg_adapt.webhook_urls_match(
+                "https://wrong.example/v1/telegram/webhook?secret=abc",
+                "https://example.com/v1/telegram/webhook?secret=abc",
+            )
+        )
+
     def test_telegram_update_to_command_with_cursor_mention(self) -> None:
         cmd = tg_adapt.update_to_command(
             {

@@ -90,8 +90,20 @@ ensure_telegram_webhook() {
     warn "ANDREA_SYNC_PUBLIC_BASE unset; skipping webhook bootstrap"
     return 0
   fi
+  if python3 "${BASE_DIR}/scripts/andrea_lockstep_telegram_e2e.py" webhook-info --require-match >/dev/null 2>&1; then
+    say "Telegram webhook already healthy"
+    return 0
+  fi
   if ! python3 "${BASE_DIR}/scripts/andrea_lockstep_telegram_e2e.py" set-webhook; then
-    warn "Telegram webhook bootstrap failed"
+    warn "Telegram webhook bootstrap failed; checking whether the existing registration is still healthy"
+    if python3 "${BASE_DIR}/scripts/andrea_lockstep_telegram_e2e.py" webhook-info --require-match >/dev/null 2>&1; then
+      say "Telegram webhook remained healthy despite bootstrap set-webhook failure"
+      return 0
+    fi
+    return 0
+  fi
+  if ! python3 "${BASE_DIR}/scripts/andrea_lockstep_telegram_e2e.py" webhook-info --require-match; then
+    warn "Telegram webhook verification failed after bootstrap"
     return 0
   fi
   say "Ensured Telegram webhook registration"

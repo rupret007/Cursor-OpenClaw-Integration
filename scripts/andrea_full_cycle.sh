@@ -113,8 +113,14 @@ fi
 
 if [[ "${SKIP_TELEGRAM_E2E:-0}" != "1" ]] && [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
   if [[ -n "${ANDREA_SYNC_TELEGRAM_SECRET:-}" ]]; then
-    say "Telegram webhook-info (redacted output from tool)"
-    python3 scripts/andrea_lockstep_telegram_e2e.py webhook-info || warn "webhook-info non-zero (check bot token / network)"
+    if [[ -n "${ANDREA_SYNC_PUBLIC_BASE:-}" ]]; then
+      say "Telegram webhook-info (require registered webhook that matches ANDREA_SYNC_PUBLIC_BASE)"
+      python3 scripts/andrea_lockstep_telegram_e2e.py webhook-info --require-match \
+        || die "Telegram webhook is unset or drifted from ANDREA_SYNC_PUBLIC_BASE"
+    else
+      warn "ANDREA_SYNC_PUBLIC_BASE unset; webhook-info is informational only"
+      python3 scripts/andrea_lockstep_telegram_e2e.py webhook-info || warn "webhook-info non-zero (check bot token / network)"
+    fi
   else
     warn "skip webhook-info (set ANDREA_SYNC_TELEGRAM_SECRET for andrea_lockstep_telegram_e2e check-env)"
   fi

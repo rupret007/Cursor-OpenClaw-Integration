@@ -38,6 +38,8 @@ class TestAndreaFullCycleScript(unittest.TestCase):
         self.assertIn("skill-absence?skill=telegram", text)
         self.assertIn("SKIP_KILL_DRILL", text)
         self.assertIn("503", text)
+        self.assertIn("webhook-info --require-match", text)
+        self.assertIn("ANDREA_SYNC_PUBLIC_BASE", text)
 
 
 class TestAndreaWrapUpPrereqsScript(unittest.TestCase):
@@ -71,6 +73,12 @@ class TestAndreaLoginBootstrap(unittest.TestCase):
             capture_output=True,
             text=True,
         )
+
+    def test_login_bootstrap_verifies_webhook_after_set(self) -> None:
+        text = LOGIN_BOOTSTRAP.read_text(encoding="utf-8")
+        self.assertIn("set-webhook", text)
+        self.assertIn("webhook-info --require-match", text)
+        self.assertIn("already healthy", text)
 
     def test_login_bootstrap_template_exists(self) -> None:
         self.assertTrue(LOGIN_BOOTSTRAP_PLIST.is_file(), str(LOGIN_BOOTSTRAP_PLIST))

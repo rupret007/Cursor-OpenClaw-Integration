@@ -126,7 +126,7 @@ bash scripts/andrea_slo_check.sh
 | `401` from Cursor API | Rotate key; check `CURSOR_BASE_URL` / `CURSOR_AUTH_MODE` |
 | `gh` not logged in | `gh auth login` or set `GH_TOKEN` / `GITHUB_TOKEN` in `.env` (merge without full wizard: `python3 scripts/dotenv_set_key.py GH_TOKEN --skill`) |
 | `openclaw` / skill missing | Install OpenClaw; `cp -R skills/cursor_handoff ~/.openclaw/workspace/skills/`; `openclaw gateway restart`; `openclaw skills info cursor_handoff --json` |
-| Reboot came back but Telegram is dark | Confirm the named tunnel LaunchAgent is loaded, `ANDREA_SYNC_PUBLIC_BASE` is set, and `python3 scripts/andrea_lockstep_telegram_e2e.py webhook-info` shows the stable webhook URL |
+| Reboot came back but Telegram is dark | Confirm the named tunnel LaunchAgent is loaded, `ANDREA_SYNC_PUBLIC_BASE` is set, and `python3 scripts/andrea_lockstep_telegram_e2e.py webhook-info --require-match` reports `status: "healthy"` |
 | SSL errors in Python | See README: `SSL_CERT_FILE` + `certifi` |
 | Tests fail | Fix on a branch; do not merge to `main` until green |
 | Readiness **Grade C** | `python3 scripts/andrea_capabilities.py` — unblock **blocked** rows (often `github:auth`: `gh auth login` or `python3 scripts/dotenv_set_key.py GH_TOKEN --skill`) |
@@ -135,6 +135,7 @@ bash scripts/andrea_slo_check.sh
 | Lockstep kill switch engaged | `GET /v1/status` shows `kill_switch.engaged`; run `bash scripts/andrea_kill_switch.sh release` (needs `ANDREA_SYNC_INTERNAL_TOKEN`) or clear env/file per [ANDREA_LOCKSTEP_ARCHITECTURE.md](ANDREA_LOCKSTEP_ARCHITECTURE.md) |
 | Capability / “missing skill” drift | Publish snapshot: `python3 scripts/andrea_sync_publish_capabilities.py`; channels should call `GET /v1/policy/skill-absence?skill=…` before denying a skill |
 | Telegram webhook 403 | Match `?secret=` to `ANDREA_SYNC_TELEGRAM_SECRET` and/or header to `ANDREA_SYNC_TELEGRAM_WEBHOOK_SECRET`; re-run `setWebhook` |
+| Telegram `webhook-info` shows `"url": ""` | Telegram currently has no webhook registered. Re-check `ANDREA_SYNC_PUBLIC_BASE`, run `python3 scripts/andrea_lockstep_telegram_e2e.py set-webhook`, then verify with `python3 scripts/andrea_lockstep_telegram_e2e.py webhook-info --require-match` |
 | Telegram ingests but no reply | Confirm `TELEGRAM_BOT_TOKEN` is loaded by `python3 scripts/andrea_sync_server.py`; inspect `/v1/tasks/{id}` for `meta.telegram.chat_id` plus `meta.execution` / `meta.openclaw` / `meta.cursor` |
 | Telegram task queues then fails immediately | Confirm `openclaw agent --agent main --message "READY" --json` succeeds, `openclaw skills info cursor_handoff --json` is eligible, and `CURSOR_API_KEY` + repo `origin` are available for OpenClaw escalations; inspect `/v1/tasks/{id}` `last_error` |
 | `@Cursor` did not seem to involve Cursor | Inspect `/v1/tasks/{id}` `meta.execution.collaboration_mode` and `meta.execution.delegated_to_cursor`; if needed, rerun after confirming `cursor_handoff` is eligible and `CURSOR_API_KEY` is available |
@@ -210,7 +211,7 @@ python3 scripts/andrea_sync_server.py
 
 **Addressing rules:** `@Andrea` prefers the direct Andrea lane, `@Cursor` requests Cursor-first collaboration, `@Andrea @Cursor` or phrasing like `work together` / `double-check` requests joint OpenClaw + Cursor handling, and `@Gemini` / `@Minimax` / `@OpenAI` / `@GPT` request a preferred OpenClaw model lane. Add phrases like `show the full dialogue`, `show all handoffs`, or `visible collaboration` when you want a much richer Telegram collaboration stream for an intentional sprint session.
 
-**E2E helper (cloudflared + setWebhook + verify):** see [ANDREA_TELEGRAM_LOCKSTEP_E2E.md](ANDREA_TELEGRAM_LOCKSTEP_E2E.md) and `python3 scripts/andrea_lockstep_telegram_e2e.py tunnel-and-webhook`.
+**E2E helper (cloudflared + setWebhook + verify):** see [ANDREA_TELEGRAM_LOCKSTEP_E2E.md](ANDREA_TELEGRAM_LOCKSTEP_E2E.md) and `python3 scripts/andrea_lockstep_telegram_e2e.py tunnel-and-webhook`. The helper now uses the same env precedence as `scripts/andrea_sync_server.py` and reports `webhook_health` so you can tell the difference between `healthy`, `drifted`, and `unset`.
 
 **Tri-LLM sprint mode:** for an aggressive one-hour Telegram-visible collaboration session, use [ANDREA_TELEGRAM_TRI_LLM_SPRINT.md](ANDREA_TELEGRAM_TRI_LLM_SPRINT.md). That guide explains how to request full collaboration visibility, how OpenClaw should use Gemini/Minimax/OpenAI by strength, and how Cursor fits into the execution lane.
 

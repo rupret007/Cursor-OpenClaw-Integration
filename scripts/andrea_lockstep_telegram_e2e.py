@@ -2,14 +2,15 @@
 """
 Andrea lockstep: Telegram webhook E2E helper.
 
-Loads repo .env then optional ANDREA_ENV_FILE (path in env). Never prints secret values.
+Loads repo .env, cwd .env, ~/andrea-lockstep.env, then optional ANDREA_ENV_FILE.
+Never prints secret values.
 
 Commands:
   check-env          Verify required variables are set (names only on failure).
   health             GET ANDREA_SYNC_URL/v1/health (default http://127.0.0.1:8765).
   set-webhook        Register Telegram webhook (needs TELEGRAM_BOT_TOKEN, ANDREA_SYNC_TELEGRAM_SECRET,
                      ANDREA_SYNC_PUBLIC_BASE=https://host  no trailing path).
-  webhook-info       Call getWebhookInfo (redacted URL in output).
+  webhook-info       Call getWebhookInfo (redacted URL in output + health summary).
   tunnel-and-webhook Start cloudflared quick tunnel to local sync, then set-webhook (requires cloudflared on PATH).
   wait-telegram-task Poll GET /v1/tasks until a telegram-channel task appears or timeout.
 
@@ -34,34 +35,26 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts import env_loader  # noqa: E402
+from services.andrea_sync.adapters import telegram as tg_adapt  # noqa: E402
+
 
 def repo_root() -> Path:
-    return Path(__file__).resolve().parent.parent
-
-
-def load_dotenv_file(path: Path, *, override: bool = False) -> None:
-    if not path.is_file():
-        return
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, rest = line.partition("=")
-        key = key.strip()
-        val = rest.strip()
-        if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
-            val = val[1:-1]
-        if key and (override or key not in os.environ):
-            os.environ[key] = val
+    return ROOT
 
 
 def load_env() -> None:
     root = repo_root()
-    load_dotenv_file(root / ".env", override=False)
+    env_loader.merge_dotenv_paths([root / ".env", Path.cwd() / ".env"], override=False)
+    override_paths = [Path.home() / "andrea-lockstep.env"]
     extra = (os.environ.get("ANDREA_ENV_FILE") or "").strip()
     if extra:
-        # Later file wins (operator-specific secrets on top of repo defaults).
-        load_dotenv_file(Path(extra).expanduser(), override=True)
+        override_paths.append(Path(extra).expanduser())
+    env_loader.merge_dotenv_paths(override_paths, override=True)
 
 
 REQUIRED = (
@@ -118,9 +111,12 @@ def cmd_health() -> int:
 
 
 def build_webhook_url(public_base: str, secret: str) -> str:
-    base = public_base.rstrip("/")
-    q = urllib.parse.urlencode({"secret": secret})
-    return f"{base}/v1/telegram/webhook?{q}"
+    use_query = os.environ.get("ANDREA_SYNC_TELEGRAM_URL_QUERY", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+    )
+    return tg_adapt.build_webhook_url(public_base, secret, use_query=use_query)
 
 
 def redact_url(u: str) -> str:
@@ -130,6 +126,44 @@ def redact_url(u: str) -> str:
         q["secret"] = ["***"]
     new_query = urllib.parse.urlencode({k: v[0] if v else "" for k, v in q.items()})
     return urllib.parse.urlunparse(parsed._replace(query=new_query))
+
+
+def expected_webhook_url_from_env() -> str:
+    public = (os.environ.get("ANDREA_SYNC_PUBLIC_BASE") or "").strip().rstrip("/")
+    secret = (os.environ.get("ANDREA_SYNC_TELEGRAM_SECRET") or "").strip()
+    if not public:
+        return ""
+    return build_webhook_url(public, secret)
+
+
+def classify_webhook_health(info: dict, *, expected_url: str = "") -> dict:
+    result = info.get("result") if isinstance(info.get("result"), dict) else {}
+    current_url = str(result.get("url") or "").strip()
+    registered = bool(current_url)
+    expected = str(expected_url or "").strip()
+    matches_expected = tg_adapt.webhook_urls_match(current_url, expected) if expected else False
+    status = "registered"
+    reason = "Telegram reports an active webhook URL."
+    if not registered:
+        status = "unset"
+        reason = "Telegram returned an empty webhook URL; no webhook is currently registered."
+    elif expected and matches_expected:
+        status = "healthy"
+        reason = "Telegram webhook matches the expected registration."
+    elif expected:
+        status = "drifted"
+        reason = "Telegram webhook is registered, but it does not match the expected URL."
+    elif not expected:
+        status = "registered"
+        reason = "Telegram webhook is registered, but no local expected URL is configured."
+    return {
+        "status": status,
+        "registered": registered,
+        "matches_expected": matches_expected,
+        "current_url": redact_url(current_url) if current_url and "secret=" in current_url else current_url,
+        "expected_url": redact_url(expected) if expected and "secret=" in expected else expected,
+        "reason": reason,
+    }
 
 
 def telegram_api(method: str, token: str, params: dict | None = None) -> dict:
@@ -190,7 +224,7 @@ def cmd_set_webhook() -> int:
     return 0 if res.get("ok") else 1
 
 
-def cmd_webhook_info() -> int:
+def cmd_webhook_info(*, require_registered: bool = False, require_match: bool = False) -> int:
     load_env()
     if check_env(strict_internal=False) != 0:
         return 1
@@ -204,8 +238,19 @@ def cmd_webhook_info() -> int:
         if isinstance(u, str):
             inner["url"] = redact_url(u) if "secret=" in u else u
         r["result"] = inner
+    r["webhook_health"] = classify_webhook_health(
+        res,
+        expected_url=expected_webhook_url_from_env(),
+    )
     print(json.dumps(r, indent=2))
-    return 0 if res.get("ok") else 1
+    if not res.get("ok"):
+        return 1
+    health = r["webhook_health"]
+    if require_registered and not health.get("registered"):
+        return 1
+    if require_match and not health.get("matches_expected"):
+        return 1
+    return 0
 
 
 def _read_cloudflared_url(proc: subprocess.Popen, timeout_sec: float = 90.0) -> str:
@@ -312,7 +357,9 @@ def main() -> int:
 
     sub.add_parser("health", help="GET /v1/health on ANDREA_SYNC_URL")
     sub.add_parser("set-webhook", help="setWebhook using ANDREA_SYNC_PUBLIC_BASE")
-    sub.add_parser("webhook-info", help="getWebhookInfo (redacted)")
+    wh = sub.add_parser("webhook-info", help="getWebhookInfo with webhook health summary")
+    wh.add_argument("--require-registered", action="store_true")
+    wh.add_argument("--require-match", action="store_true")
     sub.add_parser("tunnel-and-webhook", help="cloudflared quick tunnel + set-webhook")
     wt = sub.add_parser("wait-telegram-task", help="Poll /v1/tasks for channel=telegram")
     wt.add_argument("--timeout-sec", type=float, default=120.0)
@@ -328,7 +375,10 @@ def main() -> int:
     if args.cmd == "set-webhook":
         return cmd_set_webhook()
     if args.cmd == "webhook-info":
-        return cmd_webhook_info()
+        return cmd_webhook_info(
+            require_registered=bool(args.require_registered),
+            require_match=bool(args.require_match),
+        )
     if args.cmd == "tunnel-and-webhook":
         return cmd_tunnel_and_webhook()
     if args.cmd == "wait-telegram-task":

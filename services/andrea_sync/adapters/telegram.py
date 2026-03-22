@@ -212,6 +212,28 @@ def build_webhook_url(public_base: str, secret: str, *, use_query: bool = True) 
     return f"{base}/v1/telegram/webhook"
 
 
+def normalize_webhook_url(url: str) -> Dict[str, Any]:
+    raw = str(url or "").strip()
+    if not raw:
+        return {}
+    parsed = urllib.parse.urlparse(raw)
+    query_pairs = []
+    for key, values in urllib.parse.parse_qs(parsed.query, keep_blank_values=True).items():
+        query_pairs.append((str(key), tuple(sorted(str(v) for v in values))))
+    return {
+        "scheme": parsed.scheme.lower(),
+        "netloc": parsed.netloc.lower(),
+        "path": parsed.path.rstrip("/") or "/",
+        "query": tuple(sorted(query_pairs)),
+    }
+
+
+def webhook_urls_match(current_url: str, expected_url: str) -> bool:
+    current = normalize_webhook_url(current_url)
+    expected = normalize_webhook_url(expected_url)
+    return bool(current and expected and current == expected)
+
+
 def telegram_api(method: str, token: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     url = f"https://api.telegram.org/bot{token}/{method}"
     if params:

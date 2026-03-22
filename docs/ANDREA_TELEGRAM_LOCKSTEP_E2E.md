@@ -78,10 +78,16 @@ cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8765
 ```bash
 export ANDREA_SYNC_PUBLIC_BASE='https://YOUR_SUBDOMAIN.trycloudflare.com'
 python3 scripts/andrea_lockstep_telegram_e2e.py set-webhook
-python3 scripts/andrea_lockstep_telegram_e2e.py webhook-info
+python3 scripts/andrea_lockstep_telegram_e2e.py webhook-info --require-match
 ```
 
-`webhook-info` prints a **redacted** URL. If Telegram shows `last_error_message`, fix TLS, secret mismatch, or local server down.
+`webhook-info` now prints a `webhook_health` summary in addition to the redacted raw Telegram response.
+
+- `status: "healthy"` means the registered webhook matches the expected `ANDREA_SYNC_PUBLIC_BASE`
+- `status: "drifted"` means Telegram has a webhook, but it does not match the expected URL
+- `status: "unset"` means Telegram returned `"url": ""`, which means no webhook is currently registered
+
+If Telegram shows `last_error_message`, fix TLS, secret mismatch, or local server down.
 
 4. **Send a real message** to your bot in Telegram.
 
@@ -146,9 +152,10 @@ Use the repo orchestrator (runs from any cwd; it `cd`s to the repo):
 cd /path/to/Cursor-OpenClaw-Integration
 export ANDREA_SYNC_INTERNAL_TOKEN='…'
 export ANDREA_SYNC_URL='http://127.0.0.1:8765'
-# optional for webhook-info step:
+# optional for strict webhook verification:
 export TELEGRAM_BOT_TOKEN='…'
 export ANDREA_SYNC_TELEGRAM_SECRET='…'
+export ANDREA_SYNC_PUBLIC_BASE='https://your-stable-public-host'
 bash scripts/andrea_full_cycle.sh
 ```
 
@@ -179,7 +186,7 @@ This installs and loads:
 - `com.andrea.andrea-cloudflared`
 - `com.andrea.andrea-post-login-bootstrap`
 
-The post-login bootstrap waits for `andrea_sync`, syncs `skills/cursor_handoff` into the OpenClaw workspace, restarts the gateway, publishes the capability snapshot, and re-runs `set-webhook` when `TELEGRAM_BOT_TOKEN` and `ANDREA_SYNC_PUBLIC_BASE` are present.
+The post-login bootstrap waits for `andrea_sync`, syncs `skills/cursor_handoff` into the OpenClaw workspace, restarts the gateway, publishes the capability snapshot, verifies the current webhook first, and only re-runs `set-webhook` when the registration is missing or drifted. It then verifies the webhook registration when `TELEGRAM_BOT_TOKEN` and `ANDREA_SYNC_PUBLIC_BASE` are present.
 
 ## Hybrid execution notes
 
@@ -197,7 +204,7 @@ The post-login bootstrap waits for `andrea_sync`, syncs `skills/cursor_handoff` 
 3. Start **`andrea_sync`** (same `ANDREA_SYNC_*` env as before)
 4. If using a quick tunnel: start **`cloudflared`** again → **new URL**
 5. Run **`set-webhook`** again with the new `ANDREA_SYNC_PUBLIC_BASE` (or `tunnel-and-webhook`)
-6. `python3 scripts/andrea_lockstep_telegram_e2e.py webhook-info` — confirm no delivery errors (or let the server reclaim the webhook automatically if `ANDREA_SYNC_PUBLIC_BASE` is set)
+6. `python3 scripts/andrea_lockstep_telegram_e2e.py webhook-info --require-match` — confirm Telegram has a non-empty webhook URL that matches the expected public base (or let the server reclaim the webhook automatically if `ANDREA_SYNC_PUBLIC_BASE` is set)
 7. Send a test message and wait for both the lockstep row and the Telegram ACK/final reply
    - lightweight assistant turn: should stay direct Andrea
    - productivity / hybrid-skill turn: should show the OpenClaw lane
@@ -208,7 +215,7 @@ The post-login bootstrap waits for `andrea_sync`, syncs `skills/cursor_handoff` 
 
 - **403** on webhook: `?secret=` must equal `ANDREA_SYNC_TELEGRAM_SECRET` exactly.
 - **Stable hostname**: quick tunnels rotate; for a fixed URL use a **named Cloudflare tunnel** or your own TLS host, then install `scripts/macos/install_andrea_launchagents.sh --with-cloudflared --load`.
-- **Runtime persistence**: the sync LaunchAgent sources repo `.env` plus `~/andrea-lockstep.env`, so `TELEGRAM_BOT_TOKEN`, `CURSOR_API_KEY`, and lockstep secrets survive login.
+- **Runtime persistence**: the sync LaunchAgent sources repo `.env`, cwd `.env`, `~/andrea-lockstep.env`, and then `ANDREA_ENV_FILE`, and the Telegram E2E helper now follows that same precedence so live checks see the same effective env as the running server.
 - **Webhook self-heal**: if `ANDREA_SYNC_PUBLIC_BASE` is set, the running server checks Telegram webhook registration and re-applies it when another process clears it.
 
 ## Reference

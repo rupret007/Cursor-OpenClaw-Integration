@@ -192,7 +192,17 @@ class SyncServer:
                 result = info.get("result") if isinstance(info.get("result"), dict) else {}
                 current_url = str(result.get("url") or "").strip()
                 expected_url = self._expected_webhook_url()
-                if current_url != expected_url:
+                if not tg_adapt.webhook_urls_match(current_url, expected_url):
+                    if not current_url:
+                        print(
+                            "andrea_sync webhook missing in Telegram; reapplying expected registration",
+                            flush=True,
+                        )
+                    else:
+                        print(
+                            "andrea_sync webhook drift detected; reapplying expected registration",
+                            flush=True,
+                        )
                     res = tg_adapt.set_webhook(
                         bot_token=self.telegram_bot_token,
                         public_base=self.telegram_public_base,

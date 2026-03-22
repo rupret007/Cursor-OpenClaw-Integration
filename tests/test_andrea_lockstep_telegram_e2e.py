@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -35,6 +38,69 @@ class TestLockstepTelegramE2EHelpers(unittest.TestCase):
         r = e2e.redact_url(raw)
         self.assertIn("secret=%2A%2A%2A", r)  # urllib may encode ***
         self.assertNotIn("TOP", r)
+
+    def test_load_env_matches_live_server_precedence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "repo"
+            root.mkdir()
+            cwd = tmp_path / "cwd"
+            cwd.mkdir()
+            home = tmp_path / "home"
+            home.mkdir()
+            extra = tmp_path / "extra.env"
+            (root / ".env").write_text('TELEGRAM_BOT_TOKEN="repo-token"\n', encoding="utf-8")
+            (cwd / ".env").write_text('ANDREA_SYNC_TELEGRAM_SECRET="cwd-secret"\n', encoding="utf-8")
+            (home / "andrea-lockstep.env").write_text(
+                'ANDREA_SYNC_PUBLIC_BASE="https://home.example"\n',
+                encoding="utf-8",
+            )
+            extra.write_text('TELEGRAM_BOT_TOKEN="extra-token"\n', encoding="utf-8")
+            with mock.patch.dict(os.environ, {"ANDREA_ENV_FILE": str(extra)}, clear=True):
+                with mock.patch.object(e2e, "repo_root", return_value=root):
+                    with mock.patch.object(e2e.Path, "home", return_value=home):
+                        with mock.patch.object(e2e.Path, "cwd", return_value=cwd):
+                            e2e.load_env()
+                            self.assertEqual(os.environ["TELEGRAM_BOT_TOKEN"], "extra-token")
+                            self.assertEqual(os.environ["ANDREA_SYNC_TELEGRAM_SECRET"], "cwd-secret")
+                            self.assertEqual(os.environ["ANDREA_SYNC_PUBLIC_BASE"], "https://home.example")
+
+    def test_classify_webhook_health_unset(self) -> None:
+        health = e2e.classify_webhook_health(
+            {"ok": True, "result": {"url": ""}},
+            expected_url="https://example.com/v1/telegram/webhook?secret=abc",
+        )
+        self.assertEqual(health["status"], "unset")
+        self.assertFalse(health["registered"])
+        self.assertFalse(health["matches_expected"])
+
+    def test_classify_webhook_health_healthy_when_query_order_differs(self) -> None:
+        health = e2e.classify_webhook_health(
+            {
+                "ok": True,
+                "result": {
+                    "url": "https://example.com/v1/telegram/webhook?x=1&secret=abc",
+                },
+            },
+            expected_url="https://example.com/v1/telegram/webhook?secret=abc&x=1",
+        )
+        self.assertEqual(health["status"], "healthy")
+        self.assertTrue(health["registered"])
+        self.assertTrue(health["matches_expected"])
+
+    def test_classify_webhook_health_drifted(self) -> None:
+        health = e2e.classify_webhook_health(
+            {
+                "ok": True,
+                "result": {
+                    "url": "https://other.example/v1/telegram/webhook?secret=abc",
+                },
+            },
+            expected_url="https://example.com/v1/telegram/webhook?secret=abc",
+        )
+        self.assertEqual(health["status"], "drifted")
+        self.assertTrue(health["registered"])
+        self.assertFalse(health["matches_expected"])
 
 
 if __name__ == "__main__":

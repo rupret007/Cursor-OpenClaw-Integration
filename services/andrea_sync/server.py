@@ -120,6 +120,10 @@ class SyncServer:
         self.background_enabled = _env_bool("ANDREA_SYNC_BACKGROUND_ENABLED", True)
         self.telegram_auto_cursor = _env_bool("ANDREA_SYNC_TELEGRAM_AUTO_CURSOR", True)
         self.telegram_notifier_enabled = _env_bool("ANDREA_SYNC_TELEGRAM_NOTIFIER", True)
+        self.telegram_delegate_lane = (
+            os.environ.get("ANDREA_TELEGRAM_DELEGATE_LANE", "openclaw_hybrid").strip().lower()
+            or "openclaw_hybrid"
+        )
         self.cursor_repo_path = Path(
             os.environ.get("ANDREA_CURSOR_REPO", str(self.repo_root))
         ).expanduser()
@@ -134,6 +138,14 @@ class SyncServer:
         self.cursor_create_timeout_seconds = _env_int(
             "ANDREA_CURSOR_CREATE_TIMEOUT_SECONDS", 120
         )
+        self.openclaw_agent_id = os.environ.get("ANDREA_OPENCLAW_AGENT_ID", "main").strip() or "main"
+        self.openclaw_timeout_seconds = _env_int(
+            "ANDREA_OPENCLAW_TIMEOUT_SECONDS", 900
+        )
+        self.openclaw_fallback_to_cursor = _env_bool(
+            "ANDREA_OPENCLAW_FALLBACK_TO_CURSOR", True
+        )
+        self.openclaw_thinking = os.environ.get("ANDREA_OPENCLAW_THINKING", "medium").strip() or "medium"
         if self.telegram_webhook_autofix and self.telegram_bot_token and self.telegram_public_base:
             self._webhook_worker = threading.Thread(
                 target=self._maintain_telegram_webhook,
@@ -283,6 +295,90 @@ class SyncServer:
 
         return self.with_lock(read)
 
+    def _projection_meta(self, projection: Dict[str, Any], key: str) -> Dict[str, Any]:
+        meta = projection.get("meta", {})
+        if not isinstance(meta, dict):
+            return {}
+        section = meta.get(key, {})
+        return section if isinstance(section, dict) else {}
+
+    def _task_execution_lane(self, task_id: str) -> str:
+        snapshot = self._task_snapshot(task_id)
+        if not snapshot:
+            return self.telegram_delegate_lane
+        projection = snapshot["projection"]
+        execution_meta = self._projection_meta(projection, "execution")
+        lane = str(execution_meta.get("lane") or "").strip()
+        if lane:
+            return lane
+        cursor_meta = self._projection_meta(projection, "cursor")
+        kind = str(cursor_meta.get("kind") or "").strip()
+        if kind == "openclaw":
+            return "openclaw_hybrid"
+        if kind == "cursor":
+            return "direct_cursor"
+        return self.telegram_delegate_lane
+
+    def _task_route_reason(self, task_id: str) -> str:
+        snapshot = self._task_snapshot(task_id)
+        if not snapshot:
+            return ""
+        execution_meta = self._projection_meta(snapshot["projection"], "execution")
+        return str(execution_meta.get("route_reason") or "").strip()
+
+    def _task_routing_hint(self, task_id: str) -> str:
+        snapshot = self._task_snapshot(task_id)
+        if not snapshot:
+            return "auto"
+        execution_meta = self._projection_meta(snapshot["projection"], "execution")
+        if execution_meta.get("routing_hint"):
+            return str(execution_meta.get("routing_hint")).strip()
+        telegram_meta = self._projection_meta(snapshot["projection"], "telegram")
+        return str(telegram_meta.get("routing_hint") or "auto").strip() or "auto"
+
+    def _task_collaboration_mode(self, task_id: str) -> str:
+        snapshot = self._task_snapshot(task_id)
+        if not snapshot:
+            return "auto"
+        execution_meta = self._projection_meta(snapshot["projection"], "execution")
+        if execution_meta.get("collaboration_mode"):
+            return str(execution_meta.get("collaboration_mode")).strip()
+        telegram_meta = self._projection_meta(snapshot["projection"], "telegram")
+        return str(telegram_meta.get("collaboration_mode") or "auto").strip() or "auto"
+
+    def _task_mention_targets(self, task_id: str) -> list[str]:
+        snapshot = self._task_snapshot(task_id)
+        if not snapshot:
+            return []
+        execution_meta = self._projection_meta(snapshot["projection"], "execution")
+        mention_targets = execution_meta.get("mention_targets")
+        if isinstance(mention_targets, list):
+            return [str(v) for v in mention_targets]
+        telegram_meta = self._projection_meta(snapshot["projection"], "telegram")
+        mention_targets = telegram_meta.get("mention_targets")
+        if isinstance(mention_targets, list):
+            return [str(v) for v in mention_targets]
+        return []
+
+    def _latest_user_message_payload(self, task_id: str) -> Dict[str, Any]:
+        snapshot = self._task_snapshot(task_id)
+        if not snapshot:
+            return {}
+        for _seq, _ts, et, payload in reversed(snapshot["events"]):
+            if et == EventType.USER_MESSAGE.value and isinstance(payload, dict):
+                return payload
+        return {}
+
+    def _telegram_worker_label(self, projection: Dict[str, Any], *, running: bool = False) -> str:
+        execution_meta = self._projection_meta(projection, "execution")
+        if execution_meta.get("runner") == "openclaw":
+            if running and execution_meta.get("delegated_to_cursor"):
+                return "OpenClaw and Cursor"
+            return "OpenClaw"
+        if execution_meta.get("delegated_to_cursor"):
+            return "OpenClaw and Cursor"
+        return "Cursor"
+
     def _queue_task_followups(self, task_id: str) -> None:
         if not task_id:
             return
@@ -313,29 +409,47 @@ class SyncServer:
                 print(f"andrea_sync telegram direct reply error: {exc}", flush=True)
             return
         if status == "queued":
+            worker_label = self._telegram_worker_label(projection)
+            telegram_meta = self._projection_meta(projection, "telegram")
             try:
                 self._send_telegram_message_once(
                     task_id,
                     "ack",
-                    format_ack_message(task_id),
+                    format_ack_message(
+                        task_id,
+                        worker_label=worker_label,
+                        routing_hint=str(telegram_meta.get("routing_hint") or ""),
+                        collaboration_mode=str(
+                            self._projection_meta(projection, "execution").get("collaboration_mode")
+                            or telegram_meta.get("collaboration_mode")
+                            or ""
+                        ),
+                    ),
                 )
             except Exception as exc:  # noqa: BLE001
                 print(f"andrea_sync telegram ack error: {exc}", flush=True)
-            self._schedule_cursor_execution(task_id)
+            self._schedule_delegated_execution(task_id)
             return
         cursor_meta = (
             projection.get("meta", {}).get("cursor", {})
             if isinstance(projection.get("meta"), dict)
             else {}
         )
+        execution_meta = self._projection_meta(projection, "execution")
         if status == "running":
             agent_url = cursor_meta.get("agent_url")
-            suffix = f"\nAgent: {agent_url}" if agent_url else ""
             try:
                 self._send_telegram_message_once(
                     task_id,
                     "started",
-                    format_running_message(task_id, agent_url=str(agent_url or "")),
+                    format_running_message(
+                        task_id,
+                        agent_url=str(agent_url or ""),
+                        worker_label=self._telegram_worker_label(projection, running=True),
+                        delegated_to_cursor=bool(execution_meta.get("delegated_to_cursor")),
+                        routing_hint=str(execution_meta.get("routing_hint") or ""),
+                        collaboration_mode=str(execution_meta.get("collaboration_mode") or ""),
+                    ),
                 )
             except Exception as exc:  # noqa: BLE001
                 print(f"andrea_sync telegram running update error: {exc}", flush=True)
@@ -352,6 +466,14 @@ class SyncServer:
                         pr_url=str(cursor_meta.get("pr_url") or ""),
                         agent_url=str(cursor_meta.get("agent_url") or ""),
                         last_error=str(projection.get("last_error") or ""),
+                        worker_label=self._telegram_worker_label(projection),
+                        delegated_to_cursor=bool(execution_meta.get("delegated_to_cursor")),
+                        backend=str(execution_meta.get("backend") or ""),
+                        openclaw_session_id=str(
+                            self._projection_meta(projection, "openclaw").get("session_id") or ""
+                        ),
+                        routing_hint=str(execution_meta.get("routing_hint") or ""),
+                        collaboration_mode=str(execution_meta.get("collaboration_mode") or ""),
                     ),
                 )
             except Exception as exc:  # noqa: BLE001
@@ -362,17 +484,30 @@ class SyncServer:
         if not self._claim_routing_attempt(task_id):
             return
         try:
+            user_payload = self._latest_user_message_payload(task_id)
             prompt = self._extract_cursor_prompt(task_id)
-            decision = route_message(prompt, history=self._recent_telegram_history(task_id))
+            decision = route_message(
+                prompt,
+                history=self._recent_telegram_history(task_id),
+                routing_hint=str(user_payload.get("routing_hint") or "auto"),
+                collaboration_mode=str(user_payload.get("collaboration_mode") or "auto"),
+            )
             if decision.mode == "delegate":
+                execution_lane = decision.delegate_target or self.telegram_delegate_lane
+                kind = "openclaw" if execution_lane == "openclaw_hybrid" else "cursor"
                 applied = self._append_task_event(
                     task_id,
                     EventType.JOB_QUEUED,
                     {
-                        "kind": "cursor",
+                        "kind": kind,
                         "prompt_excerpt": prompt[:300],
                         "source": "telegram_balanced_delegate",
                         "route_reason": decision.reason,
+                        "execution_lane": execution_lane,
+                        "runner": "openclaw" if kind == "openclaw" else "cursor",
+                        "routing_hint": str(user_payload.get("routing_hint") or "auto"),
+                        "collaboration_mode": decision.collaboration_mode,
+                        "mention_targets": user_payload.get("mention_targets", []),
                     },
                 )
             else:
@@ -404,10 +539,13 @@ class SyncServer:
         if not self.with_lock(claim):
             return
         threading.Thread(
-            target=self._run_cursor_job,
+            target=self._run_delegated_job,
             args=(task_id,),
             daemon=True,
         ).start()
+
+    def _schedule_delegated_execution(self, task_id: str) -> None:
+        self._schedule_cursor_execution(task_id)
 
     def _append_task_event(
         self, task_id: str, event_type: EventType, payload: Dict[str, Any]
@@ -464,13 +602,45 @@ class SyncServer:
         return payload
 
     def _extract_cursor_prompt(self, task_id: str) -> str:
+        payload = self._latest_user_message_payload(task_id)
+        prompt = str(payload.get("routing_text") or payload.get("text") or "").strip()
+        if prompt:
+            return prompt
         snapshot = self._task_snapshot(task_id)
         if not snapshot:
             return ""
-        for _seq, _ts, et, payload in reversed(snapshot["events"]):
-            if et == EventType.USER_MESSAGE.value and payload.get("text"):
-                return str(payload["text"]).strip()
         return str(snapshot["projection"].get("summary") or "").strip()
+
+    def _create_openclaw_job(
+        self,
+        task_id: str,
+        prompt: str,
+        route_reason: str,
+        collaboration_mode: str,
+    ) -> Dict[str, Any]:
+        return self._run_json_subprocess(
+            [
+                sys.executable,
+                str(self.repo_root / "scripts" / "andrea_sync_openclaw_hybrid.py"),
+                "--task-id",
+                task_id,
+                "--prompt",
+                prompt,
+                "--repo",
+                str(self.cursor_repo_path),
+                "--agent-id",
+                self.openclaw_agent_id,
+                "--route-reason",
+                route_reason,
+                "--collaboration-mode",
+                collaboration_mode,
+                "--timeout-seconds",
+                str(self.openclaw_timeout_seconds),
+                "--thinking",
+                self.openclaw_thinking,
+            ],
+            timeout_seconds=self.openclaw_timeout_seconds + 10,
+        )
 
     def _create_cursor_job(self, prompt: str) -> Dict[str, Any]:
         return self._run_json_subprocess(
@@ -551,6 +721,132 @@ class SyncServer:
         if agent_url:
             return f"Cursor finished with status {terminal_status}. Agent: {agent_url}"
         return f"Cursor finished with status {terminal_status}."
+
+    def _run_delegated_job(self, task_id: str) -> None:
+        execution_lane = self._task_execution_lane(task_id)
+        if execution_lane == "openclaw_hybrid":
+            self._run_openclaw_job(task_id)
+            return
+        self._run_cursor_job(task_id)
+
+    def _run_openclaw_job(self, task_id: str) -> None:
+        prompt = self._extract_cursor_prompt(task_id)
+        collaboration_mode = self._task_collaboration_mode(task_id)
+        routing_hint = self._task_routing_hint(task_id)
+        if not prompt:
+            self._append_task_event(
+                task_id,
+                EventType.JOB_FAILED,
+                {
+                    "error": "missing_prompt",
+                    "message": "No Telegram text was available to send to OpenClaw.",
+                    "backend": "openclaw",
+                    "execution_lane": "openclaw_hybrid",
+                },
+            )
+            return
+        self._append_task_event(
+            task_id,
+            EventType.JOB_STARTED,
+            {
+                "backend": "openclaw",
+                "execution_lane": "openclaw_hybrid",
+                "runner": "openclaw",
+                "status": "submitted",
+                "routing_hint": routing_hint,
+                "collaboration_mode": collaboration_mode,
+            },
+        )
+        try:
+            result = self._create_openclaw_job(
+                task_id,
+                prompt,
+                self._task_route_reason(task_id),
+                collaboration_mode,
+            )
+        except Exception as exc:  # noqa: BLE001
+            if self.openclaw_fallback_to_cursor:
+                self._append_task_event(
+                    task_id,
+                    EventType.JOB_PROGRESS,
+                    {
+                        "message": (
+                            "OpenClaw could not complete the handoff cleanly, so Andrea is "
+                            "falling back to a direct Cursor launch."
+                        ),
+                        "backend": "cursor",
+                        "execution_lane": "direct_cursor",
+                        "runner": "cursor",
+                        "delegated_to_cursor": True,
+                        "routing_hint": routing_hint,
+                        "collaboration_mode": collaboration_mode,
+                    },
+                )
+                self._run_cursor_job(task_id)
+                return
+            self._append_task_event(
+                task_id,
+                EventType.JOB_FAILED,
+                {
+                    "error": "openclaw_submit_failed",
+                    "message": _clip(exc, 1500),
+                    "backend": "openclaw",
+                    "execution_lane": "openclaw_hybrid",
+                    "runner": "openclaw",
+                    "routing_hint": routing_hint,
+                    "collaboration_mode": collaboration_mode,
+                },
+            )
+            return
+        payload = {
+            "summary": str(result.get("summary") or ""),
+            "backend": "openclaw",
+            "execution_lane": "openclaw_hybrid",
+            "runner": "openclaw",
+            "delegated_to_cursor": bool(result.get("delegated_to_cursor")),
+            "openclaw_run_id": _clip(result.get("openclaw_run_id"), 200) or None,
+            "openclaw_session_id": _clip(result.get("openclaw_session_id"), 200) or None,
+            "provider": _clip(result.get("provider"), 120) or None,
+            "model": _clip(result.get("model"), 200) or None,
+            "cursor_agent_id": _clip(result.get("cursor_agent_id"), 200) or None,
+            "agent_url": _clip(result.get("agent_url"), 1000) or None,
+            "pr_url": _clip(result.get("pr_url"), 1000) or None,
+            "raw_status": _clip(result.get("status"), 120) or None,
+            "routing_hint": routing_hint,
+            "collaboration_mode": collaboration_mode,
+        }
+        requires_cursor = collaboration_mode in {"cursor_primary", "collaborative"}
+        if result.get("ok") and requires_cursor and not result.get("delegated_to_cursor"):
+            self._append_task_event(
+                task_id,
+                EventType.JOB_PROGRESS,
+                {
+                    "message": (
+                        "OpenClaw completed an initial pass, but Andrea is escalating to Cursor "
+                        "to honor your collaboration request."
+                    ),
+                    "backend": "cursor",
+                    "execution_lane": "direct_cursor",
+                    "runner": "cursor",
+                    "delegated_to_cursor": True,
+                    "routing_hint": routing_hint,
+                    "collaboration_mode": collaboration_mode,
+                },
+            )
+            self._run_cursor_job(task_id)
+            return
+        if result.get("ok"):
+            self._append_task_event(task_id, EventType.JOB_COMPLETED, payload)
+            return
+        self._append_task_event(
+            task_id,
+            EventType.JOB_FAILED,
+            {
+                **payload,
+                "error": "openclaw_execution_failed",
+                "message": _clip(result.get("summary") or result.get("raw_text") or "OpenClaw failed.", 1500),
+            },
+        )
 
     def _run_cursor_job(self, task_id: str) -> None:
         prompt = self._extract_cursor_prompt(task_id)

@@ -117,14 +117,24 @@ There are now two Telegram lanes:
   - projected task should move through `queued` -> `running` -> `completed` or `failed`
   - Telegram should receive:
     - an immediate ACK in Andrea's voice
-    - a running/status note once Cursor accepts the work
+    - a running/status note once OpenClaw accepts the work (and it may mention Cursor only when OpenClaw escalates)
     - a final completion/failure reply with:
       - `Andrea:` concise user-facing answer first
       - `What happened:` short execution summary
-      - `Cursor said:` compact excerpt of the agent result
-      - `Technical details:` task id, status, PR, agent link
+      - `OpenClaw said:` for OpenClaw-only handling, or `Cursor said:` when OpenClaw escalates to Cursor
+      - `Technical details:` task id, status, OpenClaw session when available, PR, agent link
 
 This reply shape is intentionally optimized for future voice/Alexa reuse: the first Andrea sentence should stand on its own if spoken aloud.
+
+### Direct addressing
+
+The Telegram bridge now supports lightweight addressing hints in the message text:
+
+- `@Andrea ...` tells the bot to keep the turn in Andrea's direct assistant lane when possible.
+- `@Cursor ...` tells Andrea/OpenClaw to run a Cursor-first collaboration pass instead of replying directly.
+- `@Andrea @Cursor ...` or natural phrases like `work together`, `team up`, or `double-check` tell the system to have OpenClaw and Cursor collaborate before the final answer.
+
+These tags are stripped from the delegated prompt before it is sent downstream, so they control routing without polluting the actual work request.
 
 ## Automation (full cycle)
 
@@ -169,6 +179,14 @@ This installs and loads:
 
 The post-login bootstrap waits for `andrea_sync`, syncs `skills/cursor_handoff` into the OpenClaw workspace, restarts the gateway, publishes the capability snapshot, and re-runs `set-webhook` when `TELEGRAM_BOT_TOKEN` and `ANDREA_SYNC_PUBLIC_BASE` are present.
 
+## Hybrid execution notes
+
+- Default delegated lane: `ANDREA_TELEGRAM_DELEGATE_LANE=openclaw_hybrid`
+- OpenClaw runner script: `python3 scripts/andrea_sync_openclaw_hybrid.py --task-id tsk_demo --prompt "Remind me to follow up tomorrow"`
+- Direct Cursor fallback remains available if you explicitly set `ANDREA_TELEGRAM_DELEGATE_LANE=direct_cursor` or if `ANDREA_OPENCLAW_FALLBACK_TO_CURSOR=1` is allowed during an OpenClaw launch failure
+- OpenClaw automation uses `openclaw agent --agent "${ANDREA_OPENCLAW_AGENT_ID:-main}"`, so the OpenClaw gateway and the mirrored `cursor_handoff` skill both need to stay healthy on the host
+- When the user explicitly asks for Cursor collaboration (`@Cursor` or collaborative phrasing), the hybrid runner is expected to involve Cursor before it finalizes the answer; if OpenClaw returns without doing so, `andrea_sync` escalates to Cursor directly to honor that request
+
 ## Refresh / restart checklist
 
 1. `git pull --ff-only origin main`
@@ -178,6 +196,9 @@ The post-login bootstrap waits for `andrea_sync`, syncs `skills/cursor_handoff` 
 5. Run **`set-webhook`** again with the new `ANDREA_SYNC_PUBLIC_BASE` (or `tunnel-and-webhook`)
 6. `python3 scripts/andrea_lockstep_telegram_e2e.py webhook-info` — confirm no delivery errors (or let the server reclaim the webhook automatically if `ANDREA_SYNC_PUBLIC_BASE` is set)
 7. Send a test message and wait for both the lockstep row and the Telegram ACK/final reply
+   - lightweight assistant turn: should stay direct Andrea
+   - productivity / hybrid-skill turn: should show the OpenClaw lane
+   - repo-heavy turn: should queue through OpenClaw first and only mention Cursor if OpenClaw escalates
 8. Optional: `ANDREA_SYNC_DOCTOR=1 ANDREA_SYNC_URL=http://127.0.0.1:8765 bash scripts/andrea_doctor.sh`
 
 ## Operational notes

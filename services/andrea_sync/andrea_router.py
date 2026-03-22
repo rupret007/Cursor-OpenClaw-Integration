@@ -47,6 +47,12 @@ GENERIC_DIRECT_REPLY_RE = re.compile(
     re.I,
 )
 META_CURSOR_RE = re.compile(r"\b(talk to cursor|have cursor|use cursor|delegate to cursor)\b", re.I)
+HYBRID_SKILL_RE = re.compile(
+    r"\b(remind me|reminder|note|notes|calendar|schedule|todo|to-do|task list|message someone|"
+    r"send a message|draft a message|email|inbox|search the web|search online|weather|"
+    r"summarize this|summarise this)\b",
+    re.I,
+)
 DELEGATE_KEYWORDS_RE = re.compile(
     r"\b(code|repo|repository|file|files|branch|commit|pull request|pr\b|debug|test suite|tests\b|"
     r"implement|implementation|fix|bug|refactor|edit|patch|script|service|restart|reload|deploy|"
@@ -54,6 +60,10 @@ DELEGATE_KEYWORDS_RE = re.compile(
     re.I,
 )
 PATH_RE = re.compile(r"[/~][\w.\-~/]+|`[^`]+`|\b\w+\.(py|ts|tsx|js|jsx|md|sh|json|yaml|yml)\b", re.I)
+COLLABORATE_RE = re.compile(
+    r"\b(work together|team up|collaborate|both of you|double-?check|second opinion)\b",
+    re.I,
+)
 
 
 @dataclass
@@ -61,32 +71,71 @@ class AndreaRouteDecision:
     mode: str
     reason: str
     reply_text: str = ""
+    delegate_target: str = ""
+    collaboration_mode: str = "auto"
 
 
-def should_delegate_to_cursor(text: str) -> tuple[bool, str]:
+def _default_delegate_target() -> str:
+    raw = (os.environ.get("ANDREA_TELEGRAM_DELEGATE_LANE") or "openclaw_hybrid").strip().lower()
+    if raw in {"cursor", "cursor_direct", "direct_cursor"}:
+        return "direct_cursor"
+    return "openclaw_hybrid"
+
+
+def classify_route(
+    text: str,
+    *,
+    routing_hint: str = "auto",
+    collaboration_mode: str = "auto",
+) -> tuple[str, str, str, str]:
     clean = _normalize(text)
     word_count = len(clean.split())
+    hint = str(routing_hint or "auto").strip().lower() or "auto"
+    collab = str(collaboration_mode or "auto").strip().lower() or "auto"
+    andrea_preferred = hint == "andrea"
+    if hint == "cursor":
+        return "delegate", "explicit_cursor_mention", "openclaw_hybrid", "cursor_primary"
+    if hint == "collaborate":
+        return "delegate", "explicit_collaboration_mention", "openclaw_hybrid", "collaborative"
     if not clean:
-        return False, "empty_or_whitespace"
+        return "direct", "explicit_andrea_mention" if andrea_preferred else "empty_or_whitespace", "", "andrea_primary" if andrea_preferred else collab
     if THANKS_RE.search(clean):
-        return False, "greeting_or_social"
+        return "direct", "explicit_andrea_mention" if andrea_preferred else "greeting_or_social", "", "andrea_primary" if andrea_preferred else collab
     if GREETING_RE.search(clean) and not MEMORY_RE.search(clean) and word_count <= 6:
-        return False, "greeting_or_social"
+        return "direct", "explicit_andrea_mention" if andrea_preferred else "greeting_or_social", "", "andrea_primary" if andrea_preferred else collab
     if META_CURSOR_RE.search(clean):
-        return False, "cursor_coordination_question"
+        return "direct", "explicit_andrea_mention" if andrea_preferred else "cursor_coordination_question", "", "andrea_primary" if andrea_preferred else collab
+    if HYBRID_SKILL_RE.search(clean):
+        if collab == "auto" and COLLABORATE_RE.search(clean):
+            collab = "collaborative"
+        if andrea_preferred:
+            return "delegate", "explicit_andrea_mention_delegate", "openclaw_hybrid", "andrea_primary"
+        return "delegate", "openclaw_hybrid_request", "openclaw_hybrid", collab
     if DELEGATE_KEYWORDS_RE.search(clean):
-        return True, "technical_or_repo_request"
+        if collab == "auto" and COLLABORATE_RE.search(clean):
+            collab = "collaborative"
+        if andrea_preferred:
+            return "delegate", "explicit_andrea_mention_delegate", "openclaw_hybrid", "andrea_primary"
+        return "delegate", "technical_or_repo_request", _default_delegate_target(), collab
     if PATH_RE.search(text):
-        return True, "path_or_code_reference"
+        if collab == "auto" and COLLABORATE_RE.search(clean):
+            collab = "collaborative"
+        if andrea_preferred:
+            return "delegate", "explicit_andrea_mention_delegate", "openclaw_hybrid", "andrea_primary"
+        return "delegate", "path_or_code_reference", _default_delegate_target(), collab
     if IDENTITY_RE.search(clean):
-        return False, "assistant_identity"
+        return "direct", "explicit_andrea_mention" if andrea_preferred else "assistant_identity", "", "andrea_primary" if andrea_preferred else collab
     if HELP_RE.search(clean) and word_count <= 6:
-        return False, "short_help_request"
+        return "direct", "explicit_andrea_mention" if andrea_preferred else "short_help_request", "", "andrea_primary" if andrea_preferred else collab
     if word_count <= 18:
-        return False, "short_general_request"
+        return "direct", "explicit_andrea_mention" if andrea_preferred else "short_general_request", "", "andrea_primary" if andrea_preferred else collab
     if word_count >= 45:
-        return True, "longer_multi_step_request"
-    return False, "balanced_default_direct"
+        if collab == "auto" and COLLABORATE_RE.search(clean):
+            collab = "collaborative"
+        if andrea_preferred:
+            return "delegate", "explicit_andrea_mention_delegate", "openclaw_hybrid", "andrea_primary"
+        return "delegate", "longer_multi_step_request", _default_delegate_target(), collab
+    return "direct", "explicit_andrea_mention" if andrea_preferred else "balanced_default_direct", "", "andrea_primary" if andrea_preferred else collab
 
 
 def _clip(text: str, limit: int = 220) -> str:
@@ -256,12 +305,28 @@ def build_direct_reply(text: str, history: list[dict[str, str]] | None = None) -
         return _contextual_fallback(text, history=history)
 
 
-def route_message(text: str, history: list[dict[str, str]] | None = None) -> AndreaRouteDecision:
-    delegate, reason = should_delegate_to_cursor(text)
-    if delegate:
-        return AndreaRouteDecision(mode="delegate", reason=reason)
+def route_message(
+    text: str,
+    history: list[dict[str, str]] | None = None,
+    *,
+    routing_hint: str = "auto",
+    collaboration_mode: str = "auto",
+) -> AndreaRouteDecision:
+    mode, reason, delegate_target, resolved_collab = classify_route(
+        text,
+        routing_hint=routing_hint,
+        collaboration_mode=collaboration_mode,
+    )
+    if mode == "delegate":
+        return AndreaRouteDecision(
+            mode="delegate",
+            reason=reason,
+            delegate_target=delegate_target,
+            collaboration_mode=resolved_collab,
+        )
     return AndreaRouteDecision(
         mode="direct",
         reason=reason,
         reply_text=build_direct_reply(text, history=history),
+        collaboration_mode=resolved_collab,
     )

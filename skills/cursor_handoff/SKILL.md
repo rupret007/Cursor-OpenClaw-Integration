@@ -40,6 +40,7 @@ Use this skill when a request requires broad codebase context, multi-file edits,
 3. If the user asks for analysis/review/planning or intent is ambiguous, use read-only mode.
 4. Only use edit mode when the user clearly asks for code changes.
 5. Never infer permission for commits, PR creation, or destructive git actions unless explicitly requested.
+6. When Andrea/OpenClaw marked the turn as `cursor_primary` or collaborative, involve Cursor before the final answer even if you can partially reason about the task yourself.
 
 ## Branch Guidance
 
@@ -124,3 +125,4 @@ User asks: "Fix failing tests and push branch for PR."
 - Hybrid OpenClaw expansion (Apple/Google productivity, execution lane, optional voice): repo `docs/ANDREA_OPENCLAW_HYBRID_SKILLS.md`
 - Day-to-day gates: `docs/ANDREA_OPERATIONS_PLAYBOOK.md`
 - **Lockstep bus** (Telegram/Alexa/Cursor shared task timeline): `docs/ANDREA_LOCKSTEP_ARCHITECTURE.md` — after spawning a Cursor job, report lifecycle with `scripts/andrea_sync_cursor_report.py` so all channels stay aligned.
+- Telegram intent hints: `@Andrea` means keep it direct when possible, `@Cursor` means Cursor-first collaboration, and `@Andrea @Cursor` / `work together` / `double-check` means OpenClaw and Cursor should collaborate before the final answer.

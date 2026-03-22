@@ -2,11 +2,50 @@
 from __future__ import annotations
 
 import json
+import re
 import secrets
 import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any, Dict, Optional
+
+MENTION_RE = re.compile(r"(?<!\w)@(andrea|cursor)\b", re.I)
+COLLABORATION_RE = re.compile(
+    r"\b(work together|team up|collaborate|both of you|double-?check|second opinion)\b",
+    re.I,
+)
+
+
+def _normalize_spaces(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text or "")).strip()
+
+
+def extract_routing_hints(text: str) -> Dict[str, Any]:
+    raw_text = str(text or "").strip()
+    matches = [m.group(1).lower() for m in MENTION_RE.finditer(raw_text)]
+    mention_targets = sorted(set(matches))
+    routing_hint = "auto"
+    if mention_targets == ["andrea"]:
+        routing_hint = "andrea"
+    elif mention_targets == ["cursor"]:
+        routing_hint = "cursor"
+    elif mention_targets == ["andrea", "cursor"]:
+        routing_hint = "collaborate"
+    cleaned = _normalize_spaces(MENTION_RE.sub(" ", raw_text))
+    collaboration_mode = "auto"
+    if routing_hint == "cursor":
+        collaboration_mode = "cursor_primary"
+    elif routing_hint == "collaborate" or COLLABORATION_RE.search(raw_text):
+        collaboration_mode = "collaborative"
+    elif routing_hint == "andrea":
+        collaboration_mode = "andrea_primary"
+    return {
+        "raw_text": raw_text,
+        "routing_text": cleaned,
+        "mention_targets": mention_targets,
+        "routing_hint": routing_hint,
+        "collaboration_mode": collaboration_mode,
+    }
 
 
 def update_to_command(update: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -22,6 +61,7 @@ def update_to_command(update: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     text = msg.get("text") or msg.get("caption")
     if not text or not str(text).strip():
         return None
+    routing = extract_routing_hints(str(text))
     chat = msg.get("chat") or {}
     chat_id = chat.get("id")
     message_id = msg.get("message_id")
@@ -31,7 +71,11 @@ def update_to_command(update: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "channel": "telegram",
         "external_id": str(uid),
         "payload": {
-            "text": str(text).strip(),
+            "text": routing["raw_text"],
+            "routing_text": routing["routing_text"],
+            "mention_targets": routing["mention_targets"],
+            "routing_hint": routing["routing_hint"],
+            "collaboration_mode": routing["collaboration_mode"],
             "chat_id": chat_id,
             "chat_type": chat.get("type"),
             "message_id": message_id,
@@ -103,8 +147,11 @@ def send_text_message(
         "text": msg,
         "disable_web_page_preview": True,
     }
-    if reply_to_message_id is not None:
-        body["reply_parameters"] = {"message_id": int(reply_to_message_id)}
+    if reply_to_message_id not in (None, ""):
+        try:
+            body["reply_parameters"] = {"message_id": int(reply_to_message_id)}
+        except (TypeError, ValueError):
+            pass
     data = json.dumps(body, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(
         url,

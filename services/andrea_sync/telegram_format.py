@@ -44,6 +44,18 @@ def _first_sentence(text: str, limit: int = 180) -> str:
     return _clip(clean, limit)
 
 
+def _routing_note(routing_hint: str, collaboration_mode: str) -> str:
+    hint = str(routing_hint or "").strip().lower()
+    collab = str(collaboration_mode or "").strip().lower()
+    if hint == "andrea":
+        return "- You addressed Andrea directly, so I kept this in the assistant lane."
+    if hint == "cursor":
+        return "- You addressed Cursor directly, so Andrea routed this as a Cursor-first collaboration."
+    if hint == "collaborate" or collab == "collaborative":
+        return "- You asked Andrea and Cursor to work together on this."
+    return ""
+
+
 def _footer_lines(
     task_id: str,
     status: str,
@@ -51,12 +63,15 @@ def _footer_lines(
     agent_url: str = "",
     pr_url: str = "",
     last_error: str = "",
+    openclaw_session_id: str = "",
 ) -> list[str]:
     lines = [
         "Technical details:",
         f"- Task: {task_id}",
         f"- Status: {status}",
     ]
+    if openclaw_session_id:
+        lines.append(f"- OpenClaw session: {_clip(openclaw_session_id, 200)}")
     if pr_url:
         lines.append(f"- PR: {pr_url}")
     if agent_url:
@@ -66,7 +81,29 @@ def _footer_lines(
     return lines
 
 
-def format_ack_message(task_id: str) -> str:
+def format_ack_message(
+    task_id: str,
+    *,
+    worker_label: str = "Cursor",
+    routing_hint: str = "",
+    collaboration_mode: str = "",
+) -> str:
+    routing_note = _routing_note(routing_hint, collaboration_mode)
+    if worker_label == "OpenClaw":
+        body = [
+            "Andrea:",
+            "I got your message and queued it for OpenClaw.",
+            "",
+            "What happened:",
+            "- Andrea created a task and will keep this thread updated.",
+            "- OpenClaw will handle this directly or bring in Cursor if the work needs deeper repo execution.",
+            *([routing_note] if routing_note else []),
+            "",
+            "Technical details:",
+            f"- Task: {task_id}",
+            "- Status: queued",
+        ]
+        return "\n".join(body)
     return "\n".join(
         [
             "Andrea:",
@@ -75,6 +112,7 @@ def format_ack_message(task_id: str) -> str:
             "What happened:",
             "- Andrea created a task and will keep this thread updated.",
             "- Cursor will be started automatically.",
+            *([routing_note] if routing_note else []),
             "",
             "Technical details:",
             f"- Task: {task_id}",
@@ -93,14 +131,42 @@ def format_direct_message(reply_text: str) -> str:
     )
 
 
-def format_running_message(task_id: str, agent_url: str = "") -> str:
+def format_running_message(
+    task_id: str,
+    agent_url: str = "",
+    *,
+    worker_label: str = "Cursor",
+    delegated_to_cursor: bool = False,
+    routing_hint: str = "",
+    collaboration_mode: str = "",
+) -> str:
+    if delegated_to_cursor and worker_label == "OpenClaw":
+        worker_label = "OpenClaw and Cursor"
+    if worker_label == "OpenClaw and Cursor":
+        headline = "OpenClaw and Cursor are actively working on your request now."
+        bullets = [
+            "- OpenClaw is coordinating the task and Cursor has been pulled in for the heavier execution.",
+            "- I will send the result back here when it finishes.",
+        ]
+    elif worker_label == "OpenClaw":
+        headline = "OpenClaw is actively working on your request now."
+        bullets = [
+            "- The task moved from queued to running inside the OpenClaw lane.",
+            "- I will send the result back here when it finishes.",
+        ]
+    else:
+        headline = "Cursor is actively working on your request now."
+        bullets = [
+            "- The task moved from queued to running.",
+            "- I will send the result back here when it finishes.",
+        ]
     lines = [
         "Andrea:",
-        "Cursor is actively working on your request now.",
+        headline,
         "",
         "What happened:",
-        "- The task moved from queued to running.",
-        "- I will send the result back here when it finishes.",
+        *bullets,
+        *([_routing_note(routing_hint, collaboration_mode)] if _routing_note(routing_hint, collaboration_mode) else []),
         "",
     ]
     lines.extend(_footer_lines(task_id, "running", agent_url=agent_url))
@@ -115,13 +181,29 @@ def format_final_message(
     pr_url: str = "",
     agent_url: str = "",
     last_error: str = "",
+    worker_label: str = "Cursor",
+    delegated_to_cursor: bool = False,
+    backend: str = "",
+    openclaw_session_id: str = "",
+    routing_hint: str = "",
+    collaboration_mode: str = "",
 ) -> str:
+    if backend == "openclaw" and worker_label == "Cursor":
+        worker_label = "OpenClaw"
     summary_excerpt = _cursor_excerpt(summary)
     summary_sentence = _first_sentence(summary_excerpt)
     completed = status == "completed"
+    result_label = "Cursor"
+    if worker_label == "OpenClaw":
+        result_label = "OpenClaw"
+    elif worker_label == "OpenClaw and Cursor" or delegated_to_cursor:
+        result_label = "Cursor"
     if completed:
         if pr_url:
-            andrea_line = "I finished your request and there is a PR ready to review."
+            if worker_label == "OpenClaw and Cursor" or delegated_to_cursor:
+                andrea_line = "I finished your request and there is a PR ready to review."
+            else:
+                andrea_line = "I finished your request and OpenClaw completed it successfully."
         elif summary_sentence:
             andrea_line = f"I finished your request. {summary_sentence}"
         else:
@@ -134,9 +216,17 @@ def format_final_message(
         andrea_line,
         "",
         "What happened:",
-        "- Cursor finished processing this task."
-        if completed
-        else "- Cursor ended in a failed state for this task.",
+        (
+            "- OpenClaw coordinated this task and Cursor finished the heavy execution."
+            if completed and (worker_label == "OpenClaw and Cursor" or delegated_to_cursor)
+            else "- OpenClaw finished processing this task."
+            if completed and worker_label == "OpenClaw"
+            else "- Cursor finished processing this task."
+            if completed
+            else "- OpenClaw ended in a failed state for this task."
+            if worker_label == "OpenClaw"
+            else "- Cursor ended in a failed state for this task."
+        ),
     ]
     if completed and pr_url:
         lines.append("- A PR is available for review.")
@@ -144,15 +234,30 @@ def format_final_message(
         lines.append(f"- Outcome: {summary_sentence}")
     elif not completed and last_error:
         lines.append(f"- Failure: {_clip(last_error, 220)}")
+    routing_note = _routing_note(routing_hint, collaboration_mode)
+    if routing_note:
+        lines.append(routing_note)
 
     if summary_excerpt:
         lines.extend(
             [
                 "",
-                "Cursor said:",
+                f"{result_label} said:",
                 summary_excerpt,
             ]
         )
 
-    lines.extend(["", *_footer_lines(task_id, status, agent_url=agent_url, pr_url=pr_url, last_error=last_error)])
+    lines.extend(
+        [
+            "",
+            *_footer_lines(
+                task_id,
+                status,
+                agent_url=agent_url,
+                pr_url=pr_url,
+                last_error=last_error,
+                openclaw_session_id=openclaw_session_id,
+            ),
+        ]
+    )
     return "\n".join(lines)

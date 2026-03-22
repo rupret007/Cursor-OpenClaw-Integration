@@ -45,6 +45,7 @@ class TestAndreaSync(unittest.TestCase):
         self._prev_notifier = os.environ.get("ANDREA_SYNC_TELEGRAM_NOTIFIER")
         self._prev_openai_enabled = os.environ.get("OPENAI_API_ENABLED")
         self._prev_openai_key = os.environ.get("OPENAI_API_KEY")
+        self._prev_delegate_lane = os.environ.get("ANDREA_TELEGRAM_DELEGATE_LANE")
         os.environ["ANDREA_SYNC_DB"] = str(self.db_path)
         self.conn = connect(self.db_path)
         migrate(self.conn)
@@ -71,6 +72,10 @@ class TestAndreaSync(unittest.TestCase):
             os.environ.pop("OPENAI_API_KEY", None)
         else:
             os.environ["OPENAI_API_KEY"] = self._prev_openai_key
+        if self._prev_delegate_lane is None:
+            os.environ.pop("ANDREA_TELEGRAM_DELEGATE_LANE", None)
+        else:
+            os.environ["ANDREA_TELEGRAM_DELEGATE_LANE"] = self._prev_delegate_lane
         self.db_path.unlink(missing_ok=True)
         for suf in ("-wal", "-shm"):
             p = Path(str(self.db_path) + suf)
@@ -173,6 +178,31 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(cmd["payload"]["message_id"], 55)
         self.assertEqual(cmd["payload"]["from_username"], "demo")
 
+    def test_telegram_extract_routing_hints(self) -> None:
+        routing = tg_adapt.extract_routing_hints("@Andrea @Cursor please work together on this")
+        self.assertEqual(routing["routing_hint"], "collaborate")
+        self.assertEqual(routing["collaboration_mode"], "collaborative")
+        self.assertEqual(routing["mention_targets"], ["andrea", "cursor"])
+        self.assertEqual(routing["routing_text"], "please work together on this")
+
+    def test_telegram_update_to_command_with_cursor_mention(self) -> None:
+        cmd = tg_adapt.update_to_command(
+            {
+                "update_id": 100,
+                "message": {
+                    "text": "@Cursor please fix the failing tests",
+                    "message_id": 56,
+                    "chat": {"id": 1},
+                    "from": {"id": 2, "username": "demo"},
+                },
+            }
+        )
+        self.assertIsNotNone(cmd)
+        assert cmd is not None
+        self.assertEqual(cmd["payload"]["routing_hint"], "cursor")
+        self.assertEqual(cmd["payload"]["collaboration_mode"], "cursor_primary")
+        self.assertEqual(cmd["payload"]["routing_text"], "please fix the failing tests")
+
     def test_telegram_user_message_auto_queues_cursor_job(self) -> None:
         result = handle_command(
             self.conn,
@@ -207,10 +237,50 @@ class TestAndreaSync(unittest.TestCase):
     def test_router_coding_request_delegates(self) -> None:
         decision = route_message("Please inspect the repo, fix the failing tests, and open a PR.")
         self.assertEqual(decision.mode, "delegate")
+        self.assertEqual(decision.delegate_target, "openclaw_hybrid")
 
     def test_router_help_with_technical_request_delegates(self) -> None:
         decision = route_message("Help me debug this traceback and fix the failing tests.")
         self.assertEqual(decision.mode, "delegate")
+        self.assertEqual(decision.delegate_target, "openclaw_hybrid")
+
+    def test_router_productivity_request_targets_openclaw_hybrid(self) -> None:
+        decision = route_message("Remind me to follow up with the StoryLiner team tomorrow.")
+        self.assertEqual(decision.mode, "delegate")
+        self.assertEqual(decision.delegate_target, "openclaw_hybrid")
+
+    def test_router_andrea_mention_forces_direct(self) -> None:
+        decision = route_message(
+            "how are you?",
+            routing_hint="andrea",
+            collaboration_mode="andrea_primary",
+        )
+        self.assertEqual(decision.mode, "direct")
+        self.assertEqual(decision.reason, "explicit_andrea_mention")
+
+    def test_router_andrea_mention_can_still_delegate_actionable_work(self) -> None:
+        decision = route_message(
+            "remind me to review StoryLiner tomorrow",
+            routing_hint="andrea",
+            collaboration_mode="andrea_primary",
+        )
+        self.assertEqual(decision.mode, "delegate")
+        self.assertEqual(decision.delegate_target, "openclaw_hybrid")
+
+    def test_router_cursor_mention_forces_hybrid_delegate(self) -> None:
+        decision = route_message(
+            "how are you?",
+            routing_hint="cursor",
+            collaboration_mode="cursor_primary",
+        )
+        self.assertEqual(decision.mode, "delegate")
+        self.assertEqual(decision.delegate_target, "openclaw_hybrid")
+        self.assertEqual(decision.collaboration_mode, "cursor_primary")
+
+    def test_router_collaboration_phrase_requests_joint_work(self) -> None:
+        decision = route_message("Please work together and double-check the repo changes.")
+        self.assertEqual(decision.mode, "delegate")
+        self.assertEqual(decision.collaboration_mode, "collaborative")
 
     def test_router_meta_cursor_question_stays_direct(self) -> None:
         decision = route_message("Can you talk to Cursor when needed?")
@@ -288,6 +358,38 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(history[1]["role"], "assistant")
         self.assertIn("telegram memory", history[1]["content"].lower())
 
+    def test_load_recent_telegram_history_prefers_routing_text(self) -> None:
+        first = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-history-mention",
+                "payload": {
+                    "text": "@Cursor please fix the failing tests",
+                    "routing_text": "please fix the failing tests",
+                    "routing_hint": "cursor",
+                    "collaboration_mode": "cursor_primary",
+                    "mention_targets": ["cursor"],
+                    "chat_id": 56,
+                    "message_id": 11,
+                },
+            },
+        )
+        append_event(
+            self.conn,
+            first["task_id"],
+            EventType.JOB_COMPLETED,
+            {
+                "summary": "OpenClaw and Cursor completed the repo fix.",
+                "backend": "openclaw",
+                "delegated_to_cursor": True,
+            },
+        )
+        history = load_recent_telegram_history(self.conn, 56)
+        self.assertEqual(history[0]["content"], "please fix the failing tests")
+        self.assertIn("openclaw and cursor completed", history[1]["content"].lower())
+
     def test_direct_message_format_is_short(self) -> None:
         text = format_direct_message("Hi! I'm doing well and ready to help.")
         self.assertEqual(text, "Andrea:\nHi! I'm doing well and ready to help.")
@@ -300,12 +402,39 @@ class TestAndreaSync(unittest.TestCase):
         self.assertIn("Task: tsk_demo", text)
         self.assertIn("Status: queued", text)
 
+    def test_telegram_ack_message_format_for_openclaw(self) -> None:
+        text = format_ack_message("tsk_demo", worker_label="OpenClaw")
+        self.assertIn("queued it for OpenClaw", text)
+        self.assertIn("bring in Cursor", text)
+
+    def test_telegram_ack_message_mentions_cursor_request(self) -> None:
+        text = format_ack_message(
+            "tsk_demo",
+            worker_label="OpenClaw",
+            routing_hint="cursor",
+            collaboration_mode="cursor_primary",
+        )
+        self.assertIn("addressed Cursor directly", text)
+
     def test_telegram_running_message_format(self) -> None:
         text = format_running_message("tsk_demo", agent_url="https://cursor.com/agents/demo")
         self.assertIn("Andrea:", text)
         self.assertIn("Cursor is actively working", text)
         self.assertIn("Technical details:", text)
         self.assertIn("Agent: https://cursor.com/agents/demo", text)
+
+    def test_telegram_running_message_format_for_openclaw(self) -> None:
+        text = format_running_message("tsk_demo", worker_label="OpenClaw")
+        self.assertIn("OpenClaw is actively working", text)
+
+    def test_telegram_running_message_format_for_collaboration(self) -> None:
+        text = format_running_message(
+            "tsk_demo",
+            worker_label="OpenClaw",
+            delegated_to_cursor=True,
+            collaboration_mode="collaborative",
+        )
+        self.assertIn("OpenClaw and Cursor are actively working", text)
 
     def test_telegram_final_message_separates_andrea_from_cursor(self) -> None:
         text = format_final_message(
@@ -326,6 +455,30 @@ class TestAndreaSync(unittest.TestCase):
         self.assertIn("Technical details:", text)
         self.assertIn("PR: https://github.com/example/repo/pull/1", text)
         self.assertNotIn("### What changed", text)
+
+    def test_telegram_final_message_for_openclaw_only(self) -> None:
+        text = format_final_message(
+            "tsk_demo",
+            status="completed",
+            summary="Created a reminder and scheduled the follow-up.",
+            worker_label="OpenClaw",
+            openclaw_session_id="sess_demo",
+        )
+        self.assertIn("OpenClaw finished processing", text)
+        self.assertIn("OpenClaw said:", text)
+        self.assertIn("OpenClaw session: sess_demo", text)
+
+    def test_telegram_final_message_notes_cursor_primary_request(self) -> None:
+        text = format_final_message(
+            "tsk_demo",
+            status="completed",
+            summary="Cursor reviewed the result and the PR is ready.",
+            worker_label="OpenClaw and Cursor",
+            delegated_to_cursor=True,
+            routing_hint="cursor",
+            collaboration_mode="cursor_primary",
+        )
+        self.assertIn("addressed Cursor directly", text)
 
     def test_telegram_final_message_failed_uses_error_footer(self) -> None:
         text = format_final_message(
@@ -385,7 +538,238 @@ class TestAndreaSync(unittest.TestCase):
         server._handle_task_followups(result["task_id"])
         proj = project_task_dict(server.conn, result["task_id"], "telegram")
         self.assertEqual(proj["status"], TaskStatus.QUEUED.value)
-        self.assertEqual(proj["meta"]["cursor"]["kind"], "cursor")
+        self.assertEqual(proj["meta"]["cursor"]["kind"], "openclaw")
+        self.assertEqual(proj["meta"]["execution"]["lane"], "openclaw_hybrid")
+
+    def test_server_followups_explicit_andrea_mention_stays_direct(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        result = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-andrea-mention",
+                "payload": {
+                    "text": "@Andrea how are you today?",
+                    "routing_text": "how are you today?",
+                    "routing_hint": "andrea",
+                    "collaboration_mode": "andrea_primary",
+                    "mention_targets": ["andrea"],
+                    "chat_id": 1,
+                    "message_id": 29,
+                },
+            },
+        )
+        server._handle_task_followups(result["task_id"])
+        proj = project_task_dict(server.conn, result["task_id"], "telegram")
+        self.assertEqual(proj["status"], TaskStatus.COMPLETED.value)
+        self.assertEqual(proj["meta"]["telegram"]["routing_hint"], "andrea")
+        self.assertEqual(proj["meta"]["assistant"]["route"], "direct")
+
+    def test_server_followups_explicit_andrea_mention_can_delegate_action(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        result = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-andrea-action",
+                "payload": {
+                    "text": "@Andrea remind me to drink water",
+                    "routing_text": "remind me to drink water",
+                    "routing_hint": "andrea",
+                    "collaboration_mode": "andrea_primary",
+                    "mention_targets": ["andrea"],
+                    "chat_id": 1,
+                    "message_id": 291,
+                },
+            },
+        )
+        server._handle_task_followups(result["task_id"])
+        proj = project_task_dict(server.conn, result["task_id"], "telegram")
+        self.assertEqual(proj["status"], TaskStatus.QUEUED.value)
+        self.assertEqual(proj["meta"]["execution"]["lane"], "openclaw_hybrid")
+
+    def test_server_followups_explicit_cursor_mention_marks_cursor_primary(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        result = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-cursor-mention",
+                "payload": {
+                    "text": "@Cursor fix the failing tests",
+                    "routing_text": "fix the failing tests",
+                    "routing_hint": "cursor",
+                    "collaboration_mode": "cursor_primary",
+                    "mention_targets": ["cursor"],
+                    "chat_id": 1,
+                    "message_id": 30,
+                },
+            },
+        )
+        server._handle_task_followups(result["task_id"])
+        proj = project_task_dict(server.conn, result["task_id"], "telegram")
+        self.assertEqual(proj["status"], TaskStatus.QUEUED.value)
+        self.assertEqual(proj["meta"]["execution"]["routing_hint"], "cursor")
+        self.assertEqual(proj["meta"]["execution"]["collaboration_mode"], "cursor_primary")
+
+    def test_server_openclaw_only_job_completes(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        result = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-openclaw",
+                "payload": {
+                    "text": "Remind me to review the StoryLiner repo tomorrow morning.",
+                    "chat_id": 1,
+                    "message_id": 30,
+                },
+            },
+        )
+        server._handle_task_followups(result["task_id"])
+        with mock.patch.object(
+            server,
+            "_create_openclaw_job",
+            return_value={
+                "ok": True,
+                "summary": "Created the reminder and captured the follow-up.",
+                "backend": "openclaw",
+                "execution_lane": "openclaw_hybrid",
+                "delegated_to_cursor": False,
+                "openclaw_run_id": "run-demo",
+                "openclaw_session_id": "sess-demo",
+                "provider": "google",
+                "model": "gemini-2.5-flash",
+            },
+        ):
+            server._run_delegated_job(result["task_id"])
+        proj = project_task_dict(server.conn, result["task_id"], "telegram")
+        self.assertEqual(proj["status"], TaskStatus.COMPLETED.value)
+        self.assertEqual(proj["meta"]["execution"]["backend"], "openclaw")
+        self.assertFalse(proj["meta"]["execution"]["delegated_to_cursor"])
+        self.assertEqual(proj["meta"]["openclaw"]["session_id"], "sess-demo")
+
+    def test_server_openclaw_escalation_carries_cursor_metadata(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        result = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-openclaw-cursor",
+                "payload": {
+                    "text": "Please inspect the repo, fix the failing tests, and open a PR.",
+                    "chat_id": 1,
+                    "message_id": 31,
+                },
+            },
+        )
+        server._handle_task_followups(result["task_id"])
+        with mock.patch.object(
+            server,
+            "_create_openclaw_job",
+            return_value={
+                "ok": True,
+                "summary": "OpenClaw used cursor_handoff and a PR is ready.",
+                "backend": "openclaw",
+                "execution_lane": "openclaw_hybrid",
+                "delegated_to_cursor": True,
+                "openclaw_run_id": "run-demo",
+                "openclaw_session_id": "sess-demo",
+                "provider": "google",
+                "model": "gemini-2.5-flash",
+                "cursor_agent_id": "bc-demo",
+                "agent_url": "https://cursor.com/agents/demo",
+                "pr_url": "https://github.com/example/repo/pull/1",
+            },
+        ):
+            server._run_delegated_job(result["task_id"])
+        proj = project_task_dict(server.conn, result["task_id"], "telegram")
+        self.assertEqual(proj["status"], TaskStatus.COMPLETED.value)
+        self.assertTrue(proj["meta"]["execution"]["delegated_to_cursor"])
+        self.assertEqual(proj["meta"]["cursor"]["agent_url"], "https://cursor.com/agents/demo")
+        self.assertEqual(proj["meta"]["cursor"]["pr_url"], "https://github.com/example/repo/pull/1")
+
+    def test_server_cursor_primary_escalates_if_openclaw_does_not_delegate(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        result = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-cursor-primary-fallback",
+                "payload": {
+                    "text": "@Cursor review this plan",
+                    "routing_text": "review this plan",
+                    "routing_hint": "cursor",
+                    "collaboration_mode": "cursor_primary",
+                    "mention_targets": ["cursor"],
+                    "chat_id": 1,
+                    "message_id": 32,
+                },
+            },
+        )
+        server._handle_task_followups(result["task_id"])
+
+        def fake_cursor_run(task_id: str) -> None:
+            server._append_task_event(
+                task_id,
+                EventType.JOB_COMPLETED,
+                {
+                    "summary": "Cursor reviewed the plan and suggested improvements.",
+                    "backend": "cursor",
+                    "delegated_to_cursor": True,
+                    "cursor_agent_id": "bc-fallback",
+                },
+            )
+
+        with (
+            mock.patch.object(
+                server,
+                "_create_openclaw_job",
+                return_value={
+                    "ok": True,
+                    "summary": "OpenClaw reviewed the plan.",
+                    "backend": "openclaw",
+                    "execution_lane": "openclaw_hybrid",
+                    "delegated_to_cursor": False,
+                },
+            ),
+            mock.patch.object(server, "_run_cursor_job", side_effect=fake_cursor_run),
+        ):
+            server._run_delegated_job(result["task_id"])
+        proj = project_task_dict(server.conn, result["task_id"], "telegram")
+        self.assertEqual(proj["status"], TaskStatus.COMPLETED.value)
+        self.assertTrue(proj["meta"]["execution"]["delegated_to_cursor"])
+        self.assertEqual(proj["cursor_agent_id"], "bc-fallback")
 
     def test_server_followups_memory_question_uses_prior_chat_history(self) -> None:
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
@@ -472,7 +856,7 @@ class TestAndreaSync(unittest.TestCase):
         server._handle_task_followups(task_id)
         proj = project_task_dict(server.conn, task_id, "telegram")
         self.assertEqual(proj["status"], TaskStatus.QUEUED.value)
-        self.assertEqual(proj["meta"]["cursor"]["kind"], "cursor")
+        self.assertEqual(proj["meta"]["cursor"]["kind"], "openclaw")
 
     def test_server_cursor_poll_timeout_stays_running(self) -> None:
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"

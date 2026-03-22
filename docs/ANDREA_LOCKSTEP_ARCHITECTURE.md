@@ -69,16 +69,22 @@ Commands without `idempotency_key` use a deterministic hash of `channel`, `exter
 1. A normal Telegram message lands on `/v1/telegram/webhook`, becomes `SubmitUserMessage`, and is persisted into lockstep first.
 2. `services/andrea_sync/server.py` applies Andrea-first routing:
    - direct Andrea reply for lightweight conversational/personal assistant turns
-   - Cursor delegation for heavier repo, coding, debugging, or long-running work
+   - OpenClaw hybrid delegation for productivity / assistant-skill requests and, by default, heavier repo or coding work
+   - explicit Telegram intent hints can override heuristics:
+     - `@Andrea ...` keeps the turn in Andrea's direct assistant lane unless the user only asked for routing help
+     - `@Cursor ...` makes the turn Cursor-first, but still through Andrea/OpenClaw coordination so the shared timeline stays intact
+     - `@Andrea @Cursor ...` or phrases like `work together` / `double-check` trigger collaborative mode, where OpenClaw is expected to involve Cursor before the final answer
    - direct Andrea replies can also look at recent Telegram chat history before answering
-3. Delegated tasks are queued as `JobQueued`, then the built-in executor launches `skills/cursor_handoff/scripts/cursor_handoff.py` and polls agent status with `scripts/cursor_openclaw.py`.
-4. Delegated lifecycle is appended back into lockstep as `JobStarted`, `JobCompleted`, or `JobFailed`.
+3. Delegated tasks are queued as `JobQueued` with an execution lane:
+   - `openclaw_hybrid` starts `scripts/andrea_sync_openclaw_hybrid.py`, which runs `openclaw agent` against the main OpenClaw runtime and asks it to use hybrid skills first or escalate via `cursor_handoff` when the request becomes repo-heavy
+   - `direct_cursor` remains available as a fallback lane when you explicitly force Cursor-first behavior
+4. Delegated lifecycle is appended back into lockstep as `JobStarted`, `JobProgress`, `JobCompleted`, or `JobFailed`, with metadata showing whether OpenClaw stayed in-lane or escalated to Cursor, plus the user's routing hint / collaboration mode when present.
 5. The same server process posts Telegram replies from projected task state, not ad-hoc chat text.
 6. Telegram replies are formatted as:
    - `Andrea:` user-facing answer first
    - `What happened:` compressed execution summary
-   - `Cursor said:` short excerpt from agent output
-   - `Technical details:` task id, status, PR, agent URL
+   - `OpenClaw said:` for OpenClaw-only completions, or `Cursor said:` when OpenClaw escalated
+   - `Technical details:` task id, status, OpenClaw session when available, PR, agent URL
 7. Direct Andrea replies intentionally skip Cursor lifecycle noise.
 8. When `ANDREA_SYNC_PUBLIC_BASE` is configured, the server also self-heals Telegram webhook registration if another process clears it.
 

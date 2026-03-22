@@ -173,7 +173,11 @@ def _handle_user_message(
                 {"command_type": env.command_type.value, "idempotency_key": idem},
             )
             return {"ok": True, "task_id": tid, "deduped": True}
-        summary = str(env.payload.get("text", "") or env.payload.get("summary", ""))[:120]
+        summary = str(
+            env.payload.get("routing_text")
+            or env.payload.get("text", "")
+            or env.payload.get("summary", "")
+        )[:120]
         if is_new:
             _append(
                 conn,
@@ -193,6 +197,10 @@ def _handle_user_message(
             EventType.USER_MESSAGE,
             {
                 "text": env.payload.get("text", ""),
+                "routing_text": env.payload.get("routing_text", ""),
+                "mention_targets": env.payload.get("mention_targets", []),
+                "routing_hint": env.payload.get("routing_hint", ""),
+                "collaboration_mode": env.payload.get("collaboration_mode", ""),
                 "channel": env.channel.value,
                 "chat_id": env.payload.get("chat_id"),
                 "chat_type": env.payload.get("chat_type"),
@@ -219,7 +227,9 @@ def _handle_user_message(
                 EventType.JOB_QUEUED,
                 {
                     "kind": "cursor",
-                    "prompt_excerpt": str(env.payload.get("text", ""))[:300],
+                    "prompt_excerpt": str(
+                        env.payload.get("routing_text") or env.payload.get("text", "")
+                    )[:300],
                     "source": "telegram_default",
                 },
             )
@@ -244,6 +254,10 @@ def _handle_user_message(
         EventType.USER_MESSAGE,
         {
             "text": env.payload.get("text", ""),
+            "routing_text": env.payload.get("routing_text", ""),
+            "mention_targets": env.payload.get("mention_targets", []),
+            "routing_hint": env.payload.get("routing_hint", ""),
+            "collaboration_mode": env.payload.get("collaboration_mode", ""),
             "channel": env.channel.value,
             "chat_id": env.payload.get("chat_id"),
             "chat_type": env.payload.get("chat_type"),

@@ -17,6 +17,7 @@ LOCALTUNNEL_BOOTSTRAP = REPO_ROOT / "scripts" / "macos" / "andrea_localtunnel.sh
 LOCALTUNNEL_PLIST = (
     REPO_ROOT / "scripts" / "macos" / "com.andrea.andrea-localtunnel.plist.template"
 )
+OPENCLAW_HYBRID = REPO_ROOT / "scripts" / "andrea_sync_openclaw_hybrid.py"
 
 
 class TestAndreaFullCycleScript(unittest.TestCase):
@@ -95,6 +96,9 @@ class TestAndreaLoginBootstrap(unittest.TestCase):
 
     def test_localtunnel_template_exists(self) -> None:
         self.assertTrue(LOCALTUNNEL_PLIST.is_file(), str(LOCALTUNNEL_PLIST))
+
+    def test_openclaw_hybrid_script_exists(self) -> None:
+        self.assertTrue(OPENCLAW_HYBRID.is_file(), str(OPENCLAW_HYBRID))
 
 
 if __name__ == "__main__":

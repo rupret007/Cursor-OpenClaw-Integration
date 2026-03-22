@@ -417,6 +417,8 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
         self.assertEqual(detail["task"]["status"], "queued")
         self.assertEqual(detail["task"]["meta"]["telegram"]["chat_id"], 1)
         self.assertEqual(detail["task"]["meta"]["telegram"]["message_id"], 9)
+        self.assertEqual(detail["task"]["meta"]["execution"]["lane"], "openclaw_hybrid")
+        self.assertEqual(detail["task"]["meta"]["cursor"]["kind"], "openclaw")
 
     def test_telegram_greeting_routes_direct_without_cursor_task(self) -> None:
         body = json.dumps(
@@ -470,28 +472,32 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
         os.environ["OPENAI_API_ENABLED"] = "0"
         os.environ.pop("OPENAI_API_KEY", None)
         try:
-            prior = handle_command(
-                self._srv.conn,
-                {
-                    "command_type": "SubmitUserMessage",
-                    "channel": "telegram",
-                    "external_id": "http-memory-prior",
-                    "payload": {
-                        "text": "Let's finish the reboot startup work.",
-                        "chat_id": 22,
-                        "message_id": 30,
+            prior = self._srv.with_lock(
+                lambda c: handle_command(
+                    c,
+                    {
+                        "command_type": "SubmitUserMessage",
+                        "channel": "telegram",
+                        "external_id": "http-memory-prior",
+                        "payload": {
+                            "text": "Let's finish the reboot startup work.",
+                            "chat_id": 22,
+                            "message_id": 30,
+                        },
                     },
-                },
+                )
             )
-            append_event(
-                self._srv.conn,
-                prior["task_id"],
-                EventType.ASSISTANT_REPLIED,
-                {
-                    "text": "We were working on reboot startup and Telegram memory.",
-                    "route": "direct",
-                    "reason": "history",
-                },
+            self._srv.with_lock(
+                lambda c: append_event(
+                    c,
+                    prior["task_id"],
+                    EventType.ASSISTANT_REPLIED,
+                    {
+                        "text": "We were working on reboot startup and Telegram memory.",
+                        "route": "direct",
+                        "reason": "history",
+                    },
+                )
             )
             body = json.dumps(
                 {
@@ -557,6 +563,63 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
         self.assertIn("Cursor said:", text)
         self.assertIn("Technical details:", text)
         self.assertLess(len(text), 1600)
+
+    def test_telegram_final_message_for_openclaw_only_lane(self) -> None:
+        text = format_final_message(
+            "tsk_demo",
+            status="completed",
+            summary="Created a reminder and captured the note.",
+            worker_label="OpenClaw",
+            openclaw_session_id="sess-demo",
+        )
+        self.assertIn("OpenClaw said:", text)
+        self.assertIn("OpenClaw session: sess-demo", text)
+
+    def test_telegram_cursor_mention_sets_cursor_primary_routing(self) -> None:
+        body = json.dumps(
+            {
+                "update_id": 45,
+                "message": {
+                    "text": "@Cursor please fix the failing tests",
+                    "message_id": 33,
+                    "chat": {"id": 23},
+                    "from": {"id": 3},
+                },
+            }
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            self._url("/v1/telegram/webhook"),
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "X-Telegram-Bot-Api-Secret-Token": "hdrsecret",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            self.assertEqual(resp.status, 200)
+        detail = None
+        for _ in range(40):
+            req_tasks = urllib.request.Request(self._url("/v1/tasks?limit=20"), method="GET")
+            with urllib.request.urlopen(req_tasks, timeout=5) as resp_tasks:
+                tasks = json.loads(resp_tasks.read().decode("utf-8"))["tasks"]
+            telegram_tasks = [t for t in tasks if t["channel"] == "telegram"]
+            for task in telegram_tasks:
+                req_task = urllib.request.Request(self._url(f"/v1/tasks/{task['task_id']}"), method="GET")
+                with urllib.request.urlopen(req_task, timeout=5) as resp_task:
+                    candidate = json.loads(resp_task.read().decode("utf-8"))
+                meta = candidate["task"].get("meta", {})
+                if meta.get("telegram", {}).get("message_id") == 33:
+                    detail = candidate
+                    break
+            if detail and detail["task"]["status"] == "queued":
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertEqual(detail["task"]["meta"]["telegram"]["routing_hint"], "cursor")
+        self.assertEqual(detail["task"]["meta"]["execution"]["collaboration_mode"], "cursor_primary")
+        self.assertEqual(detail["task"]["task_id"], detail["task"]["task_id"])
 
 
 if __name__ == "__main__":

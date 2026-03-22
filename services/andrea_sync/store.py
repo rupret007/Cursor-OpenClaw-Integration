@@ -209,18 +209,32 @@ def load_recent_telegram_history(
         assistant_source = ""
         for _seq, _ts, et_raw, payload in load_events_for_task(conn, task_id):
             if et_raw == EventType.USER_MESSAGE.value and payload.get("text"):
-                user_text = _clip_text(payload.get("text"))
+                user_text = _clip_text(payload.get("routing_text") or payload.get("text"))
             elif et_raw == EventType.ASSISTANT_REPLIED.value and payload.get("text"):
                 assistant_text = _clip_text(payload.get("text"))
                 assistant_source = "direct"
             elif et_raw == EventType.JOB_COMPLETED.value and payload.get("summary"):
-                assistant_text = _clip_text(f"Cursor completed: {payload.get('summary')}")
-                assistant_source = "cursor"
+                backend = str(payload.get("backend") or "").strip()
+                delegated = bool(payload.get("delegated_to_cursor"))
+                if backend == "openclaw" and delegated:
+                    assistant_text = _clip_text(f"OpenClaw and Cursor completed: {payload.get('summary')}")
+                    assistant_source = "openclaw_cursor"
+                elif backend == "openclaw":
+                    assistant_text = _clip_text(f"OpenClaw completed: {payload.get('summary')}")
+                    assistant_source = "openclaw"
+                else:
+                    assistant_text = _clip_text(f"Cursor completed: {payload.get('summary')}")
+                    assistant_source = "cursor"
             elif et_raw == EventType.JOB_FAILED.value:
                 detail = payload.get("message") or payload.get("error")
                 if detail:
-                    assistant_text = _clip_text(f"Cursor failed: {detail}")
-                    assistant_source = "cursor"
+                    backend = str(payload.get("backend") or "").strip()
+                    if backend == "openclaw":
+                        assistant_text = _clip_text(f"OpenClaw failed: {detail}")
+                        assistant_source = "openclaw"
+                    else:
+                        assistant_text = _clip_text(f"Cursor failed: {detail}")
+                        assistant_source = "cursor"
         if user_text:
             history.append({"role": "user", "content": user_text, "task_id": task_id})
         if assistant_text:

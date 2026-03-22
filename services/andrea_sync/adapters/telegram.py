@@ -190,7 +190,10 @@ def send_text_message(
     try:
         with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
-            return json.loads(raw) if raw else {"ok": True}
+            payload = json.loads(raw) if raw else {"ok": True}
+            if isinstance(payload, dict) and payload.get("ok") is False:
+                raise RuntimeError(f"telegram sendMessage rejected: {payload}")
+            return payload
     except urllib.error.HTTPError as err:
         raw = err.read().decode("utf-8", errors="replace")
         try:

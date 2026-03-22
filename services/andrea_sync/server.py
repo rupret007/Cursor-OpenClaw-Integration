@@ -18,7 +18,11 @@ from .adapters import alexa as alexa_adapt
 from .adapters import telegram as tg_adapt
 from .andrea_router import route_message
 from .bus import handle_command
-from .dashboard import build_dashboard_summary, render_dashboard_html
+from .dashboard import (
+    build_dashboard_summary,
+    build_dashboard_webhook_snapshot,
+    render_dashboard_html,
+)
 from .kill_switch import is_kill_switch_engaged, kill_switch_status
 from .policy import digest_age_seconds, evaluate_skill_absence_claim, get_capability_digest
 from .projector import project_task_dict
@@ -1018,11 +1022,22 @@ class SyncServer:
         return f"Cursor finished with status {terminal_status}."
 
     def _run_delegated_job(self, task_id: str) -> None:
-        execution_lane = self._task_execution_lane(task_id)
-        if execution_lane == "openclaw_hybrid":
-            self._run_openclaw_job(task_id)
-            return
-        self._run_cursor_job(task_id)
+        try:
+            execution_lane = self._task_execution_lane(task_id)
+            if execution_lane == "openclaw_hybrid":
+                self._run_openclaw_job(task_id)
+                return
+            self._run_cursor_job(task_id)
+        except Exception as exc:  # noqa: BLE001
+            self._append_task_event(
+                task_id,
+                EventType.JOB_FAILED,
+                {
+                    "error": "delegated_runner_crashed",
+                    "message": str(exc)[:2000],
+                    "execution_lane": self._task_execution_lane(task_id),
+                },
+            )
 
     def _run_openclaw_job(self, task_id: str) -> None:
         prompt = self._extract_cursor_prompt(task_id)
@@ -1413,6 +1428,13 @@ def make_handler(server: SyncServer) -> type:
             auth = self.headers.get("Authorization") or ""
             return auth == f"Bearer {server.internal_token}"
 
+        def _request_is_loopback(self) -> bool:
+            host = str((self.client_address or ("", 0))[0] or "").strip().lower()
+            return host in {"127.0.0.1", "::1", "::ffff:127.0.0.1", "localhost"}
+
+        def _allow_sensitive_get(self) -> bool:
+            return self._request_is_loopback() or self._auth_internal()
+
         _ADMIN_COMMAND_TYPES = frozenset(
             {
                 "PublishCapabilitySnapshot",
@@ -1444,6 +1466,9 @@ def make_handler(server: SyncServer) -> type:
             parsed = urllib.parse.urlparse(self.path)
             path = parsed.path
             if path == "/dashboard":
+                if not self._allow_sensitive_get():
+                    self._send(401, b'{"error":"unauthorized"}')
+                    return
                 self._send(
                     200,
                     render_dashboard_html().encode("utf-8"),
@@ -1468,6 +1493,9 @@ def make_handler(server: SyncServer) -> type:
                 self._send(200, server.with_lock(health_body))
                 return
             if path == "/v1/status":
+                if not self._allow_sensitive_get():
+                    self._send(401, b'{"error":"unauthorized"}')
+                    return
                 def status_body(c: sqlite3.Connection) -> bytes:
                     cap = get_capability_digest(c)
                     ks = kill_switch_status(c)
@@ -1485,6 +1513,9 @@ def make_handler(server: SyncServer) -> type:
                 self._send(200, server.with_lock(status_body))
                 return
             if path == "/v1/capabilities":
+                if not self._allow_sensitive_get():
+                    self._send(401, b'{"error":"unauthorized"}')
+                    return
 
                 def cap_body(c: sqlite3.Connection) -> bytes:
                     info = get_capability_digest(c)
@@ -1511,20 +1542,32 @@ def make_handler(server: SyncServer) -> type:
                 self._send(200, server.with_lock(pol))
                 return
             if path == "/v1/dashboard/summary":
+                if not self._allow_sensitive_get():
+                    self._send(401, b'{"error":"unauthorized"}')
+                    return
                 raw_lim = (urllib.parse.parse_qs(parsed.query).get("limit") or ["30"])[0]
                 try:
                     limit = int(raw_lim)
                 except ValueError:
                     limit = 30
                 limit = max(1, min(limit, 200))
+                webhook_snapshot = build_dashboard_webhook_snapshot(server)
 
                 def summary(c: sqlite3.Connection) -> bytes:
-                    payload = build_dashboard_summary(c, server, limit=limit)
+                    payload = build_dashboard_summary(
+                        c,
+                        server,
+                        limit=limit,
+                        webhook_snapshot=webhook_snapshot,
+                    )
                     return json.dumps(payload, indent=2).encode("utf-8")
 
                 self._send(200, server.with_lock(summary))
                 return
             if path.startswith("/v1/tasks/") and len(path) > len("/v1/tasks/"):
+                if not self._allow_sensitive_get():
+                    self._send(401, b'{"error":"unauthorized"}')
+                    return
                 tid = path.split("/v1/tasks/", 1)[1].split("?", 1)[0].strip()
                 if not tid:
                     self._send(400, b'{"error":"missing task id"}')
@@ -1560,6 +1603,9 @@ def make_handler(server: SyncServer) -> type:
                     self._send(200, payload)
                 return
             if path == "/v1/tasks":
+                if not self._allow_sensitive_get():
+                    self._send(401, b'{"error":"unauthorized"}')
+                    return
                 raw_lim = (urllib.parse.parse_qs(parsed.query).get("limit") or ["50"])[0]
                 try:
                     limit = int(raw_lim)
@@ -1688,21 +1734,20 @@ def make_handler(server: SyncServer) -> type:
                     self._send(403, b'{"error":"forbidden"}')
                     return
                 update = self._read_json()
+                cmd = tg_adapt.update_to_command(update)
+                if not cmd:
+                    self._send(200, b'{"ok":true}')
+                    return
 
-                def work() -> None:
-                    cmd = tg_adapt.update_to_command(update)
-                    if not cmd:
-                        return
+                def run(c: sqlite3.Connection) -> Dict[str, Any]:
+                    return handle_command(c, cmd)
 
-                    def run(c: sqlite3.Connection) -> Dict[str, Any]:
-                        return handle_command(c, cmd)
-
-                    result = server.with_lock(run)
-                    if result.get("ok") and result.get("task_id"):
-                        server._handle_task_followups(str(result["task_id"]))
-
-                server.queue.put(work)
-                self._send(200, b'{"ok":true}')
+                result = server.with_lock(run)
+                if result.get("ok") and result.get("task_id"):
+                    server._queue_task_followups(str(result["task_id"]))
+                    self._send(200, b'{"ok":true}')
+                    return
+                self._send(500, b'{"ok":false,"error":"telegram_update_not_persisted"}')
                 return
             if path == "/v1/alexa":
                 if server.with_lock(is_kill_switch_engaged):

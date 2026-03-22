@@ -288,11 +288,15 @@ def format_final_message(
     summary_excerpt = _cursor_excerpt(summary)
     summary_sentence = _first_sentence(summary_excerpt)
     completed = status == "completed"
-    result_label = "Cursor"
-    if worker_label == "OpenClaw":
-        result_label = "OpenClaw"
-    elif worker_label == "OpenClaw and Cursor" or delegated_to_cursor:
-        result_label = "Cursor"
+    result_label = speaker_label = _speaker_section_label(
+        worker_label=worker_label,
+        delegated_to_cursor=delegated_to_cursor,
+        provider=provider,
+        model=model,
+        preferred_model_label=preferred_model_label,
+    )
+    if worker_label == "OpenClaw and Cursor" or delegated_to_cursor:
+        result_label = speaker_label
     if completed:
         if pr_url:
             if worker_label == "OpenClaw and Cursor" or delegated_to_cursor:
@@ -330,13 +334,6 @@ def format_final_message(
     elif not completed and last_error:
         lines.append(f"- Failure: {_clip(last_error, 220)}")
     routing_note = _routing_note(routing_hint, collaboration_mode)
-    speaker_label = _speaker_section_label(
-        worker_label=worker_label,
-        delegated_to_cursor=delegated_to_cursor,
-        provider=provider,
-        model=model,
-        preferred_model_label=preferred_model_label,
-    )
     if routing_note:
         lines.append(routing_note)
 
@@ -344,7 +341,7 @@ def format_final_message(
         lines.extend(
             [
                 "",
-                f"{speaker_label if result_label != 'Cursor' else result_label} said:",
+                f"{result_label} said:",
                 summary_excerpt,
             ]
         )

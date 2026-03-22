@@ -85,7 +85,7 @@ class TestAndreaCapabilities(unittest.TestCase):
 
         snippet = "│ ✓ ready   │ 📦 acp-router           │ desc     │ bundled  │\n"
         with mock.patch.object(ac, "_which", side_effect=lambda name: name != "acpx"):
-            rows = ac._acp_support_rows(snippet)
+            rows = ac._acp_support_rows(snippet, skills_probe_ok=True)
         by_id = {r.id: r for r in rows}
         self.assertEqual(by_id["skill:acp-router"].status, "ready")
         self.assertEqual(by_id["acp_tool:acpx"].status, "blocked")
@@ -97,10 +97,29 @@ class TestAndreaCapabilities(unittest.TestCase):
 
         snippet = "│ ✓ ready   │ 📦 acp-router           │ desc     │ bundled  │\n"
         with mock.patch.object(ac, "_which", return_value=True):
-            rows = ac._acp_support_rows(snippet)
+            rows = ac._acp_support_rows(snippet, skills_probe_ok=True)
         by_id = {r.id: r for r in rows}
         self.assertEqual(by_id["skill:acp-router"].status, "ready")
         self.assertEqual(by_id["acp_tool:acpx"].status, "ready")
+
+    def test_openclaw_skills_probe_failure_blocks_matrix(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "scripts"))
+        import andrea_capabilities as ac  # noqa: E402
+
+        with mock.patch.object(ac, "_which", return_value=True), mock.patch.object(
+            ac,
+            "_run_capture",
+            side_effect=[
+                (1, "", "skills broken"),
+                (0, json.dumps({"ok": True, "api_key_present": False}), ""),
+                (0, "logged in", ""),
+            ],
+        ):
+            rows = ac.build_matrix()
+        by_id = {r.id: r for r in rows}
+        self.assertEqual(by_id["openclaw:skills_list"].status, "blocked")
+        self.assertTrue(by_id["openclaw:skills_list"].critical)
+        self.assertEqual(by_id["skill:acp-router"].status, "ready_with_limits")
 
     def test_gh_auth_state_reads_dotenv_without_process_env(self) -> None:
         sys.path.insert(0, str(REPO_ROOT / "scripts"))

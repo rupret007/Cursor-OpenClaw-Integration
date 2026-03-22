@@ -79,6 +79,8 @@ class TestAndreaLoginBootstrap(unittest.TestCase):
         self.assertIn("set-webhook", text)
         self.assertIn("webhook-info --require-match", text)
         self.assertIn("already healthy", text)
+        self.assertIn("return 1", text)
+        self.assertIn("incomplete", text)
 
     def test_login_bootstrap_template_exists(self) -> None:
         self.assertTrue(LOGIN_BOOTSTRAP_PLIST.is_file(), str(LOGIN_BOOTSTRAP_PLIST))
@@ -90,6 +92,7 @@ class TestAndreaLoginBootstrap(unittest.TestCase):
         self.assertIn("com.andrea.andrea-post-login-bootstrap.plist", text)
         self.assertIn("--load", text)
         self.assertIn("--with-localtunnel", text)
+        self.assertIn("gui/$(id -u)", text)
 
     def test_localtunnel_script_exists(self) -> None:
         self.assertTrue(LOCALTUNNEL_BOOTSTRAP.is_file(), str(LOCALTUNNEL_BOOTSTRAP))

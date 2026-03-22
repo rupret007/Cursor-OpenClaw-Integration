@@ -216,7 +216,7 @@ def _openclaw_skills() -> Tuple[str, str, str]:
         return "blocked", "", "openclaw not on PATH"
     code, out, err = _run_capture(["openclaw", "skills", "list"], timeout=45.0)
     if code != 0:
-        return "ready_with_limits", "", f"openclaw skills list failed (exit {code}): {(err or out)[:200]}"
+        return "blocked", out + err, f"openclaw skills list failed (exit {code}): {(err or out)[:200]}"
     return "ready", out + err, ""
 
 
@@ -301,8 +301,27 @@ def _skill_rows(skills_blob: str) -> List[Row]:
     return rows
 
 
-def _acp_support_rows(skills_blob: str) -> List[Row]:
+def _acp_support_rows(skills_blob: str, *, skills_probe_ok: bool) -> List[Row]:
     states = _parse_openclaw_skill_states(skills_blob)
+    if not skills_probe_ok:
+        return [
+            Row(
+                id="skill:acp-router",
+                category="openclaw_skill",
+                detail="acp-router",
+                status="ready_with_limits",
+                notes="openclaw skills list unavailable; ACP router state unknown",
+                critical=False,
+            ),
+            Row(
+                id="acp_tool:acpx",
+                category="acp",
+                detail="acpx",
+                status="ready_with_limits",
+                notes="ACP client installed state is less important until openclaw skills list is healthy",
+                critical=False,
+            ),
+        ]
     skill = _skill_row_for("acp-router", "optional", skills_blob, states)
     skill.notes = (
         skill.notes
@@ -433,15 +452,15 @@ def build_matrix() -> List[Row]:
             detail="openclaw skills list",
             status=oc_status,
             notes=oc_err or "skills enumeration",
-            critical=False,
+            critical=oc_status == "blocked",
         )
     )
     # Avoid false "blocked" core skills when `skills list` failed but returned empty/partial output.
-    if oc_status != "blocked" and (
+    if oc_status == "ready" and (
         "✓ ready" in oc_out or "✗ missing" in oc_out
     ):
         rows.extend(_skill_rows(oc_out))
-    rows.extend(_acp_support_rows(oc_out))
+    rows.extend(_acp_support_rows(oc_out, skills_probe_ok=oc_status == "ready"))
     for name in HYBRID_OPTIONAL_BINARIES:
         present = _which(name)
         rows.append(

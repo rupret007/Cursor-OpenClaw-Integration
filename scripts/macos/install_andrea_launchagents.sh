@@ -112,5 +112,5 @@ if [[ "$LOAD_AFTER_INSTALL" -eq 1 ]]; then
   if [[ "$WITH_OC" -eq 1 ]]; then
     load_agent "${AGENT_DIR}/com.andrea.openclaw-gateway-refresh.plist"
   fi
-  echo "LaunchAgents loaded into gui/\$(id -u)."
+  echo "LaunchAgents loaded into gui/$(id -u)."
 fi

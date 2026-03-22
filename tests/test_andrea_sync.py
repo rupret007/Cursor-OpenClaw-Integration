@@ -251,6 +251,15 @@ class TestAndreaSync(unittest.TestCase):
             )
         )
 
+    def test_send_text_message_rejects_telegram_ok_false_body(self) -> None:
+        response = mock.MagicMock()
+        response.read.return_value = b'{"ok": false, "description": "chat not found"}'
+        response.__enter__.return_value = response
+        with mock.patch("urllib.request.urlopen", return_value=response):
+            with self.assertRaises(RuntimeError) as ctx:
+                tg_adapt.send_text_message(bot_token="token", chat_id=1, text="hello")
+        self.assertIn("telegram sendMessage rejected", str(ctx.exception))
+
     def test_telegram_update_to_command_with_cursor_mention(self) -> None:
         cmd = tg_adapt.update_to_command(
             {
@@ -1058,6 +1067,7 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(proj["status"], TaskStatus.COMPLETED.value)
         self.assertIn("remember the recent conversation", proj["meta"]["assistant"]["last_reply"].lower())
         self.assertIn("reboot startup", proj["meta"]["assistant"]["last_reply"].lower())
+        self.assertEqual(proj["summary"], proj["meta"]["assistant"]["last_reply"][:500])
 
     def test_server_routing_retry_after_append_failure(self) -> None:
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"

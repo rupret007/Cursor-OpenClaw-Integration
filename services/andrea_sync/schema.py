@@ -274,6 +274,7 @@ def fold_projection(
         reply_text = str(payload.get("text") or "").strip()
         if reply_text:
             assistant_meta["last_reply"] = reply_text[:2000]
+            proj.summary = reply_text[:500]
     if event_type == EventType.JOB_QUEUED:
         execution_meta = proj.meta.setdefault("execution", {})
         if payload.get("execution_lane"):

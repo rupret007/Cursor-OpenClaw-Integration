@@ -77,7 +77,7 @@ publish_capabilities() {
   fi
   if ! python3 "${BASE_DIR}/scripts/andrea_sync_publish_capabilities.py"; then
     warn "Capability publish failed"
-    return 0
+    return 1
   fi
   say "Published capability snapshot"
 }
@@ -101,11 +101,11 @@ ensure_telegram_webhook() {
       say "Telegram webhook remained healthy despite bootstrap set-webhook failure"
       return 0
     fi
-    return 0
+    return 1
   fi
   if ! python3 "${BASE_DIR}/scripts/andrea_lockstep_telegram_e2e.py" webhook-info --require-match --attempts 3 --retry-delay-sec 2; then
     warn "Telegram webhook verification failed after bootstrap"
-    return 0
+    return 1
   fi
   say "Ensured Telegram webhook registration"
 }
@@ -121,11 +121,12 @@ main() {
   sync_cursor_handoff_skill
   restart_openclaw_gateway
 
-  if wait_for_sync_health; then
-    publish_capabilities
-    ensure_telegram_webhook
+  if ! wait_for_sync_health; then
+    warn "Post-login bootstrap incomplete: Andrea sync never became healthy"
+    return 1
   fi
-
+  publish_capabilities
+  ensure_telegram_webhook
   say "Post-login bootstrap complete"
 }
 

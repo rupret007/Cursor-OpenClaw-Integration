@@ -9,7 +9,7 @@ from .adapters import telegram as tg_adapt
 from .kill_switch import kill_switch_status
 from .policy import digest_age_seconds, get_capability_digest
 from .projector import project_task_dict
-from .store import list_tasks
+from .store import SYSTEM_TASK_ID, list_tasks
 
 
 def _redact_webhook_url(url: str) -> str:
@@ -33,7 +33,7 @@ def _redact_webhook_url(url: str) -> str:
     )
 
 
-def _webhook_snapshot(server: Any) -> Dict[str, Any]:
+def build_dashboard_webhook_snapshot(server: Any) -> Dict[str, Any]:
     expected_url = server._expected_webhook_url() if server.telegram_public_base else ""
     base = {
         "public_base": server.telegram_public_base,
@@ -119,7 +119,13 @@ def _task_list_item(row: Dict[str, Any], proj: Dict[str, Any]) -> Dict[str, Any]
     }
 
 
-def build_dashboard_summary(conn: Any, server: Any, *, limit: int = 30) -> Dict[str, Any]:
+def build_dashboard_summary(
+    conn: Any,
+    server: Any,
+    *,
+    limit: int = 30,
+    webhook_snapshot: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
     rows = list_tasks(conn, limit=limit)
     items: List[Dict[str, Any]] = []
     by_status: Dict[str, int] = {}
@@ -127,7 +133,7 @@ def build_dashboard_summary(conn: Any, server: Any, *, limit: int = 30) -> Dict[
     for row in rows:
         task_id = str(row.get("task_id") or "")
         channel = str(row.get("channel") or "")
-        if not task_id or not channel:
+        if not task_id or not channel or task_id == SYSTEM_TASK_ID:
             continue
         proj = project_task_dict(conn, task_id, channel)
         item = _task_list_item(row, proj)
@@ -140,6 +146,7 @@ def build_dashboard_summary(conn: Any, server: Any, *, limit: int = 30) -> Dict[
     capability_digest = get_capability_digest(conn)
     digest = capability_digest.get("digest") if isinstance(capability_digest.get("digest"), dict) else {}
     cap_rows = digest.get("rows") if isinstance(digest.get("rows"), list) else []
+    digest_valid = capability_digest.get("present") is True and bool(cap_rows)
     blocked_critical = [
         row
         for row in cap_rows
@@ -148,6 +155,30 @@ def build_dashboard_summary(conn: Any, server: Any, *, limit: int = 30) -> Dict[
     attention = [
         row for row in cap_rows if isinstance(row, dict) and row.get("status") != "ready"
     ]
+    if capability_digest.get("present") is False:
+        attention.insert(
+            0,
+            {
+                "id": "capabilities:digest_missing",
+                "category": "capability_digest",
+                "detail": "published capability snapshot",
+                "status": "blocked",
+                "notes": "No published capability digest is available yet.",
+                "critical": True,
+            },
+        )
+    elif not digest_valid:
+        attention.insert(
+            0,
+            {
+                "id": "capabilities:digest_invalid",
+                "category": "capability_digest",
+                "detail": "published capability snapshot",
+                "status": "blocked",
+                "notes": "Capability digest is present but missing the expected rows list.",
+                "critical": True,
+            },
+        )
     acpx_row = next(
         (row for row in cap_rows if isinstance(row, dict) and row.get("id") == "acp_tool:acpx"),
         None,
@@ -165,12 +196,14 @@ def build_dashboard_summary(conn: Any, server: Any, *, limit: int = 30) -> Dict[
             "telegram_delegate_lane": server.telegram_delegate_lane,
             "openclaw_agent_id": server.openclaw_agent_id,
         },
-        "webhook": _webhook_snapshot(server),
+        "webhook": webhook_snapshot if isinstance(webhook_snapshot, dict) else {},
         "capabilities": {
             "summary": digest.get("summary") if isinstance(digest.get("summary"), dict) else {},
             "blocked_critical": blocked_critical[:10],
             "attention": attention[:12],
             "acpx": acpx_row,
+            "digest_present": capability_digest.get("present") is True,
+            "digest_valid": digest_valid,
         },
         "tasks": {
             "limit": limit,
@@ -303,7 +336,7 @@ def render_dashboard_html() -> str:
         { label: "Webhook", value: data.webhook.status, status: data.webhook.status, note: data.webhook.reason || "Telegram webhook state" },
         { label: "Recent Tasks", value: String(data.tasks.count), status: "ready", note: `Limit ${data.tasks.limit}` },
         { label: "Blocked Caps", value: String((data.capabilities.summary || {}).blocked || 0), status: ((data.capabilities.summary || {}).blocked || 0) > 0 ? "blocked" : "ready", note: "Published capability digest" },
-        { label: "ACPX", value: data.capabilities.acpx ? data.capabilities.acpx.status : "unknown", status: data.capabilities.acpx ? data.capabilities.acpx.status : "ready_with_limits", note: data.capabilities.acpx ? data.capabilities.acpx.notes : "No published acpx row yet" },
+        { label: "ACPX", value: data.capabilities.acpx ? data.capabilities.acpx.status : "digest-missing", status: data.capabilities.acpx ? data.capabilities.acpx.status : "blocked", note: data.capabilities.acpx ? data.capabilities.acpx.notes : "No published acpx row is available yet" },
         { label: "Digest Age", value: `${Math.round(Number(data.service.capability_digest_age_seconds || 0))}s`, status: Number(data.service.capability_digest_age_seconds || 0) > 1800 ? "warn" : "ready", note: "Capability snapshot freshness" }
       ];
       document.getElementById("cards").innerHTML = cards.map((card) => `
@@ -447,6 +480,9 @@ def render_dashboard_html() -> str:
       renderTasks(latestSummary);
       document.getElementById("lastUpdated").textContent = `Last updated ${new Date().toLocaleTimeString()} (auto-refresh every 5s)`;
       const tasks = latestSummary.tasks.items || [];
+      if (!tasks.length) {
+        selectedTaskId = "";
+      }
       if (!selectedTaskId && tasks.length) {
         selectedTaskId = tasks[0].task_id;
       }

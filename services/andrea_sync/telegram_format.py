@@ -261,3 +261,62 @@ def format_final_message(
         ]
     )
     return "\n".join(lines)
+
+
+def format_alexa_session_summary(
+    task_id: str,
+    *,
+    status: str,
+    request_text: str,
+    summary: str = "",
+    assistant_route: str = "",
+    worker_label: str = "OpenClaw",
+    delegated_to_cursor: bool = False,
+    agent_url: str = "",
+    pr_url: str = "",
+    last_error: str = "",
+) -> str:
+    request_line = _clip(_normalize_whitespace(request_text), 220) or "Alexa request"
+    summary_excerpt = _cursor_excerpt(summary, limit=500)
+    summary_sentence = _first_sentence(summary_excerpt, limit=220)
+    completed = status == "completed"
+    handled_by = "Andrea directly"
+    route = str(assistant_route or "").strip().lower()
+    if route == "direct":
+        handled_by = "Andrea directly"
+    elif worker_label == "OpenClaw and Cursor" or delegated_to_cursor:
+        handled_by = "OpenClaw with Cursor support"
+    elif worker_label == "OpenClaw":
+        handled_by = "OpenClaw"
+    elif worker_label == "Cursor":
+        handled_by = "Cursor"
+    lines = [
+        "Andrea:",
+        "Alexa session summary.",
+        "",
+        "What you asked:",
+        f"- {request_line}",
+        "",
+        "What happened:",
+        f"- Handled by: {handled_by}",
+        f"- Status: {status}",
+    ]
+    if completed and summary_sentence:
+        lines.append(f"- Outcome: {summary_sentence}")
+    elif not completed and last_error:
+        lines.append(f"- Failure: {_clip(last_error, 220)}")
+    if summary_excerpt:
+        lines.extend(["", "Summary:", summary_excerpt])
+    lines.extend(
+        [
+            "",
+            *_footer_lines(
+                task_id,
+                status,
+                agent_url=agent_url,
+                pr_url=pr_url,
+                last_error=last_error,
+            ),
+        ]
+    )
+    return "\n".join(lines)

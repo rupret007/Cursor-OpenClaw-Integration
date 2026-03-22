@@ -362,10 +362,11 @@ def _handle_cursor_report(conn: sqlite3.Connection, env: CommandEnvelope, idem: 
 
 def _handle_alexa(conn: sqlite3.Connection, env: CommandEnvelope, idem: str) -> Dict[str, Any]:
     text = str(env.payload.get("utterance") or env.payload.get("text") or "").strip()
+    routing_text = str(env.payload.get("routing_text") or text).strip()
     fake = CommandEnvelope(
         command_type=CommandType.CREATE_TASK,
         channel=Channel.ALEXA,
-        payload={"summary": text[:200] or "alexa"},
+        payload={"summary": routing_text[:200] or text[:200] or "alexa"},
         external_id=env.external_id,
         idempotency_key=env.idempotency_key,
     )
@@ -392,14 +393,24 @@ def _handle_alexa(conn: sqlite3.Connection, env: CommandEnvelope, idem: str) -> 
             conn,
             tid,
             EventType.TASK_CREATED,
-            {"summary": text[:200] or "alexa", "channel": Channel.ALEXA.value},
+            {"summary": routing_text[:200] or text[:200] or "alexa", "channel": Channel.ALEXA.value},
         )
     if text:
         _append(
             conn,
             tid,
             EventType.USER_MESSAGE,
-            {"text": text, "channel": Channel.ALEXA.value},
+            {
+                "text": text,
+                "routing_text": routing_text,
+                "channel": Channel.ALEXA.value,
+                "session_id": env.payload.get("session_id"),
+                "request_id": env.payload.get("request_id"),
+                "intent_name": env.payload.get("intent_name"),
+                "locale": env.payload.get("locale"),
+                "user_id": env.payload.get("user_id"),
+                "device_id": env.payload.get("device_id"),
+            },
         )
     return {"ok": True, "task_id": tid, "deduped": False}
 

@@ -2,8 +2,39 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from typing import Any, Dict, Optional, Tuple
+
+MAX_SPOKEN_CHARS = 320
+
+
+def _normalize_whitespace(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text or "")).strip()
+
+
+def voice_safe_text(text: str, *, default: str = "Okay.", limit: int = MAX_SPOKEN_CHARS) -> str:
+    clean = _normalize_whitespace(text)
+    if not clean:
+        return default
+    clean = re.sub(r"https?://\S+", "", clean)
+    clean = re.sub(r"\bPR\b", "pull request", clean, flags=re.I)
+    clean = re.sub(r"[`*_#>-]+", " ", clean)
+    clean = _normalize_whitespace(clean)
+    if len(clean) <= limit:
+        return clean
+    cut = clean[: max(0, limit - 3)].rstrip()
+    return cut + "..."
+
+
+def build_ack_response(utterance: str, *, delegated: bool) -> Dict[str, Any]:
+    if delegated:
+        speech = (
+            "I started working on that. I will keep the voice reply short and send one summary to Telegram when it finishes."
+        )
+    else:
+        speech = voice_safe_text(utterance, default="Okay.")
+    return _response(speech, session_should_end=True)
 
 
 def parse_alexa_body(body: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
@@ -15,10 +46,15 @@ def parse_alexa_body(body: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Di
     rtype = req.get("type")
     session = body.get("session") or {}
     session_id = session.get("sessionId") or str(uuid.uuid4())
+    context = body.get("context") or {}
+    system = context.get("System") or {}
+    device = system.get("device") or {}
+    user = system.get("user") or {}
+    locale = req.get("locale") or ""
 
     if rtype == "LaunchRequest":
         return None, _response(
-            "Andrea sync is online. What should I capture or delegate?",
+            "AndreaBot is here. Say, ask AndreaBot to help with something.",
             session_should_end=False,
         )
 
@@ -41,7 +77,7 @@ def parse_alexa_body(body: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Di
                     break
         if not utterance:
             return None, _response(
-                "I did not catch that. Try: ask Andrea to note buy milk.",
+                "I did not catch that. Try: ask AndreaBot to note buy milk.",
                 session_should_end=False,
             )
         req_id = req.get("requestId") or session_id
@@ -49,10 +85,20 @@ def parse_alexa_body(body: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Di
             "command_type": "AlexaUtterance",
             "channel": "alexa",
             "external_id": str(req_id),
-            "payload": {"utterance": utterance, "session_id": session_id},
+            "payload": {
+                "utterance": utterance,
+                "text": utterance,
+                "routing_text": utterance,
+                "session_id": session_id,
+                "request_id": str(req.get("requestId") or ""),
+                "intent_name": str(name or ""),
+                "locale": str(locale or ""),
+                "user_id": str(user.get("userId") or ""),
+                "device_id": str(device.get("deviceId") or ""),
+            },
         }
         rep = _response(
-            f"Captured. Task queued. You said: {utterance[:120]}",
+            "Okay. Let me work on that.",
             session_should_end=True,
         )
         return cmd, rep
@@ -64,7 +110,7 @@ def _response(speech: str, *, session_should_end: bool) -> Dict[str, Any]:
     return {
         "version": "1.0",
         "response": {
-            "outputSpeech": {"type": "PlainText", "text": speech},
+            "outputSpeech": {"type": "PlainText", "text": voice_safe_text(speech)},
             "shouldEndSession": session_should_end,
         },
     }

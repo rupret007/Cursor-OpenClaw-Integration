@@ -1,6 +1,6 @@
 # Cursor-OpenClaw-Integration
 
-Hardened **Cursor Cloud Agents** integration toolkit for **OpenClaw** and shell workflows.
+Hardened **Cursor Cloud Agents** integration toolkit for **OpenClaw**, shell workflows, and the **Andrea** lockstep assistant stack across Telegram and Alexa.
 
 **Deployment:** use the **`main`** branch as the default production-style baseline. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
@@ -28,6 +28,8 @@ Hardened **Cursor Cloud Agents** integration toolkit for **OpenClaw** and shell 
 - **Resilience:** retries with backoff on `429`, `5xx`, and transient **network/SSL** failures.
 - **Unicode:** request JSON uses UTF-8 (`ensure_ascii=False`) so prompts stay readable end-to-end.
 - **OpenClaw skill** (`skills/cursor_handoff/`): API-first handoff with CLI fallback, diagnostics, dry-run, tests.
+- **Andrea lockstep bus** (`services/andrea_sync/`): shared task/event timeline for Telegram, Alexa, OpenClaw, and Cursor with Andrea-first routing.
+- **Voice + chat coordination**: direct Andrea replies stay concise, delegated work runs through OpenClaw/Cursor, and Alexa sessions can mirror a single compact summary back to Telegram.
 
 ## Repository layout
 
@@ -37,10 +39,13 @@ Hardened **Cursor Cloud Agents** integration toolkit for **OpenClaw** and shell 
 ├── .env.example
 ├── README.md
 ├── docs/
-│   ├── DEPLOYMENT.md          # main branch, env, gateway, verify
-│   ├── OPENCLAW_SKILL.md      # install skill, typical flows
-│   ├── CLI_REFERENCE.md       # flags and subcommands
-│   └── ANDREA_*.md            # Andrea max-autonomy: matrix, policy, runbooks, playbook
+│   ├── DEPLOYMENT.md                # main branch, env, gateway, verify
+│   ├── OPENCLAW_SKILL.md            # install skill, typical flows
+│   ├── CLI_REFERENCE.md             # flags and subcommands
+│   ├── ANDREA_*.md                  # Andrea max-autonomy: matrix, policy, runbooks, playbook
+│   └── ALEXA_CLOUD_EDGE_TEMPLATE.md # Alexa public-edge forwarding contract
+├── services/
+│   └── andrea_sync/           # lockstep bus, adapters, routing, HTTP server, formatting
 ├── openclaw-cursor-integration-proposal.md
 ├── openclaw-cursor-integration-roadmap.md
 ├── scripts/
@@ -62,7 +67,8 @@ Hardened **Cursor Cloud Agents** integration toolkit for **OpenClaw** and shell 
 │   ├── andrea_reliability_probes.sh # deterministic probes + capability snapshot
 │   ├── dotenv_set_key.py     # merge one .env key without full wizard overwrite
 │   ├── openclaw_apply_openai_key.sh  # openclaw onboard --openai-api-key from .env
-│   └── test_integration.sh
+│   ├── test_integration.sh
+│   └── macos/                # LaunchAgents, post-login bootstrap, localtunnel helper
 ├── skills/
 │   └── cursor_handoff/        # vendored skill (sync to ~/.openclaw/workspace/skills/)
 │       ├── SKILL.md
@@ -72,6 +78,9 @@ Hardened **Cursor Cloud Agents** integration toolkit for **OpenClaw** and shell 
 └── tests/
     ├── test_cursor_openclaw.py
     ├── test_cursor_api_common.py
+    ├── test_andrea_sync.py
+    ├── test_andrea_sync_http.py
+    ├── test_andrea_full_cycle.py
     └── test_env_loader.py
 ```
 
@@ -227,7 +236,8 @@ Full steps and flow: [docs/OPENCLAW_SKILL.md](docs/OPENCLAW_SKILL.md).
 | [docs/ANDREA_LOCKSTEP_ARCHITECTURE.md](docs/ANDREA_LOCKSTEP_ARCHITECTURE.md) | Telegram / Alexa / Cursor shared lockstep bus + SQLite store |
 | [docs/ANDREA_TELEGRAM_LOCKSTEP_E2E.md](docs/ANDREA_TELEGRAM_LOCKSTEP_E2E.md) | Telegram webhook + `cloudflared` + `scripts/andrea_lockstep_telegram_e2e.py` |
 | [docs/ANDREA_LOCKSTEP_REVIEW_FINDINGS.md](docs/ANDREA_LOCKSTEP_REVIEW_FINDINGS.md) | Lockstep awareness / kill-switch / webhook review notes |
-| [docs/ANDREA_ALEXA_INTEGRATION.md](docs/ANDREA_ALEXA_INTEGRATION.md) | Alexa Custom Skill HTTPS endpoint notes |
+| [docs/ANDREA_ALEXA_INTEGRATION.md](docs/ANDREA_ALEXA_INTEGRATION.md) | Alexa Custom Skill voice lane, Telegram session summaries, and rollout notes |
+| [docs/ALEXA_CLOUD_EDGE_TEMPLATE.md](docs/ALEXA_CLOUD_EDGE_TEMPLATE.md) | Recommended public-edge forwarding/auth contract for Alexa |
 
 **Startup self-check:**
 
@@ -290,6 +300,9 @@ bash scripts/andrea_reliability_probes.sh
 | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | **`main` as deployment branch**, requirements, verify, gateway |
 | [docs/OPENCLAW_SKILL.md](docs/OPENCLAW_SKILL.md) | Skill install, typical OpenClaw → Cursor flow |
 | [docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md) | Flags and subcommands for both CLIs |
+| [docs/ANDREA_OPERATIONS_PLAYBOOK.md](docs/ANDREA_OPERATIONS_PLAYBOOK.md) | Operator playbook for lockstep, reboot-ready startup, Telegram, and Alexa |
+| [docs/ANDREA_ALEXA_INTEGRATION.md](docs/ANDREA_ALEXA_INTEGRATION.md) | Alexa invocation model, short voice replies, Telegram summary behavior |
+| [docs/ALEXA_CLOUD_EDGE_TEMPLATE.md](docs/ALEXA_CLOUD_EDGE_TEMPLATE.md) | Thin public-edge template for Alexa request verification and forwarding |
 | [openclaw-cursor-integration-roadmap.md](openclaw-cursor-integration-roadmap.md) | Phased integration plan |
 | [openclaw-cursor-integration-proposal.md](openclaw-cursor-integration-proposal.md) | Design notes / ideas |
 
@@ -321,6 +334,12 @@ bash scripts/andrea_full_cycle.sh
 ```
 
 See [docs/ANDREA_OPERATIONS_PLAYBOOK.md](docs/ANDREA_OPERATIONS_PLAYBOOK.md) for skip flags (`SKIP_GIT`, `SKIP_KILL_DRILL`, etc.).
+
+**Andrea lockstep tests** (Telegram/Alexa routing, HTTP ingress, summaries):
+
+```bash
+python3 -m unittest discover -s tests -p 'test_andrea_sync*.py'
+```
 
 **Overnight / soak:** safe to loop `RUN_LIVE_API=1 bash scripts/exhaustive_feature_check.sh` or your own agent workflows; avoid high `list-agents` limits or tight polling against production so you don’t hit rate limits.
 

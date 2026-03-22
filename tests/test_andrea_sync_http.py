@@ -317,6 +317,143 @@ class TestAndreaSyncHTTP(unittest.TestCase):
             data = json.loads(r.read().decode("utf-8"))
         self.assertFalse(data.get("may_claim_absent"))
 
+    def test_alexa_direct_request_returns_short_reply_and_completes_task(self) -> None:
+        body = json.dumps(
+            {
+                "session": {"sessionId": "alexa-session-direct"},
+                "request": {
+                    "type": "IntentRequest",
+                    "requestId": "alexa-request-direct",
+                    "intent": {
+                        "name": "AndreaCaptureIntent",
+                        "slots": {"utterance": {"value": "how are you today"}},
+                    },
+                },
+            }
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            self._url("/v1/alexa"),
+            data=body,
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            self.assertEqual(resp.status, 200)
+            data = json.loads(resp.read().decode("utf-8"))
+        self.assertIn("ready to help", data["response"]["outputSpeech"]["text"].lower())
+        detail = None
+        for _ in range(40):
+            req_tasks = urllib.request.Request(self._url("/v1/tasks?limit=20"), method="GET")
+            with urllib.request.urlopen(req_tasks, timeout=5) as resp_tasks:
+                tasks = json.loads(resp_tasks.read().decode("utf-8"))["tasks"]
+            alexa_tasks = [t for t in tasks if t["channel"] == "alexa"]
+            for task in alexa_tasks:
+                req_task = urllib.request.Request(self._url(f"/v1/tasks/{task['task_id']}"), method="GET")
+                with urllib.request.urlopen(req_task, timeout=5) as resp_task:
+                    candidate = json.loads(resp_task.read().decode("utf-8"))
+                meta = candidate["task"].get("meta", {})
+                if meta.get("alexa", {}).get("request_id") == "alexa-request-direct":
+                    detail = candidate
+                    break
+            if detail and detail["task"]["status"] == "completed":
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertEqual(detail["task"]["status"], "completed")
+        self.assertEqual(detail["task"]["meta"]["assistant"]["route"], "direct")
+
+    def test_alexa_delegate_request_returns_ack_and_queues_task(self) -> None:
+        body = json.dumps(
+            {
+                "session": {"sessionId": "alexa-session-delegate"},
+                "request": {
+                    "type": "IntentRequest",
+                    "requestId": "alexa-request-delegate",
+                    "intent": {
+                        "name": "AndreaCaptureIntent",
+                        "slots": {
+                            "utterance": {
+                                "value": "please inspect the repo and fix the failing tests"
+                            }
+                        },
+                    },
+                },
+            }
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            self._url("/v1/alexa"),
+            data=body,
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            self.assertEqual(resp.status, 200)
+            data = json.loads(resp.read().decode("utf-8"))
+        self.assertIn("send one summary to telegram", data["response"]["outputSpeech"]["text"].lower())
+        detail = None
+        for _ in range(40):
+            req_tasks = urllib.request.Request(self._url("/v1/tasks?limit=20"), method="GET")
+            with urllib.request.urlopen(req_tasks, timeout=5) as resp_tasks:
+                tasks = json.loads(resp_tasks.read().decode("utf-8"))["tasks"]
+            alexa_tasks = [t for t in tasks if t["channel"] == "alexa"]
+            for task in alexa_tasks:
+                req_task = urllib.request.Request(self._url(f"/v1/tasks/{task['task_id']}"), method="GET")
+                with urllib.request.urlopen(req_task, timeout=5) as resp_task:
+                    candidate = json.loads(resp_task.read().decode("utf-8"))
+                meta = candidate["task"].get("meta", {})
+                if meta.get("alexa", {}).get("request_id") == "alexa-request-delegate":
+                    detail = candidate
+                    break
+            if detail and detail["task"]["status"] == "queued":
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertEqual(detail["task"]["status"], "queued")
+        self.assertEqual(detail["task"]["meta"]["execution"]["lane"], "openclaw_hybrid")
+
+    def test_alexa_requires_edge_token_when_configured(self) -> None:
+        prev = self._srv.alexa_edge_token
+        self._srv.alexa_edge_token = "edge-secret"
+        try:
+            body = json.dumps(
+                {
+                    "session": {"sessionId": "alexa-session-auth"},
+                    "request": {
+                        "type": "IntentRequest",
+                        "requestId": "alexa-request-auth",
+                        "intent": {
+                            "name": "AndreaCaptureIntent",
+                            "slots": {"utterance": {"value": "how are you today"}},
+                        },
+                    },
+                }
+            ).encode("utf-8")
+            req = urllib.request.Request(
+                self._url("/v1/alexa"),
+                data=body,
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(req, timeout=5)
+            self.assertEqual(ctx.exception.code, 401)
+
+            req_ok = urllib.request.Request(
+                self._url("/v1/alexa"),
+                data=body,
+                method="POST",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": "Bearer edge-secret",
+                },
+            )
+            with urllib.request.urlopen(req_ok, timeout=10) as resp:
+                self.assertEqual(resp.status, 200)
+        finally:
+            self._srv.alexa_edge_token = prev
+
 
 class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
     """Webhook auth via X-Telegram-Bot-Api-Secret-Token only (no query secret)."""

@@ -241,6 +241,22 @@ def fold_projection(
                 telegram_meta["routing_text"] = routing_text[:500]
             if snippet:
                 telegram_meta["last_text"] = snippet
+        if payload.get("channel") == Channel.ALEXA.value:
+            alexa_meta = proj.meta.setdefault("alexa", {})
+            for src_key, dst_key in (
+                ("session_id", "session_id"),
+                ("request_id", "request_id"),
+                ("intent_name", "intent_name"),
+                ("locale", "locale"),
+                ("user_id", "user_id"),
+                ("device_id", "device_id"),
+            ):
+                if payload.get(src_key):
+                    alexa_meta[dst_key] = str(payload.get(src_key))
+            if routing_text:
+                alexa_meta["routing_text"] = routing_text[:500]
+            if snippet:
+                alexa_meta["last_text"] = snippet
     if event_type == EventType.ASSISTANT_REPLIED:
         assistant_meta = proj.meta.setdefault("assistant", {})
         assistant_meta["route"] = str(payload.get("route") or "direct")

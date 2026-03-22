@@ -210,7 +210,7 @@ python3 scripts/andrea_sync_server.py
 
 **E2E helper (cloudflared + setWebhook + verify):** see [ANDREA_TELEGRAM_LOCKSTEP_E2E.md](ANDREA_TELEGRAM_LOCKSTEP_E2E.md) and `python3 scripts/andrea_lockstep_telegram_e2e.py tunnel-and-webhook`.
 
-**Alexa:** Publish a Custom Skill whose HTTPS endpoint is `https://your-public-host/v1/alexa`. See [ANDREA_ALEXA_INTEGRATION.md](ANDREA_ALEXA_INTEGRATION.md) for certification, account linking, and signature verification.
+**Alexa:** Publish a Custom Skill whose public endpoint is your cloud edge, and have that edge forward into `https://your-private-or-local-host/v1/alexa`. Set `ANDREA_SYNC_ALEXA_EDGE_TOKEN` on both sides so the local Andrea endpoint only accepts forwarded edge traffic. See [ANDREA_ALEXA_INTEGRATION.md](ANDREA_ALEXA_INTEGRATION.md) and [ALEXA_CLOUD_EDGE_TEMPLATE.md](ALEXA_CLOUD_EDGE_TEMPLATE.md).
 
 **Delegated lifecycle:** Built-in Telegram execution now appends lifecycle automatically for both OpenClaw-only runs and OpenClaw-to-Cursor escalations. For manual or external runs, you can still emit events directly:
 
@@ -228,3 +228,11 @@ Strict: also set `ANDREA_SYNC_REQUIRED=1` so a dead bus fails the doctor run.
 1. Confirm process: `curl -sS "$ANDREA_SYNC_URL/v1/health"`.
 2. If DB corrupt, move aside `data/andrea_sync.db` and restart (loses history; last resort).
 3. Replay Telegram updates only after fixing idempotency keys—duplicates should `CommandDeduped`, not double-run side effects.
+
+**Alexa checklist**
+
+1. Set `ANDREA_SYNC_ALEXA_EDGE_TOKEN` on the local Andrea server.
+2. Set `ANDREA_SYNC_ALEXA_SUMMARY_TO_TELEGRAM=1` and either `ANDREA_SYNC_ALEXA_SUMMARY_CHAT_ID` or `TELEGRAM_CHAT_ID`.
+3. Confirm your cloud edge validates Alexa requests before forwarding.
+4. Send a sample `/v1/alexa` request locally, then validate from the Alexa iPhone app.
+5. Confirm delegated Alexa tasks create only one Telegram summary message, not progress spam.

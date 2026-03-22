@@ -30,7 +30,7 @@ Strict two-way sync between **user channels** (Telegram, Alexa, CLI), **OpenClaw
 | GET | `/v1/tasks/{id}` | Projected state + event list |
 | POST | `/v1/internal/events` | Append raw event; requires `Authorization: Bearer $ANDREA_SYNC_INTERNAL_TOKEN` |
 | POST | `/v1/telegram/webhook?secret=...` | Telegram `Update` JSON; optional `X-Telegram-Bot-Api-Secret-Token` when `ANDREA_SYNC_TELEGRAM_WEBHOOK_SECRET` is set |
-| POST | `/v1/alexa` | Alexa skill request JSON; returns skill response; enqueues command async |
+| POST | `/v1/alexa` | Alexa skill request JSON; returns a short voice-safe response, persists task state, and optionally requires a forwarded edge token |
 
 **Admin command types** (must use `"channel":"internal"` + Bearer token on `/v1/commands`):
 
@@ -59,6 +59,9 @@ When the kill switch is engaged, Telegram/Alexa ingress and normal commands retu
 | `ANDREA_CURSOR_REPO` | Optional repo path for Telegram-triggered Cursor handoff (default repo root) |
 | `ANDREA_CURSOR_HANDOFF_MODE` | `auto` / `api` / `cli` for the built-in Telegram executor |
 | `ANDREA_SYNC_PUBLIC_BASE` | Public HTTPS origin for Telegram webhook self-heal |
+| `ANDREA_SYNC_ALEXA_EDGE_TOKEN` | Optional shared secret expected from the Alexa cloud edge (`Authorization: Bearer ...` or `X-Andrea-Alexa-Edge-Token`) |
+| `ANDREA_SYNC_ALEXA_SUMMARY_TO_TELEGRAM` | If `1`, send one Telegram summary for each completed/failed Alexa task |
+| `ANDREA_SYNC_ALEXA_SUMMARY_CHAT_ID` | Telegram chat id for Alexa session summaries (falls back to `TELEGRAM_CHAT_ID`) |
 
 ## Idempotency
 
@@ -88,11 +91,22 @@ Commands without `idempotency_key` use a deterministic hash of `channel`, `exter
 7. Direct Andrea replies intentionally skip Cursor lifecycle noise.
 8. When `ANDREA_SYNC_PUBLIC_BASE` is configured, the server also self-heals Telegram webhook registration if another process clears it.
 
+## Alexa voice lane
+
+1. A spoken `Ask AndreaBot ...` turn lands on `/v1/alexa`.
+2. The server stores an `AlexaUtterance` task with Alexa session metadata in `meta.alexa`.
+3. Andrea-first routing runs immediately:
+   - direct conversational turns return a spoken reply synchronously
+   - heavier work becomes `JobQueued` and continues through the existing OpenClaw/Cursor lanes
+4. Alexa does not receive lifecycle spam; instead, the backend can send one Telegram summary when the task reaches `completed` or `failed`.
+5. In the recommended production shape, Alexa signature validation happens at the public cloud edge, which forwards the raw request body plus `ANDREA_SYNC_ALEXA_EDGE_TOKEN` to the private/local Andrea server.
+
 ## Security
 
 - Do not expose `/v1/internal/events` without a strong random `ANDREA_SYNC_INTERNAL_TOKEN`.
 - Prefer Telegram `setWebhook` **`secret_token`** + `X-Telegram-Bot-Api-Secret-Token` verification; query `secret=` remains supported as a fallback.
 - Admin commands on `/v1/commands` require the same Bearer token; do not expose that endpoint publicly without TLS + network ACLs.
+- For Alexa, prefer a small public cloud edge that performs Alexa signature verification and forwards to `/v1/alexa` with `ANDREA_SYNC_ALEXA_EDGE_TOKEN`.
 - Treat the SQLite file like a journal: backup with the rest of your operator secrets.
 
 ## Review notes

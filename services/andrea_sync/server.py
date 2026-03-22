@@ -36,6 +36,7 @@ from .store import (
 )
 from .telegram_format import (
     format_ack_message,
+    format_alexa_session_summary,
     format_direct_message,
     format_final_message,
     format_running_message,
@@ -117,9 +118,15 @@ class SyncServer:
             "ANDREA_SYNC_TELEGRAM_WEBHOOK_AUTOFIX_INTERVAL_SECONDS", 10.0
         )
         self.internal_token = os.environ.get("ANDREA_SYNC_INTERNAL_TOKEN", "")
+        self.alexa_edge_token = os.environ.get("ANDREA_SYNC_ALEXA_EDGE_TOKEN", "").strip()
         self.background_enabled = _env_bool("ANDREA_SYNC_BACKGROUND_ENABLED", True)
         self.telegram_auto_cursor = _env_bool("ANDREA_SYNC_TELEGRAM_AUTO_CURSOR", True)
         self.telegram_notifier_enabled = _env_bool("ANDREA_SYNC_TELEGRAM_NOTIFIER", True)
+        self.alexa_summary_to_telegram = _env_bool("ANDREA_SYNC_ALEXA_SUMMARY_TO_TELEGRAM", True)
+        self.alexa_summary_chat_id = (
+            os.environ.get("ANDREA_SYNC_ALEXA_SUMMARY_CHAT_ID", "").strip()
+            or os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+        )
         self.telegram_delegate_lane = (
             os.environ.get("ANDREA_TELEGRAM_DELEGATE_LANE", "openclaw_hybrid").strip().lower()
             or "openclaw_hybrid"
@@ -271,6 +278,39 @@ class SyncServer:
 
         self.with_lock(mark)
 
+    def _send_telegram_chat_message_once(
+        self,
+        task_id: str,
+        phase: str,
+        *,
+        chat_id: int | str | None,
+        text: str,
+    ) -> None:
+        if (
+            not self.telegram_notifier_enabled
+            or not self.telegram_bot_token
+            or chat_id in (None, "")
+            or not str(text or "").strip()
+        ):
+            return
+        marker = self._meta_key(f"telegram_sent_{phase}", task_id)
+
+        def already_sent(c: sqlite3.Connection) -> bool:
+            return get_meta(c, marker) is not None
+
+        if self.with_lock(already_sent):
+            return
+        tg_adapt.send_text_message(
+            bot_token=self.telegram_bot_token,
+            chat_id=chat_id,
+            text=text,
+        )
+
+        def mark(c: sqlite3.Connection) -> None:
+            set_meta(c, marker, str(time.time()))
+
+        self.with_lock(mark)
+
     def _recent_telegram_history(self, task_id: str) -> list[dict[str, str]]:
         snapshot = self._task_snapshot(task_id)
         if not snapshot or snapshot["channel"] != "telegram":
@@ -386,8 +426,19 @@ class SyncServer:
 
     def _handle_task_followups(self, task_id: str) -> None:
         snapshot = self._task_snapshot(task_id)
-        if not snapshot or snapshot["channel"] != "telegram":
+        if not snapshot:
             return
+        if snapshot["channel"] == "telegram":
+            self._handle_telegram_followups(task_id, snapshot)
+            return
+        if snapshot["channel"] == "alexa":
+            self._handle_alexa_followups(task_id, snapshot)
+
+    def _handle_telegram_followups(
+        self,
+        task_id: str,
+        snapshot: Dict[str, Any],
+    ) -> None:
         projection = snapshot["projection"]
         status = str(projection.get("status") or "")
         if status == "created":
@@ -479,16 +530,63 @@ class SyncServer:
             except Exception as exc:  # noqa: BLE001
                 print(f"andrea_sync telegram final update error: {exc}", flush=True)
 
-    def _route_telegram_task(self, task_id: str) -> None:
+    def _handle_alexa_followups(
+        self,
+        task_id: str,
+        snapshot: Dict[str, Any],
+    ) -> None:
+        projection = snapshot["projection"]
+        status = str(projection.get("status") or "")
+        if status == "queued":
+            self._schedule_delegated_execution(task_id)
+            return
+        if status not in {"completed", "failed"}:
+            return
+        if not self.alexa_summary_to_telegram or not self.alexa_summary_chat_id:
+            return
+        execution_meta = self._projection_meta(projection, "execution")
+        assistant_meta = self._projection_meta(projection, "assistant")
+        assistant_route = str(assistant_meta.get("route") or "").strip()
+        summary_text = str(projection.get("summary") or "")
+        if assistant_route == "direct":
+            summary_text = str(assistant_meta.get("last_reply") or summary_text)
+        try:
+            self._send_telegram_chat_message_once(
+                task_id,
+                "alexa_summary",
+                chat_id=self.alexa_summary_chat_id,
+                text=format_alexa_session_summary(
+                    task_id,
+                    status=status,
+                    request_text=str(self._projection_meta(projection, "alexa").get("last_text") or projection.get("summary") or ""),
+                    summary=summary_text,
+                    assistant_route=assistant_route,
+                    worker_label=self._telegram_worker_label(projection),
+                    delegated_to_cursor=bool(execution_meta.get("delegated_to_cursor")),
+                    agent_url=str(self._projection_meta(projection, "cursor").get("agent_url") or ""),
+                    pr_url=str(self._projection_meta(projection, "cursor").get("pr_url") or ""),
+                    last_error=str(projection.get("last_error") or ""),
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"andrea_sync alexa summary error: {exc}", flush=True)
+
+    def _route_task_with_decision(
+        self,
+        task_id: str,
+        *,
+        history: list[dict[str, str]] | None,
+        source: str,
+    ) -> tuple[Optional[Any], bool]:
         marker = self._meta_key("route_applied", task_id)
         if not self._claim_routing_attempt(task_id):
-            return
+            return None, False
         try:
             user_payload = self._latest_user_message_payload(task_id)
             prompt = self._extract_cursor_prompt(task_id)
             decision = route_message(
                 prompt,
-                history=self._recent_telegram_history(task_id),
+                history=history,
                 routing_hint=str(user_payload.get("routing_hint") or "auto"),
                 collaboration_mode=str(user_payload.get("collaboration_mode") or "auto"),
             )
@@ -501,7 +599,7 @@ class SyncServer:
                     {
                         "kind": kind,
                         "prompt_excerpt": prompt[:300],
-                        "source": "telegram_balanced_delegate",
+                        "source": source,
                         "route_reason": decision.reason,
                         "execution_lane": execution_lane,
                         "runner": "openclaw" if kind == "openclaw" else "cursor",
@@ -522,8 +620,53 @@ class SyncServer:
                 )
             if applied:
                 self.with_lock(lambda c: set_meta(c, marker, str(time.time())))
+            return decision, applied
         finally:
             self._finish_routing_attempt(task_id)
+
+    def _route_telegram_task(self, task_id: str) -> None:
+        self._route_task_with_decision(
+            task_id,
+            history=self._recent_telegram_history(task_id),
+            source="telegram_balanced_delegate",
+        )
+
+    def _process_alexa_request(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        cmd, fallback_response = alexa_adapt.parse_alexa_body(body)
+        if not cmd:
+            return fallback_response
+
+        def run(c: sqlite3.Connection) -> Dict[str, Any]:
+            return handle_command(c, cmd)
+
+        result = self.with_lock(run)
+        if not result.get("ok") or not result.get("task_id"):
+            return alexa_adapt._response(
+                "I hit a problem starting that request. Please try again.",
+                session_should_end=True,
+            )
+        task_id = str(result["task_id"])
+        snapshot = self._task_snapshot(task_id)
+        if snapshot and snapshot["projection"].get("status") == "created":
+            decision, _applied = self._route_task_with_decision(
+                task_id,
+                history=[],
+                source="alexa_voice_delegate",
+            )
+        else:
+            decision = None
+        final_snapshot = self._task_snapshot(task_id) or snapshot
+        if final_snapshot and final_snapshot["projection"].get("status") == "queued":
+            self._queue_task_followups(task_id)
+        if decision and decision.mode == "direct":
+            return alexa_adapt._response(
+                decision.reply_text,
+                session_should_end=True,
+            )
+        return alexa_adapt.build_ack_response(
+            "I started working on that.",
+            delegated=True,
+        )
 
     def _schedule_cursor_execution(self, task_id: str) -> None:
         if not self.background_enabled or not self.telegram_auto_cursor:
@@ -1262,19 +1405,15 @@ def make_handler(server: SyncServer) -> type:
                         b'{"ok":false,"error":"kill_switch_engaged"}',
                     )
                     return
-                body = self._read_json()
-                cmd, resp = alexa_adapt.parse_alexa_body(body)
-
-                def work() -> None:
-                    if not cmd:
+                if server.alexa_edge_token:
+                    auth = self.headers.get("Authorization") or ""
+                    edge = self.headers.get("X-Andrea-Alexa-Edge-Token") or ""
+                    expected = server.alexa_edge_token
+                    if auth != f"Bearer {expected}" and edge != expected:
+                        self._send(401, b'{"error":"unauthorized"}')
                         return
-
-                    def run(c: sqlite3.Connection) -> None:
-                        handle_command(c, cmd)
-
-                    server.with_lock(run)
-
-                server.queue.put(work)
+                body = self._read_json()
+                resp = server._process_alexa_request(body)
                 out = alexa_adapt.build_response_json(resp)
                 self._send(200, out, content_type="application/json;charset=utf-8")
                 return

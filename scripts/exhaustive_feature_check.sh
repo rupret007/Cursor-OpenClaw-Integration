@@ -97,12 +97,18 @@ expect_fail "andrea_model_guard invalid timeout" \
 bash "${BASE_DIR}/scripts/andrea_openclaw_enforce.sh" --help >/dev/null || fail "andrea_openclaw_enforce --help"
 pass "andrea_openclaw_enforce --help"
 
-bash "${BASE_DIR}/scripts/andrea_openclaw_enforce.sh" --dry-run --required-skills "cursor_handoff,github" >/dev/null \
-  || fail "andrea_openclaw_enforce --dry-run"
-pass "andrea_openclaw_enforce --dry-run"
+if command -v openclaw >/dev/null 2>&1; then
+  bash "${BASE_DIR}/scripts/andrea_openclaw_enforce.sh" --dry-run --required-skills "cursor_handoff,github" >/dev/null \
+    || fail "andrea_openclaw_enforce --dry-run"
+  pass "andrea_openclaw_enforce --dry-run"
 
-expect_fail "andrea_openclaw_enforce invalid timeout" \
-  bash "${BASE_DIR}/scripts/andrea_openclaw_enforce.sh" --dry-run --probe-timeout-ms nope
+  expect_fail "andrea_openclaw_enforce invalid timeout" \
+    bash "${BASE_DIR}/scripts/andrea_openclaw_enforce.sh" --dry-run --probe-timeout-ms nope
+else
+  echo "(Skip OpenClaw enforce dry-run: openclaw not on PATH)"
+  pass "andrea_openclaw_enforce --dry-run (skipped: openclaw missing)"
+  pass "andrea_openclaw_enforce invalid timeout (skipped: openclaw missing)"
+fi
 
 # Validation errors (exit 2)
 expect_fail "create-agent both repository and pr-url" \

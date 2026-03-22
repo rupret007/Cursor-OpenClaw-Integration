@@ -349,7 +349,7 @@ class TestAndreaSync(unittest.TestCase):
             collaboration_mode="cursor_primary",
         )
         self.assertEqual(decision.mode, "delegate")
-        self.assertEqual(decision.delegate_target, "openclaw_hybrid")
+        self.assertEqual(decision.delegate_target, "direct_cursor")
         self.assertEqual(decision.collaboration_mode, "cursor_primary")
 
     def test_router_model_mention_forces_openclaw_delegate(self) -> None:
@@ -751,6 +751,8 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(proj["status"], TaskStatus.QUEUED.value)
         self.assertEqual(proj["meta"]["execution"]["routing_hint"], "cursor")
         self.assertEqual(proj["meta"]["execution"]["collaboration_mode"], "cursor_primary")
+        self.assertEqual(proj["meta"]["execution"]["lane"], "direct_cursor")
+        self.assertEqual(proj["meta"]["cursor"]["kind"], "cursor")
 
     def test_server_followups_explicit_model_mention_marks_preferred_lane(self) -> None:
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
@@ -1106,7 +1108,7 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(proj["status"], TaskStatus.QUEUED.value)
         self.assertEqual(proj["meta"]["cursor"]["kind"], "openclaw")
 
-    def test_server_cursor_poll_timeout_stays_running(self) -> None:
+    def test_server_cursor_poll_exhaustion_marks_failed(self) -> None:
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
         os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
         from services.andrea_sync.server import SyncServer  # noqa: E402
@@ -1161,10 +1163,10 @@ class TestAndreaSync(unittest.TestCase):
         ):
             server._run_cursor_job(task_id)
         proj = project_task_dict(server.conn, task_id, "telegram")
-        self.assertEqual(proj["status"], TaskStatus.RUNNING.value)
-        self.assertIsNone(proj["last_error"])
+        self.assertEqual(proj["status"], TaskStatus.FAILED.value)
+        self.assertEqual(proj["last_error"], "cursor_poll_exhausted")
         events = load_events_for_task(server.conn, task_id)
-        self.assertEqual(events[-1][2], EventType.JOB_PROGRESS.value)
+        self.assertEqual(events[-1][2], EventType.JOB_FAILED.value)
 
     def test_cursor_report_rejects_non_object_payload(self) -> None:
         created = handle_command(

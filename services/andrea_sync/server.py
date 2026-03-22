@@ -155,6 +155,9 @@ class SyncServer:
         self.cursor_create_timeout_seconds = _env_int(
             "ANDREA_CURSOR_CREATE_TIMEOUT_SECONDS", 120
         )
+        self.health_capability_max_age_seconds = _env_float(
+            "ANDREA_HEALTH_CAPABILITY_MAX_AGE_SECONDS", 900.0
+        )
         self.openclaw_agent_id = os.environ.get("ANDREA_OPENCLAW_AGENT_ID", "main").strip() or "main"
         self.openclaw_timeout_seconds = _env_int(
             "ANDREA_OPENCLAW_TIMEOUT_SECONDS", 900
@@ -820,6 +823,18 @@ class SyncServer:
         snapshot = self._task_snapshot(task_id)
         channel = snapshot["channel"] if snapshot else ""
         if channel == "telegram" and not self.telegram_auto_cursor:
+            self._append_task_event(
+                task_id,
+                EventType.JOB_FAILED,
+                {
+                    "error": "telegram_auto_cursor_disabled",
+                    "message": (
+                        "Delegated execution is queued, but ANDREA_SYNC_TELEGRAM_AUTO_CURSOR=0 "
+                        "prevents automatic runner startup for Telegram tasks."
+                    ),
+                    "execution_lane": self._task_execution_lane(task_id),
+                },
+            )
             return
         marker = self._meta_key("executor_started", task_id)
 
@@ -1399,11 +1414,12 @@ class SyncServer:
             return
         self._append_task_event(
             task_id,
-            EventType.JOB_PROGRESS,
+            EventType.JOB_FAILED,
             {
+                "error": "cursor_poll_exhausted",
                 "message": (
                     f"Cursor is still running with status {latest_status or 'unknown'} after "
-                    "the configured polling window; leaving the task in running state."
+                    "the configured polling window; marking task failed so operators can re-check state."
                 ),
                 "cursor_agent_id": agent_id,
                 "agent_url": agent_url or None,
@@ -1480,17 +1496,36 @@ def make_handler(server: SyncServer) -> type:
                 def health_body(c: sqlite3.Connection) -> bytes:
                     ks = kill_switch_status(c)
                     age = digest_age_seconds(c)
+                    degraded_reasons: list[str] = []
+                    capability_fresh = age is not None and age <= server.health_capability_max_age_seconds
+                    if age is None:
+                        degraded_reasons.append("capability_digest_missing")
+                    elif age > server.health_capability_max_age_seconds:
+                        degraded_reasons.append("capability_digest_stale")
+                    if bool(ks.get("engaged")):
+                        degraded_reasons.append("kill_switch_engaged")
+                    ok = not degraded_reasons
                     return json.dumps(
                         {
-                            "ok": True,
+                            "ok": ok,
+                            "degraded": not ok,
+                            "degraded_reasons": degraded_reasons,
                             "service": "andrea_sync",
                             "db": str(server.db_path),
                             "kill_switch": ks,
                             "capability_digest_age_seconds": age,
+                            "capabilities_fresh": capability_fresh,
+                            "capability_digest_max_age_seconds": server.health_capability_max_age_seconds,
                         }
                     ).encode("utf-8")
 
-                self._send(200, server.with_lock(health_body))
+                raw = server.with_lock(health_body)
+                try:
+                    obj = json.loads(raw.decode("utf-8"))
+                except json.JSONDecodeError:
+                    self._send(500, b'{"error":"health_payload_invalid"}')
+                    return
+                self._send(200 if obj.get("ok") else 503, raw)
                 return
             if path == "/v1/status":
                 if not self._allow_sensitive_get():

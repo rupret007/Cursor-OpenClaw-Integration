@@ -95,7 +95,7 @@ def classify_route(
     collab = str(collaboration_mode or "auto").strip().lower() or "auto"
     andrea_preferred = hint == "andrea"
     if hint == "cursor":
-        return "delegate", "explicit_cursor_mention", "openclaw_hybrid", "cursor_primary"
+        return "delegate", "explicit_cursor_mention", "direct_cursor", "cursor_primary"
     if hint == "collaborate":
         return "delegate", "explicit_collaboration_mention", "openclaw_hybrid", "collaborative"
     if preferred_model_family:

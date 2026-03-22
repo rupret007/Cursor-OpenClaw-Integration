@@ -79,12 +79,15 @@ class TestAndreaSyncHTTP(unittest.TestCase):
 
     def test_health_ok(self) -> None:
         req = urllib.request.Request(self._url("/v1/health"), method="GET")
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            self.assertEqual(resp.status, 200)
-            data = json.loads(resp.read().decode("utf-8"))
-        self.assertTrue(data.get("ok"))
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(req, timeout=5)
+        self.assertEqual(ctx.exception.code, 503)
+        data = json.loads(ctx.exception.read().decode("utf-8"))
+        self.assertFalse(data.get("ok"))
         self.assertIn("kill_switch", data)
         self.assertIn("capability_digest_age_seconds", data)
+        self.assertTrue(data.get("degraded"))
+        self.assertIn("degraded_reasons", data)
 
     def test_status_ok(self) -> None:
         req = urllib.request.Request(self._url("/v1/status"), method="GET")

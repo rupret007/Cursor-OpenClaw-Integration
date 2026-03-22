@@ -125,6 +125,7 @@ def format_ack_message(
     task_id: str,
     *,
     worker_label: str = "Cursor",
+    auto_start: bool = True,
     routing_hint: str = "",
     collaboration_mode: str = "",
     preferred_model_label: str = "",
@@ -132,12 +133,16 @@ def format_ack_message(
     routing_note = _routing_note(routing_hint, collaboration_mode)
     preferred_model_note = _preferred_model_note(preferred_model_label)
     if worker_label == "OpenClaw":
+        execution_line = "- OpenClaw will be started automatically."
+        if not auto_start:
+            execution_line = "- OpenClaw is queued for manual start or a later retry."
         body = [
             "Andrea:",
             "OpenClaw is taking point — it coordinates first, then delegates to Cursor when the repo needs execution.",
             "",
             "What happens next:",
             "- OpenClaw runs the coordination / handoff pass (same flow as before).",
+            execution_line,
             "- Status updates are threaded under your message so this chat stays readable.",
             *([preferred_model_note] if preferred_model_note else []),
             *([routing_note] if routing_note else []),
@@ -147,6 +152,9 @@ def format_ack_message(
             "- Status: queued",
         ]
         return "\n".join(body)
+    execution_line = "- Cursor will be started automatically."
+    if not auto_start:
+        execution_line = "- Cursor is queued for execution, but auto-start is currently disabled."
     return "\n".join(
         [
             "Andrea:",
@@ -154,7 +162,7 @@ def format_ack_message(
             "",
             "What happens next:",
             "- Andrea created a task and will keep this thread updated.",
-            "- Cursor will be started automatically.",
+            execution_line,
             *([preferred_model_note] if preferred_model_note else []),
             *([routing_note] if routing_note else []),
             "",
@@ -242,7 +250,10 @@ def format_progress_message(
         f"- {_clip(_normalize_whitespace(progress_text), 700)}",
     ]
     if model_label:
-        lines.append(f"- Active OpenClaw model: {model_label}")
+        if worker_label == "Cursor":
+            lines.append(f"- Active model: {model_label}")
+        else:
+            lines.append(f"- Active OpenClaw model: {model_label}")
     elif preferred_model_note:
         lines.append(preferred_model_note)
     if routing_note:
@@ -304,7 +315,10 @@ def format_running_message(
     ]
     model_label = _model_label(provider, model)
     if model_label:
-        lines.insert(len(lines) - 1, f"- OpenClaw is currently coordinating with {model_label}.")
+        if worker_label == "Cursor":
+            lines.insert(len(lines) - 1, f"- Active model context: {model_label}.")
+        else:
+            lines.insert(len(lines) - 1, f"- OpenClaw is currently coordinating with {model_label}.")
     else:
         preferred_model_note = _preferred_model_note(preferred_model_label)
         if preferred_model_note:

@@ -25,6 +25,7 @@ import urllib.request
 from typing import Any, Dict, Mapping
 
 DEFAULT_TIMEOUT_SECONDS = 8
+MAX_PASSTHROUGH_BODY_BYTES = 262144
 
 
 def build_alexa_response(
@@ -55,27 +56,44 @@ def build_edge_http_response(payload: Dict[str, Any], *, status_code: int = 200)
     }
 
 
-def decode_event_body(event: Mapping[str, Any]) -> str:
+def decode_event_body_bytes(event: Mapping[str, Any]) -> bytes:
     body = event.get("body", "")
     if isinstance(body, dict):
-        return json.dumps(body, ensure_ascii=False)
+        return json.dumps(body, ensure_ascii=False).encode("utf-8")
     if body is None:
-        return ""
+        return b""
     raw = str(body)
     if event.get("isBase64Encoded"):
-        decoded = base64.b64decode(raw.encode("utf-8"))
-        return decoded.decode("utf-8")
-    return raw
+        return base64.b64decode(raw.encode("utf-8"))
+    return raw.encode("utf-8")
+
+
+def decode_event_body(event: Mapping[str, Any]) -> str:
+    return decode_event_body_bytes(event).decode("utf-8")
 
 
 def parse_alexa_request_json(event: Mapping[str, Any]) -> Dict[str, Any]:
-    raw = decode_event_body(event)
+    raw = decode_event_body_bytes(event)
     if not raw.strip():
         raise ValueError("missing request body")
-    payload = json.loads(raw)
+    payload = json.loads(raw.decode("utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("Alexa request body must decode to an object")
     return payload
+
+
+def extract_passthrough_headers(event: Mapping[str, Any]) -> Dict[str, str]:
+    headers = event.get("headers")
+    if not isinstance(headers, Mapping):
+        return {}
+    out: Dict[str, str] = {}
+    for key, value in headers.items():
+        if key is None or value is None:
+            continue
+        k = str(key)
+        if k.lower() in {"signature", "signaturecertchainurl"}:
+            out[k] = str(value)
+    return out
 
 
 def extract_application_id(body: Mapping[str, Any]) -> str:
@@ -130,19 +148,22 @@ def backend_error_response(status_code: int, body_text: str = "") -> Dict[str, A
 
 
 def forward_to_andrea(
-    body_json: Dict[str, Any],
+    body_bytes: bytes,
     *,
     andrea_sync_url: str,
     edge_token: str,
+    passthrough_headers: Mapping[str, str] | None = None,
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
 ) -> Dict[str, Any]:
     url = andrea_sync_url.rstrip("/") + "/v1/alexa"
-    raw = json.dumps(body_json, ensure_ascii=False).encode("utf-8")
+    if len(body_bytes) > MAX_PASSTHROUGH_BODY_BYTES:
+        raise ValueError("request body too large")
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {edge_token}",
     }
-    req = urllib.request.Request(url, data=raw, method="POST", headers=headers)
+    headers.update({str(k): str(v) for k, v in (passthrough_headers or {}).items()})
+    req = urllib.request.Request(url, data=body_bytes, method="POST", headers=headers)
     with urllib.request.urlopen(req, timeout=max(1, timeout_seconds)) as resp:
         payload = json.loads(resp.read().decode("utf-8"))
         if not isinstance(payload, dict):
@@ -160,12 +181,14 @@ def handle_edge_event(
 ) -> Dict[str, Any]:
     allowed_ids = [value for value in (allowed_application_ids or []) if value]
     try:
+        raw_body = decode_event_body_bytes(event)
         body_json = parse_alexa_request_json(event)
         verify_allowed_application_id(body_json, allowed_ids=allowed_ids)
         payload = forward_to_andrea(
-            body_json,
+            raw_body,
             andrea_sync_url=andrea_sync_url,
             edge_token=edge_token,
+            passthrough_headers=extract_passthrough_headers(event),
             timeout_seconds=timeout_seconds,
         )
         return build_edge_http_response(payload)
@@ -199,14 +222,26 @@ def handle_edge_event(
 
 
 def handler(event: Mapping[str, Any], _context: Any) -> Dict[str, Any]:
-    andrea_sync_url = os.environ["ANDREA_SYNC_URL"].rstrip("/")
-    edge_token = os.environ["ANDREA_SYNC_ALEXA_EDGE_TOKEN"]
-    allowed_application_ids = [
-        value.strip()
-        for value in os.environ.get("ALEXA_ALLOWED_APPLICATION_IDS", "").split(",")
-        if value.strip()
-    ]
-    timeout_seconds = int(os.environ.get("ANDREA_SYNC_ALEXA_EDGE_TIMEOUT_SECONDS", str(DEFAULT_TIMEOUT_SECONDS)))
+    try:
+        andrea_sync_url = os.environ["ANDREA_SYNC_URL"].rstrip("/")
+        edge_token = os.environ["ANDREA_SYNC_ALEXA_EDGE_TOKEN"]
+        allowed_application_ids = [
+            value.strip()
+            for value in os.environ.get("ALEXA_ALLOWED_APPLICATION_IDS", "").split(",")
+            if value.strip()
+        ]
+        timeout_seconds = int(
+            os.environ.get(
+                "ANDREA_SYNC_ALEXA_EDGE_TIMEOUT_SECONDS",
+                str(DEFAULT_TIMEOUT_SECONDS),
+            )
+        )
+    except (KeyError, ValueError):
+        return build_edge_http_response(
+            build_alexa_response(
+                "AndreaBot edge configuration is incomplete right now. Please check the rollout settings."
+            )
+        )
     return handle_edge_event(
         event,
         andrea_sync_url=andrea_sync_url,

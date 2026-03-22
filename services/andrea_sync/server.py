@@ -622,11 +622,15 @@ class SyncServer:
             return
         latest_um_seq = 0
         latest_mid: Any = None
+        latest_was_continuation = False
         for seq, _ts, et, pl in events:
             if et == EventType.USER_MESSAGE.value and isinstance(pl, dict):
                 latest_um_seq = int(seq)
                 latest_mid = pl.get("message_id")
+                latest_was_continuation = bool(pl.get("telegram_continuation"))
         if latest_um_seq <= last_job_started:
+            return
+        if latest_was_continuation:
             return
         phase = (
             f"late_chunk_{latest_mid}"
@@ -680,6 +684,11 @@ class SyncServer:
                     format_ack_message(
                         task_id,
                         worker_label=worker_label,
+                        auto_start=(
+                            self.background_enabled
+                            and self.delegated_execution_enabled
+                            and (worker_label == "OpenClaw" or self.telegram_auto_cursor)
+                        ),
                         routing_hint=str(telegram_meta.get("routing_hint") or ""),
                         collaboration_mode=str(
                             self._projection_meta(projection, "execution").get("collaboration_mode")

@@ -50,14 +50,14 @@ def parse_alexa_body(body: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Di
     Returns (command_for_bus_or_none, alexa_response_envelope).
     If command is None, alexa_response is standalone (e.g. LaunchRequest welcome).
     """
-    req = body.get("request") or {}
+    req = body.get("request") if isinstance(body.get("request"), dict) else {}
     rtype = req.get("type")
-    session = body.get("session") or {}
+    session = body.get("session") if isinstance(body.get("session"), dict) else {}
     session_id = session.get("sessionId") or str(uuid.uuid4())
-    context = body.get("context") or {}
-    system = context.get("System") or {}
-    device = system.get("device") or {}
-    user = system.get("user") or {}
+    context = body.get("context") if isinstance(body.get("context"), dict) else {}
+    system = context.get("System") if isinstance(context.get("System"), dict) else {}
+    device = system.get("device") if isinstance(system.get("device"), dict) else {}
+    user = system.get("user") if isinstance(system.get("user"), dict) else {}
     locale = req.get("locale") or ""
 
     if rtype == "LaunchRequest":
@@ -70,9 +70,9 @@ def parse_alexa_body(body: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Di
         return None, _response("Goodbye.", session_should_end=True)
 
     if rtype == "IntentRequest":
-        intent = req.get("intent") or {}
+        intent = req.get("intent") if isinstance(req.get("intent"), dict) else {}
         name = intent.get("name")
-        slots = intent.get("slots") or {}
+        slots = intent.get("slots") if isinstance(intent.get("slots"), dict) else {}
         if name in ("AMAZON.StopIntent", "AMAZON.CancelIntent"):
             return None, _response("Okay.", session_should_end=True)
         utterance = ""

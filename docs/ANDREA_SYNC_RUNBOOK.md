@@ -42,9 +42,10 @@ By default `/v1/health` returns only the **basename** of the DB file. Set `ANDRE
 ## Alexa production
 
 1. Set `ANDREA_ALEXA_SKILL_ID` to the skill’s **applicationId**.
-2. Set `ANDREA_ALEXA_VERIFY_SIGNATURES=1`.
-3. Install **`cryptography`** (`pip install cryptography`).
-4. Keep `ANDREA_SYNC_ALEXA_EDGE_TOKEN` on the HTTPS edge if you use a shared URL.
+2. Keep `ANDREA_SYNC_ALEXA_EDGE_TOKEN` on the HTTPS edge and the Andrea backend.
+3. Set `ANDREA_ALEXA_VERIFY_SIGNATURES=1` on Andrea only when your edge forwards the original Alexa body bytes plus `Signature` and `SignatureCertChainUrl` headers unchanged.
+4. If the edge terminates and re-serializes JSON, verify Alexa signatures at the public edge instead of Andrea.
+5. Install **`cryptography`** (`pip install cryptography`) wherever `ANDREA_ALEXA_VERIFY_SIGNATURES=1` is enabled.
 
 Intent requests already dedupe via `external_id` = `requestId` on first task creation.
 

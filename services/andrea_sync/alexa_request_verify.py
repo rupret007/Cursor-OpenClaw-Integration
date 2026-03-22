@@ -11,6 +11,8 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Mapping
 
+MAX_CERT_CHAIN_BYTES = 65536
+
 
 def _cert_url_allowed(url: str) -> bool:
     u = url.strip().lower()
@@ -89,9 +91,11 @@ def verify_alexa_http_request(
     )
     try:
         with opener.open(cert_url_s, timeout=10) as resp:
-            pem_chain = resp.read()
+            pem_chain = resp.read(MAX_CERT_CHAIN_BYTES + 1)
     except (urllib.error.URLError, OSError, ValueError) as exc:
         raise ValueError("alexa_cert_fetch_failed") from exc
+    if len(pem_chain) > MAX_CERT_CHAIN_BYTES:
+        raise ValueError("alexa_cert_chain_too_large")
 
     try:
         try:

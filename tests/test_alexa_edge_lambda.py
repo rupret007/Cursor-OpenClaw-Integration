@@ -22,6 +22,7 @@ class AlexaEdgeLambdaTests(unittest.TestCase):
             "isBase64Encoded": True,
         }
         self.assertEqual(MODULE.decode_event_body(event), raw.decode("utf-8"))
+        self.assertEqual(MODULE.decode_event_body_bytes(event), raw)
 
     def test_extract_application_id_prefers_session_then_context(self) -> None:
         body = {"session": {"application": {"applicationId": "amzn1.ask.skill.demo"}}}
@@ -120,4 +121,38 @@ class AlexaEdgeLambdaTests(unittest.TestCase):
         body = json.loads(response["body"])
         self.assertEqual(body["response"]["outputSpeech"]["text"], "AndreaBot is ready.")
         forward.assert_called_once()
+
+    def test_handle_edge_event_forwards_raw_body_and_signature_headers(self) -> None:
+        raw = b'{"session":{"application":{"applicationId":"amzn1.ask.skill.demo"}},"request":{"type":"LaunchRequest"}}'
+        event = {
+            "body": raw.decode("utf-8"),
+            "headers": {
+                "Signature": "sig-value",
+                "SignatureCertChainUrl": "https://s3.amazonaws.com/echo.api/demo.pem",
+                "X-Ignored": "nope",
+            },
+        }
+        backend_payload = MODULE.build_alexa_response("AndreaBot is ready.")
+        with mock.patch.object(MODULE, "forward_to_andrea", return_value=backend_payload) as forward:
+            MODULE.handle_edge_event(
+                event,
+                andrea_sync_url="https://andrea.example.com",
+                edge_token="secret",
+                allowed_application_ids=["amzn1.ask.skill.demo"],
+            )
+        args, kwargs = forward.call_args
+        self.assertEqual(args[0], raw)
+        self.assertEqual(kwargs["passthrough_headers"]["Signature"], "sig-value")
+        self.assertEqual(
+            kwargs["passthrough_headers"]["SignatureCertChainUrl"],
+            "https://s3.amazonaws.com/echo.api/demo.pem",
+        )
+        self.assertNotIn("X-Ignored", kwargs["passthrough_headers"])
+
+    def test_handler_returns_alexa_payload_for_bad_env(self) -> None:
+        with mock.patch.dict(MODULE.os.environ, {"ANDREA_SYNC_URL": "https://andrea.example.com"}, clear=True):
+            response = MODULE.handler({"body": "{}"}, None)
+        body = json.loads(response["body"])
+        self.assertEqual(response["statusCode"], 200)
+        self.assertIn("configuration is incomplete", body["response"]["outputSpeech"]["text"].lower())
 

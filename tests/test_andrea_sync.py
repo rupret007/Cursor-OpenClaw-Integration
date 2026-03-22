@@ -684,6 +684,17 @@ class TestAndreaSync(unittest.TestCase):
             else:
                 os.environ["ANDREA_ALEXA_VERIFY_SIGNATURES"] = prev
 
+    def test_parse_alexa_body_tolerates_non_object_intent_shapes(self) -> None:
+        cmd, response = alexa_adapt.parse_alexa_body(
+            {
+                "request": {"type": "IntentRequest", "intent": "bad-shape"},
+                "session": "bad-shape",
+                "context": {"System": "bad-shape"},
+            }
+        )
+        self.assertIsNone(cmd)
+        self.assertIn("did not catch that", response["response"]["outputSpeech"]["text"].lower())
+
     def test_list_telegram_task_ids_for_chat_prefers_recent_tasks(self) -> None:
         a = handle_command(
             self.conn,
@@ -925,6 +936,10 @@ class TestAndreaSync(unittest.TestCase):
         )
         self.assertIn("Preferred OpenClaw lane: Gemini", text)
 
+    def test_telegram_ack_message_mentions_manual_cursor_start_when_disabled(self) -> None:
+        text = format_ack_message("tsk_demo", worker_label="Cursor", auto_start=False)
+        self.assertIn("auto-start is currently disabled", text)
+
     def test_telegram_running_message_format(self) -> None:
         text = format_running_message("tsk_demo", agent_url="https://cursor.com/agents/demo")
         self.assertIn("Andrea:", text)
@@ -935,6 +950,16 @@ class TestAndreaSync(unittest.TestCase):
     def test_telegram_running_message_format_for_openclaw(self) -> None:
         text = format_running_message("tsk_demo", worker_label="OpenClaw")
         self.assertIn("OpenClaw is actively working", text)
+
+    def test_telegram_running_message_for_cursor_uses_neutral_model_context(self) -> None:
+        text = format_running_message(
+            "tsk_demo",
+            worker_label="Cursor",
+            provider="openai",
+            model="gpt-5",
+        )
+        self.assertIn("Active model context: openai / gpt-5.", text)
+        self.assertNotIn("OpenClaw is currently coordinating", text)
 
     def test_telegram_running_message_format_for_collaboration(self) -> None:
         text = format_running_message(
@@ -966,6 +991,17 @@ class TestAndreaSync(unittest.TestCase):
             preferred_model_label="MiniMax",
         )
         self.assertIn("Preferred OpenClaw lane: MiniMax", text)
+
+    def test_telegram_progress_message_uses_neutral_model_label_for_cursor(self) -> None:
+        text = format_progress_message(
+            "tsk_demo",
+            progress_text="Cursor is running the fix.",
+            worker_label="Cursor",
+            provider="openai",
+            model="gpt-5",
+        )
+        self.assertIn("Active model: openai / gpt-5", text)
+        self.assertNotIn("Active OpenClaw model", text)
 
     def test_telegram_final_message_separates_andrea_from_cursor(self) -> None:
         text = format_final_message(
@@ -1975,6 +2011,54 @@ class TestAndreaSync(unittest.TestCase):
             server._handle_telegram_followups(created["task_id"], snapshot)
         sent_text = send_mock.call_args.kwargs["text"]
         self.assertIn("Implemented the actual fix and updated the docs", sent_text)
+
+    def test_telegram_followups_skip_late_chunk_notice_for_continuation(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "1"
+        os.environ["TELEGRAM_BOT_TOKEN"] = "telegram-test-token"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        created = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-continuation-running",
+                "payload": {
+                    "text": "first chunk",
+                    "chat_id": 10002,
+                    "message_id": 1,
+                    "from_user": 7,
+                },
+            },
+        )
+        append_event(
+            server.conn,
+            created["task_id"],
+            EventType.JOB_STARTED,
+            {"backend": "openclaw", "runner": "openclaw", "execution_lane": "openclaw_hybrid"},
+        )
+        append_event(
+            server.conn,
+            created["task_id"],
+            EventType.USER_MESSAGE,
+            {
+                "text": "second chunk",
+                "routing_text": "second chunk",
+                "chat_id": 10002,
+                "message_id": 2,
+                "from_user": 7,
+                "telegram_continuation": True,
+            },
+        )
+        snapshot = server._task_snapshot(created["task_id"])
+        assert snapshot is not None
+        with mock.patch.object(tg_adapt, "send_text_message") as send_mock:
+            server._handle_telegram_followups(created["task_id"], snapshot)
+        sent_texts = [call.kwargs["text"] for call in send_mock.call_args_list]
+        self.assertTrue(any("Merged with your current task" in text for text in sent_texts))
+        self.assertFalse(any("may not include it" in text for text in sent_texts))
 
     def test_publish_capability_requires_internal_channel(self) -> None:
         r = handle_command(

@@ -33,6 +33,7 @@ def _build_prompt(
     repo_path: str,
     route_reason: str,
     collaboration_mode: str,
+    explicit_cursor_requested: bool,
     preferred_model_family: str = "",
     preferred_model_label: str = "",
 ) -> str:
@@ -69,13 +70,22 @@ def _build_prompt(
             f"- Start in that lane when it is available, unless reliability or tool constraints require a safer fallback.\n"
             "- If you do fall back, say so briefly in the collaboration transcript.\n"
         )
+    cursor_safety_note = ""
+    if not explicit_cursor_requested:
+        cursor_safety_note = (
+            "- IMPORTANT: Do not invoke Cursor or the cursor_handoff skill unless the user explicitly asked for Cursor.\n"
+            "- If the work is repo-heavy and you would normally delegate to Cursor, instead provide a safe OpenClaw-only answer: "
+            "clarify what you can do within OpenClaw, propose minimal-risk next steps, and ask for explicit Cursor permission if needed.\n"
+        )
     return (
         f"You are running inside Andrea's lockstep OpenClaw execution lane for task {task_id}.\n\n"
         f"User request:\n{user_prompt.strip()}\n\n"
         "Execution rules:\n"
         "- Use OpenClaw skills first when they are the right fit.\n"
-        "- If the task is repo-heavy, coding-heavy, debugging-heavy, or PR-oriented, use the cursor_handoff skill rather than answering from general model reasoning alone.\n"
-        "- If you offload work to Cursor, wait for the useful outcome and summarize it clearly.\n"
+        f"{cursor_safety_note}"
+        "- If the user explicitly asked for Cursor and the task is repo-heavy, coding-heavy, debugging-heavy, or PR-oriented, "
+        "use the cursor_handoff skill rather than answering from general model reasoning alone.\n"
+        "- If you do offload work to Cursor, wait for the useful outcome and summarize it clearly.\n"
         "- Keep the user-facing answer concise and directly useful.\n"
         "- When collaboration is requested, think like a coordinator: triage first, assign the right model/tool to the right subtask, then synthesize the result.\n"
         f"{collaboration_notes}"
@@ -147,6 +157,7 @@ def run_openclaw_hybrid(
     preferred_model_label: str,
     timeout_seconds: int,
     thinking: str,
+    explicit_cursor_requested: bool,
 ) -> dict[str, Any]:
     message = _build_prompt(
         task_id,
@@ -154,6 +165,7 @@ def run_openclaw_hybrid(
         repo_path,
         route_reason,
         collaboration_mode,
+        explicit_cursor_requested,
         preferred_model_family,
         preferred_model_label,
     )
@@ -255,6 +267,7 @@ def main() -> int:
     ap.add_argument("--agent-id", default="main")
     ap.add_argument("--route-reason", default="")
     ap.add_argument("--collaboration-mode", default="auto")
+    ap.add_argument("--explicit-cursor-requested", default="0")
     ap.add_argument("--preferred-model-family", default="")
     ap.add_argument("--preferred-model-label", default="")
     ap.add_argument("--timeout-seconds", type=int, default=900)
@@ -268,6 +281,8 @@ def main() -> int:
             agent_id=args.agent_id,
             route_reason=args.route_reason,
             collaboration_mode=str(args.collaboration_mode or "").strip() or "auto",
+            explicit_cursor_requested=str(args.explicit_cursor_requested or "0").strip().lower()
+            in {"1", "true", "yes", "on"},
             preferred_model_family=str(args.preferred_model_family or "").strip(),
             preferred_model_label=str(args.preferred_model_label or "").strip(),
             timeout_seconds=max(1, args.timeout_seconds),

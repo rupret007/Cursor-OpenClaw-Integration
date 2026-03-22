@@ -169,8 +169,9 @@ class SyncServer:
         self.openclaw_timeout_seconds = _env_int(
             "ANDREA_OPENCLAW_TIMEOUT_SECONDS", 900
         )
+        # Safety: do not invoke Cursor implicitly (only when explicitly requested).
         self.openclaw_fallback_to_cursor = _env_bool(
-            "ANDREA_OPENCLAW_FALLBACK_TO_CURSOR", True
+            "ANDREA_OPENCLAW_FALLBACK_TO_CURSOR", False
         )
         self.openclaw_thinking = os.environ.get("ANDREA_OPENCLAW_THINKING", "medium").strip() or "medium"
         if self.telegram_webhook_autofix and self.telegram_bot_token and self.telegram_public_base:
@@ -1002,6 +1003,7 @@ class SyncServer:
         prompt: str,
         route_reason: str,
         collaboration_mode: str,
+        explicit_cursor_requested: bool,
         preferred_model_family: str,
         preferred_model_label: str,
     ) -> Dict[str, Any]:
@@ -1021,6 +1023,8 @@ class SyncServer:
                 route_reason,
                 "--collaboration-mode",
                 collaboration_mode,
+                "--explicit-cursor-requested",
+                "1" if explicit_cursor_requested else "0",
                 "--preferred-model-family",
                 preferred_model_family,
                 "--preferred-model-label",
@@ -1136,6 +1140,7 @@ class SyncServer:
         collaboration_mode = self._task_collaboration_mode(task_id)
         visibility_mode = self._task_visibility_mode(task_id)
         routing_hint = self._task_routing_hint(task_id)
+        explicit_cursor_requested = routing_hint == "cursor"
         preferred_model_family = self._task_preferred_model_family(task_id)
         preferred_model_label = self._task_preferred_model_label(task_id)
         if not prompt:
@@ -1194,11 +1199,12 @@ class SyncServer:
                 prompt,
                 self._task_route_reason(task_id),
                 collaboration_mode,
-                preferred_model_family,
-                preferred_model_label,
+                explicit_cursor_requested=explicit_cursor_requested,
+                preferred_model_family=preferred_model_family,
+                preferred_model_label=preferred_model_label,
             )
         except Exception as exc:  # noqa: BLE001
-            if self.openclaw_fallback_to_cursor:
+            if self.openclaw_fallback_to_cursor and explicit_cursor_requested:
                 self._append_task_event(
                     task_id,
                     EventType.JOB_PROGRESS,
@@ -1291,7 +1297,7 @@ class SyncServer:
                     "force_telegram_note": True,
                 },
             )
-        requires_cursor = collaboration_mode in {"cursor_primary", "collaborative"}
+        requires_cursor = collaboration_mode == "cursor_primary" and explicit_cursor_requested
         if result.get("ok") and requires_cursor and not result.get("delegated_to_cursor"):
             self._append_task_event(
                 task_id,

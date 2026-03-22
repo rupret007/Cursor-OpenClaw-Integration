@@ -57,6 +57,7 @@ class TestAndreaSync(unittest.TestCase):
         self._prev_openai_enabled = os.environ.get("OPENAI_API_ENABLED")
         self._prev_openai_key = os.environ.get("OPENAI_API_KEY")
         self._prev_delegate_lane = os.environ.get("ANDREA_TELEGRAM_DELEGATE_LANE")
+        self._prev_openclaw_fallback = os.environ.get("ANDREA_OPENCLAW_FALLBACK_TO_CURSOR")
         os.environ["ANDREA_SYNC_DB"] = str(self.db_path)
         os.environ["ANDREA_SYNC_PUBLIC_BASE"] = ""
         os.environ["ANDREA_SYNC_TELEGRAM_WEBHOOK_AUTOFIX"] = "0"
@@ -113,6 +114,10 @@ class TestAndreaSync(unittest.TestCase):
             os.environ.pop("ANDREA_TELEGRAM_DELEGATE_LANE", None)
         else:
             os.environ["ANDREA_TELEGRAM_DELEGATE_LANE"] = self._prev_delegate_lane
+        if self._prev_openclaw_fallback is None:
+            os.environ.pop("ANDREA_OPENCLAW_FALLBACK_TO_CURSOR", None)
+        else:
+            os.environ["ANDREA_OPENCLAW_FALLBACK_TO_CURSOR"] = self._prev_openclaw_fallback
         self.db_path.unlink(missing_ok=True)
         for suf in ("-wal", "-shm"):
             p = Path(str(self.db_path) + suf)
@@ -1399,6 +1404,85 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(proj["status"], TaskStatus.COMPLETED.value)
         self.assertTrue(proj["meta"]["execution"]["delegated_to_cursor"])
         self.assertEqual(proj["cursor_agent_id"], "bc-fallback")
+
+    def test_server_collaborative_without_explicit_cursor_does_not_escalate(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        result = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-collab-no-explicit-cursor",
+                "payload": {
+                    "text": "Please work together and double-check this plan.",
+                    "routing_text": "Please work together and double-check this plan.",
+                    "routing_hint": "collaborate",
+                    "collaboration_mode": "collaborative",
+                    "mention_targets": ["andrea"],
+                    "chat_id": 1,
+                    "message_id": 320,
+                },
+            },
+        )
+        server._handle_task_followups(result["task_id"])
+
+        with (
+            mock.patch.object(
+                server,
+                "_create_openclaw_job",
+                return_value={
+                    "ok": True,
+                    "summary": "OpenClaw completed a collaborative review without external delegation.",
+                    "backend": "openclaw",
+                    "execution_lane": "openclaw_hybrid",
+                    "delegated_to_cursor": False,
+                },
+            ),
+            mock.patch.object(server, "_run_cursor_job") as cursor_run_mock,
+        ):
+            server._run_delegated_job(result["task_id"])
+
+        proj = project_task_dict(server.conn, result["task_id"], "telegram")
+        self.assertEqual(proj["status"], TaskStatus.COMPLETED.value)
+        self.assertFalse(proj["meta"]["execution"]["delegated_to_cursor"])
+        cursor_run_mock.assert_not_called()
+
+    def test_server_openclaw_submit_failure_does_not_fallback_without_explicit_cursor(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        os.environ["ANDREA_OPENCLAW_FALLBACK_TO_CURSOR"] = "1"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        result = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-openclaw-no-explicit-fallback",
+                "payload": {
+                    "text": "Please inspect the repo and summarize what to fix first.",
+                    "chat_id": 1,
+                    "message_id": 321,
+                },
+            },
+        )
+        server._handle_task_followups(result["task_id"])
+
+        with (
+            mock.patch.object(server, "_create_openclaw_job", side_effect=RuntimeError("openclaw down")),
+            mock.patch.object(server, "_run_cursor_job") as cursor_run_mock,
+        ):
+            server._run_delegated_job(result["task_id"])
+
+        proj = project_task_dict(server.conn, result["task_id"], "telegram")
+        self.assertEqual(proj["status"], TaskStatus.FAILED.value)
+        self.assertEqual(proj["last_error"], "openclaw_submit_failed")
+        cursor_run_mock.assert_not_called()
 
     def test_server_followups_memory_question_uses_prior_chat_history(self) -> None:
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"

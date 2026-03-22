@@ -22,6 +22,7 @@ class AndreaSyncOpenClawHybridTests(unittest.TestCase):
             "/tmp/repo",
             "technical_or_repo_request",
             "collaborative",
+            False,
         )
         self.assertIn("Gemini 2.5", prompt)
         self.assertIn("Minimax 2.7", prompt)
@@ -36,6 +37,7 @@ class AndreaSyncOpenClawHybridTests(unittest.TestCase):
             "/tmp/repo",
             "technical_or_repo_request",
             "cursor_primary",
+            True,
         )
         self.assertIn("must involve Cursor", prompt)
         self.assertIn("repo-heavy execution into Cursor", prompt)
@@ -47,6 +49,7 @@ class AndreaSyncOpenClawHybridTests(unittest.TestCase):
             "/tmp/repo",
             "explicit_model_mention",
             "andrea_primary",
+            False,
             "gemini",
             "Gemini",
         )

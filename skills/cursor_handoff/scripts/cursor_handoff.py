@@ -24,7 +24,6 @@ import argparse
 import datetime as dt
 import json
 import os
-import re
 import ssl
 import shutil
 import subprocess
@@ -53,7 +52,6 @@ EXIT_CLI = 5
 EXIT_DIAG = 6
 
 TERMINAL_STATUSES = {"FINISHED", "FAILED", "CANCELLED", "STOPPED", "EXPIRED"}
-GITHUB_SLUG_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 TRANSIENT_HTTP_STATUSES = {429, 500, 502, 503, 504, cursor_api_common.TRANSIENT_TRANSPORT_STATUS}
 
 
@@ -145,11 +143,11 @@ def normalize_repo_input(repo_value: str) -> Tuple[Optional[Path], Optional[str]
             return None, None, f"Repo path exists but is not a directory: {expanded}"
         return expanded.resolve(), None, None
 
-    if raw.startswith("http://") or raw.startswith("https://"):
-        return None, raw.rstrip("/"), None
-
-    if GITHUB_SLUG_RE.fullmatch(raw):
-        return None, f"https://github.com/{raw}", None
+    try:
+        normalized_repo_url = cursor_api_common.normalize_github_repository_input(raw)
+        return None, normalized_repo_url, None
+    except ValueError:
+        pass
 
     return None, None, "Invalid --repo. Use local path, GitHub URL, or owner/repo."
 

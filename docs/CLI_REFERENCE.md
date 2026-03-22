@@ -14,7 +14,7 @@ Global options (before subcommand):
 
 `--id` values must be plain agent identifiers (letters, digits, `._:-` only) — not URLs — to avoid ambiguous paths.
 
-`create-agent` accepts **either** `--repository` **or** `--pr-url`, not both. Provide **`--prompt` and/or `--intent` and/or `--triage-repo`** (at least one): `--intent` is one of `code-review`, `refactor`, `release-notes`, `brief` (scaffolded task); `--triage-repo` prepends a non-secret repo snapshot (local path).
+`create-agent` accepts **either** `--repository` **or** `--pr-url`, not both. `--repository` may be either a full GitHub URL (e.g. `https://github.com/owner/repo`) or an `owner/repo` slug (it will be normalized to `https://github.com/owner/repo`, with optional trailing `/` or `.git` tolerated). Provide **`--prompt` and/or `--intent` and/or `--triage-repo`** (at least one): `--intent` is one of `code-review`, `refactor`, `release-notes`, `brief` (scaffolded task); `--triage-repo` prepends a non-secret repo snapshot (local path).
 
 Subcommands:
 

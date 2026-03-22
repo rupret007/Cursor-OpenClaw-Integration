@@ -165,6 +165,13 @@ def require_one_of(repo: str, pr_url: str) -> None:
         raise ValueError("Provide --repository or --pr-url.")
 
 
+def normalize_repository_arg(repository: str) -> str:
+    value = (repository or "").strip()
+    if not value:
+        return ""
+    return cursor_api_common.normalize_github_repository_input(value)
+
+
 def build_create_payload(args: argparse.Namespace, prompt_text: Optional[str] = None) -> Dict[str, Any]:
     source: Dict[str, Any]
     if args.pr_url:
@@ -358,6 +365,7 @@ def handle(cfg: Config, args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
         return status, {"status": status, "auth_mode": auth_mode, "response": data or raw}
 
     if args.command == "create-agent":
+        args.repository = normalize_repository_arg(args.repository)
         require_one_of(args.repository, args.pr_url)
         triage_path: Optional[Path] = None
         tr = (getattr(args, "triage_repo", "") or "").strip()

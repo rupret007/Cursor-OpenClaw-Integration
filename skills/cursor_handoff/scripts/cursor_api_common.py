@@ -9,9 +9,11 @@ from __future__ import annotations
 import json
 import re
 from typing import Any, Dict
+from urllib.parse import urlparse
 
 # Cursor agent IDs are opaque strings; disallow path-like / URL-like values.
 AGENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$")
+GITHUB_SLUG_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
 # Synthetic status for transport-layer failures (retried like 5xx).
 TRANSIENT_TRANSPORT_STATUS = 599
@@ -81,3 +83,37 @@ def parse_openai_enabled(raw: str | None = None) -> bool:
 
     v = (raw if raw is not None else os.getenv("OPENAI_API_ENABLED", "")).strip().lower()
     return v in ("1", "true", "yes")
+
+
+def normalize_github_repository_input(raw_value: str) -> str:
+    """
+    Normalize a GitHub repository input to canonical https URL form.
+
+    Accepts either:
+      - owner/repo
+      - http(s)://github.com/owner/repo[/...]
+    """
+    raw = (raw_value or "").strip()
+    if not raw:
+        raise ValueError("Repository cannot be empty.")
+
+    if GITHUB_SLUG_PATTERN.fullmatch(raw):
+        return f"https://github.com/{raw}"
+
+    parsed = urlparse(raw)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("Repository must be a GitHub URL or owner/repo slug.")
+    if (parsed.netloc or "").lower() != "github.com":
+        raise ValueError("Repository host must be github.com.")
+
+    parts = [p for p in parsed.path.split("/") if p]
+    if len(parts) < 2:
+        raise ValueError("GitHub repository URL must include owner and repo.")
+    owner = parts[0]
+    repo = parts[1]
+    if repo.endswith(".git"):
+        repo = repo[:-4]
+    slug = f"{owner}/{repo}"
+    if not GITHUB_SLUG_PATTERN.fullmatch(slug):
+        raise ValueError("Invalid GitHub repository format.")
+    return f"https://github.com/{slug}"

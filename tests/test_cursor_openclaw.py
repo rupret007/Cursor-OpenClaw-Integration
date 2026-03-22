@@ -137,6 +137,22 @@ class CursorOpenClawTests(unittest.TestCase):
         self.assertEqual(payload["target"]["branchName"], "cursor/test")
         self.assertFalse(payload["target"]["autoCreatePr"])
 
+    def test_normalize_repository_arg_owner_repo(self):
+        self.assertEqual(
+            MODULE.normalize_repository_arg("rupret007/StoryLiner"),
+            "https://github.com/rupret007/StoryLiner",
+        )
+
+    def test_normalize_repository_arg_url_variants(self):
+        self.assertEqual(
+            MODULE.normalize_repository_arg("https://github.com/rupret007/StoryLiner/"),
+            "https://github.com/rupret007/StoryLiner",
+        )
+        self.assertEqual(
+            MODULE.normalize_repository_arg("https://github.com/rupret007/StoryLiner.git"),
+            "https://github.com/rupret007/StoryLiner",
+        )
+
     def test_require_one_of_exclusive(self):
         with self.assertRaises(ValueError) as ctx:
             MODULE.require_one_of("https://github.com/a/b", "https://github.com/a/b/pull/1")

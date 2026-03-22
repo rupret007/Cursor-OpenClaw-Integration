@@ -44,6 +44,14 @@ class CursorHandoffTests(unittest.TestCase):
         self.assertIsNone(local)
         self.assertEqual(url, "https://github.com/owner/repo")
         self.assertIsNone(err)
+        local2, url2, err2 = MODULE.normalize_repo_input("https://github.com/owner/repo/")
+        self.assertIsNone(local2)
+        self.assertEqual(url2, "https://github.com/owner/repo")
+        self.assertIsNone(err2)
+        local3, url3, err3 = MODULE.normalize_repo_input("https://github.com/owner/repo.git")
+        self.assertIsNone(local3)
+        self.assertEqual(url3, "https://github.com/owner/repo")
+        self.assertIsNone(err3)
 
     def test_choose_backend(self):
         backend, err = MODULE.choose_backend(

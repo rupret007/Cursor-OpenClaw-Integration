@@ -165,6 +165,34 @@ def format_ack_message(
     )
 
 
+def format_continuation_notice(
+    task_id: str,
+    *,
+    chunk_preview: str = "",
+) -> str:
+    """Short Telegram copy when a follow-up message was merged onto the current task."""
+    preview = _clip(chunk_preview, 120)
+    lines = [
+        "Andrea:",
+        "I attached this message to your current task (same thread) so OpenClaw/Cursor stay aligned.",
+        "",
+        "What happened:",
+        "- This looks like a continuation of your last prompt, not a separate request.",
+        "- Andrea kept one logical task instead of starting a duplicate job.",
+    ]
+    if preview:
+        lines.extend(["", f"Latest chunk: {preview}"])
+    lines.extend(
+        [
+            "",
+            "Technical details:",
+            f"- Task: {task_id}",
+            "- Note: continuation merged",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def format_progress_message(
     task_id: str,
     *,

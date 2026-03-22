@@ -27,6 +27,7 @@ from .kill_switch import is_kill_switch_engaged, kill_switch_status
 from .policy import digest_age_seconds, evaluate_skill_absence_claim, get_capability_digest
 from .projector import project_task_dict
 from .schema import EventType
+from .telegram_continuation import attach_continuation_if_applicable
 from .store import (
     append_event,
     connect,
@@ -42,6 +43,7 @@ from .store import (
 from .telegram_format import (
     format_ack_message,
     format_alexa_session_summary,
+    format_continuation_notice,
     format_direct_message,
     format_final_message,
     format_progress_message,
@@ -546,11 +548,38 @@ class SyncServer:
         if snapshot["channel"] == "alexa":
             self._handle_alexa_followups(task_id, snapshot)
 
+    def _maybe_notify_telegram_continuation(
+        self,
+        task_id: str,
+        snapshot: Dict[str, Any],
+    ) -> None:
+        if snapshot.get("channel") != "telegram":
+            return
+        events = snapshot.get("events") or []
+        for _seq, _ts, et, payload in reversed(events):
+            if et != EventType.USER_MESSAGE.value or not isinstance(payload, dict):
+                continue
+            if not payload.get("telegram_continuation"):
+                return
+            preview = str(payload.get("routing_text") or payload.get("text") or "")
+            mid = payload.get("message_id")
+            phase = f"continuation_{mid}" if mid is not None else "continuation_unknown"
+            try:
+                self._send_telegram_message_once(
+                    task_id,
+                    phase,
+                    format_continuation_notice(task_id, chunk_preview=preview),
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(f"andrea_sync telegram continuation notice error: {exc}", flush=True)
+            return
+
     def _handle_telegram_followups(
         self,
         task_id: str,
         snapshot: Dict[str, Any],
     ) -> None:
+        self._maybe_notify_telegram_continuation(task_id, snapshot)
         projection = snapshot["projection"]
         status = str(projection.get("status") or "")
         if status == "created":
@@ -895,11 +924,16 @@ class SyncServer:
         return payload
 
     def _extract_cursor_prompt(self, task_id: str) -> str:
+        snapshot = self._task_snapshot(task_id)
+        if snapshot:
+            telegram_meta = self._projection_meta(snapshot["projection"], "telegram")
+            acc = str(telegram_meta.get("accumulated_prompt") or "").strip()
+            if acc:
+                return acc
         payload = self._latest_user_message_payload(task_id)
         prompt = str(payload.get("routing_text") or payload.get("text") or "").strip()
         if prompt:
             return prompt
-        snapshot = self._task_snapshot(task_id)
         if not snapshot:
             return ""
         return str(snapshot["projection"].get("summary") or "").strip()
@@ -1740,6 +1774,7 @@ def make_handler(server: SyncServer) -> type:
                     return
 
                 def run(c: sqlite3.Connection) -> Dict[str, Any]:
+                    attach_continuation_if_applicable(c, cmd)
                     return handle_command(c, cmd)
 
                 result = server.with_lock(run)

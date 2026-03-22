@@ -135,6 +135,41 @@ def _extract_urls(text: str) -> tuple[str, str, str]:
     return agent_url, agent_id, pr_url
 
 
+def _derive_openclaw_summary(
+    lockstep_meta: dict[str, Any],
+    clean_text: str,
+    payload: dict[str, Any],
+) -> str:
+    """
+    Prefer a user-meaningful summary: LOCKSTEP_JSON summary, then prose before the marker,
+    then outer OpenClaw JSON fields, then generic fallback is applied by the caller.
+    """
+    summary = _normalize_whitespace(str(lockstep_meta.get("summary") or "").strip())
+    if summary:
+        return summary
+    body = _normalize_whitespace(str(clean_text or "").strip())
+    if body:
+        return body
+    top = _normalize_whitespace(str(payload.get("summary") or "").strip())
+    if top:
+        return top
+    for key in ("message", "response", "answer", "output"):
+        val = payload.get(key)
+        if isinstance(val, str) and val.strip():
+            return _normalize_whitespace(val.strip())
+        if isinstance(val, dict):
+            for sub in ("text", "message", "content"):
+                inner = val.get(sub)
+                if isinstance(inner, str) and inner.strip():
+                    return _normalize_whitespace(inner.strip())
+    result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+    for key in ("summary", "message", "text"):
+        val = result.get(key)
+        if isinstance(val, str) and val.strip():
+            return _normalize_whitespace(val.strip())
+    return ""
+
+
 def run_openclaw_hybrid(
     *,
     task_id: str,
@@ -217,9 +252,7 @@ def run_openclaw_hybrid(
     delegated_to_cursor = bool(lockstep_meta.get("delegated_to_cursor", False))
     delegated_to_cursor = delegated_to_cursor or bool(agent_url or pr_url or cursor_agent_id)
 
-    summary = _normalize_whitespace(
-        str(lockstep_meta.get("summary") or clean_text or payload.get("summary") or "").strip()
-    )
+    summary = _derive_openclaw_summary(lockstep_meta, clean_text, payload)
     if not summary:
         summary = "OpenClaw completed the delegated task."
     status = str(lockstep_meta.get("status") or payload.get("status") or "ok").strip().lower()

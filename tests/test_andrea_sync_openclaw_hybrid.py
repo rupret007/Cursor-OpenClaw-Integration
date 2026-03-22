@@ -1,7 +1,9 @@
 import importlib.util
+import json
 import pathlib
 import sys
 import unittest
+from unittest import mock
 
 
 SCRIPT_PATH = (
@@ -53,6 +55,122 @@ class AndreaSyncOpenClawHybridTests(unittest.TestCase):
         self.assertIn("explicitly addressed the Gemini lane", prompt)
         self.assertIn("Preferred model family: gemini", prompt)
         self.assertIn("fall back", prompt)
+
+    def test_derive_summary_prefers_lockstep_summary(self) -> None:
+        s = MODULE._derive_openclaw_summary(
+            {"summary": "Shipped the fix."},
+            "ignored prose",
+            {"summary": "ignored top"},
+        )
+        self.assertEqual(s, "Shipped the fix.")
+
+    def test_derive_summary_falls_back_to_clean_text(self) -> None:
+        s = MODULE._derive_openclaw_summary(
+            {"summary": ""},
+            "User-visible answer before the marker.",
+            {},
+        )
+        self.assertEqual(s, "User-visible answer before the marker.")
+
+    def test_derive_summary_falls_back_to_payload_message(self) -> None:
+        s = MODULE._derive_openclaw_summary(
+            {},
+            "",
+            {"message": "Done via tool output."},
+        )
+        self.assertEqual(s, "Done via tool output.")
+
+    def test_derive_summary_falls_back_to_result_nested_text(self) -> None:
+        s = MODULE._derive_openclaw_summary(
+            {},
+            "",
+            {"result": {"text": "Nested completion text."}},
+        )
+        self.assertEqual(s, "Nested completion text.")
+
+    def test_derive_summary_empty_returns_empty_string(self) -> None:
+        self.assertEqual(MODULE._derive_openclaw_summary({}, "", {}), "")
+
+    def test_run_openclaw_hybrid_uses_generic_when_no_usable_text(self) -> None:
+        stdout_obj = {
+            "runId": "run-empty",
+            "status": "completed",
+            "result": {
+                "payloads": [
+                    {
+                        "text": (
+                            "LOCKSTEP_JSON: "
+                            '{"delegated_to_cursor":false,"summary":"","status":"completed"}'
+                        )
+                    }
+                ],
+            },
+        }
+
+        def fake_run(*_a, **_k):
+            class R:
+                returncode = 0
+                stdout = json.dumps(stdout_obj)
+                stderr = ""
+
+            return R()
+
+        with mock.patch.object(MODULE.subprocess, "run", side_effect=fake_run):
+            out = MODULE.run_openclaw_hybrid(
+                task_id="tsk_x",
+                prompt="do thing",
+                repo_path="/tmp/r",
+                agent_id="main",
+                route_reason="test",
+                collaboration_mode="auto",
+                preferred_model_family="",
+                preferred_model_label="",
+                timeout_seconds=60,
+                thinking="",
+            )
+        self.assertEqual(out["summary"], "OpenClaw completed the delegated task.")
+        self.assertTrue(out.get("ok"))
+
+    def test_run_openclaw_hybrid_prefers_prose_over_empty_lockstep_summary(self) -> None:
+        stdout_obj = {
+            "runId": "run-prose",
+            "status": "completed",
+            "result": {
+                "payloads": [
+                    {
+                        "text": (
+                            "Here is the real outcome for the user.\n"
+                            "LOCKSTEP_JSON: "
+                            '{"delegated_to_cursor":false,"summary":"","status":"completed"}'
+                        )
+                    }
+                ],
+            },
+        }
+
+        def fake_run(*_a, **_k):
+            class R:
+                returncode = 0
+                stdout = json.dumps(stdout_obj)
+                stderr = ""
+
+            return R()
+
+        with mock.patch.object(MODULE.subprocess, "run", side_effect=fake_run):
+            out = MODULE.run_openclaw_hybrid(
+                task_id="tsk_y",
+                prompt="do thing",
+                repo_path="/tmp/r",
+                agent_id="main",
+                route_reason="test",
+                collaboration_mode="auto",
+                preferred_model_family="",
+                preferred_model_label="",
+                timeout_seconds=60,
+                thinking="",
+            )
+        self.assertEqual(out["summary"], "Here is the real outcome for the user.")
+        self.assertIn("Here is the real outcome", out["raw_text"])
 
 
 if __name__ == "__main__":

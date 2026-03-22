@@ -43,8 +43,10 @@ API contract aligns with [Cursor Cloud Agents API](https://cursor.com/docs/cloud
 
 | Flag | Description |
 |------|-------------|
+| `--op` | Operation mode: `submit` (default), `status`, `conversation`, `artifacts`, `followup`, `stop`, `delete` |
+| `--agent-id` | Required for `--op` values other than `submit`; Cursor agent id (`bc-...`) |
 | `--repo` | Local path, `https://github.com/...`, or `owner/repo` |
-| `--prompt` | Task text (optional if `--intent` or `--triage` + local `--repo`) |
+| `--prompt` | Task text for `submit`, or follow-up message text for `--op followup` |
 | `--intent` | `code-review`, `refactor`, `release-notes`, or `brief` — prepends a structured scaffold |
 | `--triage` | Prepend repo triage block; **requires local** `--repo` path (not URL-only) |
 | `--read-only` | `true` / `false` |
@@ -59,6 +61,15 @@ API contract aligns with [Cursor Cloud Agents API](https://cursor.com/docs/cloud
 | `--diagnose` | No handoff; env + optional `/me` and `/agents?limit=1`; JSON `checks` includes `dotenv_files_loaded`, `openai_api_key_present`, `openai_api_enabled`, `openai_api_key_redacted` |
 | `--show-key` | With `--diagnose` only: redacted previews for Cursor/OpenAI keys in JSON |
 | `--dry-run` | Validate and show payload; works even if no backend configured (`backend: unavailable`) |
+
+Two-way examples (API mode):
+
+- Check status:
+  - `python3 skills/cursor_handoff/scripts/cursor_handoff.py --mode api --op status --agent-id bc-123 --json`
+- Read conversation:
+  - `python3 skills/cursor_handoff/scripts/cursor_handoff.py --mode api --op conversation --agent-id bc-123 --json`
+- Talk back (send follow-up):
+  - `python3 skills/cursor_handoff/scripts/cursor_handoff.py --mode api --op followup --agent-id bc-123 --prompt "Please continue and include test results." --json`
 
 ---
 

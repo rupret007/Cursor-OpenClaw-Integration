@@ -62,6 +62,30 @@ openclaw gateway restart
 3. **Handoff (implementation):** `--read-only false` only when the user explicitly wants code changes.
 4. **Deep operations:** use `cursor_openclaw.py` for `list-agents`, `conversation`, `followup`, `artifacts`, etc.
 
+### Two-way communication with a running Cursor agent
+
+Yes — this stack supports **two-way communication**:
+
+- **OpenClaw/Cursor can talk to the agent**: send follow-up prompts.
+- **OpenClaw/Cursor can listen back**: read status, conversation, and artifacts.
+
+You can do this either with:
+
+- `scripts/cursor_openclaw.py` (full API CLI), or
+- `skills/cursor_handoff/scripts/cursor_handoff.py` using `--op`:
+  - `status`
+  - `conversation`
+  - `artifacts`
+  - `followup`
+  - `stop`
+  - `delete`
+
+Example:
+
+```bash
+python3 skills/cursor_handoff/scripts/cursor_handoff.py --mode api --op followup --agent-id bc-123 --prompt "Continue and summarize tests." --json
+```
+
 ## Skill scripts
 
 | Script | Purpose |

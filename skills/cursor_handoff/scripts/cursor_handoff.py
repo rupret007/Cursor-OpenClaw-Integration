@@ -31,6 +31,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -289,6 +290,24 @@ class CursorApiClient:
                 return status, data, raw, mode
         return status, data, raw, "basic"
 
+    def request(
+        self,
+        method: str,
+        path: str,
+        body: Optional[Dict[str, Any]] = None,
+        query: Optional[Dict[str, str]] = None,
+    ) -> Tuple[int, Dict[str, Any], str, str]:
+        if query:
+            encoded = urllib.parse.urlencode(query)
+            full_path = f"{path}?{encoded}"
+        else:
+            full_path = path
+        for mode in ("bearer", "basic"):
+            status, data, raw = self._request_with_retries(method, full_path, body, auth_mode=mode)
+            if status not in (401, 403):
+                return status, data, raw, mode
+        return status, data, raw, "basic"
+
 
 def emit_json(payload: Dict[str, Any]) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
@@ -377,9 +396,24 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="OpenClaw -> Cursor handoff orchestrator (Python 3 required)."
     )
+    parser.add_argument(
+        "--op",
+        default="submit",
+        choices=["submit", "status", "conversation", "artifacts", "followup", "stop", "delete"],
+        help="Operation: submit (default) or interact with an existing agent (two-way comms).",
+    )
+    parser.add_argument(
+        "--agent-id",
+        default="",
+        help="Cursor agent id for --op status|conversation|artifacts|followup|stop|delete.",
+    )
     parser.add_argument("--repo", default="", help="Local repo path, GitHub URL, or owner/repo")
     parser.add_argument("--branch", default="", help="Target branch name (optional)")
-    parser.add_argument("--prompt", default="", help="Task prompt for Cursor (optional if --intent or --triage)")
+    parser.add_argument(
+        "--prompt",
+        default="",
+        help="Task prompt for submit, or message text for --op followup (optional if --intent or --triage).",
+    )
     parser.add_argument(
         "--intent",
         default=None,
@@ -520,11 +554,13 @@ def main() -> int:
         emit_json(payload) if args.json else emit_text(payload)
         return EXIT_VALIDATION
 
+    op = (args.op or "submit").strip().lower()
     prompt_text = args.prompt.strip()
+    agent_id = (args.agent_id or "").strip()
 
     local_repo: Optional[Path] = None
     input_repo_url: Optional[str] = None
-    if not args.diagnose:
+    if not args.diagnose and op == "submit":
         if not args.repo.strip():
             payload = {"ok": False, "error": "--repo is required unless --diagnose is used"}
             emit_json(payload) if args.json else emit_text(payload)
@@ -551,6 +587,21 @@ def main() -> int:
             }
             emit_json(payload) if args.json else emit_text(payload)
             return EXIT_VALIDATION
+    elif not args.diagnose and op != "submit":
+        if not agent_id:
+            payload = {"ok": False, "error": "--agent-id is required for --op " + op}
+            emit_json(payload) if args.json else emit_text(payload)
+            return EXIT_VALIDATION
+        try:
+            cursor_api_common.validate_agent_id(agent_id, flag_name="--agent-id")
+        except ValueError as err:
+            payload = {"ok": False, "error": str(err)}
+            emit_json(payload) if args.json else emit_text(payload)
+            return EXIT_VALIDATION
+        if op == "followup" and not prompt_text:
+            payload = {"ok": False, "error": "--prompt is required for --op followup"}
+            emit_json(payload) if args.json else emit_text(payload)
+            return EXIT_VALIDATION
 
     requested_mode = (args.mode.strip().lower() or os.getenv("OPENCLAW_CURSOR_DEFAULT_MODE", "auto").strip().lower() or "auto")
     if requested_mode not in {"api", "cli", "auto"}:
@@ -570,7 +621,7 @@ def main() -> int:
     include_branch_in_prompt = branch_from_user or (not read_only)
     if args.diagnose:
         inner_task = ""
-    else:
+    elif op == "submit":
         triage_path: Optional[Path] = local_repo if (args.triage and local_repo is not None) else None
         try:
             if args.intent or args.triage:
@@ -582,7 +633,7 @@ def main() -> int:
             emit_json(payload) if args.json else emit_text(payload)
             return EXIT_VALIDATION
 
-    if not args.diagnose:
+    if not args.diagnose and op == "submit":
         final_prompt = build_handoff_prompt(
             inner_task, read_only=read_only, branch=branch, include_branch=include_branch_in_prompt
         )
@@ -660,6 +711,8 @@ def main() -> int:
             "dry_run": True,
             "backend": backend if backend else "unavailable",
             "backend_error": backend_error,
+            "op": op,
+            "agent_id": agent_id or None,
             "mode_requested": requested_mode,
             "intent": args.intent,
             "triage": args.triage,
@@ -673,7 +726,7 @@ def main() -> int:
             "timeout_seconds": args.timeout_seconds,
             "api_retries": args.api_retries,
             "cli_timeout_seconds": args.cli_timeout_seconds,
-            "prompt_preview": final_prompt[:500],
+            "prompt_preview": final_prompt[:500] if op == "submit" else prompt_text[:500],
         }
         emit_json(payload) if args.json else emit_text(payload)
         return EXIT_OK
@@ -690,6 +743,14 @@ def main() -> int:
         return EXIT_PREREQ
 
     if backend == "cli":
+        if op != "submit":
+            payload = {
+                "ok": False,
+                "backend": "cli",
+                "error": f"CLI backend does not support --op {op}. Use --mode api (or set CURSOR_API_KEY).",
+            }
+            emit_json(payload) if args.json else emit_text(payload)
+            return EXIT_VALIDATION
         if local_repo is None:
             payload = {"ok": False, "backend": "cli", "error": "CLI backend requires a local repo directory."}
             emit_json(payload) if args.json else emit_text(payload)
@@ -753,6 +814,72 @@ def main() -> int:
         return EXIT_OK
 
     # API backend
+    api_client = CursorApiClient(
+        ApiConfig(
+            base_url=api_base_url,
+            api_key=api_key,
+            retries=args.api_retries,
+            retry_backoff_seconds=args.api_retry_backoff_seconds,
+        ),
+        timeout_seconds=args.timeout_seconds,
+    )
+
+    # Two-way operations against an existing agent.
+    if op != "submit":
+        try:
+            if op == "status":
+                status_code, data, raw, auth_mode = api_client.request("GET", f"/v0/agents/{agent_id}")
+            elif op == "conversation":
+                status_code, data, raw, auth_mode = api_client.request(
+                    "GET", f"/v0/agents/{agent_id}/conversation"
+                )
+            elif op == "artifacts":
+                status_code, data, raw, auth_mode = api_client.request("GET", f"/v0/agents/{agent_id}/artifacts")
+            elif op == "followup":
+                status_code, data, raw, auth_mode = api_client.request(
+                    "POST",
+                    f"/v0/agents/{agent_id}/followup",
+                    body={"prompt": {"text": prompt_text}},
+                )
+            elif op == "stop":
+                status_code, data, raw, auth_mode = api_client.request("POST", f"/v0/agents/{agent_id}/stop")
+            elif op == "delete":
+                status_code, data, raw, auth_mode = api_client.request("DELETE", f"/v0/agents/{agent_id}")
+            else:
+                payload = {"ok": False, "backend": "api", "error": f"Unsupported --op: {op}"}
+                emit_json(payload) if args.json else emit_text(payload)
+                return EXIT_VALIDATION
+        except Exception as err:  # noqa: BLE001
+            payload = {"ok": False, "backend": "api", "op": op, "agent_id": agent_id, "error": str(err)}
+            emit_json(payload) if args.json else emit_text(payload)
+            return EXIT_API
+
+        if status_code >= 400:
+            payload = {
+                "ok": False,
+                "backend": "api",
+                "op": op,
+                "agent_id": agent_id,
+                "auth_mode": auth_mode,
+                "error": f"Cursor API {op} failed (HTTP {status_code})",
+                "response": data if data else raw,
+            }
+            emit_json(payload) if args.json else emit_text(payload)
+            return EXIT_API
+
+        payload = {
+            "ok": True,
+            "backend": "api",
+            "op": op,
+            "agent_id": agent_id,
+            "auth_mode": auth_mode,
+            "status": status_code,
+            "response": data if data else raw,
+        }
+        emit_json(payload) if args.json else emit_text(payload)
+        return EXIT_OK
+
+    # Submit a new agent (original behavior).
     resolved_repository_url = input_repo_url
     resolved_ref = None
     if local_repo is not None:
@@ -768,15 +895,6 @@ def main() -> int:
             return EXIT_VALIDATION
 
     assert resolved_repository_url is not None
-    api_client = CursorApiClient(
-        ApiConfig(
-            base_url=api_base_url,
-            api_key=api_key,
-            retries=args.api_retries,
-            retry_backoff_seconds=args.api_retry_backoff_seconds,
-        ),
-        timeout_seconds=args.timeout_seconds,
-    )
 
     if read_only and auto_create_pr:
         auto_create_pr = False

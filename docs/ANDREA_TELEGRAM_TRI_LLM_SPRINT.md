@@ -31,6 +31,8 @@ The current Telegram routing understands:
   - force Cursor-primary collaboration
 - `@Andrea @Cursor`
   - request joint collaboration
+- `@Gemini`, `@Minimax`, `@OpenAI`, or `@GPT`
+  - request a preferred OpenClaw model lane for the coordination pass
 - phrases like `work together`, `team up`, `double-check`
   - also request collaboration
 - phrases like `show the full dialogue`, `show all handoffs`, `visible collaboration`
@@ -52,8 +54,9 @@ Ask the system to do all of the following in one message:
 When full visibility is requested, the thread should show:
 
 - the normal Andrea task acknowledgement
+- the requested OpenClaw lane when you directly address a model like `@Gemini`
 - a richer running update when the collaborative lane starts
-- coordination updates when OpenClaw begins triage or hands execution to Cursor
+- coordination updates when OpenClaw begins triage or hands execution to Cursor, including the active provider/model when available
 - the normal final summary with technical details
 
 This still does not mean every private chain-of-thought token is streamed. It means meaningful collaboration and handoff updates are surfaced in the thread instead of only a minimal `queued/running/completed` lifecycle.
@@ -86,7 +89,7 @@ bash scripts/andrea_communication_smoke.sh
 Use this in Telegram when you want the aggressive one-hour sprint:
 
 ```text
-@Andrea @Cursor work together on a focused one-hour improvement sprint for this repository and show the full dialogue, major handoffs, and visible collaboration in this Telegram thread:
+@Andrea @Cursor @Gemini work together on a focused one-hour improvement sprint for this repository and show the full dialogue, major handoffs, and visible collaboration in this Telegram thread:
 
 /Users/andreabot/repos/Cursor-OpenClaw-Integration
 
@@ -98,6 +101,7 @@ Execution model:
   - Minimax 2.7 for alternate analysis and critique
   - OpenAI for precise synthesis and instruction-following
   - Cursor for heavy repo execution, code edits, implementation, and coding-agent work
+- Since I addressed `@Gemini`, start the coordination pass there when available, and note any fallback if a different lane is safer or required.
 - Do not use every model for every step. Use each one only where it adds real value.
 - Keep one shared task timeline in Telegram and make the coordination visible.
 

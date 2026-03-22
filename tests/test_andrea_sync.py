@@ -228,6 +228,13 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(routing["collaboration_mode"], "collaborative")
         self.assertEqual(routing["visibility_mode"], "full")
 
+    def test_telegram_extract_routing_hints_detects_direct_model_lane(self) -> None:
+        routing = tg_adapt.extract_routing_hints("@Gemini review this plan with Andrea")
+        self.assertEqual(routing["preferred_model_family"], "gemini")
+        self.assertEqual(routing["preferred_model_label"], "Gemini")
+        self.assertEqual(routing["model_mentions"], ["gemini"])
+        self.assertEqual(routing["routing_text"], "review this plan with Andrea")
+
     def test_telegram_update_to_command_with_cursor_mention(self) -> None:
         cmd = tg_adapt.update_to_command(
             {
@@ -319,6 +326,15 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(decision.mode, "delegate")
         self.assertEqual(decision.delegate_target, "openclaw_hybrid")
         self.assertEqual(decision.collaboration_mode, "cursor_primary")
+
+    def test_router_model_mention_forces_openclaw_delegate(self) -> None:
+        decision = route_message(
+            "how are you?",
+            preferred_model_family="gemini",
+        )
+        self.assertEqual(decision.mode, "delegate")
+        self.assertEqual(decision.reason, "explicit_model_mention")
+        self.assertEqual(decision.delegate_target, "openclaw_hybrid")
 
     def test_router_collaboration_phrase_requests_joint_work(self) -> None:
         decision = route_message("Please work together and double-check the repo changes.")
@@ -459,6 +475,14 @@ class TestAndreaSync(unittest.TestCase):
         )
         self.assertIn("addressed Cursor directly", text)
 
+    def test_telegram_ack_message_mentions_preferred_model_lane(self) -> None:
+        text = format_ack_message(
+            "tsk_demo",
+            worker_label="OpenClaw",
+            preferred_model_label="Gemini",
+        )
+        self.assertIn("Preferred OpenClaw lane: Gemini", text)
+
     def test_telegram_running_message_format(self) -> None:
         text = format_running_message("tsk_demo", agent_url="https://cursor.com/agents/demo")
         self.assertIn("Andrea:", text)
@@ -492,6 +516,15 @@ class TestAndreaSync(unittest.TestCase):
         self.assertIn("gemini-2.5-flash", text)
         self.assertIn("work together", text.lower())
 
+    def test_telegram_progress_message_can_show_preferred_lane_without_live_model(self) -> None:
+        text = format_progress_message(
+            "tsk_demo",
+            progress_text="OpenClaw is starting with the requested reasoning lane.",
+            worker_label="OpenClaw",
+            preferred_model_label="MiniMax",
+        )
+        self.assertIn("Preferred OpenClaw lane: MiniMax", text)
+
     def test_telegram_final_message_separates_andrea_from_cursor(self) -> None:
         text = format_final_message(
             "tsk_demo",
@@ -523,6 +556,17 @@ class TestAndreaSync(unittest.TestCase):
         self.assertIn("OpenClaw finished processing", text)
         self.assertIn("OpenClaw said:", text)
         self.assertIn("OpenClaw session: sess_demo", text)
+
+    def test_telegram_final_message_uses_openclaw_model_speaker_label(self) -> None:
+        text = format_final_message(
+            "tsk_demo",
+            status="completed",
+            summary="Reviewed the plan and produced a concise synthesis.",
+            worker_label="OpenClaw",
+            provider="google",
+            model="gemini-2.5-flash",
+        )
+        self.assertIn("OpenClaw coordinator (google / gemini-2.5-flash) said:", text)
 
     def test_telegram_final_message_notes_cursor_primary_request(self) -> None:
         text = format_final_message(
@@ -682,6 +726,35 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(proj["status"], TaskStatus.QUEUED.value)
         self.assertEqual(proj["meta"]["execution"]["routing_hint"], "cursor")
         self.assertEqual(proj["meta"]["execution"]["collaboration_mode"], "cursor_primary")
+
+    def test_server_followups_explicit_model_mention_marks_preferred_lane(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        result = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-gemini-mention",
+                "payload": {
+                    "text": "@Gemini please review the repo approach",
+                    "routing_text": "please review the repo approach",
+                    "preferred_model_family": "gemini",
+                    "preferred_model_label": "Gemini",
+                    "model_mentions": ["gemini"],
+                    "chat_id": 1,
+                    "message_id": 31,
+                },
+            },
+        )
+        server._handle_task_followups(result["task_id"])
+        proj = project_task_dict(server.conn, result["task_id"], "telegram")
+        self.assertEqual(proj["status"], TaskStatus.QUEUED.value)
+        self.assertEqual(proj["meta"]["telegram"]["preferred_model_family"], "gemini")
+        self.assertEqual(proj["meta"]["execution"]["preferred_model_label"], "Gemini")
 
     def test_server_followups_collaborative_full_visibility_sets_execution_meta(self) -> None:
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"

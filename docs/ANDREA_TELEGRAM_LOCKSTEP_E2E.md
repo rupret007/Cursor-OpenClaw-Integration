@@ -133,6 +133,7 @@ The Telegram bridge now supports lightweight addressing hints in the message tex
 - `@Andrea ...` tells the bot to keep the turn in Andrea's direct assistant lane when possible.
 - `@Cursor ...` tells Andrea/OpenClaw to run a Cursor-first collaboration pass instead of replying directly.
 - `@Andrea @Cursor ...` or natural phrases like `work together`, `team up`, or `double-check` tell the system to have OpenClaw and Cursor collaborate before the final answer.
+- `@Gemini ...`, `@Minimax ...`, `@OpenAI ...`, or `@GPT ...` tell Andrea/OpenClaw to start from that preferred model lane when available and report the active provider/model back in Telegram when possible.
 - Add phrases like `show the full dialogue`, `show all handoffs`, or `visible collaboration` when you want the Telegram thread to expose richer collaboration updates for an intentional sprint-style session.
 
 These tags are stripped from the delegated prompt before it is sent downstream, so they control routing without polluting the actual work request.

@@ -416,6 +416,26 @@ class SyncServer:
         telegram_meta = self._projection_meta(snapshot["projection"], "telegram")
         return str(telegram_meta.get("visibility_mode") or "summary").strip() or "summary"
 
+    def _task_preferred_model_family(self, task_id: str) -> str:
+        snapshot = self._task_snapshot(task_id)
+        if not snapshot:
+            return ""
+        execution_meta = self._projection_meta(snapshot["projection"], "execution")
+        if execution_meta.get("preferred_model_family"):
+            return str(execution_meta.get("preferred_model_family")).strip()
+        telegram_meta = self._projection_meta(snapshot["projection"], "telegram")
+        return str(telegram_meta.get("preferred_model_family") or "").strip()
+
+    def _task_preferred_model_label(self, task_id: str) -> str:
+        snapshot = self._task_snapshot(task_id)
+        if not snapshot:
+            return ""
+        execution_meta = self._projection_meta(snapshot["projection"], "execution")
+        if execution_meta.get("preferred_model_label"):
+            return str(execution_meta.get("preferred_model_label")).strip()
+        telegram_meta = self._projection_meta(snapshot["projection"], "telegram")
+        return str(telegram_meta.get("preferred_model_label") or "").strip()
+
     def _task_mention_targets(self, task_id: str) -> list[str]:
         snapshot = self._task_snapshot(task_id)
         if not snapshot:
@@ -486,6 +506,11 @@ class SyncServer:
                         ),
                         provider=str(payload.get("provider") or openclaw_meta.get("provider") or ""),
                         model=str(payload.get("model") or openclaw_meta.get("model") or ""),
+                        preferred_model_label=str(
+                            execution_meta.get("preferred_model_label")
+                            or telegram_meta.get("preferred_model_label")
+                            or ""
+                        ),
                     ),
                 )
             except Exception as exc:  # noqa: BLE001
@@ -547,6 +572,11 @@ class SyncServer:
                             or telegram_meta.get("collaboration_mode")
                             or ""
                         ),
+                        preferred_model_label=str(
+                            self._projection_meta(projection, "execution").get("preferred_model_label")
+                            or telegram_meta.get("preferred_model_label")
+                            or ""
+                        ),
                     ),
                 )
             except Exception as exc:  # noqa: BLE001
@@ -575,6 +605,7 @@ class SyncServer:
                         collaboration_mode=str(execution_meta.get("collaboration_mode") or ""),
                         provider=str(openclaw_meta.get("provider") or ""),
                         model=str(openclaw_meta.get("model") or ""),
+                        preferred_model_label=str(execution_meta.get("preferred_model_label") or ""),
                     ),
                 )
             except Exception as exc:  # noqa: BLE001
@@ -605,6 +636,7 @@ class SyncServer:
                         collaboration_mode=str(execution_meta.get("collaboration_mode") or ""),
                         provider=str(openclaw_meta.get("provider") or ""),
                         model=str(openclaw_meta.get("model") or ""),
+                        preferred_model_label=str(execution_meta.get("preferred_model_label") or ""),
                     ),
                 )
             except Exception as exc:  # noqa: BLE001
@@ -676,6 +708,7 @@ class SyncServer:
                 history=history,
                 routing_hint=str(user_payload.get("routing_hint") or "auto"),
                 collaboration_mode=str(user_payload.get("collaboration_mode") or "auto"),
+                preferred_model_family=str(user_payload.get("preferred_model_family") or ""),
             )
             if decision.mode == "delegate":
                 execution_lane = decision.delegate_target or self.telegram_delegate_lane
@@ -694,6 +727,13 @@ class SyncServer:
                         "collaboration_mode": decision.collaboration_mode,
                         "visibility_mode": str(user_payload.get("visibility_mode") or "summary"),
                         "mention_targets": user_payload.get("mention_targets", []),
+                        "model_mentions": user_payload.get("model_mentions", []),
+                        "preferred_model_family": str(
+                            user_payload.get("preferred_model_family") or ""
+                        ),
+                        "preferred_model_label": str(
+                            user_payload.get("preferred_model_label") or ""
+                        ),
                     },
                 )
             else:
@@ -855,6 +895,8 @@ class SyncServer:
         prompt: str,
         route_reason: str,
         collaboration_mode: str,
+        preferred_model_family: str,
+        preferred_model_label: str,
     ) -> Dict[str, Any]:
         return self._run_json_subprocess(
             [
@@ -872,6 +914,10 @@ class SyncServer:
                 route_reason,
                 "--collaboration-mode",
                 collaboration_mode,
+                "--preferred-model-family",
+                preferred_model_family,
+                "--preferred-model-label",
+                preferred_model_label,
                 "--timeout-seconds",
                 str(self.openclaw_timeout_seconds),
                 "--thinking",
@@ -972,6 +1018,8 @@ class SyncServer:
         collaboration_mode = self._task_collaboration_mode(task_id)
         visibility_mode = self._task_visibility_mode(task_id)
         routing_hint = self._task_routing_hint(task_id)
+        preferred_model_family = self._task_preferred_model_family(task_id)
+        preferred_model_label = self._task_preferred_model_label(task_id)
         if not prompt:
             self._append_task_event(
                 task_id,
@@ -982,6 +1030,8 @@ class SyncServer:
                     "backend": "openclaw",
                     "execution_lane": "openclaw_hybrid",
                     "visibility_mode": visibility_mode,
+                    "preferred_model_family": preferred_model_family,
+                    "preferred_model_label": preferred_model_label,
                 },
             )
             return
@@ -996,6 +1046,8 @@ class SyncServer:
                 "routing_hint": routing_hint,
                 "collaboration_mode": collaboration_mode,
                 "visibility_mode": visibility_mode,
+                "preferred_model_family": preferred_model_family,
+                "preferred_model_label": preferred_model_label,
             },
         )
         if visibility_mode == "full" and collaboration_mode in {"cursor_primary", "collaborative"}:
@@ -1013,6 +1065,8 @@ class SyncServer:
                     "routing_hint": routing_hint,
                     "collaboration_mode": collaboration_mode,
                     "visibility_mode": visibility_mode,
+                    "preferred_model_family": preferred_model_family,
+                    "preferred_model_label": preferred_model_label,
                     "force_telegram_note": True,
                 },
             )
@@ -1022,6 +1076,8 @@ class SyncServer:
                 prompt,
                 self._task_route_reason(task_id),
                 collaboration_mode,
+                preferred_model_family,
+                preferred_model_label,
             )
         except Exception as exc:  # noqa: BLE001
             if self.openclaw_fallback_to_cursor:
@@ -1040,6 +1096,8 @@ class SyncServer:
                         "routing_hint": routing_hint,
                         "collaboration_mode": collaboration_mode,
                         "visibility_mode": visibility_mode,
+                        "preferred_model_family": preferred_model_family,
+                        "preferred_model_label": preferred_model_label,
                         "force_telegram_note": True,
                     },
                 )
@@ -1057,6 +1115,8 @@ class SyncServer:
                     "routing_hint": routing_hint,
                     "collaboration_mode": collaboration_mode,
                     "visibility_mode": visibility_mode,
+                    "preferred_model_family": preferred_model_family,
+                    "preferred_model_label": preferred_model_label,
                 },
             )
             return
@@ -1077,6 +1137,8 @@ class SyncServer:
             "routing_hint": routing_hint,
             "collaboration_mode": collaboration_mode,
             "visibility_mode": visibility_mode,
+            "preferred_model_family": preferred_model_family,
+            "preferred_model_label": preferred_model_label,
             "raw_text": _clip(result.get("raw_text"), 4000) or None,
         }
         if visibility_mode == "full":
@@ -1105,6 +1167,8 @@ class SyncServer:
                     "routing_hint": routing_hint,
                     "collaboration_mode": collaboration_mode,
                     "visibility_mode": visibility_mode,
+                    "preferred_model_family": preferred_model_family,
+                    "preferred_model_label": preferred_model_label,
                     "raw_text": _clip(result.get("raw_text"), 4000) or None,
                     "force_telegram_note": True,
                 },
@@ -1126,6 +1190,8 @@ class SyncServer:
                     "routing_hint": routing_hint,
                     "collaboration_mode": collaboration_mode,
                     "visibility_mode": visibility_mode,
+                    "preferred_model_family": preferred_model_family,
+                    "preferred_model_label": preferred_model_label,
                     "force_telegram_note": True,
                 },
             )
@@ -1150,6 +1216,8 @@ class SyncServer:
         prompt = self._extract_cursor_prompt(task_id)
         visibility_mode = self._task_visibility_mode(task_id)
         collaboration_mode = self._task_collaboration_mode(task_id)
+        preferred_model_family = self._task_preferred_model_family(task_id)
+        preferred_model_label = self._task_preferred_model_label(task_id)
         if not prompt:
             self._append_task_event(
                 task_id,
@@ -1158,6 +1226,8 @@ class SyncServer:
                     "error": "missing_prompt",
                     "message": "No Telegram text was available to send to Cursor.",
                     "visibility_mode": visibility_mode,
+                    "preferred_model_family": preferred_model_family,
+                    "preferred_model_label": preferred_model_label,
                 },
             )
             return
@@ -1171,6 +1241,8 @@ class SyncServer:
                     "error": "cursor_submit_failed",
                     "message": _clip(exc, 1500),
                     "visibility_mode": visibility_mode,
+                    "preferred_model_family": preferred_model_family,
+                    "preferred_model_label": preferred_model_label,
                 },
             )
             return
@@ -1189,6 +1261,8 @@ class SyncServer:
                 "pr_url": pr_url or None,
                 "status": initial_status,
                 "visibility_mode": visibility_mode,
+                "preferred_model_family": preferred_model_family,
+                "preferred_model_label": preferred_model_label,
             },
         )
         if visibility_mode == "full" and collaboration_mode in {"cursor_primary", "collaborative"}:
@@ -1205,6 +1279,8 @@ class SyncServer:
                     "agent_url": agent_url or None,
                     "pr_url": pr_url or None,
                     "visibility_mode": visibility_mode,
+                    "preferred_model_family": preferred_model_family,
+                    "preferred_model_label": preferred_model_label,
                     "force_telegram_note": True,
                 },
             )
@@ -1218,6 +1294,8 @@ class SyncServer:
                     "agent_url": agent_url or None,
                     "pr_url": pr_url or None,
                     "visibility_mode": visibility_mode,
+                    "preferred_model_family": preferred_model_family,
+                    "preferred_model_label": preferred_model_label,
                 },
             )
             return
@@ -1252,6 +1330,8 @@ class SyncServer:
                     "agent_url": agent_url or None,
                     "pr_url": pr_url or None,
                     "visibility_mode": visibility_mode,
+                    "preferred_model_family": preferred_model_family,
+                    "preferred_model_label": preferred_model_label,
                 },
             )
             return
@@ -1269,6 +1349,8 @@ class SyncServer:
                     "status": latest_status,
                     "raw_status": latest_response.get("status"),
                     "visibility_mode": visibility_mode,
+                    "preferred_model_family": preferred_model_family,
+                    "preferred_model_label": preferred_model_label,
                 },
             )
             return
@@ -1284,6 +1366,8 @@ class SyncServer:
                     "pr_url": pr_url or None,
                     "raw_status": latest_response.get("status"),
                     "visibility_mode": visibility_mode,
+                    "preferred_model_family": preferred_model_family,
+                    "preferred_model_label": preferred_model_label,
                 },
             )
             return
@@ -1300,6 +1384,8 @@ class SyncServer:
                 "pr_url": pr_url or None,
                 "raw_status": latest_response.get("status"),
                 "visibility_mode": visibility_mode,
+                "preferred_model_family": preferred_model_family,
+                "preferred_model_label": preferred_model_label,
             },
         )
 

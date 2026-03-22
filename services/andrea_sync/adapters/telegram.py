@@ -10,6 +10,7 @@ import urllib.request
 from typing import Any, Dict, Optional
 
 MENTION_RE = re.compile(r"(?<!\w)@(andrea|cursor)\b", re.I)
+MODEL_MENTION_RE = re.compile(r"(?<!\w)@(gemini|minimax|openai|gpt)\b", re.I)
 COLLABORATION_RE = re.compile(
     r"\b(work together|team up|collaborate|both of you|double-?check|second opinion)\b",
     re.I,
@@ -29,6 +30,17 @@ def extract_routing_hints(text: str) -> Dict[str, Any]:
     raw_text = str(text or "").strip()
     matches = [m.group(1).lower() for m in MENTION_RE.finditer(raw_text)]
     mention_targets = sorted(set(matches))
+    model_aliases = {"gemini": "gemini", "minimax": "minimax", "openai": "openai", "gpt": "openai"}
+    model_labels = {"gemini": "Gemini", "minimax": "MiniMax", "openai": "OpenAI"}
+    model_mentions: list[str] = []
+    preferred_model_family = ""
+    for match in MODEL_MENTION_RE.finditer(raw_text):
+        family = model_aliases.get(match.group(1).lower(), "")
+        if family and family not in model_mentions:
+            model_mentions.append(family)
+        if not preferred_model_family and family:
+            preferred_model_family = family
+    preferred_model_label = model_labels.get(preferred_model_family, "")
     routing_hint = "auto"
     if mention_targets == ["andrea"]:
         routing_hint = "andrea"
@@ -36,7 +48,7 @@ def extract_routing_hints(text: str) -> Dict[str, Any]:
         routing_hint = "cursor"
     elif mention_targets == ["andrea", "cursor"]:
         routing_hint = "collaborate"
-    cleaned = _normalize_spaces(MENTION_RE.sub(" ", raw_text))
+    cleaned = _normalize_spaces(MODEL_MENTION_RE.sub(" ", MENTION_RE.sub(" ", raw_text)))
     collaboration_mode = "auto"
     if routing_hint == "cursor":
         collaboration_mode = "cursor_primary"
@@ -51,6 +63,9 @@ def extract_routing_hints(text: str) -> Dict[str, Any]:
         "raw_text": raw_text,
         "routing_text": cleaned,
         "mention_targets": mention_targets,
+        "model_mentions": model_mentions,
+        "preferred_model_family": preferred_model_family,
+        "preferred_model_label": preferred_model_label,
         "routing_hint": routing_hint,
         "collaboration_mode": collaboration_mode,
         "visibility_mode": visibility_mode,
@@ -83,6 +98,9 @@ def update_to_command(update: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             "text": routing["raw_text"],
             "routing_text": routing["routing_text"],
             "mention_targets": routing["mention_targets"],
+            "model_mentions": routing["model_mentions"],
+            "preferred_model_family": routing["preferred_model_family"],
+            "preferred_model_label": routing["preferred_model_label"],
             "routing_hint": routing["routing_hint"],
             "collaboration_mode": routing["collaboration_mode"],
             "visibility_mode": routing["visibility_mode"],

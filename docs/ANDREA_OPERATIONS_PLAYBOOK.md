@@ -138,6 +138,7 @@ bash scripts/andrea_slo_check.sh
 | Telegram ingests but no reply | Confirm `TELEGRAM_BOT_TOKEN` is loaded by `python3 scripts/andrea_sync_server.py`; inspect `/v1/tasks/{id}` for `meta.telegram.chat_id` plus `meta.execution` / `meta.openclaw` / `meta.cursor` |
 | Telegram task queues then fails immediately | Confirm `openclaw agent --agent main --message "READY" --json` succeeds, `openclaw skills info cursor_handoff --json` is eligible, and `CURSOR_API_KEY` + repo `origin` are available for OpenClaw escalations; inspect `/v1/tasks/{id}` `last_error` |
 | `@Cursor` did not seem to involve Cursor | Inspect `/v1/tasks/{id}` `meta.execution.collaboration_mode` and `meta.execution.delegated_to_cursor`; if needed, rerun after confirming `cursor_handoff` is eligible and `CURSOR_API_KEY` is available |
+| `@Gemini` / `@Minimax` / `@OpenAI` did not seem to honor the requested lane | Inspect `/v1/tasks/{id}` `meta.telegram.preferred_model_family`, `meta.execution.preferred_model_label`, and `meta.openclaw.provider` / `meta.openclaw.model`; the preferred lane is a strong routing instruction, but the final active provider/model may differ if OpenClaw falls back for reliability |
 
 ---
 
@@ -207,7 +208,7 @@ python3 scripts/andrea_sync_server.py
 **Telegram:** Point BotFather `setWebhook` to  
 `https://your-public-host/v1/telegram/webhook?secret=...` (same value as `ANDREA_SYNC_TELEGRAM_SECRET`) or use the header secret path. The handler returns `200` immediately, creates a task, routes simple turns through Andrea directly, and sends delegated work into the OpenClaw hybrid lane first. OpenClaw can then finish the task itself or escalate to Cursor via `cursor_handoff`.
 
-**Addressing rules:** `@Andrea` prefers the direct Andrea lane, `@Cursor` requests Cursor-first collaboration, and `@Andrea @Cursor` or phrasing like `work together` / `double-check` requests joint OpenClaw + Cursor handling. Add phrases like `show the full dialogue`, `show all handoffs`, or `visible collaboration` when you want a much richer Telegram collaboration stream for an intentional sprint session.
+**Addressing rules:** `@Andrea` prefers the direct Andrea lane, `@Cursor` requests Cursor-first collaboration, `@Andrea @Cursor` or phrasing like `work together` / `double-check` requests joint OpenClaw + Cursor handling, and `@Gemini` / `@Minimax` / `@OpenAI` / `@GPT` request a preferred OpenClaw model lane. Add phrases like `show the full dialogue`, `show all handoffs`, or `visible collaboration` when you want a much richer Telegram collaboration stream for an intentional sprint session.
 
 **E2E helper (cloudflared + setWebhook + verify):** see [ANDREA_TELEGRAM_LOCKSTEP_E2E.md](ANDREA_TELEGRAM_LOCKSTEP_E2E.md) and `python3 scripts/andrea_lockstep_telegram_e2e.py tunnel-and-webhook`.
 

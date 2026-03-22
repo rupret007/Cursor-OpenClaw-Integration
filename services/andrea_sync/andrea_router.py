@@ -87,6 +87,7 @@ def classify_route(
     *,
     routing_hint: str = "auto",
     collaboration_mode: str = "auto",
+    preferred_model_family: str = "",
 ) -> tuple[str, str, str, str]:
     clean = _normalize(text)
     word_count = len(clean.split())
@@ -97,6 +98,8 @@ def classify_route(
         return "delegate", "explicit_cursor_mention", "openclaw_hybrid", "cursor_primary"
     if hint == "collaborate":
         return "delegate", "explicit_collaboration_mention", "openclaw_hybrid", "collaborative"
+    if preferred_model_family:
+        return "delegate", "explicit_model_mention", "openclaw_hybrid", "andrea_primary" if collab == "auto" else collab
     if not clean:
         return "direct", "explicit_andrea_mention" if andrea_preferred else "empty_or_whitespace", "", "andrea_primary" if andrea_preferred else collab
     if THANKS_RE.search(clean):
@@ -311,11 +314,13 @@ def route_message(
     *,
     routing_hint: str = "auto",
     collaboration_mode: str = "auto",
+    preferred_model_family: str = "",
 ) -> AndreaRouteDecision:
     mode, reason, delegate_target, resolved_collab = classify_route(
         text,
         routing_hint=routing_hint,
         collaboration_mode=collaboration_mode,
+        preferred_model_family=preferred_model_family,
     )
     if mode == "delegate":
         return AndreaRouteDecision(

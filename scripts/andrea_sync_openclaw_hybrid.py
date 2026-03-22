@@ -33,9 +33,13 @@ def _build_prompt(
     repo_path: str,
     route_reason: str,
     collaboration_mode: str,
+    preferred_model_family: str = "",
+    preferred_model_label: str = "",
 ) -> str:
     collaboration_notes = ""
     collab = str(collaboration_mode or "auto").strip().lower() or "auto"
+    preferred_family = str(preferred_model_family or "").strip().lower()
+    preferred_label = str(preferred_model_label or "").strip()
     if collab == "cursor_primary":
         collaboration_notes = (
             "- The user explicitly asked for Cursor. You should coordinate the handoff, but you must involve "
@@ -58,6 +62,13 @@ def _build_prompt(
             "- Include a short collaboration transcript in natural language before the LOCKSTEP_JSON marker. "
             "Mention which model/provider or execution lane handled which part of the work.\n"
         )
+    preferred_model_note = ""
+    if preferred_family:
+        preferred_model_note = (
+            f"- The user explicitly addressed the {preferred_label or preferred_family.title()} lane.\n"
+            f"- Start in that lane when it is available, unless reliability or tool constraints require a safer fallback.\n"
+            "- If you do fall back, say so briefly in the collaboration transcript.\n"
+        )
     return (
         f"You are running inside Andrea's lockstep OpenClaw execution lane for task {task_id}.\n\n"
         f"User request:\n{user_prompt.strip()}\n\n"
@@ -68,6 +79,7 @@ def _build_prompt(
         "- Keep the user-facing answer concise and directly useful.\n"
         "- When collaboration is requested, think like a coordinator: triage first, assign the right model/tool to the right subtask, then synthesize the result.\n"
         f"{collaboration_notes}"
+        f"{preferred_model_note}"
         "- End your response with exactly one single-line marker in this format:\n"
         '  LOCKSTEP_JSON: {"delegated_to_cursor":false,"cursor_agent_url":"","cursor_agent_id":"","pr_url":"","summary":"","status":"completed"}\n'
         "- Fill unknown string fields with an empty string.\n"
@@ -77,6 +89,7 @@ def _build_prompt(
         f"Local repository path for coding work: {repo_path}\n"
         f"Route reason: {route_reason or 'unspecified'}\n"
         f"Collaboration mode: {collab}\n"
+        f"Preferred model family: {preferred_family or 'none'}\n"
     )
 
 
@@ -130,10 +143,20 @@ def run_openclaw_hybrid(
     agent_id: str,
     route_reason: str,
     collaboration_mode: str,
+    preferred_model_family: str,
+    preferred_model_label: str,
     timeout_seconds: int,
     thinking: str,
 ) -> dict[str, Any]:
-    message = _build_prompt(task_id, prompt, repo_path, route_reason, collaboration_mode)
+    message = _build_prompt(
+        task_id,
+        prompt,
+        repo_path,
+        route_reason,
+        collaboration_mode,
+        preferred_model_family,
+        preferred_model_label,
+    )
     cmd = [
         "openclaw",
         "agent",
@@ -219,6 +242,8 @@ def run_openclaw_hybrid(
         "status": status,
         "stop_reason": str(result.get("stopReason") or "").strip(),
         "collaboration_mode": collaboration_mode,
+        "preferred_model_family": preferred_model_family,
+        "preferred_model_label": preferred_model_label,
     }
 
 
@@ -230,6 +255,8 @@ def main() -> int:
     ap.add_argument("--agent-id", default="main")
     ap.add_argument("--route-reason", default="")
     ap.add_argument("--collaboration-mode", default="auto")
+    ap.add_argument("--preferred-model-family", default="")
+    ap.add_argument("--preferred-model-label", default="")
     ap.add_argument("--timeout-seconds", type=int, default=900)
     ap.add_argument("--thinking", default="medium")
     args = ap.parse_args()
@@ -241,6 +268,8 @@ def main() -> int:
             agent_id=args.agent_id,
             route_reason=args.route_reason,
             collaboration_mode=str(args.collaboration_mode or "").strip() or "auto",
+            preferred_model_family=str(args.preferred_model_family or "").strip(),
+            preferred_model_label=str(args.preferred_model_label or "").strip(),
             timeout_seconds=max(1, args.timeout_seconds),
             thinking=str(args.thinking or "").strip(),
         )

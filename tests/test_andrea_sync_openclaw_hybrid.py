@@ -40,6 +40,20 @@ class AndreaSyncOpenClawHybridTests(unittest.TestCase):
         self.assertIn("must involve Cursor", prompt)
         self.assertIn("repo-heavy execution into Cursor", prompt)
 
+    def test_build_prompt_respects_preferred_model_lane(self) -> None:
+        prompt = MODULE._build_prompt(
+            "tsk_demo",
+            "@Gemini review this approach",
+            "/tmp/repo",
+            "explicit_model_mention",
+            "andrea_primary",
+            "gemini",
+            "Gemini",
+        )
+        self.assertIn("explicitly addressed the Gemini lane", prompt)
+        self.assertIn("Preferred model family: gemini", prompt)
+        self.assertIn("fall back", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

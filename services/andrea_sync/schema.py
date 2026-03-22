@@ -235,6 +235,13 @@ def fold_projection(
             mention_targets = payload.get("mention_targets")
             if isinstance(mention_targets, list):
                 telegram_meta["mention_targets"] = [str(v) for v in mention_targets[:5]]
+            model_mentions = payload.get("model_mentions")
+            if isinstance(model_mentions, list):
+                telegram_meta["model_mentions"] = [str(v) for v in model_mentions[:5]]
+            if payload.get("preferred_model_family"):
+                telegram_meta["preferred_model_family"] = str(payload.get("preferred_model_family"))
+            if payload.get("preferred_model_label"):
+                telegram_meta["preferred_model_label"] = str(payload.get("preferred_model_label"))
             if payload.get("collaboration_mode"):
                 telegram_meta["collaboration_mode"] = str(payload.get("collaboration_mode"))
             if payload.get("visibility_mode"):
@@ -286,6 +293,13 @@ def fold_projection(
         mention_targets = payload.get("mention_targets")
         if isinstance(mention_targets, list):
             execution_meta["mention_targets"] = [str(v) for v in mention_targets[:5]]
+        model_mentions = payload.get("model_mentions")
+        if isinstance(model_mentions, list):
+            execution_meta["model_mentions"] = [str(v) for v in model_mentions[:5]]
+        if payload.get("preferred_model_family"):
+            execution_meta["preferred_model_family"] = str(payload["preferred_model_family"])
+        if payload.get("preferred_model_label"):
+            execution_meta["preferred_model_label"] = str(payload["preferred_model_label"])
         if payload.get("cursor_agent_id"):
             proj.cursor_agent_id = str(payload["cursor_agent_id"])
         cursor_meta = proj.meta.setdefault("cursor", {})
@@ -336,6 +350,10 @@ def fold_projection(
             openclaw_meta["model"] = str(payload["model"])
         if payload.get("visibility_mode"):
             execution_meta["visibility_mode"] = str(payload["visibility_mode"])
+        if payload.get("preferred_model_family"):
+            execution_meta["preferred_model_family"] = str(payload["preferred_model_family"])
+        if payload.get("preferred_model_label"):
+            execution_meta["preferred_model_label"] = str(payload["preferred_model_label"])
         if payload.get("raw_text"):
             openclaw_meta = proj.meta.setdefault("openclaw", {})
             openclaw_meta["raw_text"] = str(payload["raw_text"])[:4000]
@@ -372,6 +390,10 @@ def fold_projection(
             openclaw_meta["model"] = str(payload["model"])
         if payload.get("visibility_mode"):
             execution_meta["visibility_mode"] = str(payload["visibility_mode"])
+        if payload.get("preferred_model_family"):
+            execution_meta["preferred_model_family"] = str(payload["preferred_model_family"])
+        if payload.get("preferred_model_label"):
+            execution_meta["preferred_model_label"] = str(payload["preferred_model_label"])
         if payload.get("raw_text"):
             openclaw_meta = proj.meta.setdefault("openclaw", {})
             openclaw_meta["raw_text"] = str(payload["raw_text"])[:4000]
@@ -415,6 +437,10 @@ def fold_projection(
             openclaw_meta["model"] = str(payload["model"])
         if payload.get("visibility_mode"):
             execution_meta["visibility_mode"] = str(payload["visibility_mode"])
+        if payload.get("preferred_model_family"):
+            execution_meta["preferred_model_family"] = str(payload["preferred_model_family"])
+        if payload.get("preferred_model_label"):
+            execution_meta["preferred_model_label"] = str(payload["preferred_model_label"])
         if payload.get("raw_text"):
             openclaw_meta = proj.meta.setdefault("openclaw", {})
             openclaw_meta["raw_text"] = str(payload["raw_text"])[:4000]
@@ -460,6 +486,10 @@ def fold_projection(
             openclaw_meta["model"] = str(payload["model"])
         if payload.get("visibility_mode"):
             execution_meta["visibility_mode"] = str(payload["visibility_mode"])
+        if payload.get("preferred_model_family"):
+            execution_meta["preferred_model_family"] = str(payload["preferred_model_family"])
+        if payload.get("preferred_model_label"):
+            execution_meta["preferred_model_label"] = str(payload["preferred_model_label"])
         if payload.get("raw_text"):
             openclaw_meta = proj.meta.setdefault("openclaw", {})
             openclaw_meta["raw_text"] = str(payload["raw_text"])[:4000]

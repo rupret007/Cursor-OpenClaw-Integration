@@ -52,6 +52,38 @@ def _model_label(provider: str = "", model: str = "") -> str:
     return clean_model or clean_provider
 
 
+def _preferred_model_note(preferred_model_label: str = "") -> str:
+    clean = _normalize_whitespace(preferred_model_label)
+    if not clean:
+        return ""
+    return f"- Preferred OpenClaw lane: {clean}"
+
+
+def _speaker_section_label(
+    *,
+    worker_label: str,
+    delegated_to_cursor: bool = False,
+    provider: str = "",
+    model: str = "",
+    preferred_model_label: str = "",
+) -> str:
+    model_label = _model_label(provider, model)
+    preferred_label = _normalize_whitespace(preferred_model_label)
+    if worker_label == "OpenClaw":
+        if model_label:
+            return f"OpenClaw coordinator ({model_label})"
+        if preferred_label:
+            return f"OpenClaw coordinator ({preferred_label} lane)"
+        return "OpenClaw"
+    if worker_label == "OpenClaw and Cursor" or delegated_to_cursor:
+        if model_label:
+            return f"OpenClaw coordinator ({model_label}) and Cursor"
+        if preferred_label:
+            return f"OpenClaw coordinator ({preferred_label} lane) and Cursor"
+        return "OpenClaw and Cursor"
+    return "Cursor"
+
+
 def _routing_note(routing_hint: str, collaboration_mode: str) -> str:
     hint = str(routing_hint or "").strip().lower()
     collab = str(collaboration_mode or "").strip().lower()
@@ -95,8 +127,10 @@ def format_ack_message(
     worker_label: str = "Cursor",
     routing_hint: str = "",
     collaboration_mode: str = "",
+    preferred_model_label: str = "",
 ) -> str:
     routing_note = _routing_note(routing_hint, collaboration_mode)
+    preferred_model_note = _preferred_model_note(preferred_model_label)
     if worker_label == "OpenClaw":
         body = [
             "Andrea:",
@@ -105,6 +139,7 @@ def format_ack_message(
             "What happened:",
             "- Andrea created a task and will keep this thread updated.",
             "- OpenClaw will handle this directly or bring in Cursor if the work needs deeper repo execution.",
+            *([preferred_model_note] if preferred_model_note else []),
             *([routing_note] if routing_note else []),
             "",
             "Technical details:",
@@ -120,6 +155,7 @@ def format_ack_message(
             "What happened:",
             "- Andrea created a task and will keep this thread updated.",
             "- Cursor will be started automatically.",
+            *([preferred_model_note] if preferred_model_note else []),
             *([routing_note] if routing_note else []),
             "",
             "Technical details:",
@@ -138,6 +174,7 @@ def format_progress_message(
     collaboration_mode: str = "",
     provider: str = "",
     model: str = "",
+    preferred_model_label: str = "",
 ) -> str:
     routing_note = _routing_note(routing_hint, collaboration_mode)
     headline = "Collaboration update."
@@ -148,6 +185,7 @@ def format_progress_message(
     elif worker_label == "Cursor":
         headline = "Cursor execution update."
     model_label = _model_label(provider, model)
+    preferred_model_note = _preferred_model_note(preferred_model_label)
     lines = [
         "Andrea:",
         headline,
@@ -157,6 +195,8 @@ def format_progress_message(
     ]
     if model_label:
         lines.append(f"- Active OpenClaw model: {model_label}")
+    elif preferred_model_note:
+        lines.append(preferred_model_note)
     if routing_note:
         lines.append(routing_note)
     lines.extend(["", *_footer_lines(task_id, "running")])
@@ -183,6 +223,7 @@ def format_running_message(
     collaboration_mode: str = "",
     provider: str = "",
     model: str = "",
+    preferred_model_label: str = "",
 ) -> str:
     if delegated_to_cursor and worker_label == "OpenClaw":
         worker_label = "OpenClaw and Cursor"
@@ -216,6 +257,10 @@ def format_running_message(
     model_label = _model_label(provider, model)
     if model_label:
         lines.insert(len(lines) - 1, f"- OpenClaw is currently coordinating with {model_label}.")
+    else:
+        preferred_model_note = _preferred_model_note(preferred_model_label)
+        if preferred_model_note:
+            lines.insert(len(lines) - 1, preferred_model_note)
     lines.extend(_footer_lines(task_id, "running", agent_url=agent_url))
     return "\n".join(lines)
 
@@ -236,6 +281,7 @@ def format_final_message(
     collaboration_mode: str = "",
     provider: str = "",
     model: str = "",
+    preferred_model_label: str = "",
 ) -> str:
     if backend == "openclaw" and worker_label == "Cursor":
         worker_label = "OpenClaw"
@@ -284,6 +330,13 @@ def format_final_message(
     elif not completed and last_error:
         lines.append(f"- Failure: {_clip(last_error, 220)}")
     routing_note = _routing_note(routing_hint, collaboration_mode)
+    speaker_label = _speaker_section_label(
+        worker_label=worker_label,
+        delegated_to_cursor=delegated_to_cursor,
+        provider=provider,
+        model=model,
+        preferred_model_label=preferred_model_label,
+    )
     if routing_note:
         lines.append(routing_note)
 
@@ -291,13 +344,17 @@ def format_final_message(
         lines.extend(
             [
                 "",
-                f"{result_label} said:",
+                f"{speaker_label if result_label != 'Cursor' else result_label} said:",
                 summary_excerpt,
             ]
         )
     model_label = _model_label(provider, model)
     if model_label:
         lines.extend(["", f"OpenClaw model used: {model_label}"])
+    else:
+        preferred_model_note = _preferred_model_note(preferred_model_label)
+        if preferred_model_note:
+            lines.extend(["", preferred_model_note[2:]])
 
     lines.extend(
         [

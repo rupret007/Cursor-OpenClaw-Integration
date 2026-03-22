@@ -805,6 +805,51 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
         self.assertEqual(detail["task"]["meta"]["telegram"]["visibility_mode"], "full")
         self.assertEqual(detail["task"]["meta"]["execution"]["visibility_mode"], "full")
 
+    def test_telegram_model_mention_sets_preferred_lane(self) -> None:
+        body = json.dumps(
+            {
+                "update_id": 47,
+                "message": {
+                    "text": "@Gemini review this repo plan",
+                    "message_id": 35,
+                    "chat": {"id": 25},
+                    "from": {"id": 5},
+                },
+            }
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            self._url("/v1/telegram/webhook"),
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "X-Telegram-Bot-Api-Secret-Token": "hdrsecret",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            self.assertEqual(resp.status, 200)
+        detail = None
+        for _ in range(40):
+            req_tasks = urllib.request.Request(self._url("/v1/tasks?limit=20"), method="GET")
+            with urllib.request.urlopen(req_tasks, timeout=5) as resp_tasks:
+                tasks = json.loads(resp_tasks.read().decode("utf-8"))["tasks"]
+            telegram_tasks = [t for t in tasks if t["channel"] == "telegram"]
+            for task in telegram_tasks:
+                req_task = urllib.request.Request(self._url(f"/v1/tasks/{task['task_id']}"), method="GET")
+                with urllib.request.urlopen(req_task, timeout=5) as resp_task:
+                    candidate = json.loads(resp_task.read().decode("utf-8"))
+                meta = candidate["task"].get("meta", {})
+                if meta.get("telegram", {}).get("message_id") == 35:
+                    detail = candidate
+                    break
+            if detail and detail["task"]["status"] == "queued":
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertEqual(detail["task"]["meta"]["telegram"]["preferred_model_family"], "gemini")
+        self.assertEqual(detail["task"]["meta"]["execution"]["preferred_model_label"], "Gemini")
+
 
 if __name__ == "__main__":
     unittest.main()

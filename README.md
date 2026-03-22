@@ -51,6 +51,7 @@ Hardened **Cursor Cloud Agents** integration toolkit for **OpenClaw**, shell wor
 ├── openclaw-cursor-integration-roadmap.md
 ├── scripts/
 │   ├── cursor_openclaw.py
+│   ├── alexa_edge_lambda.py # reference Alexa cloud-edge forwarder with fallback response mapping
 │   ├── cursor_api_common.py # shared validation, HTTP helpers (mirrored under skills)
 │   ├── env_loader.py        # auto-load .env (used by CLIs)
 │   ├── setup_admin.sh       # interactive .env + optional OpenClaw skill install

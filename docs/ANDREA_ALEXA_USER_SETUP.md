@@ -115,6 +115,19 @@ That edge should:
 Use this repo’s template:
 
 - [ALEXA_CLOUD_EDGE_TEMPLATE.md](ALEXA_CLOUD_EDGE_TEMPLATE.md)
+- [../scripts/alexa_edge_lambda.py](../scripts/alexa_edge_lambda.py)
+
+Important:
+
+- treat `scripts/alexa_edge_lambda.py` as the forwarding reference, not the full certification layer by itself
+- for production or publication, keep Alexa signature/certificate verification at the public edge before forwarding to Andrea
+
+Recommended edge env vars:
+
+- `ANDREA_SYNC_URL=https://<your-andrea-backhaul-base>`
+- `ANDREA_SYNC_ALEXA_EDGE_TOKEN=<shared-secret>`
+- `ALEXA_ALLOWED_APPLICATION_IDS=amzn1.ask.skill.<your-skill-id>`
+- optional: `ANDREA_SYNC_ALEXA_EDGE_TIMEOUT_SECONDS=8`
 
 ## Step 3. Create the Alexa Custom Skill
 

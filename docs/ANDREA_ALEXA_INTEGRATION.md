@@ -5,6 +5,7 @@ Alexa is an **explicit voice doorway** into the same Andrea/OpenClaw/Cursor lock
 `Alexa Custom Skill -> thin cloud edge -> local andrea_sync`
 
 See [ALEXA_CLOUD_EDGE_TEMPLATE.md](ALEXA_CLOUD_EDGE_TEMPLATE.md) for the forwarding contract.
+The repo also includes a reference edge implementation at [scripts/alexa_edge_lambda.py](../scripts/alexa_edge_lambda.py).
 
 If you want the user-facing, click-by-click setup path, start with [ANDREA_ALEXA_USER_SETUP.md](ANDREA_ALEXA_USER_SETUP.md).
 
@@ -72,6 +73,8 @@ The edge should:
 - optionally handle account linking / user identity mapping
 - forward the raw Alexa JSON body to the local Andrea endpoint
 - attach `Authorization: Bearer $ANDREA_SYNC_ALEXA_EDGE_TOKEN`
+
+The reference edge helper in this repo is intentionally a forwarding example; it does not replace the production Alexa signature/certificate verification step.
 
 The local Andrea server now supports this optional token and rejects unauthorized forwarded requests when `ANDREA_SYNC_ALEXA_EDGE_TOKEN` is set.
 

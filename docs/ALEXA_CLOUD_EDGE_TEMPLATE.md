@@ -2,6 +2,10 @@
 
 Use a thin cloud edge when you want Alexa reliability and certification readiness without exposing the local Andrea machine directly as the primary Alexa endpoint.
 
+Reference implementation in this repo:
+
+- [scripts/alexa_edge_lambda.py](../scripts/alexa_edge_lambda.py)
+
 ## Responsibilities
 
 - Receive Alexa Custom Skill HTTPS requests on an Amazon-compatible public endpoint.
@@ -19,6 +23,17 @@ Use a thin cloud edge when you want Alexa reliability and certification readines
 - Auth from edge to Andrea:
   - `Authorization: Bearer ${ANDREA_SYNC_ALEXA_EDGE_TOKEN}`
   - or `X-Andrea-Alexa-Edge-Token: ${ANDREA_SYNC_ALEXA_EDGE_TOKEN}`
+
+## Edge environment
+
+- `ANDREA_SYNC_URL`
+  - base URL for the Andrea backend the edge will call
+- `ANDREA_SYNC_ALEXA_EDGE_TOKEN`
+  - bearer token shared with the local Andrea backend
+- `ALEXA_ALLOWED_APPLICATION_IDS`
+  - optional comma-separated allowlist of Alexa skill application ids
+- `ANDREA_SYNC_ALEXA_EDGE_TIMEOUT_SECONDS`
+  - optional backend timeout for the edge forwarder
 
 ## Reference flow
 
@@ -62,6 +77,18 @@ def handler(event, context):
             "body": resp.read().decode("utf-8"),
         }
 ```
+
+The reference script goes further than this minimal sketch:
+
+- decodes API Gateway base64 request bodies
+- supports an allowed Alexa application id list
+- forwards with `ANDREA_SYNC_ALEXA_EDGE_TOKEN`
+- maps backend `401`, `503`, and transport failures into valid Alexa response envelopes
+
+Important:
+
+- the reference script is a forwarding helper, not a complete Amazon signature-verification implementation by itself
+- for production or certification, perform Alexa signature/certificate validation at the public edge before calling Andrea
 
 ## Notes
 

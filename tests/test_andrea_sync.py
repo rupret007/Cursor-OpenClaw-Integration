@@ -869,9 +869,9 @@ class TestAndreaSync(unittest.TestCase):
         text = format_ack_message("tsk_demo", worker_label="OpenClaw")
         self.assertIn("OpenClaw", text)
         low = text.lower()
-        self.assertIn("coordinates first", low)
-        self.assertIn("delegates to cursor", low)
-        self.assertIn("threaded under your message", low)
+        self.assertIn("coordination first", low)
+        self.assertIn("then cursor executes when needed", low)
+        self.assertIn("updates in this thread", low)
 
     def test_telegram_ack_message_mentions_cursor_request(self) -> None:
         text = format_ack_message(
@@ -893,13 +893,13 @@ class TestAndreaSync(unittest.TestCase):
     def test_telegram_running_message_format(self) -> None:
         text = format_running_message("tsk_demo", agent_url="https://cursor.com/agents/demo")
         self.assertIn("Andrea:", text)
-        self.assertIn("Cursor is actively working", text)
+        self.assertIn("Running. Cursor is working", text)
         self.assertIn("Technical details:", text)
         self.assertIn("Agent: https://cursor.com/agents/demo", text)
 
     def test_telegram_running_message_format_for_openclaw(self) -> None:
         text = format_running_message("tsk_demo", worker_label="OpenClaw")
-        self.assertIn("OpenClaw is actively working", text)
+        self.assertIn("Running. OpenClaw is working", text)
 
     def test_telegram_running_message_format_for_collaboration(self) -> None:
         text = format_running_message(
@@ -908,7 +908,7 @@ class TestAndreaSync(unittest.TestCase):
             delegated_to_cursor=True,
             collaboration_mode="collaborative",
         )
-        self.assertIn("OpenClaw and Cursor are actively working", text)
+        self.assertIn("Running. OpenClaw is coordinating and Cursor is executing.", text)
 
     def test_telegram_progress_message_format(self) -> None:
         text = format_progress_message(
@@ -919,7 +919,7 @@ class TestAndreaSync(unittest.TestCase):
             provider="google",
             model="gemini-2.5-flash",
         )
-        self.assertIn("coordination update", text.lower())
+        self.assertIn("openclaw + cursor update", text.lower())
         self.assertIn("gemini-2.5-flash", text)
         self.assertIn("work together", text.lower())
 
@@ -994,7 +994,7 @@ class TestAndreaSync(unittest.TestCase):
             summary="The agent could not finish the request.",
             last_error="cursor_status_failed",
         )
-        self.assertIn("could not complete", text)
+        self.assertIn("run failed", text.lower())
         self.assertIn("Failure:", text)
         self.assertIn("Error: cursor_status_failed", text)
 

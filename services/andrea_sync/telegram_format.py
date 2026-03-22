@@ -134,11 +134,11 @@ def format_ack_message(
     if worker_label == "OpenClaw":
         body = [
             "Andrea:",
-            "OpenClaw is taking point — it coordinates first, then delegates to Cursor when the repo needs execution.",
+            "Queued. OpenClaw is taking point (coordination first, then Cursor executes when needed).",
             "",
             "What happens next:",
-            "- OpenClaw runs the coordination / handoff pass (same flow as before).",
-            "- Status updates are threaded under your message so this chat stays readable.",
+            "- I’ll keep updates in this thread to avoid spamming the chat.",
+            "- If you want to add context, reply in this thread while it’s queued.",
             *([preferred_model_note] if preferred_model_note else []),
             *([routing_note] if routing_note else []),
             "",
@@ -150,11 +150,11 @@ def format_ack_message(
     return "\n".join(
         [
             "Andrea:",
-            "I got your message and queued it for Cursor.",
+            "Queued. I handed this to Cursor.",
             "",
             "What happens next:",
-            "- Andrea created a task and will keep this thread updated.",
-            "- Cursor will be started automatically.",
+            "- I’ll keep updates in this thread.",
+            "- Cursor will start automatically; you’ll get the result here.",
             *([preferred_model_note] if preferred_model_note else []),
             *([routing_note] if routing_note else []),
             "",
@@ -174,11 +174,11 @@ def format_continuation_notice(
     preview = _clip(chunk_preview, 100)
     lines = [
         "Andrea:",
-        f"Merged with your current task `{task_id}` — OpenClaw keeps one coordination run (no duplicate job).",
+        f"Added to your current task `{task_id}` (no duplicate run).",
     ]
     if preview:
         lines.append(f"Latest chunk: {preview}")
-    lines.append("Reply is threaded under your first message.")
+    lines.append("I’ll keep replying under your first message.")
     return "\n".join(lines)
 
 
@@ -187,11 +187,11 @@ def format_late_chunk_notice(task_id: str) -> str:
     return "\n".join(
         [
             "Andrea:",
-            "I received another message while OpenClaw was already running for this task.",
+            "I got another message while the task was already running.",
             "",
             "What this means:",
-            "- Your latest text is saved on the task timeline, but the in-flight OpenClaw run may not include it.",
-            "- For a follow-up that must change execution, send a new request after this one finishes.",
+            "- I saved it, but the in-flight run may not include it.",
+            "- If it must change what gets executed, send a new request after this finishes.",
             "",
             f"Task: `{task_id}`",
         ]
@@ -210,20 +210,20 @@ def format_progress_message(
     preferred_model_label: str = "",
 ) -> str:
     routing_note = _routing_note(routing_hint, collaboration_mode)
-    headline = "Collaboration update."
+    headline = "Update."
     if worker_label == "OpenClaw and Cursor":
-        headline = "OpenClaw and Cursor coordination update."
+        headline = "OpenClaw + Cursor update."
     elif worker_label == "OpenClaw":
-        headline = "OpenClaw coordination update."
+        headline = "OpenClaw update."
     elif worker_label == "Cursor":
-        headline = "Cursor execution update."
+        headline = "Cursor update."
     model_label = _model_label(provider, model)
     preferred_model_note = _preferred_model_note(preferred_model_label)
     lines = [
         "Andrea:",
         headline,
         "",
-        "What happened:",
+        "Latest:",
         f"- {_clip(_normalize_whitespace(progress_text), 700)}",
     ]
     if model_label:
@@ -261,35 +261,31 @@ def format_running_message(
     if delegated_to_cursor and worker_label == "OpenClaw":
         worker_label = "OpenClaw and Cursor"
     if worker_label == "OpenClaw and Cursor":
-        headline = "OpenClaw and Cursor are actively working on your request now."
+        headline = "Running. OpenClaw is coordinating and Cursor is executing."
         bullets = [
-            "- OpenClaw is coordinating the task and Cursor has been pulled in for the heavier execution.",
-            "- I will send the result back here when it finishes.",
+            "- I’ll reply here with the result when it’s done.",
         ]
     elif worker_label == "OpenClaw":
-        headline = "OpenClaw is actively working on your request now."
+        headline = "Running. OpenClaw is working on your request."
         bullets = [
-            "- The task moved from queued to running inside the OpenClaw lane.",
-            "- I will send the result back here when it finishes.",
+            "- I’ll reply here with the result when it’s done.",
         ]
     else:
-        headline = "Cursor is actively working on your request now."
+        headline = "Running. Cursor is working on your request."
         bullets = [
-            "- The task moved from queued to running.",
-            "- I will send the result back here when it finishes.",
+            "- I’ll reply here with the result when it’s done.",
         ]
     lines = [
         "Andrea:",
         headline,
         "",
-        "What happened:",
         *bullets,
         *([_routing_note(routing_hint, collaboration_mode)] if _routing_note(routing_hint, collaboration_mode) else []),
         "",
     ]
     model_label = _model_label(provider, model)
     if model_label:
-        lines.insert(len(lines) - 1, f"- OpenClaw is currently coordinating with {model_label}.")
+        lines.insert(len(lines) - 1, f"- OpenClaw model: {model_label}")
     else:
         preferred_model_note = _preferred_model_note(preferred_model_label)
         if preferred_model_note:
@@ -333,15 +329,15 @@ def format_final_message(
     if completed:
         if pr_url:
             if worker_label == "OpenClaw and Cursor" or delegated_to_cursor:
-                andrea_line = "I finished your request and there is a PR ready to review."
+                andrea_line = "Done. Your request is complete and a PR is ready to review."
             else:
-                andrea_line = "I finished your request and OpenClaw completed it successfully."
+                andrea_line = "Done. OpenClaw completed your request successfully."
         elif summary_sentence:
-            andrea_line = f"I finished your request. {summary_sentence}"
+            andrea_line = f"Done. {summary_sentence}"
         else:
-            andrea_line = "I finished your request and captured the result below."
+            andrea_line = "Done. Result captured below."
     else:
-        andrea_line = "I could not complete your request successfully, but I captured the failure details below."
+        andrea_line = "This run failed. I captured the details below."
 
     lines = [
         "Andrea:",
@@ -361,11 +357,12 @@ def format_final_message(
         ),
     ]
     if completed and pr_url:
-        lines.append("- A PR is available for review.")
+        lines.append(f"- Review PR: {pr_url}")
     elif completed and summary_sentence:
         lines.append(f"- Outcome: {summary_sentence}")
     elif not completed and last_error:
         lines.append(f"- Failure: {_clip(last_error, 220)}")
+        lines.append("- Next step: reply with what to try next (or re-run with more detail).")
     routing_note = _routing_note(routing_hint, collaboration_mode)
     if routing_note:
         lines.append(routing_note)

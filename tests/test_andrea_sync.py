@@ -195,6 +195,11 @@ class TestAndreaSync(unittest.TestCase):
         decision = route_message("Can you talk to Cursor when needed?")
         self.assertEqual(decision.mode, "direct")
 
+    def test_router_meta_openclaw_question_stays_direct(self) -> None:
+        decision = route_message("Ok we need to have curser fix this and all these responses as this wasn’t the intention I need to talk to OpenClaw.")
+        self.assertEqual(decision.mode, "direct")
+        self.assertIn("openclaw", decision.reply_text.lower())
+
     def test_direct_message_format_is_short(self) -> None:
         text = format_direct_message("Hi! I'm doing well and ready to help.")
         self.assertEqual(text, "Andrea:\nHi! I'm doing well and ready to help.")

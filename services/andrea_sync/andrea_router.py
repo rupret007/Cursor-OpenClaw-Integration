@@ -27,6 +27,7 @@ GREETING_RE = re.compile(
 THANKS_RE = re.compile(r"\b(thanks|thank you|appreciate it)\b", re.I)
 IDENTITY_RE = re.compile(r"\b(who are you|what can you do|help me|help|what do you do)\b", re.I)
 META_CURSOR_RE = re.compile(r"\b(talk to cursor|have cursor|use cursor|delegate to cursor)\b", re.I)
+META_OPENCLAW_RE = re.compile(r"\b(talk to openclaw|talk to open claw|have openclaw|use openclaw)\b", re.I)
 DELEGATE_KEYWORDS_RE = re.compile(
     r"\b(code|repo|repository|file|files|branch|commit|pull request|pr\b|debug|test suite|tests\b|"
     r"implement|implementation|fix|bug|refactor|edit|patch|script|service|restart|reload|deploy|"
@@ -53,6 +54,8 @@ def should_delegate_to_cursor(text: str) -> tuple[bool, str]:
         return False, "assistant_identity_or_help"
     if META_CURSOR_RE.search(clean):
         return False, "cursor_coordination_question"
+    if META_OPENCLAW_RE.search(clean):
+        return False, "openclaw_coordination_question"
     if DELEGATE_KEYWORDS_RE.search(clean):
         return True, "technical_or_repo_request"
     if PATH_RE.search(text):
@@ -77,6 +80,11 @@ def _heuristic_reply(text: str) -> str:
         return (
             "Yes. I can coordinate with Cursor when the work needs heavier repo or coding help, "
             "but I'll answer directly when I can handle it myself."
+        )
+    if META_OPENCLAW_RE.search(clean):
+        return (
+            "Sure—what do you want to tell OpenClaw? If you paste the context, I can draft a clear "
+            "message and a short summary of what went wrong."
         )
     if IDENTITY_RE.search(clean):
         return (
@@ -150,7 +158,14 @@ def _openai_direct_reply(text: str) -> str:
 
 
 def build_direct_reply(text: str) -> str:
-    if GREETING_RE.search(_normalize(text)) or THANKS_RE.search(_normalize(text)) or IDENTITY_RE.search(_normalize(text)) or META_CURSOR_RE.search(_normalize(text)):
+    norm = _normalize(text)
+    if (
+        GREETING_RE.search(norm)
+        or THANKS_RE.search(norm)
+        or IDENTITY_RE.search(norm)
+        or META_CURSOR_RE.search(norm)
+        or META_OPENCLAW_RE.search(norm)
+    ):
         return _heuristic_reply(text)
     try:
         return _openai_direct_reply(text)

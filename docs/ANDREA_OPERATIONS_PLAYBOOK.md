@@ -103,6 +103,7 @@ bash scripts/andrea_slo_check.sh
 | **Daily wrap-up (operator)** | Step-by-step: [ANDREA_WRAP_UP_DAILY.md](ANDREA_WRAP_UP_DAILY.md) — `bash scripts/andrea_wrap_up_prereqs.sh` → `bash scripts/andrea_full_cycle.sh` → `bash scripts/test_integration.sh` |
 | Unit + integration | `bash scripts/test_integration.sh` |
 | Live comm smoke (optional) | `RUN_COMM_SMOKE=1 ANDREA_SYNC_URL=http://127.0.0.1:8765 bash scripts/test_integration.sh` or `bash scripts/andrea_communication_smoke.sh` |
+| Local monitor dashboard | Open `http://127.0.0.1:8765/dashboard` for live health, webhook, recent tasks, and task timelines |
 | Full operator cycle (local) | From repo: `export ANDREA_SYNC_INTERNAL_TOKEN=…` then `bash scripts/andrea_full_cycle.sh` (pull, health, publish digest, policy, gateway restart, smoke, kill-switch drill). Skips: `SKIP_GIT=1`, `SKIP_GATEWAY_RESTART=1`, `SKIP_COMM_SMOKE=1`, `SKIP_KILL_DRILL=1`, `SKIP_TELEGRAM_E2E=1`. |
 | Masterclass doctor | `bash scripts/andrea_doctor.sh` |
 | Security sanity (repo) | `bash scripts/andrea_security_sanity.sh` |
@@ -126,6 +127,7 @@ bash scripts/andrea_slo_check.sh
 | `401` from Cursor API | Rotate key; check `CURSOR_BASE_URL` / `CURSOR_AUTH_MODE` |
 | `gh` not logged in | `gh auth login` or set `GH_TOKEN` / `GITHUB_TOKEN` in `.env` (merge without full wizard: `python3 scripts/dotenv_set_key.py GH_TOKEN --skill`) |
 | `openclaw` / skill missing | Install OpenClaw; `cp -R skills/cursor_handoff ~/.openclaw/workspace/skills/`; `openclaw gateway restart`; `openclaw skills info cursor_handoff --json` |
+| `acpx` missing even though `acp-router` is loaded | Install the ACP client with `npm install -g acpx`, restart the gateway, then rerun `bash scripts/andrea_openclaw_enforce.sh` or `python3 scripts/andrea_capabilities.py` |
 | Reboot came back but Telegram is dark | Confirm the named tunnel LaunchAgent is loaded, `ANDREA_SYNC_PUBLIC_BASE` is set, and `python3 scripts/andrea_lockstep_telegram_e2e.py webhook-info --require-match` reports `status: "healthy"` |
 | SSL errors in Python | See README: `SSL_CERT_FILE` + `certifi` |
 | Tests fail | Fix on a branch; do not merge to `main` until green |

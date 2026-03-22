@@ -12,7 +12,7 @@
   <array>
     <string>/bin/zsh</string>
     <string>-lc</string>
-    <string>cd "__REPO_ROOT__" &amp;&amp; exec bash scripts/macos/andrea_post_login_bootstrap.sh</string>
+    <string>export PATH="${HOME}/.npm-global/bin:${HOME}/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH}"; cd "__REPO_ROOT__" &amp;&amp; exec bash scripts/macos/andrea_post_login_bootstrap.sh</string>
   </array>
   <key>StandardOutPath</key>
   <string>__HOME__/Library/Logs/andrea/andrea-post-login-bootstrap.log</string>

@@ -3,6 +3,7 @@ set -euo pipefail
 
 BASE_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 LOG_PREFIX="[andrea_post_login_bootstrap]"
+export PATH="${HOME}/.npm-global/bin:${HOME}/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
 
 say() {
   echo "${LOG_PREFIX} $*"

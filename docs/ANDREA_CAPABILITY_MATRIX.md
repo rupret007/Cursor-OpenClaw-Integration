@@ -39,11 +39,12 @@ ANDREA_REPO_ROOT=/path/to/Cursor-OpenClaw-Integration python3 scripts/andrea_cap
 
 | Area | Source of truth | Notes |
 |------|-----------------|--------|
-| Binaries | `PATH` | `python3`, `openclaw`, `gh`, `git`, `curl`, optional `gemini` |
+| Binaries | `PATH` | `python3`, `openclaw`, `gh`, `git`, `curl`, optional `gemini`, plus ACP runtime visibility via `acpx` |
 | OpenClaw | `openclaw skills list` | Parses ✓/✗ rows for **core**, **optional** (`gemini`), and **hybrid** skills (see `scripts/andrea_capabilities.py`). Hybrid install matrix: [ANDREA_OPENCLAW_HYBRID_SKILLS.md](ANDREA_OPENCLAW_HYBRID_SKILLS.md) |
 | Hybrid CLIs | `PATH` | Optional `memo`, `remindctl`, `things`, `gog`, `summarize`, `rg`, `tmux`, `peekaboo`, `codex`, `claude` (informational rows) |
 | GitHub auth | `gh auth status` + env + `.env` | `GH_TOKEN` / `GITHUB_TOKEN` in **process env**, **repo `.env`**, or **`cursor_handoff` skill `.env`** counts as **ready_with_limits** if `gh` session is not confirmed |
 | Cursor CLI | `python3 scripts/cursor_openclaw.py --json diagnose` | Probes CLI health; **never** prints keys |
+| ACP router runtime | `openclaw skills list` + `PATH` | If `acp-router` is `✓ ready` but `acpx` is missing, the matrix reports a **blocked** lane with `npm install -g acpx` remediation |
 | Secrets | Boolean only | Keys from `.env.example` family: present in process env **or** repo `.env` **or** `~/.openclaw/workspace/skills/cursor_handoff/.env` — **values are never shown** |
 
 ## Status meanings

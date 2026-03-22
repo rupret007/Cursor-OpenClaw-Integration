@@ -79,6 +79,29 @@ class TestAndreaCapabilities(unittest.TestCase):
         ):
             self.assertIn(name, ac.EXPECTED_OPENCLAW_SKILLS)
 
+    def test_acpx_blocked_when_acp_router_ready_but_binary_missing(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "scripts"))
+        import andrea_capabilities as ac  # noqa: E402
+
+        snippet = "│ ✓ ready   │ 📦 acp-router           │ desc     │ bundled  │\n"
+        with mock.patch.object(ac, "_which", side_effect=lambda name: name != "acpx"):
+            rows = ac._acp_support_rows(snippet)
+        by_id = {r.id: r for r in rows}
+        self.assertEqual(by_id["skill:acp-router"].status, "ready")
+        self.assertEqual(by_id["acp_tool:acpx"].status, "blocked")
+        self.assertIn("npm install -g acpx", by_id["acp_tool:acpx"].notes)
+
+    def test_acpx_ready_when_binary_present(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "scripts"))
+        import andrea_capabilities as ac  # noqa: E402
+
+        snippet = "│ ✓ ready   │ 📦 acp-router           │ desc     │ bundled  │\n"
+        with mock.patch.object(ac, "_which", return_value=True):
+            rows = ac._acp_support_rows(snippet)
+        by_id = {r.id: r for r in rows}
+        self.assertEqual(by_id["skill:acp-router"].status, "ready")
+        self.assertEqual(by_id["acp_tool:acpx"].status, "ready")
+
     def test_gh_auth_state_reads_dotenv_without_process_env(self) -> None:
         sys.path.insert(0, str(REPO_ROOT / "scripts"))
         import andrea_capabilities as ac  # noqa: E402

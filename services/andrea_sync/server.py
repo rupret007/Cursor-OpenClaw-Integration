@@ -18,6 +18,7 @@ from .adapters import alexa as alexa_adapt
 from .adapters import telegram as tg_adapt
 from .andrea_router import route_message
 from .bus import handle_command
+from .dashboard import build_dashboard_summary, render_dashboard_html
 from .kill_switch import is_kill_switch_engaged, kill_switch_status
 from .policy import digest_age_seconds, evaluate_skill_absence_claim, get_capability_digest
 from .projector import project_task_dict
@@ -1442,6 +1443,13 @@ def make_handler(server: SyncServer) -> type:
         def do_GET(self) -> None:  # noqa: N802
             parsed = urllib.parse.urlparse(self.path)
             path = parsed.path
+            if path == "/dashboard":
+                self._send(
+                    200,
+                    render_dashboard_html().encode("utf-8"),
+                    content_type="text/html;charset=utf-8",
+                )
+                return
             if path == "/v1/health":
 
                 def health_body(c: sqlite3.Connection) -> bytes:
@@ -1501,6 +1509,20 @@ def make_handler(server: SyncServer) -> type:
                     return json.dumps(ev, indent=2).encode("utf-8")
 
                 self._send(200, server.with_lock(pol))
+                return
+            if path == "/v1/dashboard/summary":
+                raw_lim = (urllib.parse.parse_qs(parsed.query).get("limit") or ["30"])[0]
+                try:
+                    limit = int(raw_lim)
+                except ValueError:
+                    limit = 30
+                limit = max(1, min(limit, 200))
+
+                def summary(c: sqlite3.Connection) -> bytes:
+                    payload = build_dashboard_summary(c, server, limit=limit)
+                    return json.dumps(payload, indent=2).encode("utf-8")
+
+                self._send(200, server.with_lock(summary))
                 return
             if path.startswith("/v1/tasks/") and len(path) > len("/v1/tasks/"):
                 tid = path.split("/v1/tasks/", 1)[1].split("?", 1)[0].strip()

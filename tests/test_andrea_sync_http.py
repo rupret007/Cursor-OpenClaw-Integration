@@ -95,6 +95,42 @@ class TestAndreaSyncHTTP(unittest.TestCase):
         self.assertIn("kill_switch", data)
         self.assertIn("capabilities", data)
 
+    def test_dashboard_html_route(self) -> None:
+        req = urllib.request.Request(self._url("/dashboard"), method="GET")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            self.assertEqual(resp.status, 200)
+            body = resp.read().decode("utf-8")
+        self.assertIn("Andrea Monitor", body)
+        self.assertIn("/v1/dashboard/summary", body)
+
+    def test_dashboard_summary_includes_projected_tasks(self) -> None:
+        create_body = json.dumps(
+            {
+                "command_type": "CreateTask",
+                "channel": "telegram",
+                "external_id": "dashboard-summary-1",
+                "payload": {"summary": "dashboard coverage"},
+            }
+        ).encode("utf-8")
+        create_req = urllib.request.Request(
+            self._url("/v1/commands"),
+            data=create_body,
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(create_req, timeout=5) as resp:
+            created = json.loads(resp.read().decode("utf-8"))
+        req = urllib.request.Request(self._url("/v1/dashboard/summary?limit=5"), method="GET")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            self.assertEqual(resp.status, 200)
+            data = json.loads(resp.read().decode("utf-8"))
+        self.assertTrue(data.get("ok"))
+        self.assertIn("webhook", data)
+        self.assertIn("capabilities", data)
+        self.assertIn("tasks", data)
+        task_ids = [task["task_id"] for task in data["tasks"]["items"]]
+        self.assertIn(created["task_id"], task_ids)
+
     def test_command_create_and_fetch_task(self) -> None:
         body = json.dumps(
             {

@@ -396,6 +396,7 @@ See [.env.example](.env.example) and [skills/cursor_handoff/.env.example](skills
 | `401 Unauthorized` | Wrong key type or revoked key; confirm key in Cursor settings. |
 | `CERTIFICATE_VERIFY_FAILED` (Python) | On macOS, try `export SSL_CERT_FILE="$(python3 -c 'import certifi; print(certifi.where())')"` if `certifi` is installed. |
 | Skill not listed after copy | `openclaw gateway restart`; confirm path `~/.openclaw/workspace/skills/cursor_handoff/SKILL.md`. |
+| `acpx` missing even though `acp-router` is loaded | Install it with `npm install -g acpx`, then `openclaw gateway restart` so the ACP router lane can launch sessions. |
 | zsh: `command not found: #` / `no matches found` after paste | You pasted comment lines or broken lines into the shell. Run commands one at a time; avoid copying `#` comment lines from docs or chat. |
 | `create-agent` validation errors | Use `--dry-run` first; use **either** `--repository` or `--pr-url`, not both; check `--ref` / `--branch-name` per API docs. |
 | `Invalid --id format` | Pass only the agent id (e.g. `bc-…`), not a full URL. Allowed characters: letters, digits, `._:-`. |

@@ -301,6 +301,43 @@ def _skill_rows(skills_blob: str) -> List[Row]:
     return rows
 
 
+def _acp_support_rows(skills_blob: str) -> List[Row]:
+    states = _parse_openclaw_skill_states(skills_blob)
+    skill = _skill_row_for("acp-router", "optional", skills_blob, states)
+    skill.notes = (
+        skill.notes
+        or "optional ACP router lane for structured coding-agent sessions"
+    )
+    skill.critical = False
+    acpx_present = _which("acpx")
+    if acpx_present:
+        acpx_status = "ready"
+        acpx_note = "on PATH; ACP router can launch acpx sessions"
+    elif skill.status == "ready":
+        acpx_status = "blocked"
+        acpx_note = (
+            "acp-router is ready but acpx is missing from PATH; install with "
+            "`npm install -g acpx`"
+        )
+    else:
+        acpx_status = "ready_with_limits"
+        acpx_note = (
+            "optional ACP CLI; install with `npm install -g acpx` before relying on "
+            "acp-router"
+        )
+    return [
+        skill,
+        Row(
+            id="acp_tool:acpx",
+            category="acp",
+            detail="acpx",
+            status=acpx_status,
+            notes=acpx_note,
+            critical=acpx_status == "blocked",
+        ),
+    ]
+
+
 def _cursor_diagnose_summary() -> Tuple[str, str]:
     """CLI health only; live API readiness is tracked on secret:CURSOR_API_KEY."""
     cli = REPO_ROOT / "scripts" / "cursor_openclaw.py"
@@ -404,6 +441,7 @@ def build_matrix() -> List[Row]:
         "✓ ready" in oc_out or "✗ missing" in oc_out
     ):
         rows.extend(_skill_rows(oc_out))
+    rows.extend(_acp_support_rows(oc_out))
     for name in HYBRID_OPTIONAL_BINARIES:
         present = _which(name)
         rows.append(

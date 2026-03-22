@@ -14,6 +14,7 @@ set -euo pipefail
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKSPACE_SKILLS_DIR="${HOME}/.openclaw/workspace/skills"
 REPO_SKILL_DIR="${BASE_DIR}/skills/cursor_handoff"
+export PATH="${HOME}/.npm-global/bin:${HOME}/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
 
 OPENCLAW_PROBE_MS="${OPENCLAW_PROBE_MS:-30000}"
 # Default includes hybrid catalog keys (always listed by OpenClaw; use ANDREA_OPENCLAW_ELIGIBLE_SKILLS for strict readiness).
@@ -135,6 +136,21 @@ check_eligible_skills() {
   [[ "$failed" -eq 0 ]] || die "eligible skill checks failed: ${failed}"
 }
 
+check_acp_router_runtime() {
+  note "validate ACP router runtime"
+  local out
+  out="$(openclaw skills list)"
+  if printf '%s\n' "$out" | grep -E "✓ ready.*acp-router" >/dev/null 2>&1; then
+    if command -v acpx >/dev/null 2>&1; then
+      note "acpx available for acp-router"
+    else
+      die "acp-router is ready but acpx is missing from PATH; install with: npm install -g acpx"
+    fi
+  else
+    note "acp-router not ready on this host; skipping acpx requirement"
+  fi
+}
+
 maybe_skills_check() {
   if [[ "${ANDREA_OPENCLAW_SKILLS_CHECK:-0}" != "1" ]]; then
     return 0
@@ -176,6 +192,7 @@ main() {
   check_required_skills
   maybe_skills_check
   check_eligible_skills
+  check_acp_router_runtime
   if [[ "$PROBE_MODELS" -eq 1 ]]; then
     probe_models
   fi

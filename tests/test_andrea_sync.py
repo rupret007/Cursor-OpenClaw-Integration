@@ -795,6 +795,27 @@ class TestAndreaSync(unittest.TestCase):
         decision = route_message("Can you talk to Cursor when needed?")
         self.assertEqual(decision.mode, "direct")
 
+    def test_router_is_this_openclaw_stays_direct(self) -> None:
+        decision = route_message("Is this OpenClaw?")
+        self.assertEqual(decision.mode, "direct")
+        self.assertEqual(decision.reason, "stack_or_tooling_question")
+        self.assertIn("openclaw", decision.reply_text.lower())
+
+    def test_router_what_is_cursor_stays_direct(self) -> None:
+        decision = route_message("What is Cursor?")
+        self.assertEqual(decision.mode, "direct")
+        self.assertIn("cursor", decision.reply_text.lower())
+
+    def test_router_have_cursor_fix_delegates(self) -> None:
+        decision = route_message("Have Cursor fix the failing tests in the repo.")
+        self.assertEqual(decision.mode, "delegate")
+        self.assertEqual(decision.delegate_target, "openclaw_hybrid")
+        self.assertEqual(decision.collaboration_mode, "cursor_primary")
+
+    def test_router_bare_openclaw_mention_stays_direct_when_short(self) -> None:
+        decision = route_message("Just checking — openclaw?")
+        self.assertEqual(decision.mode, "direct")
+
     def test_router_memory_question_uses_history_fallback(self) -> None:
         os.environ["OPENAI_API_ENABLED"] = "0"
         os.environ.pop("OPENAI_API_KEY", None)
@@ -1115,6 +1136,62 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(proj["status"], TaskStatus.COMPLETED.value)
         self.assertEqual(proj["meta"]["assistant"]["route"], "direct")
         self.assertNotIn("cursor", proj["meta"])
+
+    def test_telegram_followups_summary_skips_lifecycle_when_quiet(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "1"
+        os.environ["ANDREA_SYNC_TELEGRAM_QUIET_LIFECYCLE"] = "1"
+        os.environ["TELEGRAM_BOT_TOKEN"] = "test-token"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        result = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-quiet-lifecycle",
+                "payload": {
+                    "text": "Please inspect the repo and fix the failing tests.",
+                    "chat_id": 91001,
+                    "message_id": 1,
+                },
+            },
+        )
+        with mock.patch.object(tg_adapt, "send_text_message") as send_mock:
+            with mock.patch.object(server, "_schedule_delegated_execution"):
+                server._handle_task_followups(result["task_id"])
+                server._handle_task_followups(result["task_id"])
+        send_mock.assert_not_called()
+
+    def test_telegram_followups_summary_sends_ack_when_lifecycle_verbose(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "1"
+        os.environ["ANDREA_SYNC_TELEGRAM_QUIET_LIFECYCLE"] = "0"
+        os.environ["TELEGRAM_BOT_TOKEN"] = "test-token"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        result = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-verbose-lifecycle",
+                "payload": {
+                    "text": "Please inspect the repo and fix the failing tests.",
+                    "chat_id": 91002,
+                    "message_id": 2,
+                },
+            },
+        )
+        with mock.patch.object(tg_adapt, "send_text_message") as send_mock:
+            with mock.patch.object(server, "_schedule_delegated_execution"):
+                server._handle_task_followups(result["task_id"])
+                server._handle_task_followups(result["task_id"])
+        self.assertGreaterEqual(send_mock.call_count, 1)
+        first = send_mock.call_args.kwargs["text"]
+        self.assertTrue("queued" in first.lower() or "task" in first.lower())
 
     def test_server_followups_route_repo_request_delegate(self) -> None:
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"

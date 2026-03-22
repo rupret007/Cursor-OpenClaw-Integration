@@ -46,7 +46,47 @@ GENERIC_DIRECT_REPLY_RE = re.compile(
     r"what would you like me to work on|tell me what you need)",
     re.I,
 )
-META_CURSOR_RE = re.compile(r"\b(talk to cursor|have cursor|use cursor|delegate to cursor)\b", re.I)
+# Coordination / capability questions — not actionable "have Cursor fix X" instructions.
+META_CURSOR_RE = re.compile(
+    r"\b("
+    r"talk to cursor(?:\s+when|\s+if needed)?|"
+    r"delegate to cursor(?:\s+when|\s+if needed)?|"
+    r"coordinate with cursor|"
+    r"work with cursor when|"
+    r"cursor when needed"
+    r")\b",
+    re.I,
+)
+# Explicit instruction to hand work to Cursor without an @mention.
+CURSOR_EXPLICIT_ACTION_RE = re.compile(
+    r"\b("
+    r"(?:have|ask)\s+cursor\s+(?:to\s+)?(?:fix|debug|implement|change|update|refactor|patch|review|inspect)\b|"
+    r"use\s+cursor\s+(?:to|for)\s+(?:fix|debug|implement|change|update|refactor|patch|review|inspect)\b"
+    r")\b",
+    re.I,
+)
+# Simple questions about the stack (OpenClaw / Cursor / who is speaking).
+META_STACK_STANDALONE_RE = re.compile(
+    r"^(?:" + r"|".join(
+        [
+            r"what (?:is|'s) openclaw\??",
+            r"what (?:is|'s) cursor\??",
+            r"who(?:'s| is) answering\??",
+            r"who answered\??",
+            r"is (?:this|that) (?:the )?openclaw\??",
+            r"is this (?:really )?andrea\??",
+        ]
+    )
+    + r")$",
+    re.I,
+)
+META_STACK_INLINE_RE = re.compile(
+    r"\b("
+    r"are you (?:using|on|in) (?:cursor|openclaw)\b|"
+    r"which (?:llm|model) (?:is )?(?:this|answering|replying)\b"
+    r")\b",
+    re.I,
+)
 HYBRID_SKILL_RE = re.compile(
     r"\b(remind me|reminder|note|notes|calendar|schedule|todo|to-do|task list|message someone|"
     r"send a message|draft a message|email|inbox|search the web|search online|weather|"
@@ -56,7 +96,7 @@ HYBRID_SKILL_RE = re.compile(
 DELEGATE_KEYWORDS_RE = re.compile(
     r"\b(code|repo|repository|file|files|branch|commit|pull request|pr\b|debug|test suite|tests\b|"
     r"implement|implementation|fix|bug|refactor|edit|patch|script|service|restart|reload|deploy|"
-    r"openclaw|cursor|traceback|stack trace|lint|unit test|integration test|github)\b",
+    r"traceback|stack trace|lint|unit test|integration test|github)\b",
     re.I,
 )
 PATH_RE = re.compile(r"[/~][\w.\-~/]+|`[^`]+`|\b\w+\.(py|ts|tsx|js|jsx|md|sh|json|yaml|yml)\b", re.I)
@@ -64,6 +104,16 @@ COLLABORATE_RE = re.compile(
     r"\b(work together|team up|collaborate|both of you|double-?check|second opinion)\b",
     re.I,
 )
+
+
+def _meta_stack_question(clean: str, original: str) -> bool:
+    """True for short identity/stack questions; false when a path/file reference implies repo work."""
+    if PATH_RE.search(str(original or "")):
+        return False
+    trimmed = clean.rstrip("?.! ").strip()
+    if META_STACK_INLINE_RE.search(clean):
+        return True
+    return bool(META_STACK_STANDALONE_RE.match(trimmed))
 
 
 @dataclass
@@ -76,9 +126,7 @@ class AndreaRouteDecision:
 
 
 def _default_delegate_target() -> str:
-    raw = (os.environ.get("ANDREA_TELEGRAM_DELEGATE_LANE") or "openclaw_hybrid").strip().lower()
-    if raw in {"cursor", "cursor_direct", "direct_cursor"}:
-        return "direct_cursor"
+    """OpenClaw-first delegation; Cursor is escalated inside the hybrid lane or via @Cursor."""
     return "openclaw_hybrid"
 
 
@@ -106,6 +154,21 @@ def classify_route(
         return "direct", "explicit_andrea_mention" if andrea_preferred else "greeting_or_social", "", "andrea_primary" if andrea_preferred else collab
     if GREETING_RE.search(clean) and not MEMORY_RE.search(clean) and word_count <= 6:
         return "direct", "explicit_andrea_mention" if andrea_preferred else "greeting_or_social", "", "andrea_primary" if andrea_preferred else collab
+    if CURSOR_EXPLICIT_ACTION_RE.search(clean):
+        if collab == "auto" and COLLABORATE_RE.search(clean):
+            collab = "collaborative"
+        if andrea_preferred:
+            return "delegate", "explicit_andrea_mention_delegate", "openclaw_hybrid", "cursor_primary"
+        if collab == "auto":
+            collab = "cursor_primary"
+        return "delegate", "explicit_cursor_work_request", "openclaw_hybrid", collab
+    if _meta_stack_question(clean, text):
+        return (
+            "direct",
+            "explicit_andrea_mention" if andrea_preferred else "stack_or_tooling_question",
+            "",
+            "andrea_primary" if andrea_preferred else collab,
+        )
     if META_CURSOR_RE.search(clean):
         return "direct", "explicit_andrea_mention" if andrea_preferred else "cursor_coordination_question", "", "andrea_primary" if andrea_preferred else collab
     if HYBRID_SKILL_RE.search(clean):
@@ -208,6 +271,12 @@ def _heuristic_reply(text: str) -> str:
             "Yes. I can coordinate with Cursor when the work needs heavier repo or coding help, "
             "but I'll answer directly when I can handle it myself."
         )
+    if _meta_stack_question(clean, text):
+        return (
+            "You're talking with Andrea. OpenClaw is the visible multi-model collaboration layer "
+            "I coordinate for richer reasoning; Cursor is for heavier repo and coding work when needed. "
+            "Lightweight questions like this I answer directly."
+        )
     if HELP_RE.search(clean) and len(clean.split()) <= 6:
         return (
             "Absolutely. Tell me what you want to get done, and I'll either handle it directly "
@@ -299,6 +368,7 @@ def build_direct_reply(text: str, history: list[dict[str, str]] | None = None) -
         or THANKS_RE.search(clean)
         or IDENTITY_RE.search(clean)
         or META_CURSOR_RE.search(clean)
+        or _meta_stack_question(clean, text)
         or (HELP_RE.search(clean) and len(clean.split()) <= 6)
     ):
         return _heuristic_reply(text)

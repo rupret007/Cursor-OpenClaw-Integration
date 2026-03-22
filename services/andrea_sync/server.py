@@ -142,15 +142,20 @@ class SyncServer:
         )
         self.telegram_auto_cursor = _env_bool("ANDREA_SYNC_TELEGRAM_AUTO_CURSOR", True)
         self.telegram_notifier_enabled = _env_bool("ANDREA_SYNC_TELEGRAM_NOTIFIER", True)
+        self.telegram_quiet_lifecycle = _env_bool("ANDREA_SYNC_TELEGRAM_QUIET_LIFECYCLE", True)
         self.alexa_summary_to_telegram = _env_bool("ANDREA_SYNC_ALEXA_SUMMARY_TO_TELEGRAM", True)
         self.alexa_summary_chat_id = (
             os.environ.get("ANDREA_SYNC_ALEXA_SUMMARY_CHAT_ID", "").strip()
             or os.environ.get("TELEGRAM_CHAT_ID", "").strip()
         )
-        self.telegram_delegate_lane = (
+        _lane = (
             os.environ.get("ANDREA_TELEGRAM_DELEGATE_LANE", "openclaw_hybrid").strip().lower()
             or "openclaw_hybrid"
         )
+        # Cursor-first Telegram lane is deprecated; hybrid orchestrates visible OpenClaw then escalates.
+        if _lane in {"cursor", "cursor_direct", "direct_cursor"}:
+            _lane = "openclaw_hybrid"
+        self.telegram_delegate_lane = _lane
         self.cursor_repo_path = Path(
             os.environ.get("ANDREA_CURSOR_REPO", str(self.repo_root))
         ).expanduser()
@@ -390,6 +395,17 @@ class SyncServer:
             return {}
         section = meta.get(key, {})
         return section if isinstance(section, dict) else {}
+
+    def _telegram_send_lifecycle_messages(self, projection: Dict[str, Any]) -> bool:
+        """Queued/running ack + started Telegrams: always on for full visibility; optional in summary mode."""
+        execution_meta = self._projection_meta(projection, "execution")
+        telegram_meta = self._projection_meta(projection, "telegram")
+        visibility_mode = str(
+            execution_meta.get("visibility_mode") or telegram_meta.get("visibility_mode") or "summary"
+        ).strip() or "summary"
+        if visibility_mode == "full":
+            return True
+        return not self.telegram_quiet_lifecycle
 
     def _task_execution_lane(self, task_id: str) -> str:
         snapshot = self._task_snapshot(task_id)
@@ -677,33 +693,34 @@ class SyncServer:
         if status == "queued":
             worker_label = self._telegram_worker_label(projection)
             telegram_meta = self._projection_meta(projection, "telegram")
-            try:
-                self._send_telegram_message_once(
-                    task_id,
-                    "ack",
-                    format_ack_message(
+            if self._telegram_send_lifecycle_messages(projection):
+                try:
+                    self._send_telegram_message_once(
                         task_id,
-                        worker_label=worker_label,
-                        auto_start=(
-                            self.background_enabled
-                            and self.delegated_execution_enabled
-                            and (worker_label == "OpenClaw" or self.telegram_auto_cursor)
+                        "ack",
+                        format_ack_message(
+                            task_id,
+                            worker_label=worker_label,
+                            auto_start=(
+                                self.background_enabled
+                                and self.delegated_execution_enabled
+                                and (worker_label == "OpenClaw" or self.telegram_auto_cursor)
+                            ),
+                            routing_hint=str(telegram_meta.get("routing_hint") or ""),
+                            collaboration_mode=str(
+                                self._projection_meta(projection, "execution").get("collaboration_mode")
+                                or telegram_meta.get("collaboration_mode")
+                                or ""
+                            ),
+                            preferred_model_label=str(
+                                self._projection_meta(projection, "execution").get("preferred_model_label")
+                                or telegram_meta.get("preferred_model_label")
+                                or ""
+                            ),
                         ),
-                        routing_hint=str(telegram_meta.get("routing_hint") or ""),
-                        collaboration_mode=str(
-                            self._projection_meta(projection, "execution").get("collaboration_mode")
-                            or telegram_meta.get("collaboration_mode")
-                            or ""
-                        ),
-                        preferred_model_label=str(
-                            self._projection_meta(projection, "execution").get("preferred_model_label")
-                            or telegram_meta.get("preferred_model_label")
-                            or ""
-                        ),
-                    ),
-                )
-            except Exception as exc:  # noqa: BLE001
-                print(f"andrea_sync telegram ack error: {exc}", flush=True)
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    print(f"andrea_sync telegram ack error: {exc}", flush=True)
             self._schedule_delegated_execution(task_id)
             return
         cursor_meta = (
@@ -715,24 +732,25 @@ class SyncServer:
         if status == "running":
             agent_url = cursor_meta.get("agent_url")
             openclaw_meta = self._projection_meta(projection, "openclaw")
-            try:
-                self._send_telegram_message_once(
-                    task_id,
-                    "started",
-                    format_running_message(
+            if self._telegram_send_lifecycle_messages(projection):
+                try:
+                    self._send_telegram_message_once(
                         task_id,
-                        agent_url=str(agent_url or ""),
-                        worker_label=self._telegram_worker_label(projection, running=True),
-                        delegated_to_cursor=bool(execution_meta.get("delegated_to_cursor")),
-                        routing_hint=str(execution_meta.get("routing_hint") or ""),
-                        collaboration_mode=str(execution_meta.get("collaboration_mode") or ""),
-                        provider=str(openclaw_meta.get("provider") or ""),
-                        model=str(openclaw_meta.get("model") or ""),
-                        preferred_model_label=str(execution_meta.get("preferred_model_label") or ""),
-                    ),
-                )
-            except Exception as exc:  # noqa: BLE001
-                print(f"andrea_sync telegram running update error: {exc}", flush=True)
+                        "started",
+                        format_running_message(
+                            task_id,
+                            agent_url=str(agent_url or ""),
+                            worker_label=self._telegram_worker_label(projection, running=True),
+                            delegated_to_cursor=bool(execution_meta.get("delegated_to_cursor")),
+                            routing_hint=str(execution_meta.get("routing_hint") or ""),
+                            collaboration_mode=str(execution_meta.get("collaboration_mode") or ""),
+                            provider=str(openclaw_meta.get("provider") or ""),
+                            model=str(openclaw_meta.get("model") or ""),
+                            preferred_model_label=str(execution_meta.get("preferred_model_label") or ""),
+                        ),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    print(f"andrea_sync telegram running update error: {exc}", flush=True)
             self._send_telegram_progress_updates(task_id, snapshot)
             return
         if status in {"completed", "failed"}:

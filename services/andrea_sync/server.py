@@ -681,6 +681,7 @@ class SyncServer:
             else {}
         )
         execution_meta = self._projection_meta(projection, "execution")
+        visibility_mode = str(execution_meta.get("visibility_mode") or "summary")
         if status == "running":
             agent_url = cursor_meta.get("agent_url")
             openclaw_meta = self._projection_meta(projection, "openclaw")
@@ -693,6 +694,7 @@ class SyncServer:
                         agent_url=str(agent_url or ""),
                         worker_label=self._telegram_worker_label(projection, running=True),
                         delegated_to_cursor=bool(execution_meta.get("delegated_to_cursor")),
+                        visibility_mode=visibility_mode,
                         routing_hint=str(execution_meta.get("routing_hint") or ""),
                         collaboration_mode=str(execution_meta.get("collaboration_mode") or ""),
                         provider=str(openclaw_meta.get("provider") or ""),
@@ -714,6 +716,7 @@ class SyncServer:
                     format_final_message(
                         task_id,
                         status=status,
+                        visibility_mode=visibility_mode,
                         summary=str(projection.get("summary") or ""),
                         pr_url=str(cursor_meta.get("pr_url") or ""),
                         agent_url=str(cursor_meta.get("agent_url") or ""),

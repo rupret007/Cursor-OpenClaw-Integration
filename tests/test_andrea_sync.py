@@ -910,6 +910,13 @@ class TestAndreaSync(unittest.TestCase):
         )
         self.assertIn("OpenClaw and Cursor are actively working", text)
 
+    def test_telegram_running_message_summary_mode_is_concise(self) -> None:
+        text = format_running_message("tsk_demo", visibility_mode="summary", worker_label="OpenClaw")
+        self.assertIn("Andrea:", text)
+        self.assertIn("OpenClaw is actively working", text)
+        self.assertNotIn("Technical details:", text)
+        self.assertNotIn("What happened:", text)
+
     def test_telegram_progress_message_format(self) -> None:
         text = format_progress_message(
             "tsk_demo",
@@ -997,6 +1004,21 @@ class TestAndreaSync(unittest.TestCase):
         self.assertIn("could not complete", text)
         self.assertIn("Failure:", text)
         self.assertIn("Error: cursor_status_failed", text)
+
+    def test_telegram_final_message_summary_mode_is_concise(self) -> None:
+        text = format_final_message(
+            "tsk_demo",
+            status="completed",
+            visibility_mode="summary",
+            summary="Implemented the requested change and verified behavior.",
+            pr_url="https://github.com/example/repo/pull/1",
+        )
+        self.assertIn("Andrea:", text)
+        self.assertIn("Implemented the requested change", text)
+        self.assertIn("PR: https://github.com/example/repo/pull/1", text)
+        self.assertNotIn("Technical details:", text)
+        self.assertNotIn("What happened:", text)
+        self.assertNotIn("Cursor said:", text)
 
     def test_server_followups_route_greeting_direct(self) -> None:
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"

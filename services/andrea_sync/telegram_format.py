@@ -252,6 +252,7 @@ def format_running_message(
     *,
     worker_label: str = "Cursor",
     delegated_to_cursor: bool = False,
+    visibility_mode: str = "full",
     routing_hint: str = "",
     collaboration_mode: str = "",
     provider: str = "",
@@ -278,6 +279,9 @@ def format_running_message(
             "- The task moved from queued to running.",
             "- I will send the result back here when it finishes.",
         ]
+    if str(visibility_mode or "").strip().lower() != "full":
+        return "\n".join(["Andrea:", headline])
+
     lines = [
         "Andrea:",
         headline,
@@ -302,6 +306,7 @@ def format_final_message(
     task_id: str,
     *,
     status: str,
+    visibility_mode: str = "full",
     summary: str = "",
     pr_url: str = "",
     agent_url: str = "",
@@ -342,6 +347,16 @@ def format_final_message(
             andrea_line = "I finished your request and captured the result below."
     else:
         andrea_line = "I could not complete your request successfully, but I captured the failure details below."
+
+    if str(visibility_mode or "").strip().lower() != "full":
+        concise_lines = ["Andrea:", andrea_line]
+        if completed and summary_sentence:
+            concise_lines.extend(["", summary_sentence])
+        elif not completed and last_error:
+            concise_lines.extend(["", f"Failure: {_clip(last_error, 220)}"])
+        if completed and pr_url:
+            concise_lines.extend(["", f"PR: {pr_url}"])
+        return "\n".join(concise_lines)
 
     lines = [
         "Andrea:",

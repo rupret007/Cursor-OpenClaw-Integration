@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
+from typing import Any
 import tempfile
 import unittest
 from unittest import mock
@@ -211,6 +213,24 @@ class TestAndreaSync(unittest.TestCase):
         self.assertFalse(cmd["payload"]["auto_cursor_job"])
         self.assertEqual(cmd["payload"]["message_id"], 55)
         self.assertEqual(cmd["payload"]["from_username"], "demo")
+        self.assertNotIn("message_thread_id", cmd["payload"])
+
+    def test_telegram_update_to_command_includes_forum_message_thread_id(self) -> None:
+        cmd = tg_adapt.update_to_command(
+            {
+                "update_id": 101,
+                "message": {
+                    "text": "hello topic",
+                    "message_id": 56,
+                    "message_thread_id": 424242,
+                    "chat": {"id": -100123, "type": "supergroup", "is_forum": True},
+                    "from": {"id": 2},
+                },
+            }
+        )
+        self.assertIsNotNone(cmd)
+        assert cmd is not None
+        self.assertEqual(cmd["payload"]["message_thread_id"], 424242)
 
     def test_telegram_extract_routing_hints(self) -> None:
         routing = tg_adapt.extract_routing_hints("@Andrea @Cursor please work together on this")
@@ -259,6 +279,29 @@ class TestAndreaSync(unittest.TestCase):
             with self.assertRaises(RuntimeError) as ctx:
                 tg_adapt.send_text_message(bot_token="token", chat_id=1, text="hello")
         self.assertIn("telegram sendMessage rejected", str(ctx.exception))
+
+    def test_send_text_message_sends_reply_parameters_and_forum_thread(self) -> None:
+        captured: dict[str, Any] = {}
+
+        def fake_urlopen(req, timeout=20):  # noqa: ANN001
+            captured["body"] = json.loads(req.data.decode("utf-8"))
+            response = mock.MagicMock()
+            response.read.return_value = b'{"ok": true, "result": {}}'
+            response.__enter__.return_value = response
+            return response
+
+        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            tg_adapt.send_text_message(
+                bot_token="token",
+                chat_id=-1001,
+                text="status",
+                reply_to_message_id=77,
+                message_thread_id=99,
+            )
+        body = captured["body"]
+        self.assertEqual(body["message_thread_id"], 99)
+        self.assertEqual(body["reply_parameters"]["message_id"], 77)
+        self.assertTrue(body["reply_parameters"]["allow_sending_without_reply"])
 
     def test_telegram_update_to_command_with_cursor_mention(self) -> None:
         cmd = tg_adapt.update_to_command(
@@ -352,6 +395,8 @@ class TestAndreaSync(unittest.TestCase):
 
             proj = project_task_dict(self.conn, tid, "telegram")
             self.assertEqual(proj["meta"]["telegram"].get("continuation_count"), 1)
+            self.assertEqual(proj["meta"]["telegram"].get("first_user_message_id"), 1001)
+            self.assertEqual(proj["meta"]["telegram"].get("message_id"), 1002)
             acc = str(proj["meta"]["telegram"].get("accumulated_prompt") or "")
             self.assertIn("part one", acc.lower())
             self.assertIn("definition of done", acc.lower())
@@ -629,15 +674,18 @@ class TestAndreaSync(unittest.TestCase):
     def test_telegram_ack_message_format(self) -> None:
         text = format_ack_message("tsk_demo")
         self.assertIn("Andrea:", text)
-        self.assertIn("What happened:", text)
+        self.assertIn("What happens next:", text)
         self.assertIn("Technical details:", text)
         self.assertIn("Task: tsk_demo", text)
         self.assertIn("Status: queued", text)
 
     def test_telegram_ack_message_format_for_openclaw(self) -> None:
         text = format_ack_message("tsk_demo", worker_label="OpenClaw")
-        self.assertIn("queued it for OpenClaw", text)
-        self.assertIn("bring in Cursor", text)
+        self.assertIn("OpenClaw", text)
+        low = text.lower()
+        self.assertIn("coordinates first", low)
+        self.assertIn("delegates to cursor", low)
+        self.assertIn("threaded under your message", low)
 
     def test_telegram_ack_message_mentions_cursor_request(self) -> None:
         text = format_ack_message(

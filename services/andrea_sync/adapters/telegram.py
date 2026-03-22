@@ -90,27 +90,31 @@ def update_to_command(update: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     chat_id = chat.get("id")
     message_id = msg.get("message_id")
     from_user = (msg.get("from") or {}).get("id")
+    thread_id = msg.get("message_thread_id")
+    payload: Dict[str, Any] = {
+        "text": routing["raw_text"],
+        "routing_text": routing["routing_text"],
+        "mention_targets": routing["mention_targets"],
+        "model_mentions": routing["model_mentions"],
+        "preferred_model_family": routing["preferred_model_family"],
+        "preferred_model_label": routing["preferred_model_label"],
+        "routing_hint": routing["routing_hint"],
+        "collaboration_mode": routing["collaboration_mode"],
+        "visibility_mode": routing["visibility_mode"],
+        "chat_id": chat_id,
+        "chat_type": chat.get("type"),
+        "message_id": message_id,
+        "from_user": from_user,
+        "from_username": (msg.get("from") or {}).get("username"),
+        "auto_cursor_job": False,
+    }
+    if thread_id is not None:
+        payload["message_thread_id"] = thread_id
     return {
         "command_type": "SubmitUserMessage",
         "channel": "telegram",
         "external_id": str(uid),
-        "payload": {
-            "text": routing["raw_text"],
-            "routing_text": routing["routing_text"],
-            "mention_targets": routing["mention_targets"],
-            "model_mentions": routing["model_mentions"],
-            "preferred_model_family": routing["preferred_model_family"],
-            "preferred_model_label": routing["preferred_model_label"],
-            "routing_hint": routing["routing_hint"],
-            "collaboration_mode": routing["collaboration_mode"],
-            "visibility_mode": routing["visibility_mode"],
-            "chat_id": chat_id,
-            "chat_type": chat.get("type"),
-            "message_id": message_id,
-            "from_user": from_user,
-            "from_username": (msg.get("from") or {}).get("username"),
-            "auto_cursor_job": False,
-        },
+        "payload": payload,
     }
 
 
@@ -162,6 +166,7 @@ def send_text_message(
     chat_id: int | str,
     text: str,
     reply_to_message_id: Optional[int | str] = None,
+    message_thread_id: Optional[int | str] = None,
     timeout_seconds: int = 20,
 ) -> Dict[str, Any]:
     if not bot_token.strip():
@@ -175,9 +180,17 @@ def send_text_message(
         "text": msg,
         "disable_web_page_preview": True,
     }
+    if message_thread_id not in (None, ""):
+        try:
+            body["message_thread_id"] = int(message_thread_id)
+        except (TypeError, ValueError):
+            pass
     if reply_to_message_id not in (None, ""):
         try:
-            body["reply_parameters"] = {"message_id": int(reply_to_message_id)}
+            body["reply_parameters"] = {
+                "message_id": int(reply_to_message_id),
+                "allow_sending_without_reply": True,
+            }
         except (TypeError, ValueError):
             pass
     data = json.dumps(body, ensure_ascii=False).encode("utf-8")

@@ -182,6 +182,22 @@ def format_continuation_notice(
     return "\n".join(lines)
 
 
+def format_late_chunk_notice(task_id: str) -> str:
+    """User text arrived after OpenClaw already started; may not be in the current run."""
+    return "\n".join(
+        [
+            "Andrea:",
+            "I received another message while OpenClaw was already running for this task.",
+            "",
+            "What this means:",
+            "- Your latest text is saved on the task timeline, but the in-flight OpenClaw run may not include it.",
+            "- For a follow-up that must change execution, send a new request after this one finishes.",
+            "",
+            f"Task: `{task_id}`",
+        ]
+    )
+
+
 def format_progress_message(
     task_id: str,
     *,

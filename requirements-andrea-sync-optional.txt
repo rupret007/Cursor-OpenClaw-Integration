@@ -1,0 +1,2 @@
+# Optional production dependencies for andrea_sync
+cryptography>=42.0.0

@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict, Optional
 
 from .adapters import alexa as alexa_adapt
 from .adapters import telegram as tg_adapt
+from .alexa_request_verify import verify_alexa_http_request
 from .andrea_router import route_message
 from .bus import handle_command
 from .dashboard import (
@@ -24,6 +25,7 @@ from .dashboard import (
     render_dashboard_html,
 )
 from .kill_switch import is_kill_switch_engaged, kill_switch_status
+from .observability import metric_log, structured_log
 from .policy import digest_age_seconds, evaluate_skill_absence_claim, get_capability_digest
 from .projector import project_task_dict
 from .schema import EventType
@@ -31,6 +33,7 @@ from .telegram_continuation import attach_continuation_if_applicable
 from .store import (
     append_event,
     connect,
+    delete_meta,
     ensure_system_task,
     get_meta,
     get_task_channel,
@@ -46,6 +49,7 @@ from .telegram_format import (
     format_continuation_notice,
     format_direct_message,
     format_final_message,
+    format_late_chunk_notice,
     format_progress_message,
     format_running_message,
 )
@@ -128,6 +132,10 @@ class SyncServer:
         )
         self.internal_token = os.environ.get("ANDREA_SYNC_INTERNAL_TOKEN", "")
         self.alexa_edge_token = os.environ.get("ANDREA_SYNC_ALEXA_EDGE_TOKEN", "").strip()
+        self.alexa_skill_id = os.environ.get("ANDREA_ALEXA_SKILL_ID", "").strip()
+        self.executor_started_ttl_seconds = _env_int(
+            "ANDREA_SYNC_EXECUTOR_STARTED_TTL_SECONDS", 0
+        )
         self.background_enabled = _env_bool("ANDREA_SYNC_BACKGROUND_ENABLED", True)
         self.delegated_execution_enabled = _env_bool(
             "ANDREA_SYNC_DELEGATED_EXECUTION_ENABLED", True
@@ -581,12 +589,48 @@ class SyncServer:
                 print(f"andrea_sync telegram continuation notice error: {exc}", flush=True)
             return
 
+    def _maybe_notify_late_chunk_after_job_started(
+        self,
+        task_id: str,
+        snapshot: Dict[str, Any],
+    ) -> None:
+        if snapshot.get("channel") != "telegram":
+            return
+        status = str(snapshot.get("projection", {}).get("status") or "")
+        if status not in ("running", "awaiting_approval"):
+            return
+        events = snapshot.get("events") or []
+        last_job_started = 0
+        for seq, _ts, et, _pl in events:
+            if et == EventType.JOB_STARTED.value:
+                last_job_started = max(last_job_started, int(seq))
+        if last_job_started <= 0:
+            return
+        latest_um_seq = 0
+        latest_mid: Any = None
+        for seq, _ts, et, pl in events:
+            if et == EventType.USER_MESSAGE.value and isinstance(pl, dict):
+                latest_um_seq = int(seq)
+                latest_mid = pl.get("message_id")
+        if latest_um_seq <= last_job_started:
+            return
+        phase = f"late_chunk_{latest_mid}" if latest_mid is not None else "late_chunk"
+        try:
+            self._send_telegram_message_once(
+                task_id,
+                phase,
+                format_late_chunk_notice(task_id),
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"andrea_sync telegram late-chunk notice error: {exc}", flush=True)
+
     def _handle_telegram_followups(
         self,
         task_id: str,
         snapshot: Dict[str, Any],
     ) -> None:
         self._maybe_notify_telegram_continuation(task_id, snapshot)
+        self._maybe_notify_late_chunk_after_job_started(task_id, snapshot)
         projection = snapshot["projection"]
         status = str(projection.get("status") or "")
         if status == "created":
@@ -870,9 +914,19 @@ class SyncServer:
             )
             return
         marker = self._meta_key("executor_started", task_id)
+        ttl = int(self.executor_started_ttl_seconds or 0)
 
         def claim(c: sqlite3.Connection) -> bool:
-            if get_meta(c, marker) is not None:
+            raw = get_meta(c, marker)
+            if raw is not None and ttl > 0:
+                try:
+                    started_at = float(raw)
+                except ValueError:
+                    started_at = 0.0
+                if time.time() - started_at > ttl:
+                    delete_meta(c, marker)
+                    raw = None
+            if raw is not None:
                 return False
             set_meta(c, marker, str(time.time()))
             return True
@@ -1543,13 +1597,16 @@ def make_handler(server: SyncServer) -> type:
                     if bool(ks.get("engaged")):
                         degraded_reasons.append("kill_switch_engaged")
                     ok = not degraded_reasons
+                    db_disp = str(server.db_path)
+                    if os.environ.get("ANDREA_SYNC_HEALTH_VERBOSE", "0") != "1":
+                        db_disp = Path(db_disp).name
                     return json.dumps(
                         {
                             "ok": ok,
                             "degraded": not ok,
                             "degraded_reasons": degraded_reasons,
                             "service": "andrea_sync",
-                            "db": str(server.db_path),
+                            "db": db_disp,
                             "kill_switch": ks,
                             "capability_digest_age_seconds": age,
                             "capabilities_fresh": capability_fresh,
@@ -1837,7 +1894,35 @@ def make_handler(server: SyncServer) -> type:
                     if auth != f"Bearer {expected}" and edge != expected:
                         self._send(401, b'{"error":"unauthorized"}')
                         return
-                body = self._read_json()
+                length = int(self.headers.get("Content-Length") or "0")
+                raw = self.rfile.read(length) if length else b"{}"
+                try:
+                    verify_alexa_http_request(
+                        raw,
+                        dict(self.headers),
+                        expected_application_id=server.alexa_skill_id,
+                    )
+                except ValueError as exc:
+                    structured_log("alexa_verify_failed", error=str(exc))
+                    metric_log("alexa_verify_failed")
+                    self._send(
+                        400,
+                        json.dumps({"error": "alexa_verify_failed", "detail": str(exc)}).encode(
+                            "utf-8"
+                        ),
+                    )
+                    return
+                except RuntimeError as exc:
+                    structured_log("alexa_verify_misconfig", error=str(exc))
+                    self._send(
+                        500,
+                        json.dumps({"error": "alexa_verify_misconfig"}).encode("utf-8"),
+                    )
+                    return
+                try:
+                    body = json.loads(raw.decode("utf-8") or "{}")
+                except json.JSONDecodeError:
+                    body = {}
                 resp = server._process_alexa_request(body)
                 out = alexa_adapt.build_response_json(resp)
                 self._send(200, out, content_type="application/json;charset=utf-8")

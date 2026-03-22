@@ -8,7 +8,11 @@ from typing import Any, Dict, Optional, Tuple
 from .adapters.telegram import MENTION_RE
 from .projector import project_task_dict
 from .schema import TaskStatus
-from .store import get_task_updated_at, list_recent_telegram_task_ids
+from .store import (
+    get_task_updated_at,
+    list_recent_telegram_task_ids,
+    list_telegram_task_ids_for_chat,
+)
 
 _ACTIVE_STATUSES = frozenset(
     {
@@ -36,12 +40,27 @@ def _chat_matches(a: Any, b: Any) -> bool:
 
 
 def _user_matches(a: Any, b: Any) -> bool:
-    if a is None or b is None:
+    if a is None and b is None:
         return True
+    if a is None or b is None:
+        return False
     try:
         return int(a) == int(b)
     except (TypeError, ValueError):
         return str(a) == str(b)
+
+
+def _thread_matches(prev_telegram_meta: Dict[str, Any], new_payload: Dict[str, Any]) -> bool:
+    """Forum topics: require same message_thread_id when either side has one."""
+    p = prev_telegram_meta.get("message_thread_id")
+    n = new_payload.get("message_thread_id")
+    if p is not None and n is not None:
+        return str(p) == str(n)
+    if p is not None and n is None:
+        return False
+    if p is None and n is not None:
+        return False
+    return True
 
 
 def _parse_status(raw: Any) -> Optional[TaskStatus]:
@@ -64,16 +83,21 @@ def _should_continue_message(new_payload: Dict[str, Any], prev_telegram_meta: Di
     return new_mentions <= prev_mentions
 
 
-def _find_continuation_candidate(
+def _scan_candidates(
     conn: Any,
+    ordered_ids: list[str],
     chat_id: Any,
-    from_user: Any,
+    new_payload: Dict[str, Any],
     *,
     now: float,
     window_sec: float,
-    scan_limit: int,
 ) -> Optional[Tuple[str, Dict[str, Any]]]:
-    for tid in list_recent_telegram_task_ids(conn, scan_limit):
+    from_user = new_payload.get("from_user")
+    seen: set[str] = set()
+    for tid in ordered_ids:
+        if tid in seen:
+            continue
+        seen.add(tid)
         updated_at = get_task_updated_at(conn, tid)
         if updated_at is not None and (now - updated_at) > window_sec:
             continue
@@ -89,8 +113,34 @@ def _find_continuation_candidate(
             continue
         if not _user_matches(from_user, tg.get("from_user")):
             continue
+        if not _thread_matches(tg, new_payload):
+            continue
         return tid, tg
     return None
+
+
+def _find_continuation_candidate(
+    conn: Any,
+    chat_id: Any,
+    new_payload: Dict[str, Any],
+    *,
+    now: float,
+    window_sec: float,
+    scan_limit: int,
+) -> Optional[Tuple[str, Dict[str, Any]]]:
+    per_chat = list_telegram_task_ids_for_chat(conn, chat_id, limit=scan_limit)
+    global_ids = list_recent_telegram_task_ids(conn, scan_limit)
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for tid in per_chat + global_ids:
+        if tid not in seen:
+            seen.add(tid)
+            ordered.append(tid)
+        if len(ordered) >= scan_limit * 2:
+            break
+    return _scan_candidates(
+        conn, ordered[: scan_limit * 2], chat_id, new_payload, now=now, window_sec=window_sec
+    )
 
 
 def _merge_anchor_routing(payload: Dict[str, Any], prev_telegram_meta: Dict[str, Any]) -> None:
@@ -129,7 +179,7 @@ def attach_continuation_if_applicable(conn: Any, cmd: Dict[str, Any]) -> bool:
     found = _find_continuation_candidate(
         conn,
         chat_id,
-        payload.get("from_user"),
+        payload,
         now=now,
         window_sec=window_sec,
         scan_limit=scan_limit,

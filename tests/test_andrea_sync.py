@@ -25,6 +25,7 @@ from services.andrea_sync.store import (  # noqa: E402
     append_event,
     connect,
     list_tasks,
+    list_telegram_task_ids_for_chat,
     load_events_for_task,
     load_recent_telegram_history,
     migrate,
@@ -214,6 +215,49 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(cmd["payload"]["message_id"], 55)
         self.assertEqual(cmd["payload"]["from_username"], "demo")
         self.assertNotIn("message_thread_id", cmd["payload"])
+
+    def test_telegram_continuation_skips_mismatched_forum_thread_id(self) -> None:
+        from services.andrea_sync.telegram_continuation import attach_continuation_if_applicable
+
+        prev = os.environ.get("ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS")
+        os.environ["ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS"] = "300"
+        try:
+            cmd1 = tg_adapt.update_to_command(
+                {
+                    "update_id": 8801,
+                    "message": {
+                        "text": "forum part one",
+                        "message_id": 501,
+                        "message_thread_id": 111,
+                        "chat": {"id": 8888, "type": "supergroup"},
+                        "from": {"id": 42},
+                    },
+                }
+            )
+            assert cmd1
+            r1 = handle_command(self.conn, cmd1)
+            tid = r1["task_id"]
+            cmd2 = tg_adapt.update_to_command(
+                {
+                    "update_id": 8802,
+                    "message": {
+                        "text": "forum part two",
+                        "message_id": 502,
+                        "message_thread_id": 222,
+                        "chat": {"id": 8888, "type": "supergroup"},
+                        "from": {"id": 42},
+                    },
+                }
+            )
+            assert cmd2
+            self.assertFalse(attach_continuation_if_applicable(self.conn, cmd2))
+            r2 = handle_command(self.conn, cmd2)
+            self.assertNotEqual(r2["task_id"], tid)
+        finally:
+            if prev is None:
+                os.environ.pop("ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS", None)
+            else:
+                os.environ["ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS"] = prev
 
     def test_telegram_update_to_command_includes_forum_message_thread_id(self) -> None:
         cmd = tg_adapt.update_to_command(
@@ -496,6 +540,148 @@ class TestAndreaSync(unittest.TestCase):
                 os.environ.pop("ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS", None)
             else:
                 os.environ["ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS"] = prev
+
+    def test_submit_user_message_existing_task_idempotent_by_external_id(self) -> None:
+        first = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-anchor",
+                "payload": {
+                    "text": "hello",
+                    "chat_id": 50001,
+                    "message_id": 1,
+                    "from_user": 100,
+                },
+            },
+        )
+        self.assertTrue(first.get("ok"))
+        tid = first["task_id"]
+        dup_body = {
+            "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+            "channel": "telegram",
+            "task_id": tid,
+            "external_id": "tg-chunk-dup",
+            "payload": {
+                "text": "continuation",
+                "chat_id": 50001,
+                "message_id": 2,
+                "from_user": 100,
+            },
+        }
+        self.assertTrue(handle_command(self.conn, dup_body).get("ok"))
+        r_dup = handle_command(self.conn, dup_body)
+        self.assertTrue(r_dup.get("ok"))
+        self.assertTrue(r_dup.get("deduped"))
+
+    def test_report_cursor_event_idempotent_same_payload(self) -> None:
+        created = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.CREATE_CURSOR_JOB.value,
+                "channel": "telegram",
+                "external_id": "idem-cursor",
+                "payload": {"prompt": "fix bug", "summary": "fix"},
+            },
+        )
+        self.assertTrue(created.get("ok"))
+        tid = created["task_id"]
+        body = {
+            "command_type": CommandType.REPORT_CURSOR_EVENT.value,
+            "channel": "cursor",
+            "task_id": tid,
+            "payload": {
+                "event_type": EventType.JOB_PROGRESS.value,
+                "payload": {"message": "step", "n": 1},
+            },
+        }
+        self.assertTrue(handle_command(self.conn, body).get("ok"))
+        r2 = handle_command(self.conn, body)
+        self.assertTrue(r2.get("ok"))
+        self.assertTrue(r2.get("deduped"))
+
+    def test_external_ref_kind_reflects_channel_on_existing_task(self) -> None:
+        created = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.CREATE_TASK.value,
+                "channel": "cursor",
+                "external_id": "ext-cursor-task",
+                "payload": {"summary": "cli cursor task"},
+            },
+        )
+        self.assertTrue(created.get("ok"))
+        tid = created["task_id"]
+        handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "cursor",
+                "task_id": tid,
+                "external_id": "ext-cursor-msg",
+                "payload": {"text": "go", "routing_text": "go"},
+            },
+        )
+        events = load_events_for_task(self.conn, tid)
+        kinds = [
+            p.get("kind")
+            for _s, _t, et, p in events
+            if et == EventType.EXTERNAL_REF.value and isinstance(p, dict)
+        ]
+        self.assertIn("cursor_update", kinds)
+
+    def test_alexa_verify_skipped_when_disabled(self) -> None:
+        from services.andrea_sync import alexa_request_verify as arv
+
+        prev = os.environ.get("ANDREA_ALEXA_VERIFY_SIGNATURES")
+        os.environ.pop("ANDREA_ALEXA_VERIFY_SIGNATURES", None)
+        try:
+            self.assertFalse(arv.alexa_signature_verification_enabled())
+            arv.verify_alexa_http_request(
+                b'{"session":{"application":{"applicationId":"any"}},"request":{"timestamp":"2020-01-01T00:00:00Z"}}',
+                {},
+                expected_application_id="",
+            )
+        finally:
+            if prev is None:
+                os.environ.pop("ANDREA_ALEXA_VERIFY_SIGNATURES", None)
+            else:
+                os.environ["ANDREA_ALEXA_VERIFY_SIGNATURES"] = prev
+
+    def test_list_telegram_task_ids_for_chat_prefers_recent_tasks(self) -> None:
+        a = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "chat-order-a",
+                "payload": {
+                    "text": "a",
+                    "chat_id": 60001,
+                    "message_id": 1,
+                    "from_user": 1,
+                },
+            },
+        )
+        b = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "chat-order-b",
+                "payload": {
+                    "text": "b",
+                    "chat_id": 60001,
+                    "message_id": 2,
+                    "from_user": 1,
+                },
+            },
+        )
+        self.assertTrue(a.get("ok") and b.get("ok"))
+        ids = list_telegram_task_ids_for_chat(self.conn, 60001, limit=10)
+        self.assertGreaterEqual(len(ids), 2)
+        self.assertEqual(ids[0], b["task_id"])
 
     def test_router_greeting_stays_direct(self) -> None:
         decision = route_message("hi andrea how are you?")

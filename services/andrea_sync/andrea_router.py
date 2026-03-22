@@ -25,7 +25,8 @@ GREETING_RE = re.compile(
     re.I,
 )
 THANKS_RE = re.compile(r"\b(thanks|thank you|appreciate it)\b", re.I)
-IDENTITY_RE = re.compile(r"\b(who are you|what can you do|help me|help|what do you do)\b", re.I)
+IDENTITY_RE = re.compile(r"\b(who are you|what can you do|what do you do)\b", re.I)
+HELP_RE = re.compile(r"^(help|help me|help please|i need help)\b", re.I)
 META_CURSOR_RE = re.compile(r"\b(talk to cursor|have cursor|use cursor|delegate to cursor)\b", re.I)
 DELEGATE_KEYWORDS_RE = re.compile(
     r"\b(code|repo|repository|file|files|branch|commit|pull request|pr\b|debug|test suite|tests\b|"
@@ -45,19 +46,21 @@ class AndreaRouteDecision:
 
 def should_delegate_to_cursor(text: str) -> tuple[bool, str]:
     clean = _normalize(text)
+    word_count = len(clean.split())
     if not clean:
         return False, "empty_or_whitespace"
     if GREETING_RE.search(clean) or THANKS_RE.search(clean):
         return False, "greeting_or_social"
-    if IDENTITY_RE.search(clean):
-        return False, "assistant_identity_or_help"
     if META_CURSOR_RE.search(clean):
         return False, "cursor_coordination_question"
     if DELEGATE_KEYWORDS_RE.search(clean):
         return True, "technical_or_repo_request"
     if PATH_RE.search(text):
         return True, "path_or_code_reference"
-    word_count = len(clean.split())
+    if IDENTITY_RE.search(clean):
+        return False, "assistant_identity"
+    if HELP_RE.search(clean) and word_count <= 6:
+        return False, "short_help_request"
     if word_count <= 18:
         return False, "short_general_request"
     if word_count >= 45:
@@ -77,6 +80,11 @@ def _heuristic_reply(text: str) -> str:
         return (
             "Yes. I can coordinate with Cursor when the work needs heavier repo or coding help, "
             "but I'll answer directly when I can handle it myself."
+        )
+    if HELP_RE.search(clean) and len(clean.split()) <= 6:
+        return (
+            "Absolutely. Tell me what you want to get done, and I'll either handle it directly "
+            "or bring in Cursor if the work needs deeper technical help."
         )
     if IDENTITY_RE.search(clean):
         return (
@@ -150,7 +158,14 @@ def _openai_direct_reply(text: str) -> str:
 
 
 def build_direct_reply(text: str) -> str:
-    if GREETING_RE.search(_normalize(text)) or THANKS_RE.search(_normalize(text)) or IDENTITY_RE.search(_normalize(text)) or META_CURSOR_RE.search(_normalize(text)):
+    clean = _normalize(text)
+    if (
+        GREETING_RE.search(clean)
+        or THANKS_RE.search(clean)
+        or IDENTITY_RE.search(clean)
+        or META_CURSOR_RE.search(clean)
+        or (HELP_RE.search(clean) and len(clean.split()) <= 6)
+    ):
         return _heuristic_reply(text)
     try:
         return _openai_direct_reply(text)

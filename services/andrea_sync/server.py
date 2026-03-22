@@ -94,6 +94,7 @@ class SyncServer:
         migrate(self.conn)
         ensure_system_task(self.conn)
         self.lock = threading.Lock()
+        self._routing_inflight: set[str] = set()
         self.queue: Queue[Callable[[], None]] = Queue()
         self._worker = threading.Thread(target=self._run_queue, daemon=True)
         self._worker.start()
@@ -191,6 +192,25 @@ class SyncServer:
 
     def _meta_key(self, prefix: str, task_id: str) -> str:
         return f"andrea_bridge:{prefix}:{task_id}"
+
+    def _claim_routing_attempt(self, task_id: str) -> bool:
+        marker = self._meta_key("route_applied", task_id)
+
+        def claim(c: sqlite3.Connection) -> bool:
+            if task_id in self._routing_inflight:
+                return False
+            if get_meta(c, marker) is not None:
+                return False
+            self._routing_inflight.add(task_id)
+            return True
+
+        return self.with_lock(claim)
+
+    def _finish_routing_attempt(self, task_id: str) -> None:
+        def release(_c: sqlite3.Connection) -> None:
+            self._routing_inflight.discard(task_id)
+
+        self.with_lock(release)
 
     def _task_snapshot(self, task_id: str) -> Optional[Dict[str, Any]]:
         def read(c: sqlite3.Connection) -> Optional[Dict[str, Any]]:
@@ -314,38 +334,36 @@ class SyncServer:
 
     def _route_telegram_task(self, task_id: str) -> None:
         marker = self._meta_key("route_applied", task_id)
-
-        def claim(c: sqlite3.Connection) -> bool:
-            if get_meta(c, marker) is not None:
-                return False
-            set_meta(c, marker, str(time.time()))
-            return True
-
-        if not self.with_lock(claim):
+        if not self._claim_routing_attempt(task_id):
             return
-        prompt = self._extract_cursor_prompt(task_id)
-        decision = route_message(prompt)
-        if decision.mode == "delegate":
-            self._append_task_event(
-                task_id,
-                EventType.JOB_QUEUED,
-                {
-                    "kind": "cursor",
-                    "prompt_excerpt": prompt[:300],
-                    "source": "telegram_balanced_delegate",
-                    "route_reason": decision.reason,
-                },
-            )
-            return
-        self._append_task_event(
-            task_id,
-            EventType.ASSISTANT_REPLIED,
-            {
-                "text": decision.reply_text,
-                "route": "direct",
-                "reason": decision.reason,
-            },
-        )
+        try:
+            prompt = self._extract_cursor_prompt(task_id)
+            decision = route_message(prompt)
+            if decision.mode == "delegate":
+                applied = self._append_task_event(
+                    task_id,
+                    EventType.JOB_QUEUED,
+                    {
+                        "kind": "cursor",
+                        "prompt_excerpt": prompt[:300],
+                        "source": "telegram_balanced_delegate",
+                        "route_reason": decision.reason,
+                    },
+                )
+            else:
+                applied = self._append_task_event(
+                    task_id,
+                    EventType.ASSISTANT_REPLIED,
+                    {
+                        "text": decision.reply_text,
+                        "route": "direct",
+                        "reason": decision.reason,
+                    },
+                )
+            if applied:
+                self.with_lock(lambda c: set_meta(c, marker, str(time.time())))
+        finally:
+            self._finish_routing_attempt(task_id)
 
     def _schedule_cursor_execution(self, task_id: str) -> None:
         if not self.background_enabled or not self.telegram_auto_cursor:
@@ -368,7 +386,7 @@ class SyncServer:
 
     def _append_task_event(
         self, task_id: str, event_type: EventType, payload: Dict[str, Any]
-    ) -> None:
+    ) -> bool:
         def append(c: sqlite3.Connection) -> bool:
             if not get_task_channel(c, task_id):
                 return False
@@ -377,6 +395,8 @@ class SyncServer:
 
         if self.with_lock(append):
             self._queue_task_followups(task_id)
+            return True
+        return False
 
     def _run_json_subprocess(
         self,
@@ -405,7 +425,14 @@ class SyncServer:
         else:
             payload = {}
         if proc.returncode != 0:
-            detail = payload.get("error") if isinstance(payload, dict) else ""
+            detail = ""
+            if isinstance(payload, dict):
+                detail = str(
+                    payload.get("error")
+                    or payload.get("message")
+                    or payload.get("response")
+                    or ""
+                )
             raise RuntimeError(
                 f"subprocess failed exit={proc.returncode}: {detail or stderr or stdout[:500]}"
             )
@@ -595,12 +622,28 @@ class SyncServer:
                 },
             )
             return
+        if latest_status in TERMINAL_CURSOR_STATUSES:
+            self._append_task_event(
+                task_id,
+                EventType.JOB_FAILED,
+                {
+                    "error": f"cursor_status_{latest_status.lower() or 'unknown'}",
+                    "message": f"Cursor ended with status {latest_status or 'unknown'}.",
+                    "cursor_agent_id": agent_id,
+                    "agent_url": agent_url or None,
+                    "pr_url": pr_url or None,
+                    "raw_status": latest_response.get("status"),
+                },
+            )
+            return
         self._append_task_event(
             task_id,
-            EventType.JOB_FAILED,
+            EventType.JOB_PROGRESS,
             {
-                "error": f"cursor_status_{latest_status.lower() or 'unknown'}",
-                "message": f"Cursor ended with status {latest_status or 'unknown'}.",
+                "message": (
+                    f"Cursor is still running with status {latest_status or 'unknown'} after "
+                    "the configured polling window; leaving the task in running state."
+                ),
                 "cursor_agent_id": agent_id,
                 "agent_url": agent_url or None,
                 "pr_url": pr_url or None,
@@ -820,10 +863,13 @@ def make_handler(server: SyncServer) -> type:
                 body = self._read_json()
                 task_id = body.get("task_id")
                 et = body.get("event_type")
-                payload = body.get("payload") if isinstance(body.get("payload"), dict) else {}
                 if not task_id or not et:
                     self._send(400, b'{"error":"task_id and event_type required"}')
                     return
+                if body.get("payload") is not None and not isinstance(body.get("payload"), dict):
+                    self._send(400, b'{"error":"payload must be a JSON object"}')
+                    return
+                payload = body.get("payload") if isinstance(body.get("payload"), dict) else {}
                 from .schema import validate_event_type
                 from .store import append_event, task_exists
 

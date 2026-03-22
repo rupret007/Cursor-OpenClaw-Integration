@@ -5,7 +5,7 @@ BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CLI="${BASE_DIR}/scripts/cursor_openclaw.py"
 TEST_FILE="${BASE_DIR}/tests/test_cursor_openclaw.py"
 
-echo "[1/10] Validate required files..."
+echo "[1/11] Validate required files..."
 for f in "$CLI" "$TEST_FILE" "${BASE_DIR}/README.md" "${BASE_DIR}/.env.example" "${BASE_DIR}/docs/ANDREA_OPENCLAW_HYBRID_SKILLS.md" "${BASE_DIR}/docs/ANDREA_LOCKSTEP_ARCHITECTURE.md" "${BASE_DIR}/docs/ANDREA_LOCKSTEP_REVIEW_FINDINGS.md" "${BASE_DIR}/docs/ANDREA_ALEXA_INTEGRATION.md" "${BASE_DIR}/scripts/setup_admin.sh" "${BASE_DIR}/scripts/env_loader.py" "${BASE_DIR}/scripts/cursor_api_common.py" "${BASE_DIR}/scripts/handoff_context.py" "${BASE_DIR}/scripts/exhaustive_feature_check.sh" "${BASE_DIR}/scripts/andrea_capabilities.py" "${BASE_DIR}/scripts/andrea_reliability_probes.sh" "${BASE_DIR}/scripts/dotenv_set_key.py" "${BASE_DIR}/scripts/openclaw_apply_openai_key.sh" "${BASE_DIR}/scripts/andrea_readiness_grade.py" "${BASE_DIR}/scripts/andrea_security_sanity.sh" "${BASE_DIR}/scripts/andrea_slo_check.sh" "${BASE_DIR}/scripts/andrea_doctor.sh" "${BASE_DIR}/scripts/andrea_model_guard.sh" "${BASE_DIR}/scripts/andrea_openclaw_enforce.sh" "${BASE_DIR}/scripts/andrea_release_gate.sh" "${BASE_DIR}/scripts/andrea_slo_telegram.sh" "${BASE_DIR}/scripts/andrea_slo_telegram_probe.py" "${BASE_DIR}/scripts/andrea_sync_server.py" "${BASE_DIR}/scripts/andrea_sync_health.py" "${BASE_DIR}/scripts/andrea_sync_cursor_report.py" "${BASE_DIR}/scripts/andrea_sync_publish_capabilities.py" "${BASE_DIR}/scripts/andrea_kill_switch.sh" "${BASE_DIR}/scripts/andrea_lockstep_telegram_e2e.py" "${BASE_DIR}/scripts/andrea_communication_smoke.sh" "${BASE_DIR}/scripts/andrea_full_cycle.sh" "${BASE_DIR}/scripts/andrea_wrap_up_prereqs.sh" "${BASE_DIR}/scripts/macos/install_andrea_launchagents.sh"; do
   [[ -f "$f" ]] || { echo "Missing file: $f" >&2; exit 1; }
 done
@@ -41,13 +41,16 @@ while IFS= read -r _py; do
   python3 -m py_compile "$_py"
 done < <(find "${BASE_DIR}/services" -name "*.py" 2>/dev/null | sort)
 
-echo "[2/10] Python syntax compile..."
+echo "[2/11] Python syntax compile..."
 python3 -m py_compile "$CLI"
 
-echo "[3/10] Unit tests..."
+echo "[3/11] Unit tests..."
 python3 -m unittest discover -s "${BASE_DIR}/tests" -p "test_*.py"
 
-echo "[4/10] Dry-run create payload..."
+echo "[4/11] Cursor handoff skill tests..."
+python3 -m unittest discover -s "${BASE_DIR}/skills/cursor_handoff/tests" -p "test_*.py"
+
+echo "[5/11] Dry-run create payload..."
 CURSOR_API_KEY="dummy_test_key" python3 "$CLI" \
   --json create-agent \
   --prompt "Test prompt" \
@@ -64,22 +67,22 @@ CURSOR_API_KEY="dummy_test_key" python3 "$CLI" \
   --branch-name "cursor/intent-only" \
   --dry-run >/dev/null
 
-echo "[5/10] Diagnostic command..."
+echo "[6/11] Diagnostic command..."
 CURSOR_API_KEY="dummy_test_key" python3 "$CLI" --json diagnose >/dev/null
 
-echo "[6/10] Andrea security sanity (non-strict)..."
+echo "[7/11] Andrea security sanity (non-strict)..."
 bash "${BASE_DIR}/scripts/andrea_security_sanity.sh"
 
-echo "[7/10] Andrea reliability probes..."
+echo "[8/11] Andrea reliability probes..."
 bash "${BASE_DIR}/scripts/andrea_reliability_probes.sh"
 
-echo "[8/10] Readiness grade (informational; may be B/C on minimal env)..."
+echo "[9/11] Readiness grade (informational; may be B/C on minimal env)..."
 python3 "${BASE_DIR}/scripts/andrea_readiness_grade.py" || true
 
-echo "[9/10] Exhaustive offline feature check..."
+echo "[10/11] Exhaustive offline feature check..."
 bash "${BASE_DIR}/scripts/exhaustive_feature_check.sh"
 
-echo "[10/10] Optional live communication smoke (RUN_COMM_SMOKE=1)..."
+echo "[11/11] Optional live communication smoke (RUN_COMM_SMOKE=1)..."
 if [[ "${RUN_COMM_SMOKE:-0}" == "1" ]]; then
   bash "${BASE_DIR}/scripts/andrea_communication_smoke.sh"
 else

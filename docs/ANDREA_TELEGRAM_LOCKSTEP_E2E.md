@@ -4,7 +4,10 @@ End-to-end path: **Telegram** → **HTTPS webhook** → **local `andrea_sync`** 
 
 ## Prerequisites
 
-1. **Secrets in repo `.env`** (recommended) or exported in your shell. Optional second file: set `ANDREA_ENV_FILE=/path/to/override.env` — values there **override** repo `.env` for duplicate keys.
+1. **Secrets in repo `.env`** (recommended) or exported in your shell. Optional override files:
+   - `~/andrea-lockstep.env`
+   - `ANDREA_ENV_FILE=/path/to/override.env`
+   Both override repo `.env` for duplicate keys.
 
 | Variable | Purpose |
 |----------|---------|
@@ -26,7 +29,7 @@ export ANDREA_SYNC_INTERNAL_TOKEN='long-random'
 python3 scripts/andrea_sync_server.py
 ```
 
-`scripts/andrea_sync_server.py` now loads repo `.env` automatically before startup-safe overrides from `~/andrea-lockstep.env`, so the same process can handle webhook ingest, Cursor execution, Telegram replies, and webhook self-heal.
+`scripts/andrea_sync_server.py` now loads repo `.env`, then cwd `.env`, then startup-safe overrides from `~/andrea-lockstep.env`, and finally `ANDREA_ENV_FILE` when set. That lets the same process handle webhook ingest, Cursor execution, Telegram replies, and webhook self-heal without requiring a separate export step.
 
 3. **`cloudflared` on PATH** (quick tunnel). Install:
 

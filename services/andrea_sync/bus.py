@@ -19,8 +19,7 @@ from .schema import (
 from .store import (
     SYSTEM_TASK_ID,
     append_event,
-    claim_idempotency_or_get_existing,
-    create_task,
+    claim_idempotency_and_create_task,
     ensure_system_task,
     set_meta,
     task_exists,
@@ -102,10 +101,14 @@ def _ensure_task(
         return tid, False, False
 
     candidate = new_task_id()
-    tid, fresh = claim_idempotency_or_get_existing(conn, idem, candidate)
+    tid, fresh = claim_idempotency_and_create_task(
+        conn,
+        idem,
+        candidate,
+        env.channel.value,
+    )
     if not fresh:
         return tid, False, True
-    create_task(conn, tid, env.channel.value)
     return tid, True, False
 
 
@@ -335,6 +338,8 @@ def _handle_cursor_report(conn: sqlite3.Connection, env: CommandEnvelope, idem: 
         cet = EventType(str(et_raw))
     except ValueError:
         return {"ok": False, "error": f"invalid event_type: {et_raw}"}
+    if env.payload.get("payload") is not None and not isinstance(env.payload.get("payload"), dict):
+        return {"ok": False, "error": "payload.payload must be a JSON object"}
     inner = env.payload.get("payload") if isinstance(env.payload.get("payload"), dict) else {}
     _append(conn, tid, EventType.COMMAND_RECEIVED, {"command_type": "ReportCursorEvent"})
     _append(conn, tid, cet, inner)

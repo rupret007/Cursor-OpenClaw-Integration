@@ -34,6 +34,9 @@ def main() -> int:
     except json.JSONDecodeError:
         print("invalid --payload JSON", file=sys.stderr)
         return 2
+    if not isinstance(payload, dict):
+        print("--payload must decode to a JSON object", file=sys.stderr)
+        return 2
     cmd = cursor_event_command(args.task_id, args.event, payload)
     if args.db:
         dbp = Path(args.db).expanduser()
@@ -66,7 +69,16 @@ def main() -> int:
         )
         try:
             with urllib.request.urlopen(req, timeout=30.0) as resp:
-                out = json.loads(resp.read().decode("utf-8"))
+                raw = resp.read().decode("utf-8")
+                try:
+                    out = json.loads(raw)
+                except json.JSONDecodeError:
+                    print(f"non-JSON response: {raw[:500]}", file=sys.stderr)
+                    return 1
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")
+            print(body or str(e), file=sys.stderr)
+            return 1
         except urllib.error.URLError as e:
             print(str(e), file=sys.stderr)
             return 1

@@ -26,7 +26,13 @@ bash "${BASE_DIR}/scripts/andrea_security_sanity.sh"
 echo ""
 
 echo ">>> [2/4] Capability matrix summary + readiness grade"
+set +o pipefail
 python3 "${BASE_DIR}/scripts/andrea_capabilities.py" | head -20
+_cap_status=("${PIPESTATUS[@]}")
+set -o pipefail
+if [[ "${_cap_status[0]:-0}" -ne 0 && "${_cap_status[0]:-0}" -ne 141 ]]; then
+  exit "${_cap_status[0]}"
+fi
 echo "…"
 python3 "${BASE_DIR}/scripts/andrea_readiness_grade.py" || {
   echo "Grade C — fix blocked rows above, then re-run." >&2

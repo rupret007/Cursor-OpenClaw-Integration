@@ -152,6 +152,43 @@ class TestAndreaSyncHTTP(unittest.TestCase):
             urllib.request.urlopen(req, timeout=5)
         self.assertEqual(ctx.exception.code, 401)
 
+    def test_internal_events_rejects_non_object_payload(self) -> None:
+        create_body = json.dumps(
+            {
+                "command_type": "CreateTask",
+                "channel": "cli",
+                "external_id": "http-internal-payload",
+                "payload": {"summary": "for payload validation"},
+            }
+        ).encode("utf-8")
+        create_req = urllib.request.Request(
+            self._url("/v1/commands"),
+            data=create_body,
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(create_req, timeout=5) as resp:
+            created = json.loads(resp.read().decode("utf-8"))
+        body = json.dumps(
+            {
+                "task_id": created["task_id"],
+                "event_type": "JobStarted",
+                "payload": ["not", "an", "object"],
+            }
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            self._url("/v1/internal/events"),
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": "Bearer internal-test-token",
+            },
+        )
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(req, timeout=5)
+        self.assertEqual(ctx.exception.code, 400)
+
     def test_telegram_webhook_forbidden_without_secret(self) -> None:
         body = json.dumps({"update_id": 1, "message": {"text": "hi"}}).encode("utf-8")
         req = urllib.request.Request(

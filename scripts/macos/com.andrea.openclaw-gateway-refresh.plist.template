@@ -10,7 +10,7 @@
   <array>
     <string>/bin/zsh</string>
     <string>-lc</string>
-    <string>command -v openclaw &amp;&amp; openclaw gateway restart || true</string>
+    <string>export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH}"; if command -v openclaw &gt;/dev/null 2&gt;&amp;1; then openclaw gateway restart; else echo "openclaw not found on PATH" &gt;&amp;2; exit 127; fi</string>
   </array>
   <key>StandardOutPath</key>
   <string>__HOME__/Library/Logs/andrea/openclaw-gateway-refresh.log</string>

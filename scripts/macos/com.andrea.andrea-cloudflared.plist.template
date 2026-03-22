@@ -10,7 +10,7 @@
   <true/>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/local/bin/cloudflared</string>
+    <string>__CLOUDFLARED_BIN__</string>
     <string>tunnel</string>
     <string>--no-autoupdate</string>
     <string>run</string>

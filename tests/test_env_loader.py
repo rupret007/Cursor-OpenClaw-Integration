@@ -47,6 +47,22 @@ class EnvLoaderTests(unittest.TestCase):
                 else:
                     os.environ.pop(key, None)
 
+    def test_merge_override_replaces_existing_value(self):
+        key = "ENV_LOADER_OVERRIDE_TEST_KEY"
+        with tempfile.TemporaryDirectory() as tmp:
+            env_path = pathlib.Path(tmp) / "override.env"
+            env_path.write_text(f'{key}="override_value"\n', encoding="utf-8")
+            old = os.environ.get(key)
+            os.environ[key] = "base_value"
+            try:
+                MODULE.merge_dotenv_paths([env_path], override=True)
+                self.assertEqual(os.environ.get(key), "override_value")
+            finally:
+                if old is not None:
+                    os.environ[key] = old
+                else:
+                    os.environ.pop(key, None)
+
 
 if __name__ == "__main__":
     unittest.main()

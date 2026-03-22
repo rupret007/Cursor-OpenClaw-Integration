@@ -11,6 +11,7 @@ BASE_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 REPO_ROOT="${REPO_ROOT:-$BASE_DIR}"
 HOME_DIR="${HOME}"
 PY3="${PYTHON3:-$(command -v python3)}"
+CLOUDFLARED_BIN="${CLOUDFLARED_BIN:-$(command -v cloudflared || true)}"
 AGENT_DIR="${HOME_DIR}/Library/LaunchAgents"
 LOG_DIR="${HOME_DIR}/Library/Logs/andrea"
 WITH_CF=0
@@ -30,6 +31,7 @@ render() {
     -e "s|__REPO_ROOT__|${REPO_ROOT//\\/\\\\}|g" \
     -e "s|__HOME__|${HOME_DIR//\\/\\\\}|g" \
     -e "s|__PYTHON3__|${PY3//\\/\\\\}|g" \
+    -e "s|__CLOUDFLARED_BIN__|${CLOUDFLARED_BIN//\\/\\\\}|g" \
     -e "s|__CLOUDFLARED_TUNNEL_TOKEN__|${CLOUDFLARED_TUNNEL_TOKEN:-REPLACE_ME}|g" \
     "$src" > "$dest"
 }
@@ -41,15 +43,21 @@ echo "Installed ${AGENT_DIR}/com.andrea.andrea-sync.plist"
 echo "The sync LaunchAgent sources repo .env first, then ~/andrea-lockstep.env for overrides."
 echo "Put secrets/runtime overrides in ~/andrea-lockstep.env (export TELEGRAM_BOT_TOKEN=... etc.) then:"
 echo "  launchctl bootstrap gui/\$(id -u) ${AGENT_DIR}/com.andrea.andrea-sync.plist"
+echo "  # if updating an existing agent first run:"
+echo "  launchctl bootout gui/\$(id -u) ${AGENT_DIR}/com.andrea.andrea-sync.plist || true"
 
 if [[ "$WITH_CF" -eq 1 ]]; then
   if [[ -z "${CLOUDFLARED_TUNNEL_TOKEN:-}" ]]; then
     echo "error: set CLOUDFLARED_TUNNEL_TOKEN for named tunnel" >&2
     exit 1
   fi
+  if [[ -z "${CLOUDFLARED_BIN}" ]]; then
+    echo "error: cloudflared not found on PATH (set CLOUDFLARED_BIN explicitly if needed)" >&2
+    exit 1
+  fi
   render "${BASE_DIR}/scripts/macos/com.andrea.andrea-cloudflared.plist.template" \
     "${AGENT_DIR}/com.andrea.andrea-cloudflared.plist"
-  echo "Installed cloudflared agent (verify /usr/local/bin/cloudflared path)."
+  echo "Installed cloudflared agent using ${CLOUDFLARED_BIN}."
 fi
 
 if [[ "$WITH_OC" -eq 1 ]]; then

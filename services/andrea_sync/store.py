@@ -104,6 +104,49 @@ def claim_idempotency_or_get_existing(
     return new_task_id, True
 
 
+def claim_idempotency_and_create_task(
+    conn: sqlite3.Connection,
+    key: str,
+    new_task_id: str,
+    channel: str,
+) -> Tuple[str, bool]:
+    """
+    Returns (task_id, created_new_task).
+
+    This keeps the idempotency claim and task creation in one transaction so a
+    crash cannot leave an idempotency mapping without a task row.
+    """
+    row = conn.execute(
+        "SELECT task_id FROM idempotency WHERE idempotency_key = ?",
+        (key,),
+    ).fetchone()
+    if row:
+        return str(row["task_id"]), False
+    ts = time.time()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT task_id FROM idempotency WHERE idempotency_key = ?",
+            (key,),
+        ).fetchone()
+        if row:
+            conn.rollback()
+            return str(row["task_id"]), False
+        conn.execute(
+            "INSERT INTO idempotency(idempotency_key, task_id, created_at) VALUES (?,?,?)",
+            (key, new_task_id, ts),
+        )
+        conn.execute(
+            "INSERT INTO tasks(task_id, channel, created_at, updated_at) VALUES (?,?,?,?)",
+            (new_task_id, channel, ts, ts),
+        )
+        conn.commit()
+        return new_task_id, True
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def load_events_for_task(
     conn: sqlite3.Connection, task_id: str
 ) -> List[Tuple[int, float, str, Dict[str, Any]]]:

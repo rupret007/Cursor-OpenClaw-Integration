@@ -6,6 +6,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -18,7 +19,7 @@ from services.andrea_sync.bus import handle_command  # noqa: E402
 from services.andrea_sync.policy import evaluate_skill_absence_claim  # noqa: E402
 from services.andrea_sync.projector import project_task_dict  # noqa: E402
 from services.andrea_sync.schema import CommandType, EventType, TaskStatus, normalize_idempotency_base  # noqa: E402
-from services.andrea_sync.store import connect, migrate  # noqa: E402
+from services.andrea_sync.store import connect, load_events_for_task, migrate  # noqa: E402
 from services.andrea_sync.andrea_router import route_message  # noqa: E402
 from services.andrea_sync.telegram_format import (  # noqa: E402
     format_ack_message,
@@ -191,6 +192,10 @@ class TestAndreaSync(unittest.TestCase):
         decision = route_message("Please inspect the repo, fix the failing tests, and open a PR.")
         self.assertEqual(decision.mode, "delegate")
 
+    def test_router_help_with_technical_request_delegates(self) -> None:
+        decision = route_message("Help me debug this traceback and fix the failing tests.")
+        self.assertEqual(decision.mode, "delegate")
+
     def test_router_meta_cursor_question_stays_direct(self) -> None:
         decision = route_message("Can you talk to Cursor when needed?")
         self.assertEqual(decision.mode, "direct")
@@ -293,6 +298,129 @@ class TestAndreaSync(unittest.TestCase):
         proj = project_task_dict(server.conn, result["task_id"], "telegram")
         self.assertEqual(proj["status"], TaskStatus.QUEUED.value)
         self.assertEqual(proj["meta"]["cursor"]["kind"], "cursor")
+
+    def test_server_routing_retry_after_append_failure(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        result = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-retry",
+                "payload": {
+                    "text": "Please inspect the repo and fix the failing tests.",
+                    "chat_id": 1,
+                    "message_id": 4,
+                },
+            },
+        )
+        task_id = result["task_id"]
+        original_append = server._append_task_event
+        attempts = {"count": 0}
+
+        def flaky_append(*args, **kwargs):
+            if attempts["count"] == 0:
+                attempts["count"] += 1
+                raise RuntimeError("append failed")
+            return original_append(*args, **kwargs)
+
+        with mock.patch.object(server, "_append_task_event", side_effect=flaky_append):
+            with self.assertRaises(RuntimeError):
+                server._handle_task_followups(task_id)
+        server._handle_task_followups(task_id)
+        proj = project_task_dict(server.conn, task_id, "telegram")
+        self.assertEqual(proj["status"], TaskStatus.QUEUED.value)
+        self.assertEqual(proj["meta"]["cursor"]["kind"], "cursor")
+
+    def test_server_cursor_poll_timeout_stays_running(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        result = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-long-run",
+                "payload": {
+                    "text": "Please inspect the repo and fix the failing tests.",
+                    "chat_id": 1,
+                    "message_id": 5,
+                    "auto_cursor_job": True,
+                },
+            },
+        )
+        task_id = result["task_id"]
+        server.cursor_status_poll_attempts = 2
+        server.cursor_status_poll_interval = 0.0
+        with (
+            mock.patch.object(
+                server,
+                "_create_cursor_job",
+                return_value={
+                    "agent_id": "bc-demo",
+                    "agent_url": "https://cursor.com/agents/demo",
+                    "status": "SUBMITTED",
+                    "backend": "api",
+                },
+            ),
+            mock.patch.object(
+                server,
+                "_cursor_agent_status",
+                side_effect=[
+                    {
+                        "response": {
+                            "status": "RUNNING",
+                            "target": {"url": "https://cursor.com/agents/demo"},
+                        }
+                    },
+                    {
+                        "response": {
+                            "status": "RUNNING",
+                            "target": {"url": "https://cursor.com/agents/demo"},
+                        }
+                    },
+                ],
+            ),
+        ):
+            server._run_cursor_job(task_id)
+        proj = project_task_dict(server.conn, task_id, "telegram")
+        self.assertEqual(proj["status"], TaskStatus.RUNNING.value)
+        self.assertIsNone(proj["last_error"])
+        events = load_events_for_task(server.conn, task_id)
+        self.assertEqual(events[-1][2], EventType.JOB_PROGRESS.value)
+
+    def test_cursor_report_rejects_non_object_payload(self) -> None:
+        created = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.CREATE_CURSOR_JOB.value,
+                "channel": "telegram",
+                "external_id": "cursor-report-payload",
+                "payload": {"prompt": "fix bug", "summary": "fix"},
+            },
+        )
+        self.assertTrue(created.get("ok"))
+        result = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.REPORT_CURSOR_EVENT.value,
+                "channel": "cursor",
+                "task_id": created["task_id"],
+                "payload": {
+                    "event_type": EventType.JOB_STARTED.value,
+                    "payload": ["not", "an", "object"],
+                },
+            },
+        )
+        self.assertFalse(result.get("ok"))
+        self.assertIn("json object", str(result.get("error", "")).lower())
 
     def test_alexa_parse_intent(self) -> None:
         body = {

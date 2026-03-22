@@ -102,6 +102,35 @@ class TestLockstepTelegramE2EHelpers(unittest.TestCase):
         self.assertTrue(health["registered"])
         self.assertFalse(health["matches_expected"])
 
+    def test_cmd_webhook_info_retries_until_match(self) -> None:
+        responses = [
+            {"ok": True, "result": {"url": ""}},
+            {
+                "ok": True,
+                "result": {"url": "https://example.com/v1/telegram/webhook?secret=abc"},
+            },
+        ]
+        with mock.patch.dict(
+            os.environ,
+            {
+                "TELEGRAM_BOT_TOKEN": "token",
+                "ANDREA_SYNC_TELEGRAM_SECRET": "abc",
+                "ANDREA_SYNC_PUBLIC_BASE": "https://example.com",
+            },
+            clear=True,
+        ):
+            with mock.patch.object(e2e, "load_env"):
+                with mock.patch.object(e2e, "check_env", return_value=0):
+                    with mock.patch.object(e2e, "telegram_api", side_effect=responses):
+                        with mock.patch.object(e2e.time, "sleep") as sleep_mock:
+                            rc = e2e.cmd_webhook_info(
+                                require_match=True,
+                                attempts=2,
+                                retry_delay_sec=0.01,
+                            )
+        self.assertEqual(rc, 0)
+        sleep_mock.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

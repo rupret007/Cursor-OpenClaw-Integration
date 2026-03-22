@@ -224,28 +224,48 @@ def cmd_set_webhook() -> int:
     return 0 if res.get("ok") else 1
 
 
-def cmd_webhook_info(*, require_registered: bool = False, require_match: bool = False) -> int:
+def cmd_webhook_info(
+    *,
+    require_registered: bool = False,
+    require_match: bool = False,
+    attempts: int = 1,
+    retry_delay_sec: float = 2.0,
+) -> int:
     load_env()
     if check_env(strict_internal=False) != 0:
         return 1
     token = os.environ["TELEGRAM_BOT_TOKEN"].strip()
-    res = telegram_api("getWebhookInfo", token)
-    # Redact URL query in result
-    r = dict(res)
-    if r.get("result") and isinstance(r["result"], dict):
-        inner = dict(r["result"])
-        u = inner.get("url")
-        if isinstance(u, str):
-            inner["url"] = redact_url(u) if "secret=" in u else u
-        r["result"] = inner
-    r["webhook_health"] = classify_webhook_health(
-        res,
-        expected_url=expected_webhook_url_from_env(),
-    )
-    print(json.dumps(r, indent=2))
-    if not res.get("ok"):
+    expected_url = expected_webhook_url_from_env()
+    attempts = max(1, int(attempts))
+    final_response: dict = {}
+    for attempt in range(attempts):
+        res = telegram_api("getWebhookInfo", token)
+        # Redact URL query in result
+        r = dict(res)
+        if r.get("result") and isinstance(r["result"], dict):
+            inner = dict(r["result"])
+            u = inner.get("url")
+            if isinstance(u, str):
+                inner["url"] = redact_url(u) if "secret=" in u else u
+            r["result"] = inner
+        r["webhook_health"] = classify_webhook_health(
+            res,
+            expected_url=expected_url,
+        )
+        final_response = r
+        if not res.get("ok"):
+            break
+        health = r["webhook_health"]
+        registered_ok = health.get("registered") or not require_registered
+        match_ok = health.get("matches_expected") or not require_match
+        if registered_ok and match_ok:
+            break
+        if attempt < attempts - 1:
+            time.sleep(max(0.0, retry_delay_sec))
+    print(json.dumps(final_response, indent=2))
+    if not final_response.get("ok"):
         return 1
-    health = r["webhook_health"]
+    health = final_response["webhook_health"]
     if require_registered and not health.get("registered"):
         return 1
     if require_match and not health.get("matches_expected"):
@@ -360,6 +380,8 @@ def main() -> int:
     wh = sub.add_parser("webhook-info", help="getWebhookInfo with webhook health summary")
     wh.add_argument("--require-registered", action="store_true")
     wh.add_argument("--require-match", action="store_true")
+    wh.add_argument("--attempts", type=int, default=1)
+    wh.add_argument("--retry-delay-sec", type=float, default=2.0)
     sub.add_parser("tunnel-and-webhook", help="cloudflared quick tunnel + set-webhook")
     wt = sub.add_parser("wait-telegram-task", help="Poll /v1/tasks for channel=telegram")
     wt.add_argument("--timeout-sec", type=float, default=120.0)
@@ -378,6 +400,8 @@ def main() -> int:
         return cmd_webhook_info(
             require_registered=bool(args.require_registered),
             require_match=bool(args.require_match),
+            attempts=int(args.attempts),
+            retry_delay_sec=float(args.retry_delay_sec),
         )
     if args.cmd == "tunnel-and-webhook":
         return cmd_tunnel_and_webhook()

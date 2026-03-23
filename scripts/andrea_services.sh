@@ -54,6 +54,21 @@ require_openclaw() {
   command -v openclaw >/dev/null 2>&1 || die "openclaw not found on PATH"
 }
 
+gateway_status_text() {
+  openclaw gateway status 2>&1 || true
+}
+
+gateway_status_needs_repair() {
+  local text="$1"
+  [[ "${text}" == *"not loaded"* || "${text}" == *"Service not installed"* || "${text}" == *"Service unit not found"* ]]
+}
+
+repair_gateway_service() {
+  require_openclaw
+  say "Reinstalling OpenClaw gateway service"
+  openclaw gateway install --force >/dev/null
+}
+
 describe_launchagent() {
   local label="$1"
   local role="$2"
@@ -173,8 +188,15 @@ stop_tunnel() {
 
 start_gateway() {
   require_openclaw
+  local status_out
   say "Starting OpenClaw gateway"
-  openclaw gateway start
+  openclaw gateway start >/dev/null 2>&1 || true
+  status_out="$(gateway_status_text)"
+  if gateway_status_needs_repair "${status_out}"; then
+    warn "OpenClaw gateway service was not loaded after start; repairing install"
+    repair_gateway_service
+    openclaw gateway start >/dev/null
+  fi
 }
 
 stop_gateway() {
@@ -185,8 +207,15 @@ stop_gateway() {
 
 restart_gateway() {
   require_openclaw
+  local status_out
   say "Restarting OpenClaw gateway"
-  openclaw gateway restart
+  openclaw gateway restart >/dev/null 2>&1 || true
+  status_out="$(gateway_status_text)"
+  if gateway_status_needs_repair "${status_out}"; then
+    warn "OpenClaw gateway service was not loaded after restart; repairing install"
+    repair_gateway_service
+    openclaw gateway restart >/dev/null
+  fi
 }
 
 run_bootstrap() {
@@ -216,8 +245,13 @@ stop_all() {
 }
 
 restart_all() {
-  stop_all
-  start_all
+  stop_bootstrap_agent
+  stop_tunnel
+  stop_sync
+  restart_gateway
+  start_sync
+  start_tunnel
+  run_bootstrap
 }
 
 print_labels() {

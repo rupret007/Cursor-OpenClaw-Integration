@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 
-if [[ -n "${ANDREA_LAUNCHAGENT_LIB_SOURCED:-}" ]]; then
+if [[ -n "${ANDREA_LAUNCHAGENT_LIB_SOURCED:-}" && -n "${ANDREA_SYNC_LABEL:-}" ]]; then
   return 0 2>/dev/null || exit 0
 fi
-export ANDREA_LAUNCHAGENT_LIB_SOURCED=1
+ANDREA_LAUNCHAGENT_LIB_SOURCED=1
 
 ANDREA_MACOS_SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ANDREA_REPO_ROOT="${ANDREA_REPO_ROOT:-$(cd "${ANDREA_MACOS_SCRIPTS_DIR}/../.." && pwd)}"

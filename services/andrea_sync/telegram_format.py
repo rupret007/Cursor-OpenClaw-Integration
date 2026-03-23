@@ -90,7 +90,7 @@ def _routing_note(routing_hint: str, collaboration_mode: str) -> str:
     if hint == "andrea":
         return "- You addressed Andrea directly, so I kept this in the assistant lane."
     if hint == "cursor":
-        return "- You addressed Cursor directly, so Andrea routed this as a Cursor-first collaboration."
+        return "- You asked Andrea to use the Cursor execution lane for the heavy work."
     if hint == "collaborate" or collab == "collaborative":
         return "- You asked Andrea and Cursor to work together on this."
     return ""
@@ -110,8 +110,6 @@ def _footer_lines(
         f"- Task: {task_id}",
         f"- Status: {status}",
     ]
-    if openclaw_session_id:
-        lines.append(f"- OpenClaw session: {_clip(openclaw_session_id, 200)}")
     if pr_url:
         lines.append(f"- PR: {pr_url}")
     if agent_url:
@@ -119,6 +117,25 @@ def _footer_lines(
     if last_error:
         lines.append(f"- Error: {_clip(last_error, 500)}")
     return lines
+
+
+def _collaboration_trace_lines(
+    collaboration_trace: list[str] | None,
+    *,
+    visibility_mode: str = "",
+) -> list[str]:
+    if str(visibility_mode or "").strip().lower() != "full":
+        return []
+    if not isinstance(collaboration_trace, list):
+        return []
+    items: list[str] = []
+    for raw in collaboration_trace[:4]:
+        text = _normalize_whitespace(str(raw or ""))
+        if text:
+            items.append(f"- {_clip(text, 240)}")
+    if not items:
+        return []
+    return ["", "Collaboration trace:", *items]
 
 
 def format_ack_message(
@@ -340,6 +357,8 @@ def format_final_message(
     delegated_to_cursor: bool = False,
     backend: str = "",
     openclaw_session_id: str = "",
+    visibility_mode: str = "",
+    collaboration_trace: list[str] | None = None,
     routing_hint: str = "",
     collaboration_mode: str = "",
     provider: str = "",
@@ -373,7 +392,7 @@ def format_final_message(
         else:
             andrea_line = "I finished your request and captured the result below."
     else:
-        andrea_line = "I could not complete your request successfully, but I captured the failure details below."
+        andrea_line = "I could not complete your request successfully, but I captured the safe failure summary below."
 
     if completed:
         if worker_label == "OpenClaw and Cursor" or delegated_to_cursor:
@@ -406,6 +425,12 @@ def format_final_message(
     routing_note = _routing_note(routing_hint, collaboration_mode)
     if routing_note:
         lines.append(routing_note)
+    lines.extend(
+        _collaboration_trace_lines(
+            collaboration_trace,
+            visibility_mode=visibility_mode,
+        )
+    )
 
     if summary_excerpt:
         lines.extend(

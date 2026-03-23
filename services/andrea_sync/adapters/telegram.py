@@ -59,6 +59,11 @@ def extract_routing_hints(text: str) -> Dict[str, Any]:
     visibility_mode = "summary"
     if FULL_DIALOGUE_RE.search(raw_text):
         visibility_mode = "full"
+    requested_capability = "assistant"
+    if routing_hint == "cursor":
+        requested_capability = "cursor_execution"
+    elif routing_hint == "collaborate" or collaboration_mode == "collaborative":
+        requested_capability = "collaboration"
     return {
         "raw_text": raw_text,
         "routing_text": cleaned,
@@ -69,6 +74,7 @@ def extract_routing_hints(text: str) -> Dict[str, Any]:
         "routing_hint": routing_hint,
         "collaboration_mode": collaboration_mode,
         "visibility_mode": visibility_mode,
+        "requested_capability": requested_capability,
     }
 
 
@@ -103,6 +109,7 @@ def update_to_command(update: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "routing_hint": routing["routing_hint"],
         "collaboration_mode": routing["collaboration_mode"],
         "visibility_mode": routing["visibility_mode"],
+        "requested_capability": routing["requested_capability"],
         "chat_id": chat_id,
         "chat_type": chat.get("type"),
         "message_id": message_id,

@@ -13,12 +13,14 @@ import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from services.andrea_sync.telegram_format import format_final_message  # noqa: E402
+from services.andrea_sync.adapters import telegram as tg_adapt  # noqa: E402
 from services.andrea_sync.bus import handle_command  # noqa: E402
 from services.andrea_sync.schema import EventType  # noqa: E402
 from services.andrea_sync.store import append_event  # noqa: E402
@@ -128,8 +130,142 @@ class TestAndreaSyncHTTP(unittest.TestCase):
         self.assertIn("webhook", data)
         self.assertIn("capabilities", data)
         self.assertIn("tasks", data)
+        self.assertIn("optimization", data)
+        self.assertIn("memory", data)
         task_ids = [task["task_id"] for task in data["tasks"]["items"]]
         self.assertIn(created["task_id"], task_ids)
+
+    def test_dashboard_summary_includes_optimization_loop(self) -> None:
+        created = self._srv.with_lock(
+            lambda c: handle_command(
+                c,
+                {
+                    "command_type": "CreateTask",
+                    "channel": "telegram",
+                    "external_id": "dashboard-optimizer-source",
+                    "payload": {"summary": "Is this OpenClaw?"},
+                },
+            )
+        )
+        self._srv.with_lock(
+            lambda c: append_event(
+                c,
+                created["task_id"],
+                EventType.USER_MESSAGE,
+                {
+                    "text": "Is this OpenClaw?",
+                    "routing_text": "Is this OpenClaw?",
+                    "channel": "telegram",
+                    "chat_id": 4040,
+                    "message_id": 91,
+                },
+            )
+        )
+        self._srv.with_lock(
+            lambda c: append_event(
+                c,
+                created["task_id"],
+                EventType.JOB_QUEUED,
+                {
+                    "kind": "openclaw",
+                    "execution_lane": "openclaw_hybrid",
+                    "runner": "openclaw",
+                    "route_reason": "stack_or_tooling_question",
+                },
+            )
+        )
+
+        body = json.dumps(
+            {
+                "command_type": "RunOptimizationCycle",
+                "channel": "internal",
+                "payload": {
+                    "limit": 10,
+                    "regression_report": {"passed": True, "total": 8},
+                    "emit_proposals": True,
+                },
+            }
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            self._url("/v1/commands"),
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": "Bearer internal-test-token",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            self.assertEqual(resp.status, 200)
+            result = json.loads(resp.read().decode("utf-8"))
+        self.assertTrue(result.get("ok"))
+
+        req_summary = urllib.request.Request(self._url("/v1/dashboard/summary?limit=10"), method="GET")
+        with urllib.request.urlopen(req_summary, timeout=5) as resp:
+            self.assertEqual(resp.status, 200)
+            data = json.loads(resp.read().decode("utf-8"))
+        self.assertEqual(data["optimization"]["latest_run"]["status"], "completed")
+        self.assertTrue(
+            any(
+                row["category"] == "overdelegation"
+                for row in data["optimization"]["dominant_categories"]
+            )
+        )
+        self.assertTrue(
+            any(
+                row["category"] == "overdelegation"
+                for row in data["optimization"]["recent_proposals"]
+            )
+        )
+        self.assertEqual(data["optimization"]["latest_regression"]["total"], 8)
+
+    def test_run_proactive_sweep_internal_command_delivers_due_reminder(self) -> None:
+        create_body = json.dumps(
+            {
+                "command_type": "CreateReminder",
+                "channel": "telegram",
+                "task_id": "tsk_system_lockstep",
+                "payload": {
+                    "principal_id": "prn_http_demo",
+                    "message": "drink water",
+                    "due_at": time.time() - 5,
+                    "delivery_target": "777",
+                    "delivery_channel": "telegram",
+                },
+            }
+        ).encode("utf-8")
+        create_req = urllib.request.Request(
+            self._url("/v1/commands"),
+            data=create_body,
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(create_req, timeout=5) as resp:
+            created = json.loads(resp.read().decode("utf-8"))
+        self.assertTrue(created.get("ok"))
+
+        sweep_body = json.dumps(
+            {
+                "command_type": "RunProactiveSweep",
+                "channel": "internal",
+                "payload": {"limit": 10},
+            }
+        ).encode("utf-8")
+        sweep_req = urllib.request.Request(
+            self._url("/v1/commands"),
+            data=sweep_body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": "Bearer internal-test-token",
+            },
+        )
+        with mock.patch.object(tg_adapt, "send_text_message") as send_mock:
+            with urllib.request.urlopen(sweep_req, timeout=5) as resp:
+                self.assertEqual(resp.status, 200)
+                result = json.loads(resp.read().decode("utf-8"))
+        self.assertEqual(result["delivered"], 1)
+        send_mock.assert_called_once()
 
     def test_command_create_and_fetch_task(self) -> None:
         body = json.dumps(
@@ -737,6 +873,149 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
         self.assertEqual(detail["task"]["meta"]["assistant"]["route"], "direct")
         self.assertNotIn("cursor", detail["task"]["meta"])
 
+    def test_telegram_is_this_openclaw_routes_direct(self) -> None:
+        """Success gate: Is this OpenClaw? stays direct, no delegation lifecycle."""
+        body = json.dumps(
+            {
+                "update_id": 50,
+                "message": {
+                    "text": "Is this OpenClaw?",
+                    "message_id": 11,
+                    "chat": {"id": 3},
+                    "from": {"id": 4},
+                },
+            }
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            self._url("/v1/telegram/webhook"),
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "X-Telegram-Bot-Api-Secret-Token": "hdrsecret",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            self.assertEqual(resp.status, 200)
+        detail = None
+        for _ in range(40):
+            req_tasks = urllib.request.Request(self._url("/v1/tasks?limit=10"), method="GET")
+            with urllib.request.urlopen(req_tasks, timeout=5) as resp_tasks:
+                tasks = json.loads(resp_tasks.read().decode("utf-8"))["tasks"]
+            telegram_tasks = [t for t in tasks if t["channel"] == "telegram"]
+            for task in telegram_tasks:
+                req_task = urllib.request.Request(self._url(f"/v1/tasks/{task['task_id']}"), method="GET")
+                with urllib.request.urlopen(req_task, timeout=5) as resp_task:
+                    candidate = json.loads(resp_task.read().decode("utf-8"))
+                meta = candidate["task"].get("meta", {})
+                if meta.get("telegram", {}).get("message_id") == 11:
+                    detail = candidate
+                    break
+            if detail and detail["task"]["status"] == "completed":
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertEqual(detail["task"]["status"], "completed")
+        self.assertEqual(detail["task"]["meta"]["assistant"]["route"], "direct")
+        self.assertNotIn("cursor", detail["task"]["meta"])
+        self.assertIn("openclaw", detail["task"]["meta"]["assistant"]["last_reply"].lower())
+
+    def test_telegram_what_is_cursor_routes_direct(self) -> None:
+        """Success gate: What is Cursor? stays direct, no delegation lifecycle."""
+        body = json.dumps(
+            {
+                "update_id": 51,
+                "message": {
+                    "text": "What is Cursor?",
+                    "message_id": 12,
+                    "chat": {"id": 4},
+                    "from": {"id": 5},
+                },
+            }
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            self._url("/v1/telegram/webhook"),
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "X-Telegram-Bot-Api-Secret-Token": "hdrsecret",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            self.assertEqual(resp.status, 200)
+        detail = None
+        for _ in range(40):
+            req_tasks = urllib.request.Request(self._url("/v1/tasks?limit=10"), method="GET")
+            with urllib.request.urlopen(req_tasks, timeout=5) as resp_tasks:
+                tasks = json.loads(resp_tasks.read().decode("utf-8"))["tasks"]
+            telegram_tasks = [t for t in tasks if t["channel"] == "telegram"]
+            for task in telegram_tasks:
+                req_task = urllib.request.Request(self._url(f"/v1/tasks/{task['task_id']}"), method="GET")
+                with urllib.request.urlopen(req_task, timeout=5) as resp_task:
+                    candidate = json.loads(resp_task.read().decode("utf-8"))
+                meta = candidate["task"].get("meta", {})
+                if meta.get("telegram", {}).get("message_id") == 12:
+                    detail = candidate
+                    break
+            if detail and detail["task"]["status"] == "completed":
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertEqual(detail["task"]["status"], "completed")
+        self.assertEqual(detail["task"]["meta"]["assistant"]["route"], "direct")
+        self.assertNotIn("cursor", detail["task"]["meta"])
+        self.assertIn("cursor", detail["task"]["meta"]["assistant"]["last_reply"].lower())
+
+    def test_telegram_what_llm_is_answering_routes_direct(self) -> None:
+        """Success gate: What LLM is answering? stays direct, no delegation lifecycle."""
+        body = json.dumps(
+            {
+                "update_id": 52,
+                "message": {
+                    "text": "What LLM is answering?",
+                    "message_id": 13,
+                    "chat": {"id": 5},
+                    "from": {"id": 6},
+                },
+            }
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            self._url("/v1/telegram/webhook"),
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "X-Telegram-Bot-Api-Secret-Token": "hdrsecret",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            self.assertEqual(resp.status, 200)
+        detail = None
+        for _ in range(40):
+            req_tasks = urllib.request.Request(self._url("/v1/tasks?limit=10"), method="GET")
+            with urllib.request.urlopen(req_tasks, timeout=5) as resp_tasks:
+                tasks = json.loads(resp_tasks.read().decode("utf-8"))["tasks"]
+            telegram_tasks = [t for t in tasks if t["channel"] == "telegram"]
+            for task in telegram_tasks:
+                req_task = urllib.request.Request(self._url(f"/v1/tasks/{task['task_id']}"), method="GET")
+                with urllib.request.urlopen(req_task, timeout=5) as resp_task:
+                    candidate = json.loads(resp_task.read().decode("utf-8"))
+                meta = candidate["task"].get("meta", {})
+                if meta.get("telegram", {}).get("message_id") == 13:
+                    detail = candidate
+                    break
+            if detail and detail["task"]["status"] == "completed":
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertEqual(detail["task"]["status"], "completed")
+        self.assertEqual(detail["task"]["meta"]["assistant"]["route"], "direct")
+        self.assertNotIn("cursor", detail["task"]["meta"])
+
     def test_telegram_memory_question_uses_prior_chat_context(self) -> None:
         prev_enabled = os.environ.get("OPENAI_API_ENABLED")
         prev_key = os.environ.get("OPENAI_API_KEY")
@@ -844,7 +1123,7 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
             openclaw_session_id="sess-demo",
         )
         self.assertIn("OpenClaw said:", text)
-        self.assertIn("OpenClaw session: sess-demo", text)
+        self.assertNotIn("OpenClaw session:", text)
 
     def test_telegram_cursor_mention_sets_cursor_primary_routing(self) -> None:
         body = json.dumps(
@@ -890,6 +1169,7 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
         assert detail is not None
         self.assertEqual(detail["task"]["meta"]["telegram"]["routing_hint"], "cursor")
         self.assertEqual(detail["task"]["meta"]["execution"]["collaboration_mode"], "cursor_primary")
+        self.assertEqual(detail["task"]["meta"]["telegram"]["requested_capability"], "cursor_execution")
         self.assertEqual(detail["task"]["task_id"], detail["task"]["task_id"])
 
     def test_telegram_collaboration_request_sets_full_visibility_mode(self) -> None:
@@ -936,6 +1216,7 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
         assert detail is not None
         self.assertEqual(detail["task"]["meta"]["telegram"]["visibility_mode"], "full")
         self.assertEqual(detail["task"]["meta"]["execution"]["visibility_mode"], "full")
+        self.assertEqual(detail["task"]["meta"]["telegram"]["requested_capability"], "collaboration")
 
     def test_telegram_model_mention_sets_preferred_lane(self) -> None:
         body = json.dumps(

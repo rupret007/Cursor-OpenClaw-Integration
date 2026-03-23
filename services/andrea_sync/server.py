@@ -1,8 +1,10 @@
 """HTTP server for Andrea lockstep (local-first)."""
 from __future__ import annotations
 
+import datetime as dt
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -17,7 +19,7 @@ from typing import Any, Callable, Dict, Optional
 from .adapters import alexa as alexa_adapt
 from .adapters import telegram as tg_adapt
 from .alexa_request_verify import verify_alexa_http_request
-from .andrea_router import route_message
+from .andrea_router import AndreaRouteDecision, route_message
 from .bus import handle_command
 from .dashboard import (
     build_dashboard_summary,
@@ -32,12 +34,19 @@ from .schema import EventType
 from .telegram_continuation import attach_continuation_if_applicable
 from .store import (
     append_event,
+    count_active_memories,
+    count_due_reminders,
+    count_pending_reminders,
     connect,
     delete_meta,
     ensure_system_task,
     get_meta,
+    get_principal_preferences,
+    get_task_principal_id,
     get_task_channel,
     list_tasks,
+    list_principal_memories,
+    load_recent_principal_history,
     load_events_for_task,
     load_recent_telegram_history,
     migrate,
@@ -98,6 +107,28 @@ def _env_float(name: str, default: float) -> float:
 
 def _clip(value: Any, limit: int) -> str:
     return str(value or "")[:limit]
+
+
+REMIND_ME_RE = re.compile(r"^\s*(?:please\s+)?remind me(?:\s+to)?\s+(?P<body>.+?)\s*$", re.I)
+REMEMBER_NOTE_RE = re.compile(
+    r"^\s*(?:please\s+)?remember(?:\s+that|\s+this)?\s+(?P<body>.+?)\s*$",
+    re.I,
+)
+RELATIVE_REMINDER_RE = re.compile(
+    r"\bin\s+(?P<count>\d+)\s+(?P<unit>minute|minutes|hour|hours|day|days)\b",
+    re.I,
+)
+
+
+def _format_due_time_local(due_at: float) -> str:
+    tz = dt.datetime.now().astimezone().tzinfo
+    when = dt.datetime.fromtimestamp(float(due_at), tz=tz)
+    now = dt.datetime.now(tz)
+    if when.date() == now.date():
+        return when.strftime("today at %-I:%M %p")
+    if when.date() == (now + dt.timedelta(days=1)).date():
+        return when.strftime("tomorrow at %-I:%M %p")
+    return when.strftime("%b %-d at %-I:%M %p")
 
 
 class SyncServer:
@@ -178,12 +209,24 @@ class SyncServer:
             "ANDREA_OPENCLAW_FALLBACK_TO_CURSOR", True
         )
         self.openclaw_thinking = os.environ.get("ANDREA_OPENCLAW_THINKING", "medium").strip() or "medium"
+        self.proactive_sweep_enabled = _env_bool(
+            "ANDREA_SYNC_PROACTIVE_SWEEP_ENABLED", False
+        )
+        self.proactive_sweep_interval_seconds = _env_float(
+            "ANDREA_SYNC_PROACTIVE_SWEEP_INTERVAL_SECONDS", 60.0
+        )
         if self.telegram_webhook_autofix and self.telegram_bot_token and self.telegram_public_base:
             self._webhook_worker = threading.Thread(
                 target=self._maintain_telegram_webhook,
                 daemon=True,
             )
             self._webhook_worker.start()
+        if self.proactive_sweep_enabled:
+            self._proactive_worker = threading.Thread(
+                target=self._maintain_proactive_sweep,
+                daemon=True,
+            )
+            self._proactive_worker.start()
 
     def _run_queue(self) -> None:
         while True:
@@ -240,6 +283,25 @@ class SyncServer:
             except Exception as exc:  # noqa: BLE001
                 print(f"andrea_sync webhook autofix error: {exc}", flush=True)
             time.sleep(max(5.0, self.telegram_webhook_autofix_interval))
+
+    def _maintain_proactive_sweep(self) -> None:
+        while True:
+            try:
+                self.with_lock(
+                    lambda c: handle_command(
+                        c,
+                        {
+                            "command_type": "RunProactiveSweep",
+                            "channel": "internal",
+                            "payload": {
+                                "limit": 20,
+                            },
+                        },
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(f"andrea_sync proactive sweep error: {exc}", flush=True)
+            time.sleep(max(10.0, self.proactive_sweep_interval_seconds))
 
     def with_lock(self, fn: Callable[[sqlite3.Connection], Any]) -> Any:
         with self.lock:
@@ -389,6 +451,57 @@ class SyncServer:
 
         return self.with_lock(read)
 
+    def _task_principal_id(self, task_id: str) -> str:
+        snapshot = self._task_snapshot(task_id)
+        if snapshot:
+            projection_meta = snapshot["projection"].get("meta", {})
+            if isinstance(projection_meta, dict):
+                identity_meta = projection_meta.get("identity")
+                if isinstance(identity_meta, dict) and identity_meta.get("principal_id"):
+                    return str(identity_meta.get("principal_id")).strip()
+
+        def read(c: sqlite3.Connection) -> str:
+            return str(get_task_principal_id(c, task_id) or "").strip()
+
+        return self.with_lock(read)
+
+    def _principal_preferences(self, task_id: str) -> Dict[str, Any]:
+        principal_id = self._task_principal_id(task_id)
+        if not principal_id:
+            return {}
+
+        def read(c: sqlite3.Connection) -> Dict[str, Any]:
+            return get_principal_preferences(c, principal_id)
+
+        return self.with_lock(read)
+
+    def _principal_memory_notes(self, task_id: str) -> list[str]:
+        principal_id = self._task_principal_id(task_id)
+        if not principal_id:
+            return []
+
+        def read(c: sqlite3.Connection) -> list[str]:
+            rows = list_principal_memories(c, principal_id, limit=6)
+            return [str(row.get("content") or "").strip() for row in rows if str(row.get("content") or "").strip()]
+
+        return self.with_lock(read)
+
+    def _recent_task_history(self, task_id: str) -> list[dict[str, str]]:
+        principal_id = self._task_principal_id(task_id)
+        if principal_id:
+            def read(c: sqlite3.Connection) -> list[dict[str, str]]:
+                return load_recent_principal_history(
+                    c,
+                    principal_id,
+                    limit_turns=_env_int("ANDREA_DIRECT_HISTORY_TURNS", 6),
+                    exclude_task_id=task_id,
+                )
+
+            history = self.with_lock(read)
+            if history:
+                return history
+        return self._recent_telegram_history(task_id)
+
     def _projection_meta(self, projection: Dict[str, Any], key: str) -> Dict[str, Any]:
         meta = projection.get("meta", {})
         if not isinstance(meta, dict):
@@ -439,7 +552,10 @@ class SyncServer:
         if execution_meta.get("routing_hint"):
             return str(execution_meta.get("routing_hint")).strip()
         telegram_meta = self._projection_meta(snapshot["projection"], "telegram")
-        return str(telegram_meta.get("routing_hint") or "auto").strip() or "auto"
+        if telegram_meta.get("routing_hint"):
+            return str(telegram_meta.get("routing_hint")).strip()
+        prefs = self._principal_preferences(task_id)
+        return str(prefs.get("routing_hint") or "auto").strip() or "auto"
 
     def _task_collaboration_mode(self, task_id: str) -> str:
         snapshot = self._task_snapshot(task_id)
@@ -449,17 +565,26 @@ class SyncServer:
         if execution_meta.get("collaboration_mode"):
             return str(execution_meta.get("collaboration_mode")).strip()
         telegram_meta = self._projection_meta(snapshot["projection"], "telegram")
-        return str(telegram_meta.get("collaboration_mode") or "auto").strip() or "auto"
+        if telegram_meta.get("collaboration_mode"):
+            return str(telegram_meta.get("collaboration_mode")).strip()
+        prefs = self._principal_preferences(task_id)
+        return str(prefs.get("collaboration_mode") or "auto").strip() or "auto"
 
     def _task_visibility_mode(self, task_id: str) -> str:
+        """Visibility for lifecycle/Telegram updates. Prefer 'full' when either meta requests it,
+        so newer Telegram intent (e.g. continuation adding 'show full dialogue') is not shadowed."""
         snapshot = self._task_snapshot(task_id)
         if not snapshot:
             return "summary"
         execution_meta = self._projection_meta(snapshot["projection"], "execution")
-        if execution_meta.get("visibility_mode"):
-            return str(execution_meta.get("visibility_mode")).strip()
         telegram_meta = self._projection_meta(snapshot["projection"], "telegram")
-        return str(telegram_meta.get("visibility_mode") or "summary").strip() or "summary"
+        exec_mode = str(execution_meta.get("visibility_mode") or "").strip().lower()
+        tg_mode = str(telegram_meta.get("visibility_mode") or "").strip().lower()
+        if exec_mode == "full" or tg_mode == "full":
+            return "full"
+        prefs = self._principal_preferences(task_id)
+        pref_mode = str(prefs.get("visibility_mode") or "").strip().lower()
+        return exec_mode or tg_mode or pref_mode or "summary"
 
     def _task_preferred_model_family(self, task_id: str) -> str:
         snapshot = self._task_snapshot(task_id)
@@ -469,7 +594,10 @@ class SyncServer:
         if execution_meta.get("preferred_model_family"):
             return str(execution_meta.get("preferred_model_family")).strip()
         telegram_meta = self._projection_meta(snapshot["projection"], "telegram")
-        return str(telegram_meta.get("preferred_model_family") or "").strip()
+        if telegram_meta.get("preferred_model_family"):
+            return str(telegram_meta.get("preferred_model_family") or "").strip()
+        prefs = self._principal_preferences(task_id)
+        return str(prefs.get("preferred_model_family") or "").strip()
 
     def _task_preferred_model_label(self, task_id: str) -> str:
         snapshot = self._task_snapshot(task_id)
@@ -479,7 +607,10 @@ class SyncServer:
         if execution_meta.get("preferred_model_label"):
             return str(execution_meta.get("preferred_model_label")).strip()
         telegram_meta = self._projection_meta(snapshot["projection"], "telegram")
-        return str(telegram_meta.get("preferred_model_label") or "").strip()
+        if telegram_meta.get("preferred_model_label"):
+            return str(telegram_meta.get("preferred_model_label") or "").strip()
+        prefs = self._principal_preferences(task_id)
+        return str(prefs.get("preferred_model_label") or "").strip()
 
     def _task_mention_targets(self, task_id: str) -> list[str]:
         snapshot = self._task_snapshot(task_id)
@@ -514,17 +645,59 @@ class SyncServer:
             return "OpenClaw and Cursor"
         return "Cursor"
 
+    def _telegram_collaboration_trace(self, projection: Dict[str, Any]) -> list[str]:
+        openclaw_meta = self._projection_meta(projection, "openclaw")
+        items: list[str] = []
+        phase_outputs = openclaw_meta.get("phase_outputs")
+        if isinstance(phase_outputs, dict):
+            for phase in ("plan", "critique", "execution", "synthesis"):
+                entry = phase_outputs.get(phase)
+                if not isinstance(entry, dict):
+                    continue
+                summary = str(entry.get("summary") or "").strip()
+                if summary:
+                    items.append(summary)
+        trace = openclaw_meta.get("collaboration_trace")
+        if isinstance(trace, list):
+            for raw in trace[:4]:
+                text = str(raw or "").strip()
+                if text and text not in items:
+                    items.append(text)
+        return items
+
+    def _collaboration_trace_excerpt(self, trace: list[str]) -> str:
+        cleaned = [str(item or "").strip() for item in trace if str(item or "").strip()]
+        if not cleaned:
+            return ""
+        return _clip("; ".join(cleaned[:2]), 320)
+
+    def _telegram_user_safe_error_text(self, projection: Dict[str, Any]) -> str:
+        execution_meta = self._projection_meta(projection, "execution")
+        openclaw_meta = self._projection_meta(projection, "openclaw")
+        summary = str(projection.get("summary") or "").strip()
+        return (
+            str(execution_meta.get("user_safe_error") or "").strip()
+            or str(openclaw_meta.get("blocked_reason") or "").strip()
+            or summary
+            or "I ran into an internal limitation while working on this request."
+        )
+
     def _telegram_final_summary_text(self, projection: Dict[str, Any]) -> str:
         summary = str(projection.get("summary") or "").strip()
         openclaw_meta = self._projection_meta(projection, "openclaw")
-        raw_text = str(openclaw_meta.get("raw_text") or "").strip()
+        user_summary = str(openclaw_meta.get("user_summary") or "").strip()
+        blocked_reason = str(openclaw_meta.get("blocked_reason") or "").strip()
         generic_openclaw_summaries = {
             "",
             "OpenClaw completed the delegated task.",
         }
-        if summary not in generic_openclaw_summaries:
+        if user_summary and user_summary not in generic_openclaw_summaries:
+            return user_summary
+        if summary and summary not in generic_openclaw_summaries:
             return summary
-        return raw_text or summary
+        if blocked_reason:
+            return blocked_reason
+        return user_summary or summary
 
     def _send_telegram_progress_updates(
         self,
@@ -756,6 +929,7 @@ class SyncServer:
         if status in {"completed", "failed"}:
             self._send_telegram_progress_updates(task_id, snapshot)
             openclaw_meta = self._projection_meta(projection, "openclaw")
+            visibility_mode = self._task_visibility_mode(task_id)
             try:
                 self._send_telegram_message_once(
                     task_id,
@@ -766,13 +940,17 @@ class SyncServer:
                         summary=self._telegram_final_summary_text(projection),
                         pr_url=str(cursor_meta.get("pr_url") or ""),
                         agent_url=str(cursor_meta.get("agent_url") or ""),
-                        last_error=str(projection.get("last_error") or ""),
+                        last_error=self._telegram_user_safe_error_text(projection)
+                        if status == "failed"
+                        else "",
                         worker_label=self._telegram_worker_label(projection),
                         delegated_to_cursor=bool(execution_meta.get("delegated_to_cursor")),
                         backend=str(execution_meta.get("backend") or ""),
                         openclaw_session_id=str(
                             openclaw_meta.get("session_id") or ""
                         ),
+                        visibility_mode=visibility_mode,
+                        collaboration_trace=self._telegram_collaboration_trace(projection),
                         routing_hint=str(execution_meta.get("routing_hint") or ""),
                         collaboration_mode=str(execution_meta.get("collaboration_mode") or ""),
                         provider=str(openclaw_meta.get("provider") or ""),
@@ -825,7 +1003,9 @@ class SyncServer:
                     delegated_to_cursor=bool(execution_meta.get("delegated_to_cursor")),
                     agent_url=str(self._projection_meta(projection, "cursor").get("agent_url") or ""),
                     pr_url=str(self._projection_meta(projection, "cursor").get("pr_url") or ""),
-                    last_error=str(projection.get("last_error") or ""),
+                    last_error=self._telegram_user_safe_error_text(projection)
+                    if status == "failed"
+                    else "",
                 ),
             )
         except Exception as exc:  # noqa: BLE001
@@ -845,12 +1025,47 @@ class SyncServer:
             user_payload = self._latest_user_message_payload(task_id)
             classify_text = self._routing_classification_text(task_id)
             execution_prompt = self._extract_cursor_prompt(task_id)
+            principal_prefs = self._principal_preferences(task_id)
+            effective_history = history if history is not None else self._recent_task_history(task_id)
+            structured_action = self._maybe_handle_structured_assistant_action(task_id)
+            if structured_action is not None:
+                reply_text, reason = structured_action
+                decision = AndreaRouteDecision(
+                    mode="direct",
+                    reason=reason,
+                    reply_text=reply_text,
+                )
+                applied = self._append_task_event(
+                    task_id,
+                    EventType.ASSISTANT_REPLIED,
+                    {
+                        "text": decision.reply_text,
+                        "route": "direct",
+                        "reason": decision.reason,
+                    },
+                )
+                if applied:
+                    self.with_lock(lambda c: set_meta(c, marker, str(time.time())))
+                return decision, applied
             decision = route_message(
                 classify_text,
-                history=history,
-                routing_hint=str(user_payload.get("routing_hint") or "auto"),
-                collaboration_mode=str(user_payload.get("collaboration_mode") or "auto"),
-                preferred_model_family=str(user_payload.get("preferred_model_family") or ""),
+                history=effective_history,
+                memory_notes=self._principal_memory_notes(task_id),
+                routing_hint=str(
+                    user_payload.get("routing_hint")
+                    or principal_prefs.get("routing_hint")
+                    or "auto"
+                ),
+                collaboration_mode=str(
+                    user_payload.get("collaboration_mode")
+                    or principal_prefs.get("collaboration_mode")
+                    or "auto"
+                ),
+                preferred_model_family=str(
+                    user_payload.get("preferred_model_family")
+                    or principal_prefs.get("preferred_model_family")
+                    or ""
+                ),
             )
             if decision.mode == "delegate":
                 execution_lane = decision.delegate_target or self.telegram_delegate_lane
@@ -867,14 +1082,25 @@ class SyncServer:
                         "runner": "openclaw" if kind == "openclaw" else "cursor",
                         "routing_hint": str(user_payload.get("routing_hint") or "auto"),
                         "collaboration_mode": decision.collaboration_mode,
-                        "visibility_mode": str(user_payload.get("visibility_mode") or "summary"),
+                        "visibility_mode": str(
+                            user_payload.get("visibility_mode")
+                            or principal_prefs.get("visibility_mode")
+                            or "summary"
+                        ),
+                        "requested_capability": str(
+                            user_payload.get("requested_capability") or ""
+                        ),
                         "mention_targets": user_payload.get("mention_targets", []),
                         "model_mentions": user_payload.get("model_mentions", []),
                         "preferred_model_family": str(
-                            user_payload.get("preferred_model_family") or ""
+                            user_payload.get("preferred_model_family")
+                            or principal_prefs.get("preferred_model_family")
+                            or ""
                         ),
                         "preferred_model_label": str(
-                            user_payload.get("preferred_model_label") or ""
+                            user_payload.get("preferred_model_label")
+                            or principal_prefs.get("preferred_model_label")
+                            or ""
                         ),
                     },
                 )
@@ -897,7 +1123,7 @@ class SyncServer:
     def _route_telegram_task(self, task_id: str) -> None:
         self._route_task_with_decision(
             task_id,
-            history=self._recent_telegram_history(task_id),
+            history=self._recent_task_history(task_id),
             source="telegram_balanced_delegate",
         )
 
@@ -920,7 +1146,7 @@ class SyncServer:
         if snapshot and snapshot["projection"].get("status") == "created":
             decision, _applied = self._route_task_with_decision(
                 task_id,
-                history=[],
+                history=self._recent_task_history(task_id),
                 source="alexa_voice_delegate",
             )
         else:
@@ -1054,6 +1280,181 @@ class SyncServer:
         if not snapshot:
             return ""
         return str(snapshot["projection"].get("summary") or "").strip()
+
+    def _append_orchestration_step(
+        self,
+        task_id: str,
+        phase: str,
+        status: str,
+        *,
+        lane: str = "",
+        summary: str = "",
+        provider: str = "",
+        model: str = "",
+    ) -> None:
+        self._append_task_event(
+            task_id,
+            EventType.ORCHESTRATION_STEP,
+            {
+                "phase": str(phase or "").strip().lower(),
+                "status": str(status or "").strip().lower(),
+                "lane": str(lane or "").strip(),
+                "summary": _clip(summary, 400) if summary else "",
+                "provider": _clip(provider, 120) if provider else "",
+                "model": _clip(model, 200) if model else "",
+            },
+        )
+
+    def _parse_memory_note_request(self, text: str) -> str:
+        clean = str(text or "").strip()
+        lowered = clean.lower()
+        if not (
+            lowered.startswith("remember that ")
+            or lowered.startswith("please remember that ")
+            or lowered.startswith("remember this ")
+            or lowered.startswith("please remember this ")
+        ):
+            return ""
+        match = REMEMBER_NOTE_RE.match(clean)
+        if not match:
+            return ""
+        note = str(match.group("body") or "").strip().rstrip(".")
+        if not note or note.endswith("?"):
+            return ""
+        return note
+
+    def _parse_reminder_request(self, text: str) -> Optional[Dict[str, Any]]:
+        clean = str(text or "").strip()
+        match = REMIND_ME_RE.match(clean)
+        if not match:
+            return None
+        body = str(match.group("body") or "").strip()
+        if not body:
+            return None
+        now = dt.datetime.now().astimezone()
+        due = now + dt.timedelta(hours=1)
+        defaulted = True
+        lowered = body.lower()
+        rel = RELATIVE_REMINDER_RE.search(body)
+        if rel:
+            count = max(1, int(rel.group("count")))
+            unit = str(rel.group("unit") or "").lower()
+            if unit.startswith("minute"):
+                due = now + dt.timedelta(minutes=count)
+            elif unit.startswith("hour"):
+                due = now + dt.timedelta(hours=count)
+            else:
+                due = now + dt.timedelta(days=count)
+            body = (body[: rel.start()] + body[rel.end() :]).strip(" ,.")
+            defaulted = False
+        elif "tomorrow morning" in lowered:
+            due = (now + dt.timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
+            body = re.sub(r"\btomorrow morning\b", "", body, flags=re.I).strip(" ,.")
+            defaulted = False
+        elif "tomorrow afternoon" in lowered:
+            due = (now + dt.timedelta(days=1)).replace(hour=14, minute=0, second=0, microsecond=0)
+            body = re.sub(r"\btomorrow afternoon\b", "", body, flags=re.I).strip(" ,.")
+            defaulted = False
+        elif "tomorrow evening" in lowered or "tomorrow night" in lowered:
+            due = (now + dt.timedelta(days=1)).replace(hour=19, minute=0, second=0, microsecond=0)
+            body = re.sub(r"\btomorrow (?:evening|night)\b", "", body, flags=re.I).strip(" ,.")
+            defaulted = False
+        elif "tomorrow" in lowered:
+            due = (now + dt.timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
+            body = re.sub(r"\btomorrow\b", "", body, flags=re.I).strip(" ,.")
+            defaulted = False
+        elif "later today" in lowered:
+            target = now.replace(hour=17, minute=0, second=0, microsecond=0)
+            if target <= now:
+                target = now + dt.timedelta(hours=3)
+            due = target
+            body = re.sub(r"\blater today\b", "", body, flags=re.I).strip(" ,.")
+            defaulted = False
+        elif "tonight" in lowered:
+            target = now.replace(hour=20, minute=0, second=0, microsecond=0)
+            if target <= now:
+                target = now + dt.timedelta(hours=2)
+            due = target
+            body = re.sub(r"\btonight\b", "", body, flags=re.I).strip(" ,.")
+            defaulted = False
+        elif "today" in lowered:
+            target = now.replace(hour=17, minute=0, second=0, microsecond=0)
+            if target <= now:
+                target = now + dt.timedelta(hours=2)
+            due = target
+            body = re.sub(r"\btoday\b", "", body, flags=re.I).strip(" ,.")
+            defaulted = False
+        message = body.strip(" .")
+        if not message:
+            return None
+        return {
+            "message": message,
+            "due_at": due.timestamp(),
+            "defaulted": defaulted,
+        }
+
+    def _maybe_handle_structured_assistant_action(
+        self, task_id: str
+    ) -> tuple[str, str] | None:
+        payload = self._latest_user_message_payload(task_id)
+        text = str(payload.get("routing_text") or payload.get("text") or "").strip()
+        if not text:
+            return None
+        channel = str(payload.get("channel") or "telegram").strip() or "telegram"
+        memory_note = self._parse_memory_note_request(text)
+        if memory_note:
+            result = self.with_lock(
+                lambda c: handle_command(
+                    c,
+                    {
+                        "command_type": "SavePrincipalMemory",
+                        "channel": channel,
+                        "task_id": task_id,
+                        "payload": {
+                            "content": memory_note,
+                            "kind": "note",
+                            "source": "direct_memory_capture",
+                        },
+                    },
+                )
+            )
+            if result.get("ok"):
+                return (
+                    "I saved that as a memory note and I can use it across future Telegram and Alexa turns when the same principal is linked.",
+                    "principal_memory_saved",
+                )
+        reminder = self._parse_reminder_request(text)
+        if reminder:
+            result = self.with_lock(
+                lambda c: handle_command(
+                    c,
+                    {
+                        "command_type": "CreateReminder",
+                        "channel": channel,
+                        "task_id": task_id,
+                        "payload": {
+                            "message": reminder["message"],
+                            "due_at": reminder["due_at"],
+                            "note": "structured assistant reminder",
+                        },
+                    },
+                )
+            )
+            if result.get("ok"):
+                due_text = _format_due_time_local(float(reminder["due_at"]))
+                if str(result.get("status") or "") == "awaiting_delivery_channel":
+                    return (
+                        f"I saved the reminder for {due_text}, but I still need a deliverable reminder channel for this principal before I can proactively send it.",
+                        "reminder_saved_awaiting_channel",
+                    )
+                suffix = ""
+                if reminder.get("defaulted"):
+                    suffix = " If you want a different time, tell me and I will move it."
+                return (
+                    f"I set a reminder for {due_text}: {reminder['message']}.{suffix}",
+                    "reminder_created",
+                )
+        return None
 
     def _create_openclaw_job(
         self,
@@ -1210,6 +1611,10 @@ class SyncServer:
                 {
                     "error": "missing_prompt",
                     "message": "No Telegram text was available to send to OpenClaw.",
+                    "user_safe_error": (
+                        "I could not start the OpenClaw coordination lane because there was no "
+                        "request text available to send."
+                    ),
                     "backend": "openclaw",
                     "execution_lane": "openclaw_hybrid",
                     "visibility_mode": visibility_mode,
@@ -1218,6 +1623,7 @@ class SyncServer:
                 },
             )
             return
+        self._append_orchestration_step(task_id, "plan", "started", lane="openclaw")
         self._append_task_event(
             task_id,
             EventType.JOB_STARTED,
@@ -1263,6 +1669,13 @@ class SyncServer:
                 preferred_model_label,
             )
         except Exception as exc:  # noqa: BLE001
+            self._append_orchestration_step(
+                task_id,
+                "plan",
+                "failed",
+                lane="openclaw",
+                summary="OpenClaw could not start the planning pass cleanly.",
+            )
             if self.openclaw_fallback_to_cursor:
                 self._append_task_event(
                     task_id,
@@ -1292,6 +1705,10 @@ class SyncServer:
                 {
                     "error": "openclaw_submit_failed",
                     "message": _clip(exc, 1500),
+                    "user_safe_error": (
+                        "I could not start the OpenClaw coordination lane cleanly on this pass."
+                    ),
+                    "internal_error": _clip(exc, 1500),
                     "backend": "openclaw",
                     "execution_lane": "openclaw_hybrid",
                     "runner": "openclaw",
@@ -1305,6 +1722,7 @@ class SyncServer:
             return
         payload = {
             "summary": str(result.get("summary") or ""),
+            "user_summary": str(result.get("user_summary") or result.get("summary") or ""),
             "backend": "openclaw",
             "execution_lane": "openclaw_hybrid",
             "runner": "openclaw",
@@ -1322,10 +1740,37 @@ class SyncServer:
             "visibility_mode": visibility_mode,
             "preferred_model_family": preferred_model_family,
             "preferred_model_label": preferred_model_label,
+            "collaboration_trace": result.get("collaboration_trace") or [],
+            "machine_collaboration_trace": result.get("machine_collaboration_trace") or [],
+            "phase_outputs": result.get("phase_outputs") or {},
+            "blocked_reason": _clip(result.get("blocked_reason"), 500) or None,
+            "internal_trace": _clip(result.get("internal_trace"), 4000) or None,
             "raw_text": _clip(result.get("raw_text"), 4000) or None,
         }
+        phase_outputs = (
+            result.get("phase_outputs")
+            if isinstance(result.get("phase_outputs"), dict)
+            else {}
+        )
+        for phase in ("plan", "critique"):
+            entry = phase_outputs.get(phase)
+            if not isinstance(entry, dict):
+                continue
+            self._append_orchestration_step(
+                task_id,
+                phase,
+                str(entry.get("status") or "completed"),
+                lane=str(entry.get("lane") or "openclaw"),
+                summary=str(entry.get("summary") or ""),
+                provider=str(result.get("provider") or ""),
+                model=str(result.get("model") or ""),
+            )
         if visibility_mode == "full":
-            notes = _clip(result.get("raw_text") or result.get("summary") or "", 700)
+            trace_excerpt = self._collaboration_trace_excerpt(
+                result.get("collaboration_trace")
+                if isinstance(result.get("collaboration_trace"), list)
+                else []
+            )
             progress_message = "OpenClaw completed the coordination pass."
             if result.get("delegated_to_cursor"):
                 progress_message = (
@@ -1335,8 +1780,8 @@ class SyncServer:
                 progress_message = (
                     "OpenClaw completed the coordination pass, but Andrea may still escalate to Cursor to honor the collaboration request."
                 )
-            if notes:
-                progress_message += f" Notes: {notes}"
+            if trace_excerpt:
+                progress_message += f" Trace: {trace_excerpt}"
             self._append_task_event(
                 task_id,
                 EventType.JOB_PROGRESS,
@@ -1352,12 +1797,28 @@ class SyncServer:
                     "visibility_mode": visibility_mode,
                     "preferred_model_family": preferred_model_family,
                     "preferred_model_label": preferred_model_label,
-                    "raw_text": _clip(result.get("raw_text"), 4000) or None,
+                    "collaboration_trace": result.get("collaboration_trace") or [],
+                    "blocked_reason": _clip(result.get("blocked_reason"), 500) or None,
+                    "internal_trace": _clip(result.get("internal_trace"), 4000) or None,
                     "force_telegram_note": True,
                 },
             )
         requires_cursor = collaboration_mode in {"cursor_primary", "collaborative"}
         if result.get("ok") and requires_cursor and not result.get("delegated_to_cursor"):
+            execution_entry = phase_outputs.get("execution")
+            execution_summary = ""
+            if isinstance(execution_entry, dict):
+                execution_summary = str(execution_entry.get("summary") or "")
+            self._append_orchestration_step(
+                task_id,
+                "execution",
+                "started",
+                lane="cursor",
+                summary=execution_summary
+                or "Andrea is handing the heavier execution step to Cursor.",
+                provider=str(result.get("provider") or ""),
+                model=str(result.get("model") or ""),
+            )
             self._append_task_event(
                 task_id,
                 EventType.JOB_PROGRESS,
@@ -1381,17 +1842,86 @@ class SyncServer:
             self._run_cursor_job(task_id)
             return
         if result.get("ok"):
+            execution_entry = phase_outputs.get("execution")
+            if isinstance(execution_entry, dict):
+                self._append_orchestration_step(
+                    task_id,
+                    "execution",
+                    str(execution_entry.get("status") or "completed"),
+                    lane=str(execution_entry.get("lane") or ("cursor" if result.get("delegated_to_cursor") else "openclaw")),
+                    summary=str(execution_entry.get("summary") or ""),
+                    provider=str(result.get("provider") or ""),
+                    model=str(result.get("model") or ""),
+                )
+            elif not result.get("delegated_to_cursor"):
+                self._append_orchestration_step(
+                    task_id,
+                    "execution",
+                    "completed",
+                    lane="openclaw",
+                    summary="OpenClaw completed the execution inside the coordination lane.",
+                    provider=str(result.get("provider") or ""),
+                    model=str(result.get("model") or ""),
+                )
+            synthesis_entry = phase_outputs.get("synthesis")
+            self._append_orchestration_step(
+                task_id,
+                "synthesis",
+                str(synthesis_entry.get("status") or "completed")
+                if isinstance(synthesis_entry, dict)
+                else "completed",
+                lane=str(synthesis_entry.get("lane") or "openclaw")
+                if isinstance(synthesis_entry, dict)
+                else "openclaw",
+                summary=str(synthesis_entry.get("summary") or result.get("user_summary") or result.get("summary") or "")
+                if isinstance(synthesis_entry, dict)
+                else str(result.get("user_summary") or result.get("summary") or ""),
+                provider=str(result.get("provider") or ""),
+                model=str(result.get("model") or ""),
+            )
             self._append_task_event(task_id, EventType.JOB_COMPLETED, payload)
             return
+        self._append_orchestration_step(
+            task_id,
+            "synthesis",
+            "failed",
+            lane="openclaw",
+            summary=str(
+                result.get("blocked_reason")
+                or result.get("user_summary")
+                or "I could not complete the final synthesis cleanly."
+            ),
+            provider=str(result.get("provider") or ""),
+            model=str(result.get("model") or ""),
+        )
         self._append_task_event(
             task_id,
             EventType.JOB_FAILED,
             {
                 **payload,
                 "error": "openclaw_execution_failed",
-                "message": _clip(result.get("summary") or result.get("raw_text") or "OpenClaw failed.", 1500),
+                "message": _clip(
+                    result.get("internal_trace")
+                    or result.get("raw_text")
+                    or result.get("summary")
+                    or "OpenClaw failed.",
+                    1500,
+                ),
+                "user_safe_error": _clip(
+                    result.get("blocked_reason")
+                    or result.get("user_summary")
+                    or result.get("summary")
+                    or "I could not complete that collaboration pass cleanly.",
+                    500,
+                ),
+                "internal_error": _clip(
+                    result.get("internal_trace")
+                    or result.get("raw_text")
+                    or result.get("summary")
+                    or "OpenClaw failed.",
+                    1500,
+                ),
                 "visibility_mode": visibility_mode,
-                "raw_text": _clip(result.get("raw_text"), 4000) or None,
             },
         )
 
@@ -1402,27 +1932,50 @@ class SyncServer:
         preferred_model_family = self._task_preferred_model_family(task_id)
         preferred_model_label = self._task_preferred_model_label(task_id)
         if not prompt:
+            self._append_orchestration_step(
+                task_id,
+                "execution",
+                "failed",
+                lane="cursor",
+                summary="Cursor could not start because there was no execution prompt.",
+            )
             self._append_task_event(
                 task_id,
                 EventType.JOB_FAILED,
                 {
                     "error": "missing_prompt",
                     "message": "No Telegram text was available to send to Cursor.",
+                    "user_safe_error": (
+                        "I could not start the Cursor execution lane because there was no "
+                        "request text available to send."
+                    ),
                     "visibility_mode": visibility_mode,
                     "preferred_model_family": preferred_model_family,
                     "preferred_model_label": preferred_model_label,
                 },
             )
             return
+        self._append_orchestration_step(task_id, "execution", "started", lane="cursor")
         try:
             created = self._create_cursor_job(prompt)
         except Exception as exc:  # noqa: BLE001
+            self._append_orchestration_step(
+                task_id,
+                "execution",
+                "failed",
+                lane="cursor",
+                summary="Cursor could not start the execution pass cleanly.",
+            )
             self._append_task_event(
                 task_id,
                 EventType.JOB_FAILED,
                 {
                     "error": "cursor_submit_failed",
                     "message": _clip(exc, 1500),
+                    "user_safe_error": (
+                        "I could not start the Cursor execution lane cleanly on this pass."
+                    ),
+                    "internal_error": _clip(exc, 1500),
                     "visibility_mode": visibility_mode,
                     "preferred_model_family": preferred_model_family,
                     "preferred_model_label": preferred_model_label,
@@ -1468,12 +2021,22 @@ class SyncServer:
                 },
             )
         if not agent_id:
+            self._append_orchestration_step(
+                task_id,
+                "execution",
+                "failed",
+                lane="cursor",
+                summary="Cursor started but did not return a usable execution handle.",
+            )
             self._append_task_event(
                 task_id,
                 EventType.JOB_FAILED,
                 {
                     "error": "missing_agent_id",
                     "message": "Cursor submission succeeded but no agent id was returned.",
+                    "user_safe_error": (
+                        "I started the Cursor handoff, but I did not get a usable execution handle back."
+                    ),
                     "agent_url": agent_url or None,
                     "pr_url": pr_url or None,
                     "visibility_mode": visibility_mode,
@@ -1503,12 +2066,23 @@ class SyncServer:
                 if attempt < attempts - 1 and self.cursor_status_poll_interval > 0:
                     time.sleep(self.cursor_status_poll_interval)
         except Exception as exc:  # noqa: BLE001
+            self._append_orchestration_step(
+                task_id,
+                "execution",
+                "failed",
+                lane="cursor",
+                summary="Cursor did not return a clean status during the execution pass.",
+            )
             self._append_task_event(
                 task_id,
                 EventType.JOB_FAILED,
                 {
                     "error": "cursor_poll_failed",
                     "message": _clip(exc, 1500),
+                    "user_safe_error": (
+                        "I could not get a clean status back from the Cursor execution lane."
+                    ),
+                    "internal_error": _clip(exc, 1500),
                     "cursor_agent_id": agent_id,
                     "agent_url": agent_url or None,
                     "pr_url": pr_url or None,
@@ -1519,13 +2093,28 @@ class SyncServer:
             )
             return
         if latest_status == "FINISHED":
+            summary_text = self._cursor_terminal_summary(
+                agent_id, latest_status, pr_url, agent_url
+            )
+            self._append_orchestration_step(
+                task_id,
+                "execution",
+                "completed",
+                lane="cursor",
+                summary="Cursor completed the heavy execution step.",
+            )
+            self._append_orchestration_step(
+                task_id,
+                "synthesis",
+                "completed",
+                lane="cursor",
+                summary=summary_text,
+            )
             self._append_task_event(
                 task_id,
                 EventType.JOB_COMPLETED,
                 {
-                    "summary": self._cursor_terminal_summary(
-                        agent_id, latest_status, pr_url, agent_url
-                    ),
+                    "summary": summary_text,
                     "cursor_agent_id": agent_id,
                     "agent_url": agent_url or None,
                     "pr_url": pr_url or None,
@@ -1538,12 +2127,22 @@ class SyncServer:
             )
             return
         if latest_status in TERMINAL_CURSOR_STATUSES:
+            self._append_orchestration_step(
+                task_id,
+                "execution",
+                "failed",
+                lane="cursor",
+                summary=f"Cursor ended with status {latest_status or 'unknown'}.",
+            )
             self._append_task_event(
                 task_id,
                 EventType.JOB_FAILED,
                 {
                     "error": f"cursor_status_{latest_status.lower() or 'unknown'}",
                     "message": f"Cursor ended with status {latest_status or 'unknown'}.",
+                    "user_safe_error": (
+                        "Cursor did not finish the execution cleanly on this pass."
+                    ),
                     "cursor_agent_id": agent_id,
                     "agent_url": agent_url or None,
                     "pr_url": pr_url or None,
@@ -1595,6 +2194,12 @@ def make_handler(server: SyncServer) -> type:
         _ADMIN_COMMAND_TYPES = frozenset(
             {
                 "PublishCapabilitySnapshot",
+                "RecordEvaluationFinding",
+                "RunOptimizationCycle",
+                "CreateOptimizationProposal",
+                "ApplyOptimizationProposal",
+                "LinkPrincipalIdentity",
+                "RunProactiveSweep",
                 "KillSwitchEngage",
                 "KillSwitchRelease",
             }

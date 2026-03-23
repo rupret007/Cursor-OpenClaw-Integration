@@ -11,6 +11,8 @@ Strict two-way sync between **user channels** (Telegram, Alexa, CLI), **OpenClaw
 | Bus | `services/andrea_sync/bus.py` | Accept commands, enforce idempotency, append events |
 | Projector | `services/andrea_sync/projector.py` | Derive task JSON from events |
 | HTTP API | `services/andrea_sync/server.py` | REST ingress for commands, Telegram webhook, Alexa skill |
+| Optimizer | `services/andrea_sync/optimizer.py` + `scripts/andrea_optimize.py` | Detect regressions, emit proposals, and gate local self-heal |
+| Dashboard | `services/andrea_sync/dashboard.py` | Operator summary for orchestration, memory, reminders, and autonomy health |
 | Policy | `services/andrea_sync/policy.py` | Verify-before-deny using published capability digest + TTL |
 | Kill switch | `services/andrea_sync/kill_switch.py` | Env + flag file + meta; halts ingress when engaged |
 | Server entry | `scripts/andrea_sync_server.py` | Run from repo root |
@@ -36,6 +38,9 @@ Strict two-way sync between **user channels** (Telegram, Alexa, CLI), **OpenClaw
 
 - `PublishCapabilitySnapshot` — body is typically `scripts/andrea_capabilities.py --json` output; sets canonical digest for policy.
 - `KillSwitchEngage` / `KillSwitchRelease` — emergency halt / resume (see `scripts/andrea_kill_switch.sh`).
+- `RunOptimizationCycle` / `CreateOptimizationProposal` / `ApplyOptimizationProposal` — autonomy loop entrypoints for recurring UX/runtime failures.
+- `SavePrincipalMemory` / `SetPrincipalPreference` / `LinkPrincipalIdentity` — durable identity and memory controls.
+- `CreateReminder` / `RunProactiveSweep` — quiet follow-through and reminder delivery primitives.
 
 When the kill switch is engaged, Telegram/Alexa ingress and normal commands return **503**; only `KillSwitchRelease` is accepted (with token).
 
@@ -62,6 +67,10 @@ When the kill switch is engaged, Telegram/Alexa ingress and normal commands retu
 | `ANDREA_SYNC_ALEXA_EDGE_TOKEN` | Optional shared secret expected from the Alexa cloud edge (`Authorization: Bearer ...` or `X-Andrea-Alexa-Edge-Token`) |
 | `ANDREA_SYNC_ALEXA_SUMMARY_TO_TELEGRAM` | If `1`, send one Telegram summary for each completed/failed Alexa task |
 | `ANDREA_SYNC_ALEXA_SUMMARY_CHAT_ID` | Telegram chat id for Alexa session summaries (falls back to `TELEGRAM_CHAT_ID`) |
+| `ANDREA_SYNC_PROACTIVE_SWEEP_ENABLED` | If `1`, the server runs a background reminder sweep loop |
+| `ANDREA_SYNC_PROACTIVE_SWEEP_INTERVAL_SECONDS` | How often the reminder sweep checks for due reminders (default `60`) |
+| `ANDREA_SYNC_CURSOR_REPO` | Repo override for admin/autonomy helpers such as local self-heal |
+| `ANDREA_SELF_HEAL_CURSOR_MODE` | Cursor backend override for auto-heal branch prep (`auto`, `api`, `cli`) |
 
 ## Idempotency
 
@@ -77,19 +86,20 @@ Commands without `idempotency_key` use a deterministic hash of `channel`, `exter
      - `@Andrea ...` keeps the turn in Andrea's direct assistant lane unless the user only asked for routing help
      - `@Cursor ...` makes the turn Cursor-first, but still through Andrea/OpenClaw coordination so the shared timeline stays intact
      - `@Andrea @Cursor ...` or phrases like `work together` / `double-check` trigger collaborative mode, where OpenClaw is expected to involve Cursor before the final answer
-   - direct Andrea replies can also look at recent Telegram chat history before answering
+   - direct Andrea replies can also look at recent principal history, stored notes, and preferences before answering
 3. Delegated tasks are queued as `JobQueued` with an execution lane:
    - `openclaw_hybrid` starts `scripts/andrea_sync_openclaw_hybrid.py`, which runs `openclaw agent` against the main OpenClaw runtime and asks it to use hybrid skills first or escalate via `cursor_handoff` when the request becomes repo-heavy
    - `direct_cursor` remains available as a fallback lane when you explicitly force Cursor-first behavior
 4. Delegated lifecycle is appended back into lockstep as `JobStarted`, `JobProgress`, `JobCompleted`, or `JobFailed`, with metadata showing whether OpenClaw stayed in-lane or escalated to Cursor, plus the user's routing hint / collaboration mode when present.
-5. The same server process posts Telegram replies from projected task state, not ad-hoc chat text.
-6. Telegram replies are formatted as:
+5. Multi-model collaboration is logged explicitly through `OrchestrationStep` events so plan, critique, execution, and synthesis are auditable without turning raw tool chatter into user-facing copy.
+6. The same server process posts Telegram replies from projected task state, not ad-hoc chat text.
+7. Telegram replies are formatted as:
    - `Andrea:` user-facing answer first
-   - `What happened:` compressed execution summary
-   - `OpenClaw said:` for OpenClaw-only completions, or `Cursor said:` when OpenClaw escalated
-   - `Technical details:` task id, status, OpenClaw session when available, PR, agent URL
-7. Direct Andrea replies intentionally skip Cursor lifecycle noise.
-8. When `ANDREA_SYNC_PUBLIC_BASE` is configured, the server also self-heals Telegram webhook registration if another process clears it.
+   - summary mode stays calm and compact
+   - full-dialogue mode shows a curated collaboration trace (plan / critique / execution / synthesis), not runtime/session jargon
+   - exact diagnostics stay in internal traces, task metadata, dashboard views, and optimizer findings
+8. Direct Andrea replies intentionally skip Cursor lifecycle noise.
+9. When `ANDREA_SYNC_PUBLIC_BASE` is configured, the server also self-heals Telegram webhook registration if another process clears it.
 
 ## Alexa voice lane
 
@@ -100,6 +110,20 @@ Commands without `idempotency_key` use a deterministic hash of `channel`, `exter
    - heavier work becomes `JobQueued` and continues through the existing OpenClaw/Cursor lanes
 4. Alexa does not receive lifecycle spam; instead, the backend can send one Telegram summary when the task reaches `completed` or `failed`.
 5. In the recommended production shape, Alexa signature validation happens at the public cloud edge, which forwards the raw request body plus `ANDREA_SYNC_ALEXA_EDGE_TOKEN` to the private/local Andrea server.
+
+## Principal memory and proactive surface
+
+1. Principals are durable identities linked across Telegram chats, Alexa users, and future channels.
+2. Each principal can accumulate memory notes, preferences, and reminders without exposing that internal storage model to the user.
+3. Simple assistant actions like “remember this” or “remind me tomorrow” can complete directly inside Andrea without invoking a heavy collaboration lane.
+4. Reminder delivery can happen either from the server’s background sweep (`ANDREA_SYNC_PROACTIVE_SWEEP_ENABLED=1`) or on demand through the `RunProactiveSweep` admin command.
+
+## Closed-loop local self-heal
+
+1. `services/andrea_sync/optimizer.py` scans recent outcomes, derives recurring UX/runtime failure categories, and emits structured optimization proposals.
+2. `scripts/andrea_optimize.py` runs one optimization cycle, optionally records regression results, and can auto-apply ready proposals through Cursor branch prep.
+3. `scripts/andrea_autonomy_cycle.sh` is the operator-facing wrapper for a disciplined local autonomy pass: health check, regressions, optimization, gated auto-heal, and proactive sweep.
+4. Auto-heal is intentionally gated by regression success, kill-switch state, capability freshness, and safe file roots so the system improves itself without silently rewriting arbitrary parts of the repo.
 
 ## Security
 

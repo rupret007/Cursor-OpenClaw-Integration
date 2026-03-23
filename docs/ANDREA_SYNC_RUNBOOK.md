@@ -39,6 +39,41 @@ By default `/v1/health` returns only the **basename** of the DB file. Set `ANDRE
 | `ANDREA_SYNC_STRUCTURED_LOG=1` | One JSON line per structured event (e.g. Alexa verify failures) |
 | `ANDREA_SYNC_METRICS_LOG=1` | One JSON line per `metric_log` counter |
 
+## Principal memory / reminders
+
+- Principals, memory notes, preferences, and reminders live in the same SQLite store as the task/event journal.
+- Enable `ANDREA_SYNC_PROACTIVE_SWEEP_ENABLED=1` when you want the server to deliver due reminders in the background.
+- Tune `ANDREA_SYNC_PROACTIVE_SWEEP_INTERVAL_SECONDS` to control how often due reminders are checked.
+- For an on-demand reminder delivery pass, POST `RunProactiveSweep` to `/v1/commands` with the internal bearer token.
+
+## Closed-loop local autonomy
+
+`scripts/andrea_optimize.py` runs one optimization cycle against the local DB and can optionally auto-apply ready proposals via Cursor branch prep.
+
+```bash
+cd /path/to/Cursor-OpenClaw-Integration
+python3 scripts/andrea_optimize.py \
+  --repo . \
+  --regression-command "python3 -m unittest discover -p 'test_*.py'" \
+  --regression-cwd tests \
+  --auto-apply-ready
+```
+
+For the operator-grade wrapper, use:
+
+```bash
+cd /path/to/Cursor-OpenClaw-Integration
+export ANDREA_SYNC_URL='http://127.0.0.1:8765'
+export ANDREA_SYNC_INTERNAL_TOKEN='...'
+bash scripts/andrea_autonomy_cycle.sh
+```
+
+Notes:
+
+- `ANDREA_SELF_HEAL_CURSOR_MODE` overrides the Cursor backend used for branch prep (`auto`, `api`, `cli`).
+- `ANDREA_SYNC_CURSOR_REPO` overrides the repo path used by autonomy helpers.
+- `scripts/andrea_autonomy_cycle.sh` refuses auto-heal branch prep on a dirty worktree unless `ANDREA_AUTONOMY_ALLOW_DIRTY=1` is set.
+
 ## Alexa production
 
 1. Set `ANDREA_ALEXA_SKILL_ID` to the skill’s **applicationId**.

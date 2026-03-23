@@ -38,6 +38,10 @@ git pull origin main
 | `ANDREA_SYNC_ALEXA_EDGE_TOKEN` | No | Recommended for Alexa rollout; shared secret the public Alexa edge forwards to local `/v1/alexa`. |
 | `ANDREA_SYNC_ALEXA_SUMMARY_TO_TELEGRAM` / `ANDREA_SYNC_ALEXA_SUMMARY_CHAT_ID` | No | Alexa session summary controls; summary mirroring is on by default and can target a dedicated Telegram chat. |
 | `ANDREA_SYNC_DELEGATED_EXECUTION_ENABLED` | No | Global kill switch for delegated Alexa/OpenClaw/Cursor execution (`1` by default). |
+| `ANDREA_SYNC_PROACTIVE_SWEEP_ENABLED` / `ANDREA_SYNC_PROACTIVE_SWEEP_INTERVAL_SECONDS` | No | Enable the background reminder sweep and control how frequently due reminders are delivered. |
+| `ANDREA_CURSOR_REPO` / `ANDREA_CURSOR_HANDOFF_MODE` | No | Default repo path and Cursor handoff mode used by the lockstep server for Telegram-triggered execution. |
+| `ANDREA_SYNC_CURSOR_REPO` | No | Override repo path used by admin/autonomy helpers such as the local self-heal runner. |
+| `ANDREA_SELF_HEAL_CURSOR_MODE` | No | Cursor backend override for the local auto-heal branch-prep flow (`auto`, `api`, `cli`). |
 | `ANDREA_SYNC_PUBLIC_BASE` | No | Public HTTPS origin for Telegram webhook self-heal and reboot-stable ingress. Required for persistent Telegram webhook recovery. |
 | `CLOUDFLARED_TUNNEL_TOKEN` | No | Named Cloudflare tunnel token for reboot-stable `cloudflared` LaunchAgent startup. |
 | `ANDREA_LOCALTUNNEL_SUBDOMAIN` | No | Fallback stable-ish localtunnel subdomain for hosts that do not have `cloudflared` available. |
@@ -57,6 +61,10 @@ python3 scripts/andrea_capabilities.py        # Andrea readiness snapshot
 bash scripts/andrea_reliability_probes.sh       # deterministic probes (+ optional RUN_LIVE_PROBES=1)
 bash scripts/test_integration.sh
 bash skills/cursor_handoff/scripts/test_handoff.sh
+# Optional: one closed-loop local autonomy pass after the stack is healthy
+# export ANDREA_SYNC_URL='http://127.0.0.1:8765'
+# export ANDREA_SYNC_INTERNAL_TOKEN='...'
+# ANDREA_AUTONOMY_AUTO_APPLY_READY=0 bash scripts/andrea_autonomy_cycle.sh
 ```
 
 **Andrea operator docs:** [ANDREA_OPERATIONS_PLAYBOOK.md](ANDREA_OPERATIONS_PLAYBOOK.md).

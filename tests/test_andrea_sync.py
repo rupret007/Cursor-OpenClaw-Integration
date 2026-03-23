@@ -22,6 +22,7 @@ from services.andrea_sync.policy import evaluate_skill_absence_claim  # noqa: E4
 from services.andrea_sync.projector import project_task_dict  # noqa: E402
 from services.andrea_sync.schema import CommandType, EventType, TaskStatus, normalize_idempotency_base  # noqa: E402
 from services.andrea_sync.store import (  # noqa: E402
+    SYSTEM_TASK_ID,
     append_event,
     connect,
     get_meta,
@@ -176,6 +177,241 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(proj["status"], TaskStatus.COMPLETED.value)
         self.assertEqual(proj["cursor_agent_id"], "bc-test")
 
+    def test_projection_outcome_marks_overdelegated_meta_question(self) -> None:
+        created = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.CREATE_TASK.value,
+                "channel": "telegram",
+                "external_id": "outcome-meta-q",
+                "payload": {"summary": "Is this OpenClaw?"},
+            },
+        )
+        tid = created["task_id"]
+        append_event(
+            self.conn,
+            tid,
+            EventType.USER_MESSAGE,
+            {
+                "text": "Is this OpenClaw?",
+                "routing_text": "Is this OpenClaw?",
+                "channel": "telegram",
+                "chat_id": 55,
+                "message_id": 100,
+            },
+        )
+        append_event(
+            self.conn,
+            tid,
+            EventType.JOB_QUEUED,
+            {
+                "kind": "openclaw",
+                "execution_lane": "openclaw_hybrid",
+                "runner": "openclaw",
+                "route_reason": "stack_or_tooling_question",
+                "visibility_mode": "summary",
+                "collaboration_mode": "auto",
+            },
+        )
+        proj = project_task_dict(self.conn, tid, "telegram")
+        outcome = proj["meta"]["outcome"]
+        self.assertEqual(outcome["route_mode"], "delegate")
+        self.assertIn("overdelegated_meta_question", outcome["ux_flags"])
+        self.assertTrue(outcome["optimization_candidate"])
+
+    def test_submit_user_feedback_updates_projection_outcome(self) -> None:
+        created = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.CREATE_TASK.value,
+                "channel": "telegram",
+                "external_id": "feedback-direct",
+                "payload": {"summary": "hello"},
+            },
+        )
+        tid = created["task_id"]
+        append_event(
+            self.conn,
+            tid,
+            EventType.ASSISTANT_REPLIED,
+            {
+                "text": "Andrea answered directly.",
+                "route": "direct",
+                "reason": "greeting_or_social",
+            },
+        )
+        result = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_FEEDBACK.value,
+                "channel": "telegram",
+                "task_id": tid,
+                "payload": {
+                    "label": "negative",
+                    "comment": "That felt too noisy.",
+                    "source": "telegram",
+                },
+            },
+        )
+        self.assertTrue(result.get("ok"))
+        proj = project_task_dict(self.conn, tid, "telegram")
+        self.assertEqual(proj["meta"]["feedback"]["count"], 1)
+        self.assertEqual(proj["meta"]["feedback"]["last_label"], "negative")
+        self.assertIn("negative_feedback", proj["meta"]["outcome"]["ux_flags"])
+        self.assertEqual(proj["meta"]["outcome"]["feedback_average"], -1.0)
+
+    def test_projection_outcome_marks_blocked_capability_and_runtime_trace(self) -> None:
+        created = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.CREATE_TASK.value,
+                "channel": "telegram",
+                "external_id": "blocked-capability",
+                "payload": {"summary": "Need Cursor coordination"},
+            },
+        )
+        tid = created["task_id"]
+        append_event(
+            self.conn,
+            tid,
+            EventType.JOB_COMPLETED,
+            {
+                "summary": "I hit an internal collaboration limitation while trying to pass work between reasoning lanes.",
+                "user_summary": "I hit an internal collaboration limitation while trying to pass work between reasoning lanes.",
+                "backend": "openclaw",
+                "runner": "openclaw",
+                "blocked_reason": "I hit an internal collaboration limitation while trying to pass work between reasoning lanes.",
+                "internal_trace": "sessions_spawn.attachments.enabled is disabled.",
+                "collaboration_trace": ["OpenClaw prepared the first pass.", "Andrea kept the fallback calm."],
+            },
+        )
+        proj = project_task_dict(self.conn, tid, "telegram")
+        outcome = proj["meta"]["outcome"]
+        self.assertIn("blocked_capability", outcome["ux_flags"])
+        self.assertIn("internal_runtime_trace", outcome["ux_flags"])
+        self.assertEqual(outcome["collaboration_trace_count"], 2)
+        self.assertIn("blocked_reason", outcome)
+
+    def test_projection_outcome_tracks_orchestration_and_proactive_failures(self) -> None:
+        created = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.CREATE_TASK.value,
+                "channel": "telegram",
+                "external_id": "orchestration-failure",
+                "payload": {"summary": "Need a repo fix"},
+            },
+        )
+        tid = created["task_id"]
+        append_event(
+            self.conn,
+            tid,
+            EventType.ORCHESTRATION_STEP,
+            {
+                "phase": "plan",
+                "status": "completed",
+                "lane": "openclaw",
+                "summary": "OpenClaw built the initial plan.",
+            },
+        )
+        append_event(
+            self.conn,
+            tid,
+            EventType.ORCHESTRATION_STEP,
+            {
+                "phase": "execution",
+                "status": "failed",
+                "lane": "cursor",
+                "summary": "Cursor failed during execution.",
+            },
+        )
+        append_event(
+            self.conn,
+            tid,
+            EventType.REMINDER_FAILED,
+            {
+                "reminder_id": "rem_demo",
+                "error": "delivery_failed",
+            },
+        )
+        proj = project_task_dict(self.conn, tid, "telegram")
+        outcome = proj["meta"]["outcome"]
+        self.assertEqual(outcome["planner_steps"], 1)
+        self.assertEqual(outcome["executor_steps"], 0)
+        self.assertEqual(outcome["failed_orchestration_phase"], "execution")
+        self.assertIn("executor_failure", outcome["ux_flags"])
+        self.assertIn("proactive_delivery_failed", outcome["ux_flags"])
+
+    def test_run_optimization_cycle_internal_command_records_system_audit(self) -> None:
+        created = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.CREATE_TASK.value,
+                "channel": "telegram",
+                "external_id": "optimizer-overdelegation",
+                "payload": {"summary": "Is this OpenClaw?"},
+            },
+        )
+        tid = created["task_id"]
+        append_event(
+            self.conn,
+            tid,
+            EventType.USER_MESSAGE,
+            {
+                "text": "Is this OpenClaw?",
+                "routing_text": "Is this OpenClaw?",
+                "channel": "telegram",
+                "chat_id": 77,
+                "message_id": 200,
+            },
+        )
+        append_event(
+            self.conn,
+            tid,
+            EventType.JOB_QUEUED,
+            {
+                "kind": "openclaw",
+                "execution_lane": "openclaw_hybrid",
+                "runner": "openclaw",
+                "route_reason": "stack_or_tooling_question",
+                "visibility_mode": "summary",
+                "collaboration_mode": "auto",
+            },
+        )
+        append_event(
+            self.conn,
+            tid,
+            EventType.JOB_COMPLETED,
+            {
+                "summary": "Delegated path completed.",
+                "backend": "openclaw",
+                "runner": "openclaw",
+            },
+        )
+
+        result = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.RUN_OPTIMIZATION_CYCLE.value,
+                "channel": "internal",
+                "payload": {
+                    "limit": 20,
+                    "regression_report": {"passed": True, "total": 10},
+                    "emit_proposals": True,
+                },
+            },
+        )
+        self.assertTrue(result.get("ok"))
+        self.assertEqual(result["task_id"], SYSTEM_TASK_ID)
+        self.assertTrue(any(row["category"] == "overdelegation" for row in result["findings"]))
+        self.assertTrue(any(row["category"] == "overdelegation" for row in result["proposals"]))
+
+        events = load_events_for_task(self.conn, SYSTEM_TASK_ID)
+        event_types = [event_type for _seq, _ts, event_type, _payload in events]
+        self.assertIn(EventType.OPTIMIZATION_RUN_COMPLETED.value, event_types)
+        self.assertIn(EventType.EVALUATION_RECORDED.value, event_types)
+        self.assertIn(EventType.OPTIMIZATION_PROPOSAL.value, event_types)
+
     def test_unknown_channel_rejected(self) -> None:
         r = handle_command(
             self.conn,
@@ -302,6 +538,7 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(routing["mention_targets"], ["andrea", "cursor"])
         self.assertEqual(routing["routing_text"], "please work together on this")
         self.assertEqual(routing["visibility_mode"], "summary")
+        self.assertEqual(routing["requested_capability"], "collaboration")
 
     def test_telegram_extract_routing_hints_detects_full_dialogue_mode(self) -> None:
         routing = tg_adapt.extract_routing_hints(
@@ -310,6 +547,7 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(routing["routing_hint"], "collaborate")
         self.assertEqual(routing["collaboration_mode"], "collaborative")
         self.assertEqual(routing["visibility_mode"], "full")
+        self.assertEqual(routing["requested_capability"], "collaboration")
 
     def test_telegram_extract_routing_hints_detects_direct_model_lane(self) -> None:
         routing = tg_adapt.extract_routing_hints("@Gemini review this plan with Andrea")
@@ -317,6 +555,7 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(routing["preferred_model_label"], "Gemini")
         self.assertEqual(routing["model_mentions"], ["gemini"])
         self.assertEqual(routing["routing_text"], "review this plan with Andrea")
+        self.assertEqual(routing["requested_capability"], "assistant")
 
     def test_telegram_webhook_url_match_ignores_query_order(self) -> None:
         self.assertTrue(
@@ -409,6 +648,51 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(proj["meta"]["telegram"]["chat_id"], 777)
         self.assertEqual(proj["meta"]["telegram"]["message_id"], 42)
         self.assertEqual(proj["meta"]["cursor"]["prompt_excerpt"], "review the bridge")
+
+    def test_telegram_continuation_reply_to_anchor_still_merges_split_prompt(self) -> None:
+        """Split prompt with explicit reply-to-anchor must still merge (reply overrides '?')."""
+        from services.andrea_sync.telegram_continuation import attach_continuation_if_applicable
+
+        prev = os.environ.get("ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS")
+        os.environ["ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS"] = "300"
+        try:
+            cmd1 = tg_adapt.update_to_command(
+                {
+                    "update_id": 501,
+                    "message": {
+                        "text": "@Andrea section A of the spec",
+                        "message_id": 1001,
+                        "chat": {"id": 4242, "type": "private"},
+                        "from": {"id": 99, "username": "u1"},
+                    },
+                }
+            )
+            self.assertIsNotNone(cmd1)
+            assert cmd1 is not None
+            r1 = handle_command(self.conn, cmd1)
+            tid = r1["task_id"]
+
+            cmd2 = tg_adapt.update_to_command(
+                {
+                    "update_id": 502,
+                    "message": {
+                        "text": "Section B: acceptance criteria?",
+                        "message_id": 1002,
+                        "chat": {"id": 4242, "type": "private"},
+                        "from": {"id": 99, "username": "u1"},
+                        "reply_to_message": {"message_id": 1001},
+                    },
+                }
+            )
+            self.assertIsNotNone(cmd2)
+            assert cmd2 is not None
+            self.assertTrue(attach_continuation_if_applicable(self.conn, cmd2))
+            self.assertEqual(cmd2["task_id"], tid)
+        finally:
+            if prev is None:
+                os.environ.pop("ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS", None)
+            else:
+                os.environ["ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS"] = prev
 
     def test_telegram_continuation_merges_second_chunk_same_task(self) -> None:
         from services.andrea_sync.telegram_continuation import attach_continuation_if_applicable
@@ -559,6 +843,54 @@ class TestAndreaSync(unittest.TestCase):
             assert cmd2
             self.assertFalse(attach_continuation_if_applicable(self.conn, cmd2))
             self.assertIsNone(cmd2.get("task_id"))
+        finally:
+            if prev is None:
+                os.environ.pop("ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS", None)
+            else:
+                os.environ["ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS"] = prev
+
+    def test_telegram_continuation_question_does_not_merge_created_task(self) -> None:
+        """Regression: 'Is this OpenClaw?' must not merge onto a CREATED technical task."""
+        from services.andrea_sync.telegram_continuation import attach_continuation_if_applicable
+
+        prev = os.environ.get("ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS")
+        os.environ["ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS"] = "300"
+        try:
+            cmd1 = tg_adapt.update_to_command(
+                {
+                    "update_id": 711,
+                    "message": {
+                        "text": "Please fix the repo and run the tests",
+                        "message_id": 2201,
+                        "chat": {"id": 9393, "type": "private"},
+                        "from": {"id": 89, "username": "u4"},
+                    },
+                }
+            )
+            assert cmd1
+            r1 = handle_command(self.conn, cmd1)
+            tid1 = r1["task_id"]
+            proj = project_task_dict(self.conn, tid1, "telegram")
+            self.assertEqual(proj["status"], TaskStatus.CREATED.value)
+
+            cmd2 = tg_adapt.update_to_command(
+                {
+                    "update_id": 712,
+                    "message": {
+                        "text": "Is this OpenClaw?",
+                        "message_id": 2202,
+                        "chat": {"id": 9393, "type": "private"},
+                        "from": {"id": 89, "username": "u4"},
+                    },
+                }
+            )
+            assert cmd2
+            self.assertFalse(attach_continuation_if_applicable(self.conn, cmd2))
+            self.assertIsNone(cmd2.get("task_id"))
+
+            r2 = handle_command(self.conn, cmd2)
+            self.assertTrue(r2.get("ok"))
+            self.assertNotEqual(r2["task_id"], tid1)
         finally:
             if prev is None:
                 os.environ.pop("ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS", None)
@@ -869,11 +1201,14 @@ class TestAndreaSync(unittest.TestCase):
     def test_router_meta_cursor_question_stays_direct(self) -> None:
         decision = route_message("Can you talk to Cursor when needed?")
         self.assertEqual(decision.mode, "direct")
+        self.assertIn("@cursor", decision.reply_text.lower())
+        self.assertNotIn("sessionkey", decision.reply_text.lower())
 
     def test_router_is_this_openclaw_stays_direct(self) -> None:
         decision = route_message("Is this OpenClaw?")
         self.assertEqual(decision.mode, "direct")
         self.assertEqual(decision.reason, "stack_or_tooling_question")
+        self.assertIn("andrea", decision.reply_text.lower())
         self.assertIn("openclaw", decision.reply_text.lower())
 
     def test_router_what_is_cursor_stays_direct(self) -> None:
@@ -1081,7 +1416,7 @@ class TestAndreaSync(unittest.TestCase):
             routing_hint="cursor",
             collaboration_mode="cursor_primary",
         )
-        self.assertIn("addressed Cursor directly", text)
+        self.assertIn("Cursor execution lane", text)
 
     def test_telegram_ack_message_mentions_preferred_model_lane(self) -> None:
         text = format_ack_message(
@@ -1188,7 +1523,7 @@ class TestAndreaSync(unittest.TestCase):
         )
         self.assertIn("OpenClaw finished processing", text)
         self.assertIn("OpenClaw said:", text)
-        self.assertIn("OpenClaw session: sess_demo", text)
+        self.assertNotIn("OpenClaw session:", text)
 
     def test_telegram_final_message_for_cursor_pr_mentions_cursor(self) -> None:
         text = format_final_message(
@@ -1222,7 +1557,24 @@ class TestAndreaSync(unittest.TestCase):
             routing_hint="cursor",
             collaboration_mode="cursor_primary",
         )
-        self.assertIn("addressed Cursor directly", text)
+        self.assertIn("Cursor execution lane", text)
+
+    def test_telegram_final_message_full_visibility_shows_curated_collaboration_trace(self) -> None:
+        text = format_final_message(
+            "tsk_demo",
+            status="completed",
+            summary="Implemented the fix and verified the result.",
+            worker_label="OpenClaw and Cursor",
+            delegated_to_cursor=True,
+            visibility_mode="full",
+            collaboration_trace=[
+                "OpenClaw triaged the issue and framed the plan.",
+                "Cursor handled the repo-heavy execution.",
+            ],
+        )
+        self.assertIn("Collaboration trace:", text)
+        self.assertIn("OpenClaw triaged the issue", text)
+        self.assertIn("Cursor handled the repo-heavy execution", text)
 
     def test_telegram_final_message_failed_uses_error_footer(self) -> None:
         text = format_final_message(
@@ -1394,8 +1746,8 @@ class TestAndreaSync(unittest.TestCase):
                 "channel": "telegram",
                 "external_id": "tg-andrea-action",
                 "payload": {
-                    "text": "@Andrea remind me to drink water",
-                    "routing_text": "remind me to drink water",
+                    "text": "@Andrea please inspect the repo and fix the failing tests",
+                    "routing_text": "please inspect the repo and fix the failing tests",
                     "routing_hint": "andrea",
                     "collaboration_mode": "andrea_primary",
                     "mention_targets": ["andrea"],
@@ -1408,6 +1760,62 @@ class TestAndreaSync(unittest.TestCase):
         proj = project_task_dict(server.conn, result["task_id"], "telegram")
         self.assertEqual(proj["status"], TaskStatus.QUEUED.value)
         self.assertEqual(proj["meta"]["execution"]["lane"], "openclaw_hybrid")
+
+    def test_server_followups_structured_reminder_stays_direct_and_creates_proactive_meta(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        result = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-structured-reminder",
+                "payload": {
+                    "text": "Remind me to review the StoryLiner repo tomorrow morning.",
+                    "routing_text": "remind me to review the StoryLiner repo tomorrow morning",
+                    "chat_id": 1,
+                    "message_id": 292,
+                    "from_user": 11,
+                },
+            },
+        )
+        server._handle_task_followups(result["task_id"])
+        proj = project_task_dict(server.conn, result["task_id"], "telegram")
+        self.assertEqual(proj["status"], TaskStatus.COMPLETED.value)
+        self.assertEqual(proj["meta"]["assistant"]["reason"], "reminder_created")
+        self.assertEqual(proj["meta"]["proactive"]["pending_reminder_count"], 1)
+        self.assertEqual(proj["meta"]["outcome"]["pending_reminder_count"], 1)
+
+    def test_server_followups_memory_note_is_saved_on_principal(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        result = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-memory-note",
+                "payload": {
+                    "text": "remember that I prefer full dialogue for repo work",
+                    "routing_text": "remember that I prefer full dialogue for repo work",
+                    "chat_id": 1,
+                    "message_id": 293,
+                    "from_user": 12,
+                },
+            },
+        )
+        server._handle_task_followups(result["task_id"])
+        proj = project_task_dict(server.conn, result["task_id"], "telegram")
+        self.assertEqual(proj["status"], TaskStatus.COMPLETED.value)
+        self.assertEqual(proj["meta"]["assistant"]["reason"], "principal_memory_saved")
+        self.assertEqual(proj["meta"]["identity"]["memory_count"], 1)
+        self.assertTrue(proj["meta"]["identity"]["principal_id"].startswith("prn_"))
 
     def test_server_followups_explicit_cursor_mention_marks_cursor_primary(self) -> None:
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
@@ -1496,6 +1904,57 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(proj["status"], TaskStatus.QUEUED.value)
         self.assertEqual(proj["meta"]["telegram"]["visibility_mode"], "full")
         self.assertEqual(proj["meta"]["execution"]["visibility_mode"], "full")
+        self.assertEqual(proj["meta"]["telegram"]["requested_capability"], "collaboration")
+
+    def test_task_visibility_mode_prefers_full_when_telegram_upgrades(self) -> None:
+        """When telegram has 'full' and execution has 'summary', use full (continuation upgrade)."""
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        result = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-visibility-upgrade",
+                "payload": {
+                    "text": "fix the repo",
+                    "routing_text": "fix the repo",
+                    "visibility_mode": "summary",
+                    "chat_id": 888,
+                    "message_id": 401,
+                },
+            },
+        )
+        append_event(
+            server.conn,
+            result["task_id"],
+            EventType.JOB_QUEUED,
+            {
+                "kind": "openclaw",
+                "execution_lane": "openclaw_hybrid",
+                "runner": "openclaw",
+                "visibility_mode": "summary",
+            },
+        )
+        append_event(
+            server.conn,
+            result["task_id"],
+            EventType.USER_MESSAGE,
+            {
+                "channel": "telegram",
+                "text": "and show the full dialogue",
+                "routing_text": "and show the full dialogue",
+                "visibility_mode": "full",
+                "chat_id": 888,
+                "message_id": 402,
+                "telegram_continuation": True,
+            },
+        )
+        mode = server._task_visibility_mode(result["task_id"])
+        self.assertEqual(mode, "full")
 
     def test_server_running_followups_emit_progress_message_for_full_visibility(self) -> None:
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "1"
@@ -1573,7 +2032,7 @@ class TestAndreaSync(unittest.TestCase):
                 "channel": "telegram",
                 "external_id": "tg-openclaw",
                 "payload": {
-                    "text": "Remind me to review the StoryLiner repo tomorrow morning.",
+                    "text": "Please inspect the repo and summarize the likely failing tests.",
                     "chat_id": 1,
                     "message_id": 30,
                 },
@@ -2178,7 +2637,7 @@ class TestAndreaSync(unittest.TestCase):
         run_cursor.assert_called_once_with("tsk_demo")
         self.assertIsNone(get_meta(server.conn, marker))
 
-    def test_telegram_followups_prefer_openclaw_raw_text_when_summary_is_generic(self) -> None:
+    def test_telegram_followups_prefer_openclaw_user_summary_when_summary_is_generic(self) -> None:
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "1"
         os.environ["TELEGRAM_BOT_TOKEN"] = "telegram-test-token"
         os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
@@ -2211,9 +2670,13 @@ class TestAndreaSync(unittest.TestCase):
             EventType.JOB_COMPLETED,
             {
                 "summary": "OpenClaw completed the delegated task.",
+                "user_summary": "Implemented the actual fix and updated the docs with the final behavior.",
                 "backend": "openclaw",
                 "runner": "openclaw",
-                "raw_text": "Implemented the actual fix and updated the docs with the final behavior.",
+                "raw_text": (
+                    "sessions_spawn.attachments.enabled is disabled.\n"
+                    "Implemented the actual fix and updated the docs with the final behavior."
+                ),
             },
         )
         snapshot = server._task_snapshot(created["task_id"])
@@ -2222,6 +2685,7 @@ class TestAndreaSync(unittest.TestCase):
             server._handle_telegram_followups(created["task_id"], snapshot)
         sent_text = send_mock.call_args.kwargs["text"]
         self.assertIn("Implemented the actual fix and updated the docs", sent_text)
+        self.assertNotIn("sessions_spawn.attachments.enabled", sent_text)
 
     def test_telegram_followups_skip_late_chunk_notice_for_continuation(self) -> None:
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "1"

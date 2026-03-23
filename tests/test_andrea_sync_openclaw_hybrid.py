@@ -29,7 +29,10 @@ class AndreaSyncOpenClawHybridTests(unittest.TestCase):
         self.assertIn("Minimax 2.7", prompt)
         self.assertIn("OpenAI", prompt)
         self.assertIn("Cursor for the heavy repo execution", prompt)
-        self.assertIn("collaboration transcript", prompt)
+        self.assertIn("collaboration_trace", prompt)
+        self.assertIn("phase_trace", prompt)
+        self.assertIn("planner_summary", prompt)
+        self.assertIn("Never emit raw tool chatter", prompt)
 
     def test_build_prompt_for_cursor_primary_still_requires_cursor(self) -> None:
         prompt = MODULE._build_prompt(
@@ -41,6 +44,7 @@ class AndreaSyncOpenClawHybridTests(unittest.TestCase):
         )
         self.assertIn("must involve Cursor", prompt)
         self.assertIn("repo-heavy execution into Cursor", prompt)
+        self.assertIn("session keys", prompt)
 
     def test_build_prompt_respects_preferred_model_lane(self) -> None:
         prompt = MODULE._build_prompt(
@@ -56,40 +60,77 @@ class AndreaSyncOpenClawHybridTests(unittest.TestCase):
         self.assertIn("Preferred model family: gemini", prompt)
         self.assertIn("fall back", prompt)
 
-    def test_derive_summary_prefers_lockstep_summary(self) -> None:
-        s = MODULE._derive_openclaw_summary(
-            {"summary": "Shipped the fix."},
+    def test_derive_contract_prefers_lockstep_summary_and_trace(self) -> None:
+        contract = MODULE._derive_openclaw_contract(
+            {
+                "summary": "Shipped the fix.",
+                "collaboration_trace": ["OpenClaw triaged the task.", "Cursor applied the repo fix."],
+            },
             "ignored prose",
             {"summary": "ignored top"},
         )
-        self.assertEqual(s, "Shipped the fix.")
+        self.assertEqual(contract["summary"], "Shipped the fix.")
+        self.assertEqual(
+            contract["collaboration_trace"],
+            ["OpenClaw triaged the task.", "Cursor applied the repo fix."],
+        )
+        self.assertEqual(contract["phase_outputs"]["plan"]["summary"], "OpenClaw triaged the task.")
 
-    def test_derive_summary_falls_back_to_clean_text(self) -> None:
-        s = MODULE._derive_openclaw_summary(
+    def test_derive_contract_falls_back_to_clean_text(self) -> None:
+        contract = MODULE._derive_openclaw_contract(
             {"summary": ""},
             "User-visible answer before the marker.",
             {},
         )
-        self.assertEqual(s, "User-visible answer before the marker.")
+        self.assertEqual(contract["summary"], "User-visible answer before the marker.")
 
-    def test_derive_summary_falls_back_to_payload_message(self) -> None:
-        s = MODULE._derive_openclaw_summary(
+    def test_derive_contract_falls_back_to_payload_message(self) -> None:
+        contract = MODULE._derive_openclaw_contract(
             {},
             "",
             {"message": "Done via tool output."},
         )
-        self.assertEqual(s, "Done via tool output.")
+        self.assertEqual(contract["summary"], "Done via tool output.")
 
-    def test_derive_summary_falls_back_to_result_nested_text(self) -> None:
-        s = MODULE._derive_openclaw_summary(
+    def test_derive_contract_falls_back_to_result_nested_text(self) -> None:
+        contract = MODULE._derive_openclaw_contract(
             {},
             "",
             {"result": {"text": "Nested completion text."}},
         )
-        self.assertEqual(s, "Nested completion text.")
+        self.assertEqual(contract["summary"], "Nested completion text.")
 
-    def test_derive_summary_empty_returns_empty_string(self) -> None:
-        self.assertEqual(MODULE._derive_openclaw_summary({}, "", {}), "")
+    def test_derive_contract_detects_blocked_capability_and_keeps_internal_trace(self) -> None:
+        contract = MODULE._derive_openclaw_contract(
+            {},
+            "I need a sessionKey before I can talk to Cursor.",
+            {},
+        )
+        self.assertIn("handled behind the scenes", contract["summary"])
+        self.assertIn("handled behind the scenes", contract["blocked_reason"])
+        self.assertIn("sessionKey", contract["internal_trace"])
+
+    def test_derive_contract_builds_machine_trace_and_phase_outputs(self) -> None:
+        contract = MODULE._derive_openclaw_contract(
+            {"summary": "The fix is ready."},
+            "",
+            {},
+            payloads=[
+                {"text": "Plan the repo triage before changing code."},
+                {"text": "Critique the risky path before execution."},
+                {"text": "Cursor can implement the execution step once the plan is solid."},
+            ],
+            collaboration_mode="collaborative",
+            delegated_to_cursor=True,
+            provider="google",
+            model="gemini-2.5-flash",
+        )
+        self.assertTrue(contract["machine_collaboration_trace"])
+        phases = {row["phase"] for row in contract["machine_collaboration_trace"]}
+        self.assertIn("plan", phases)
+        self.assertIn("critique", phases)
+        self.assertIn("execution", phases)
+        self.assertIn("synthesis", contract["phase_outputs"])
 
     def test_run_openclaw_hybrid_uses_generic_when_no_usable_text(self) -> None:
         stdout_obj = {
@@ -130,6 +171,7 @@ class AndreaSyncOpenClawHybridTests(unittest.TestCase):
             )
         self.assertEqual(out["summary"], "OpenClaw completed the delegated task.")
         self.assertTrue(out.get("ok"))
+        self.assertIn("phase_outputs", out)
 
     def test_run_openclaw_hybrid_prefers_prose_over_empty_lockstep_summary(self) -> None:
         stdout_obj = {
@@ -171,6 +213,52 @@ class AndreaSyncOpenClawHybridTests(unittest.TestCase):
             )
         self.assertEqual(out["summary"], "Here is the real outcome for the user.")
         self.assertIn("Here is the real outcome", out["raw_text"])
+        self.assertIn("phase_outputs", out)
+
+    def test_run_openclaw_hybrid_sanitizes_internal_runtime_leakage(self) -> None:
+        stdout_obj = {
+            "runId": "run-blocked",
+            "status": "completed",
+            "result": {
+                "payloads": [
+                    {
+                        "text": (
+                            "I need a sessionKey or label before I can talk to Cursor.\n"
+                            "sessions_spawn.attachments.enabled is disabled.\n"
+                            "LOCKSTEP_JSON: "
+                            '{"delegated_to_cursor":false,"summary":"","status":"completed"}'
+                        )
+                    }
+                ],
+            },
+        }
+
+        def fake_run(*_a, **_k):
+            class R:
+                returncode = 0
+                stdout = json.dumps(stdout_obj)
+                stderr = ""
+
+            return R()
+
+        with mock.patch.object(MODULE.subprocess, "run", side_effect=fake_run):
+            out = MODULE.run_openclaw_hybrid(
+                task_id="tsk_blocked",
+                prompt="do thing",
+                repo_path="/tmp/r",
+                agent_id="main",
+                route_reason="test",
+                collaboration_mode="cursor_primary",
+                preferred_model_family="",
+                preferred_model_label="",
+                timeout_seconds=60,
+                thinking="",
+            )
+        self.assertNotIn("sessionKey", out["summary"])
+        self.assertIn("internal collaboration limitation", out["summary"])
+        self.assertIn("sessionKey", out["internal_trace"])
+        self.assertIn("internal collaboration limitation", out["blocked_reason"])
+        self.assertIn("machine_collaboration_trace", out)
 
 
 if __name__ == "__main__":

@@ -9,7 +9,17 @@ from .adapters import telegram as tg_adapt
 from .kill_switch import kill_switch_status
 from .policy import digest_age_seconds, get_capability_digest
 from .projector import project_task_dict
-from .store import SYSTEM_TASK_ID, list_tasks
+from .schema import EventType
+from .store import (
+    SYSTEM_TASK_ID,
+    count_active_memories,
+    count_due_reminders,
+    count_pending_reminders,
+    count_principals,
+    list_tasks,
+    load_events_for_task,
+    task_exists,
+)
 
 
 def _redact_webhook_url(url: str) -> str:
@@ -97,6 +107,8 @@ def _task_list_item(row: Dict[str, Any], proj: Dict[str, Any]) -> Dict[str, Any]
     execution = meta.get("execution") if isinstance(meta.get("execution"), dict) else {}
     openclaw = meta.get("openclaw") if isinstance(meta.get("openclaw"), dict) else {}
     cursor = meta.get("cursor") if isinstance(meta.get("cursor"), dict) else {}
+    outcome = meta.get("outcome") if isinstance(meta.get("outcome"), dict) else {}
+    identity = meta.get("identity") if isinstance(meta.get("identity"), dict) else {}
     return {
         "task_id": proj.get("task_id") or row.get("task_id"),
         "channel": proj.get("channel") or row.get("channel") or "",
@@ -107,15 +119,198 @@ def _task_list_item(row: Dict[str, Any], proj: Dict[str, Any]) -> Dict[str, Any]
         "updated_at": row.get("updated_at"),
         "visibility_mode": execution.get("visibility_mode") or telegram.get("visibility_mode") or "",
         "collaboration_mode": execution.get("collaboration_mode") or telegram.get("collaboration_mode") or "",
+        "requested_capability": execution.get("requested_capability")
+        or telegram.get("requested_capability")
+        or "",
         "preferred_model_label": execution.get("preferred_model_label")
         or telegram.get("preferred_model_label")
         or "",
         "provider": openclaw.get("provider") or "",
         "model": openclaw.get("model") or "",
         "delegated_to_cursor": bool(execution.get("delegated_to_cursor")),
+        "blocked_reason": outcome.get("blocked_reason") or "",
+        "collaboration_trace_count": int(outcome.get("collaboration_trace_count") or 0),
+        "verified_trace_count": int(outcome.get("verified_collaboration_trace_count") or 0),
+        "orchestration_step_count": int(outcome.get("orchestration_step_count") or 0),
+        "planner_steps": int(outcome.get("planner_steps") or 0),
+        "critic_steps": int(outcome.get("critic_steps") or 0),
+        "executor_steps": int(outcome.get("executor_steps") or 0),
+        "synthesis_steps": int(outcome.get("synthesis_steps") or 0),
+        "principal_id": identity.get("principal_id") or "",
+        "pending_reminder_count": int(outcome.get("pending_reminder_count") or 0),
         "agent_url": cursor.get("agent_url") or "",
         "pr_url": cursor.get("pr_url") or "",
         "openclaw_session_id": openclaw.get("session_id") or "",
+    }
+
+
+def _build_optimization_summary(conn: Any) -> Dict[str, Any]:
+    if not task_exists(conn, SYSTEM_TASK_ID):
+        return {
+            "latest_run": {},
+            "recent_runs": [],
+            "dominant_categories": [],
+            "recent_proposals": [],
+            "latest_regression": {},
+            "recent_auto_heal": [],
+        }
+    events = load_events_for_task(conn, SYSTEM_TASK_ID)
+    runs: Dict[str, Dict[str, Any]] = {}
+    categories: Dict[str, Dict[str, Any]] = {}
+    proposals: List[Dict[str, Any]] = []
+    latest_regression: Dict[str, Any] = {}
+    auto_heal_events: List[Dict[str, Any]] = []
+    for _seq, ts, et, payload in events:
+        if et == EventType.OPTIMIZATION_RUN_STARTED.value:
+            run_id = str(payload.get("run_id") or "")
+            if not run_id:
+                continue
+            runs[run_id] = {
+                "run_id": run_id,
+                "status": "running",
+                "actor": str(payload.get("actor") or ""),
+                "analysis_mode": str(payload.get("analysis_mode") or ""),
+                "started_at": ts,
+                "completed_at": None,
+                "gate_allowed": None,
+                "proposal_count": 0,
+                "finding_count": 0,
+                "error": "",
+            }
+        elif et == EventType.OPTIMIZATION_RUN_COMPLETED.value:
+            run_id = str(payload.get("run_id") or "")
+            if not run_id:
+                continue
+            row = runs.setdefault(
+                run_id,
+                {
+                    "run_id": run_id,
+                    "status": "completed",
+                    "actor": str(payload.get("actor") or ""),
+                    "analysis_mode": str(payload.get("analysis_mode") or ""),
+                    "started_at": None,
+                    "completed_at": ts,
+                    "gate_allowed": None,
+                    "proposal_count": 0,
+                    "finding_count": 0,
+                    "error": "",
+                },
+            )
+            row["status"] = "completed"
+            row["completed_at"] = ts
+            row["gate_allowed"] = bool(payload.get("gate_allowed"))
+            row["proposal_count"] = int(payload.get("proposal_count") or 0)
+            row["finding_count"] = int(payload.get("finding_count") or 0)
+        elif et == EventType.OPTIMIZATION_RUN_FAILED.value:
+            run_id = str(payload.get("run_id") or "")
+            if not run_id:
+                continue
+            row = runs.setdefault(
+                run_id,
+                {
+                    "run_id": run_id,
+                    "status": "failed",
+                    "actor": str(payload.get("actor") or ""),
+                    "analysis_mode": str(payload.get("analysis_mode") or ""),
+                    "started_at": None,
+                    "completed_at": ts,
+                    "gate_allowed": False,
+                    "proposal_count": 0,
+                    "finding_count": 0,
+                    "error": "",
+                },
+            )
+            row["status"] = "failed"
+            row["completed_at"] = ts
+            row["error"] = str(payload.get("error") or "")
+        elif et == EventType.EVALUATION_RECORDED.value:
+            category = str(payload.get("category") or "").strip()
+            if not category:
+                continue
+            bucket = categories.setdefault(
+                category,
+                {"category": category, "count": 0, "severity": str(payload.get("severity") or "medium")},
+            )
+            bucket["count"] += int(payload.get("count") or 1)
+            if payload.get("severity"):
+                bucket["severity"] = str(payload.get("severity"))
+        elif et == EventType.OPTIMIZATION_PROPOSAL.value:
+            proposals.append(
+                {
+                    "proposal_id": str(payload.get("proposal_id") or ""),
+                    "title": str(payload.get("title") or ""),
+                    "category": str(payload.get("category") or ""),
+                    "status": str(payload.get("status") or ""),
+                    "preferred_execution_lane": str(
+                        payload.get("preferred_execution_lane") or ""
+                    ),
+                    "branch_prep_allowed": bool(payload.get("branch_prep_allowed")),
+                    "ts": ts,
+                }
+            )
+        elif et == EventType.REGRESSION_RECORDED.value:
+            latest_regression = {
+                "passed": bool(payload.get("passed")),
+                "total": int(payload.get("total") or 0),
+                "command": str(payload.get("command") or ""),
+                "actor": str(payload.get("actor") or ""),
+                "ts": ts,
+            }
+        elif et in (
+            EventType.LOCAL_AUTO_HEAL_STARTED.value,
+            EventType.LOCAL_AUTO_HEAL_COMPLETED.value,
+            EventType.LOCAL_AUTO_HEAL_FAILED.value,
+        ):
+            auto_heal_events.append(
+                {
+                    "proposal_id": str(payload.get("proposal_id") or ""),
+                    "title": str(payload.get("title") or ""),
+                    "category": str(payload.get("category") or ""),
+                    "branch": str(payload.get("branch") or ""),
+                    "status": "running"
+                    if et == EventType.LOCAL_AUTO_HEAL_STARTED.value
+                    else "completed"
+                    if et == EventType.LOCAL_AUTO_HEAL_COMPLETED.value
+                    else "failed",
+                    "agent_url": str(payload.get("agent_url") or ""),
+                    "pr_url": str(payload.get("pr_url") or ""),
+                    "error": str(payload.get("error") or ""),
+                    "ts": ts,
+                }
+            )
+
+    recent_runs = sorted(
+        runs.values(),
+        key=lambda row: float(row.get("completed_at") or row.get("started_at") or 0.0),
+        reverse=True,
+    )[:6]
+    dominant_categories = sorted(
+        categories.values(),
+        key=lambda row: (-int(row.get("count") or 0), str(row.get("category") or "")),
+    )[:8]
+    recent_proposals = sorted(
+        proposals, key=lambda row: float(row.get("ts") or 0.0), reverse=True
+    )[:8]
+    return {
+        "latest_run": recent_runs[0] if recent_runs else {},
+        "recent_runs": recent_runs,
+        "dominant_categories": dominant_categories,
+        "recent_proposals": recent_proposals,
+        "latest_regression": latest_regression,
+        "recent_auto_heal": sorted(
+            auto_heal_events,
+            key=lambda row: float(row.get("ts") or 0.0),
+            reverse=True,
+        )[:8],
+    }
+
+
+def _build_memory_summary(conn: Any) -> Dict[str, Any]:
+    return {
+        "principal_count": count_principals(conn),
+        "active_memory_count": count_active_memories(conn),
+        "pending_reminder_count": count_pending_reminders(conn),
+        "due_reminder_count": count_due_reminders(conn),
     }
 
 
@@ -212,6 +407,8 @@ def build_dashboard_summary(
             "by_channel": by_channel,
             "items": items,
         },
+        "memory": _build_memory_summary(conn),
+        "optimization": _build_optimization_summary(conn),
     }
 
 
@@ -274,6 +471,20 @@ def render_dashboard_html() -> str:
 
     <div class="grid cards" id="cards"></div>
 
+    <div class="grid twoCol" style="margin-bottom:16px;">
+      <section class="panel">
+        <h2>Optimization Loop</h2>
+        <p class="subtle">Recent autonomous eval runs, gate state, and dominant orchestration failure categories.</p>
+        <div class="list" id="optimizationLoop"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Optimization Proposals</h2>
+        <p class="subtle">Branch-prep candidates generated from recurring failures on the system timeline.</p>
+        <div class="list" id="optimizationProposals"></div>
+      </section>
+    </div>
+
     <div class="grid twoCol">
       <section class="panel">
         <h2>Recent Tasks</h2>
@@ -331,13 +542,15 @@ def render_dashboard_html() -> str:
     }
 
     function renderCards(data) {
+      const latestRun = (data.optimization || {}).latest_run || {};
       const cards = [
         { label: "Kill Switch", value: data.service.kill_switch.engaged ? "ENGAGED" : "Released", status: data.service.kill_switch.engaged ? "blocked" : "ready", note: "Server safety state" },
         { label: "Webhook", value: data.webhook.status, status: data.webhook.status, note: data.webhook.reason || "Telegram webhook state" },
         { label: "Recent Tasks", value: String(data.tasks.count), status: "ready", note: `Limit ${data.tasks.limit}` },
         { label: "Blocked Caps", value: String((data.capabilities.summary || {}).blocked || 0), status: ((data.capabilities.summary || {}).blocked || 0) > 0 ? "blocked" : "ready", note: "Published capability digest" },
         { label: "ACPX", value: data.capabilities.acpx ? data.capabilities.acpx.status : "digest-missing", status: data.capabilities.acpx ? data.capabilities.acpx.status : "blocked", note: data.capabilities.acpx ? data.capabilities.acpx.notes : "No published acpx row is available yet" },
-        { label: "Digest Age", value: `${Math.round(Number(data.service.capability_digest_age_seconds || 0))}s`, status: Number(data.service.capability_digest_age_seconds || 0) > 1800 ? "warn" : "ready", note: "Capability snapshot freshness" }
+        { label: "Digest Age", value: `${Math.round(Number(data.service.capability_digest_age_seconds || 0))}s`, status: Number(data.service.capability_digest_age_seconds || 0) > 1800 ? "warn" : "ready", note: "Capability snapshot freshness" },
+        { label: "Optimizer", value: latestRun.status || "idle", status: latestRun.status || "warn", note: latestRun.run_id ? `Latest run ${latestRun.run_id}` : "No optimization run recorded yet" }
       ];
       document.getElementById("cards").innerHTML = cards.map((card) => `
         <div class="card">
@@ -386,6 +599,53 @@ def render_dashboard_html() -> str:
           ${item.extra ? `<p class="subtle" style="margin-top:6px;">${escapeHtml(item.extra)}</p>` : ""}
         </div>
       `).join("") || `<div class="item"><strong>No active issues</strong><p class="subtle" style="margin-top:8px;">Capability digest and webhook look healthy.</p></div>`;
+    }
+
+    function renderOptimization(data) {
+      const opt = data.optimization || {};
+      const latest = opt.latest_run || {};
+      const categories = opt.dominant_categories || [];
+      const recentRuns = opt.recent_runs || [];
+      const proposals = opt.recent_proposals || [];
+
+      const loopItems = [];
+      if (latest.run_id) {
+        loopItems.push({
+          title: `Latest run: ${latest.run_id}`,
+          note: `Status ${latest.status || "unknown"}${latest.analysis_mode ? ` · ${latest.analysis_mode}` : ""}`,
+          extra: `Findings ${latest.finding_count || 0} · Proposals ${latest.proposal_count || 0} · Gate ${latest.gate_allowed === true ? "open" : latest.gate_allowed === false ? "gated" : "n/a"}`,
+          status: latest.status || "warn"
+        });
+      }
+      for (const row of categories.slice(0, 4)) {
+        loopItems.push({
+          title: row.category,
+          note: `Observed ${row.count} time(s)`,
+          extra: `Severity ${row.severity || "medium"}`,
+          status: row.severity === "high" ? "bad" : "warn"
+        });
+      }
+      document.getElementById("optimizationLoop").innerHTML = loopItems.map((item) => `
+        <div class="item">
+          <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;">
+            <strong>${escapeHtml(item.title)}</strong>
+            <span class="pill ${pillClass(item.status)}">${escapeHtml(item.status)}</span>
+          </div>
+          <p class="subtle" style="margin-top:8px;">${escapeHtml(item.note)}</p>
+          ${item.extra ? `<p class="subtle" style="margin-top:6px;">${escapeHtml(item.extra)}</p>` : ""}
+        </div>
+      `).join("") || `<div class="item"><strong>No optimizer runs yet</strong><p class="subtle" style="margin-top:8px;">Once Andrea reviews recent outcomes, the autonomous loop will appear here.</p></div>`;
+
+      document.getElementById("optimizationProposals").innerHTML = proposals.map((proposal) => `
+        <div class="item">
+          <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;">
+            <strong>${escapeHtml(proposal.title || proposal.proposal_id || "proposal")}</strong>
+            <span class="pill ${pillClass(proposal.branch_prep_allowed ? "ready" : (proposal.status || "warn"))}">${escapeHtml(proposal.status || "proposed")}</span>
+          </div>
+          <p class="subtle" style="margin-top:8px;">${escapeHtml(proposal.category || "uncategorized")} · ${escapeHtml(proposal.preferred_execution_lane || "n/a")}</p>
+          <p class="subtle" style="margin-top:6px;">${escapeHtml(formatTs(proposal.ts))}</p>
+        </div>
+      `).join("") || `<div class="item"><strong>No proposals yet</strong><p class="subtle" style="margin-top:8px;">The optimizer will list branch-prep candidates here once recurring failures are detected.</p></div>`;
     }
 
     function renderTasks(data) {
@@ -477,6 +737,7 @@ def render_dashboard_html() -> str:
       latestSummary = await fetchJson("/v1/dashboard/summary?limit=30");
       renderCards(latestSummary);
       renderAttention(latestSummary);
+      renderOptimization(latestSummary);
       renderTasks(latestSummary);
       document.getElementById("lastUpdated").textContent = `Last updated ${new Date().toLocaleTimeString()} (auto-refresh every 5s)`;
       const tasks = latestSummary.tasks.items || [];

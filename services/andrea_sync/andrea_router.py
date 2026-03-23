@@ -230,14 +230,39 @@ def _history_hint(history: list[dict[str, str]] | None) -> str:
     return ""
 
 
-def _contextual_fallback(text: str, history: list[dict[str, str]] | None = None) -> str:
+def _memory_hint(memory_notes: list[str] | None) -> str:
+    if not memory_notes:
+        return ""
+    for note in memory_notes:
+        clipped = _clip(note, 180)
+        if clipped:
+            return clipped
+    return ""
+
+
+def _contextual_fallback(
+    text: str,
+    history: list[dict[str, str]] | None = None,
+    memory_notes: list[str] | None = None,
+) -> str:
     clean = _normalize(text)
     hint = _history_hint(history)
+    memory_hint = _memory_hint(memory_notes)
     if MEMORY_RE.search(clean):
+        if hint and memory_hint:
+            return (
+                "Yes. I remember the recent conversation and I also have a durable note for this principal. "
+                f"Recent thread: {hint} Durable note: {memory_hint}"
+            )
         if hint:
             return (
                 "Yes, I remember the recent conversation in this chat. "
                 f"The latest useful context I have is: {hint} What would you like to continue?"
+            )
+        if memory_hint:
+            return (
+                "Yes. I have a durable note for this principal, even if this specific chat thread is light. "
+                f"The strongest saved note I have is: {memory_hint}"
             )
         return (
             "I can remember the recent conversation in this chat once we build a little history together. "
@@ -255,6 +280,11 @@ def _contextual_fallback(text: str, history: list[dict[str, str]] | None = None)
             "I can answer that using the recent context from this chat. "
             f"The latest useful thread I have is: {hint}"
         )
+    if memory_hint and ("?" in text or len(clean.split()) > 8):
+        return (
+            "I can answer that using the durable context I have for this principal. "
+            f"The strongest saved note I have is: {memory_hint}"
+        )
     return _heuristic_reply(text)
 
 
@@ -268,14 +298,15 @@ def _heuristic_reply(text: str) -> str:
         return "You're welcome. I'm ready for the next thing whenever you are."
     if META_CURSOR_RE.search(clean):
         return (
-            "Yes. I can coordinate with Cursor when the work needs heavier repo or coding help, "
-            "but I'll answer directly when I can handle it myself."
+            "Yes. I can bring Cursor in when the work needs heavier repo or coding help. "
+            "If you use @Cursor, I handle that routing for you behind the scenes, and you do not need "
+            "to manage session keys, labels, or other runtime details."
         )
     if _meta_stack_question(clean, text):
         return (
-            "You're talking with Andrea. OpenClaw is the visible multi-model collaboration layer "
-            "I coordinate for richer reasoning; Cursor is for heavier repo and coding work when needed. "
-            "Lightweight questions like this I answer directly."
+            "You're talking with Andrea. OpenClaw is a collaboration layer I can use when deeper "
+            "reasoning helps, and Cursor is the heavy execution lane for repo and coding work. "
+            "I keep the internal plumbing behind the scenes, and lightweight questions like this stay direct."
         )
     if HELP_RE.search(clean) and len(clean.split()) <= 6:
         return (
@@ -293,7 +324,11 @@ def _heuristic_reply(text: str) -> str:
     )
 
 
-def _openai_direct_reply(text: str, history: list[dict[str, str]] | None = None) -> str:
+def _openai_direct_reply(
+    text: str,
+    history: list[dict[str, str]] | None = None,
+    memory_notes: list[str] | None = None,
+) -> str:
     api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
     if not api_key or not _env_truthy("OPENAI_API_ENABLED", False):
         raise RuntimeError("openai_direct_disabled")
@@ -310,12 +345,22 @@ def _openai_direct_reply(text: str, history: list[dict[str, str]] | None = None)
                 "You are Andrea, a warm and capable personal assistant. "
                 "Answer directly, naturally, and concisely. "
                 "Do not mention Cursor unless the user asks. "
+                "Never mention session IDs, session labels, tool configuration flags, or runtime internals. "
+                "If the user asks about Cursor or collaboration, explain it in product terms instead. "
                 "Use the recent conversation history when it is relevant, "
                 "but do not claim memories beyond what is provided in this chat context. "
                 "Keep replies short and useful for chat or voice."
             ),
         }
     ]
+    durable_notes = [str(note or "").strip() for note in (memory_notes or []) if str(note or "").strip()]
+    if durable_notes:
+        messages.append(
+            {
+                "role": "system",
+                "content": "Durable user context:\n- " + "\n- ".join(durable_notes[:4]),
+            }
+        )
     for turn in (history or [])[-history_turns:]:
         role = "assistant" if turn.get("role") == "assistant" else "user"
         content = str(turn.get("content") or "").strip()
@@ -361,7 +406,11 @@ def _openai_direct_reply(text: str, history: list[dict[str, str]] | None = None)
     return text_out
 
 
-def build_direct_reply(text: str, history: list[dict[str, str]] | None = None) -> str:
+def build_direct_reply(
+    text: str,
+    history: list[dict[str, str]] | None = None,
+    memory_notes: list[str] | None = None,
+) -> str:
     clean = _normalize(text)
     if (
         (GREETING_RE.search(clean) and not MEMORY_RE.search(clean) and len(clean.split()) <= 6)
@@ -373,9 +422,9 @@ def build_direct_reply(text: str, history: list[dict[str, str]] | None = None) -
     ):
         return _heuristic_reply(text)
     try:
-        return _openai_direct_reply(text, history=history)
+        return _openai_direct_reply(text, history=history, memory_notes=memory_notes)
     except Exception:
-        return _contextual_fallback(text, history=history)
+        return _contextual_fallback(text, history=history, memory_notes=memory_notes)
 
 
 def route_message(
@@ -385,6 +434,7 @@ def route_message(
     routing_hint: str = "auto",
     collaboration_mode: str = "auto",
     preferred_model_family: str = "",
+    memory_notes: list[str] | None = None,
 ) -> AndreaRouteDecision:
     mode, reason, delegate_target, resolved_collab = classify_route(
         text,
@@ -402,6 +452,6 @@ def route_message(
     return AndreaRouteDecision(
         mode="direct",
         reason=reason,
-        reply_text=build_direct_reply(text, history=history),
+        reply_text=build_direct_reply(text, history=history, memory_notes=memory_notes),
         collaboration_mode=resolved_collab,
     )

@@ -29,6 +29,9 @@ Hardened **Cursor Cloud Agents** integration toolkit for **OpenClaw**, shell wor
 - **Unicode:** request JSON uses UTF-8 (`ensure_ascii=False`) so prompts stay readable end-to-end.
 - **OpenClaw skill** (`skills/cursor_handoff/`): API-first handoff with CLI fallback, diagnostics, dry-run, tests.
 - **Andrea lockstep bus** (`services/andrea_sync/`): shared task/event timeline for Telegram, Alexa, OpenClaw, and Cursor with Andrea-first routing.
+- **Planner/critic/executor trace:** machine-derived orchestration steps and user-safe collaboration summaries instead of raw runtime chatter.
+- **Principal memory + reminders:** durable identity, memory notes, preferences, and scheduled follow-through across Telegram and Alexa.
+- **Closed-loop local self-heal:** regression-backed optimization proposals and gated Cursor branch prep via `services/andrea_sync/optimizer.py` and `scripts/andrea_optimize.py`.
 - **Voice + chat coordination**: direct Andrea replies stay concise, delegated work runs through OpenClaw/Cursor, and Alexa sessions can mirror a single compact summary back to Telegram.
 
 ## Repository layout
@@ -61,8 +64,10 @@ Hardened **Cursor Cloud Agents** integration toolkit for **OpenClaw**, shell wor
 │   ├── andrea_security_sanity.sh     # repo secret-pattern sanity checks
 │   ├── andrea_slo_check.sh         # grade + optional OpenClaw model probe
 │   ├── andrea_doctor.sh            # one-pass: security + grade + probes + probe
+│   ├── andrea_autonomy_cycle.sh    # closed-loop local autonomy pass
 │   ├── andrea_model_guard.sh       # automatic profile failover + reprobe loop
 │   ├── andrea_openclaw_enforce.sh  # sync skill + required skills + probe/guard
+│   ├── andrea_optimize.py          # optimization cycle + optional auto-heal branch prep
 │   ├── andrea_release_gate.sh      # STRICT security + grade not C + test_integration
 │   ├── andrea_slo_telegram.sh      # timed Telegram getMe SLO (token from env only)
 │   ├── handoff_context.py          # shared intent templates + repo triage text
@@ -236,6 +241,7 @@ Full steps and flow: [docs/OPENCLAW_SKILL.md](docs/OPENCLAW_SKILL.md).
 | [docs/ANDREA_SECURITY.md](docs/ANDREA_SECURITY.md) | Secrets, redaction, gateway token, rotation |
 | [docs/ANDREA_MODEL_POLICY.md](docs/ANDREA_MODEL_POLICY.md) | Model profiles + fallbacks + rate limits |
 | [docs/ANDREA_LOCKSTEP_ARCHITECTURE.md](docs/ANDREA_LOCKSTEP_ARCHITECTURE.md) | Telegram / Alexa / Cursor shared lockstep bus + SQLite store |
+| [docs/ANDREA_SYNC_RUNBOOK.md](docs/ANDREA_SYNC_RUNBOOK.md) | Lockstep maintenance notes for kill switch, reminders, autonomy loop, and migrations |
 | [docs/ANDREA_TELEGRAM_LOCKSTEP_E2E.md](docs/ANDREA_TELEGRAM_LOCKSTEP_E2E.md) | Telegram webhook + `cloudflared` + `scripts/andrea_lockstep_telegram_e2e.py` |
 | [docs/ANDREA_TELEGRAM_TRI_LLM_SPRINT.md](docs/ANDREA_TELEGRAM_TRI_LLM_SPRINT.md) | High-visibility one-hour Telegram collaboration sprint across OpenClaw multi-model reasoning and Cursor execution, including direct `@Gemini` / `@Minimax` / `@OpenAI` model-lane requests |
 | [docs/ANDREA_LOCKSTEP_REVIEW_FINDINGS.md](docs/ANDREA_LOCKSTEP_REVIEW_FINDINGS.md) | Lockstep awareness / kill-switch / webhook review notes |
@@ -295,6 +301,16 @@ bash scripts/andrea_release_gate.sh
 ```bash
 bash scripts/andrea_reliability_probes.sh
 # optional: RUN_LIVE_PROBES=1 for gh + openclaw
+```
+
+**Closed-loop autonomy cycle** (health + regressions + optimization proposals + gated local auto-heal + proactive sweep):
+
+```bash
+export ANDREA_SYNC_URL='http://127.0.0.1:8765'
+export ANDREA_SYNC_INTERNAL_TOKEN='…'
+bash scripts/andrea_autonomy_cycle.sh
+# proposal generation only:
+# ANDREA_AUTONOMY_AUTO_APPLY_READY=0 bash scripts/andrea_autonomy_cycle.sh
 ```
 
 ## Documentation
@@ -376,6 +392,10 @@ See [.env.example](.env.example) and [skills/cursor_handoff/.env.example](skills
 | `ANDREA_SYNC_ALEXA_EDGE_TOKEN` | No | Recommended for Alexa rollout; shared secret between the public Alexa edge and local `/v1/alexa`. |
 | `ANDREA_SYNC_ALEXA_SUMMARY_TO_TELEGRAM` / `ANDREA_SYNC_ALEXA_SUMMARY_CHAT_ID` | No | Controls whether Alexa sessions mirror one summary to Telegram and which chat receives it. |
 | `ANDREA_SYNC_DELEGATED_EXECUTION_ENABLED` | No | Global on/off switch for delegated Alexa/OpenClaw/Cursor execution. |
+| `ANDREA_SYNC_PROACTIVE_SWEEP_ENABLED` / `ANDREA_SYNC_PROACTIVE_SWEEP_INTERVAL_SECONDS` | No | Enables the server-side reminder sweep loop and controls how often due reminders are delivered. |
+| `ANDREA_CURSOR_REPO` / `ANDREA_CURSOR_HANDOFF_MODE` | No | Default repo path and Cursor handoff mode for Telegram-triggered execution. |
+| `ANDREA_SYNC_CURSOR_REPO` | No | Override repo path used by admin/autonomy helpers such as the local self-heal runner. |
+| `ANDREA_SELF_HEAL_CURSOR_MODE` | No | Cursor backend override for auto-heal branch-prep proposals (`auto`, `api`, `cli`). |
 | `BRAVE_SEARCH_API_KEY` / `BRAVE_ANSWERS_API_KEY` | No | Optional Brave Search skill keys (`brave-api-search` expects both names; answers key may reuse search key). |
 | `MINIMAX_API_KEY` | No | Optional MiniMax provider key for MiniMax integrations. |
 | `SSL_CERT_FILE` | No | Optional path to CA bundle for Python TLS (macOS `CERTIFICATE_VERIFY_FAILED`); see README troubleshooting. |

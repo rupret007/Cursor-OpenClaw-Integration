@@ -41,6 +41,8 @@ Use this skill when a request requires broad codebase context, multi-file edits,
 4. Only use edit mode when the user clearly asks for code changes.
 5. Never infer permission for commits, PR creation, or destructive git actions unless explicitly requested.
 6. When Andrea/OpenClaw marked the turn as `cursor_primary` or collaborative, involve Cursor before the final answer even if you can partially reason about the task yourself.
+7. Never ask the user for session keys, session labels, runtime identifiers, or other internal routing details. Andrea owns that abstraction.
+8. Keep any user-facing summary product-level and calm. Exact runtime/tool diagnostics belong in internal notes, not in the primary reply.
 
 ## Branch Guidance
 
@@ -58,6 +60,7 @@ Before handoff, convert the user request into a clean implementation prompt:
 - State whether task is read-only analysis or edit implementation.
 - Ask Cursor to summarize changes/results concisely.
 - Avoid leaking secrets or unrelated private context.
+- Ask for a compact, user-safe result summary plus any exact internal diagnostics separately when something is blocked or fails.
 
 ### Intent templates (recommended)
 
@@ -95,6 +98,7 @@ With a **local** repo path, add **`--triage`** to prepend a short non-secret sna
    - agent/job ID (if available)
    - status + URL (if available)
    - one next step
+6. If the handoff is blocked, explain it as a product limitation or fallback choice. Do not surface raw tool/config/runtime jargon to the user.
 
 ## Safety Guidance
 

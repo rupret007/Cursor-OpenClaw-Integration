@@ -78,7 +78,12 @@ def _should_continue_message(new_payload: Dict[str, Any], prev_telegram_meta: Di
     reply_to_message_id = new_payload.get("reply_to_message_id")
     anchor_message_id = prev_telegram_meta.get("message_id")
     if reply_to_message_id is not None and anchor_message_id is not None:
-        return str(reply_to_message_id) == str(anchor_message_id)
+        if str(reply_to_message_id) == str(anchor_message_id):
+            return True
+    # Question-like text with no mention: treat as new question unless explicitly replying to anchor.
+    # Prevents "Is this OpenClaw?" from merging onto a just-created technical task.
+    if "?" in new_text and not MENTION_RE.search(new_text):
+        return False
     if not MENTION_RE.search(new_text):
         return True
     new_mentions = set(new_payload.get("mention_targets") or [])

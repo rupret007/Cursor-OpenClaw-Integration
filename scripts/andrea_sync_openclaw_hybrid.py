@@ -14,6 +14,29 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 LOCKSTEP_JSON_PREFIX = "LOCKSTEP_JSON:"
 CURSOR_AGENT_URL_RE = re.compile(r"https://cursor\.com/agents/([A-Za-z0-9._:-]+)")
 PR_URL_RE = re.compile(r"https://github\.com/[^\s]+/pull/\d+")
+INTERNAL_RUNTIME_RE = re.compile(
+    r"\b("
+    r"sessionkey|session key|sessionid|session id|session label|runtime id|"
+    r"sessions_send|sessions_spawn|attachments\.enabled|tool chatter|tool call|"
+    r"internal runtime|cursor session|label that identifies|session identifier"
+    r")\b",
+    re.I,
+)
+ATTACHMENT_LIMIT_RE = re.compile(
+    r"\b("
+    r"attachments\.enabled|attachment[s]? (?:is |are )?(?:currently )?disabled|"
+    r"cannot pass (?:detailed )?documents|can't pass (?:detailed )?documents|"
+    r"blocked .*attachment"
+    r")\b",
+    re.I,
+)
+SESSION_ROUTING_RE = re.compile(
+    r"\b("
+    r"sessionkey|session key|session label|label that identifies|"
+    r"unique session|identify(?:ing)? cursor'?s session|runtime identifiers?"
+    r")\b",
+    re.I,
+)
 
 
 def _clip(value: Any, limit: int) -> str:
@@ -25,6 +48,309 @@ def _clip(value: Any, limit: int) -> str:
 
 def _normalize_whitespace(text: str) -> str:
     return re.sub(r"\s+", " ", str(text or "")).strip()
+
+
+def _is_internal_runtime_text(text: str) -> bool:
+    normalized = _normalize_whitespace(text)
+    if not normalized:
+        return False
+    if INTERNAL_RUNTIME_RE.search(normalized):
+        return True
+    return bool(
+        re.search(r"\b(tool|runtime|config|setting|session)\b", normalized, re.I)
+        and re.search(r"\b(key|label|id|enabled|disabled|missing|required)\b", normalized, re.I)
+    )
+
+
+def _sanitize_user_safe_text(text: Any, limit: int = 500) -> str:
+    safe_lines: list[str] = []
+    for raw_line in str(text or "").splitlines():
+        stripped = _normalize_whitespace(raw_line.lstrip("-*• "))
+        if not stripped or _is_internal_runtime_text(stripped):
+            continue
+        safe_lines.append(stripped)
+    if not safe_lines:
+        collapsed = _normalize_whitespace(str(text or ""))
+        if collapsed and not _is_internal_runtime_text(collapsed):
+            safe_lines.append(collapsed)
+    if not safe_lines:
+        return ""
+    return _clip(" ".join(safe_lines), limit)
+
+
+def _normalize_trace_item(value: Any) -> str:
+    text = ""
+    if isinstance(value, dict):
+        lane = _normalize_whitespace(
+            str(value.get("lane") or value.get("role") or value.get("worker") or "")
+        )
+        detail = _sanitize_user_safe_text(
+            value.get("text")
+            or value.get("summary")
+            or value.get("step")
+            or value.get("message")
+            or "",
+            240,
+        )
+        if lane and detail and not detail.lower().startswith(lane.lower()):
+            text = f"{lane}: {detail}"
+        else:
+            text = detail or lane
+    else:
+        text = _sanitize_user_safe_text(value, 240)
+    return _clip(text, 240)
+
+
+def _coerce_collaboration_trace(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    items: list[str] = []
+    for raw in value:
+        item = _normalize_trace_item(raw)
+        if item and item not in items:
+            items.append(item)
+        if len(items) >= 4:
+            break
+    return items
+
+
+def _derive_collaboration_trace(lockstep_meta: dict[str, Any], clean_text: str) -> list[str]:
+    explicit = _coerce_collaboration_trace(lockstep_meta.get("collaboration_trace"))
+    if explicit:
+        return explicit
+    items: list[str] = []
+    for raw_line in str(clean_text or "").splitlines():
+        item = _sanitize_user_safe_text(raw_line, 240)
+        if not item:
+            continue
+        items.append(item)
+        if len(items) >= 4:
+            break
+    if items:
+        return items
+    safe_text = _sanitize_user_safe_text(clean_text, 800)
+    if not safe_text:
+        return []
+    sentences = re.split(r"(?<=[.!?])\s+", safe_text)
+    trace: list[str] = []
+    for sentence in sentences:
+        clipped = _clip(_normalize_whitespace(sentence), 240)
+        if clipped and clipped not in trace:
+            trace.append(clipped)
+        if len(trace) >= 4:
+            break
+    return trace
+
+
+def _derive_blocked_reason(lockstep_meta: dict[str, Any], clean_text: str) -> str:
+    explicit = _sanitize_user_safe_text(lockstep_meta.get("blocked_reason") or "", 280)
+    if explicit:
+        return explicit
+    normalized = _normalize_whitespace(clean_text)
+    if not normalized:
+        return ""
+    if ATTACHMENT_LIMIT_RE.search(normalized):
+        return (
+            "I hit an internal collaboration limitation while trying to pass work between reasoning "
+            "lanes, so I could not complete that cross-model handoff cleanly."
+        )
+    if SESSION_ROUTING_RE.search(normalized):
+        return (
+            "I can route work to Cursor for you, but the internal session routing is handled behind "
+            "the scenes and should not require anything from you."
+        )
+    if _is_internal_runtime_text(normalized):
+        return (
+            "I ran into an internal collaboration limitation during the handoff, so I could not "
+            "complete that cross-lane step cleanly."
+        )
+    return ""
+
+
+def _infer_phase_label(text: str, lane: str = "") -> str:
+    combined = f"{lane} {text}".lower()
+    if any(
+        keyword in combined
+        for keyword in ("critique", "review", "double-check", "challenge", "second pass")
+    ):
+        return "critique"
+    if any(
+        keyword in combined
+        for keyword in ("execute", "execution", "implement", "patch", "fix", "cursor", "run tests")
+    ):
+        return "execution"
+    if any(keyword in combined for keyword in ("plan", "triage", "approach", "decompose", "outline")):
+        return "plan"
+    return "synthesis"
+
+
+def _append_machine_trace_item(out: list[dict[str, str]], entry: dict[str, str]) -> None:
+    signature = "|".join(
+        [
+            str(entry.get("phase") or ""),
+            str(entry.get("lane") or ""),
+            str(entry.get("provider") or ""),
+            str(entry.get("model") or ""),
+            str(entry.get("summary") or ""),
+        ]
+    )
+    if not signature.strip("|"):
+        return
+    for existing in out:
+        existing_signature = "|".join(
+            [
+                str(existing.get("phase") or ""),
+                str(existing.get("lane") or ""),
+                str(existing.get("provider") or ""),
+                str(existing.get("model") or ""),
+                str(existing.get("summary") or ""),
+            ]
+        )
+        if existing_signature == signature:
+            return
+    out.append(entry)
+
+
+def _collect_machine_trace(
+    value: Any,
+    out: list[dict[str, str]],
+    *,
+    default_lane: str = "",
+    default_provider: str = "",
+    default_model: str = "",
+) -> None:
+    if len(out) >= 8:
+        return
+    if isinstance(value, dict):
+        lane = _normalize_whitespace(
+            str(value.get("lane") or value.get("role") or value.get("worker") or default_lane or "")
+        )
+        provider = _normalize_whitespace(
+            str(value.get("provider") or value.get("vendor") or default_provider or "")
+        )
+        model = _normalize_whitespace(str(value.get("model") or default_model or ""))
+        text_value = (
+            value.get("summary")
+            or value.get("message")
+            or value.get("text")
+            or value.get("content")
+            or ""
+        )
+        summary = _sanitize_user_safe_text(text_value, 240)
+        if summary:
+            _append_machine_trace_item(
+                out,
+                {
+                    "phase": _infer_phase_label(summary, lane),
+                    "lane": lane or "openclaw",
+                    "provider": provider,
+                    "model": model,
+                    "summary": summary,
+                },
+            )
+        for inner in value.values():
+            _collect_machine_trace(
+                inner,
+                out,
+                default_lane=lane or default_lane,
+                default_provider=provider or default_provider,
+                default_model=model or default_model,
+            )
+        return
+    if isinstance(value, list):
+        for inner in value:
+            _collect_machine_trace(
+                inner,
+                out,
+                default_lane=default_lane,
+                default_provider=default_provider,
+                default_model=default_model,
+            )
+
+
+def _derive_machine_collaboration_trace(
+    payloads: Any,
+    lockstep_meta: dict[str, Any],
+    *,
+    provider: str = "",
+    model: str = "",
+) -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    _collect_machine_trace(
+        payloads,
+        out,
+        default_lane="openclaw",
+        default_provider=provider,
+        default_model=model,
+    )
+    if not out:
+        _collect_machine_trace(
+            lockstep_meta.get("phase_trace") or lockstep_meta.get("machine_collaboration_trace"),
+            out,
+            default_lane="openclaw",
+            default_provider=provider,
+            default_model=model,
+        )
+    return out[:6]
+
+
+def _phase_summary_from_machine_trace(
+    machine_trace: list[dict[str, str]], phase: str
+) -> tuple[str, str]:
+    for item in machine_trace:
+        if str(item.get("phase") or "").strip().lower() != phase:
+            continue
+        summary = _sanitize_user_safe_text(item.get("summary") or "", 320)
+        lane = _normalize_whitespace(str(item.get("lane") or ""))
+        if summary or lane:
+            return summary, lane
+    return "", ""
+
+
+def _derive_phase_outputs(
+    lockstep_meta: dict[str, Any],
+    *,
+    summary: str,
+    collaboration_trace: list[str],
+    machine_trace: list[dict[str, str]],
+    collaboration_mode: str,
+    delegated_to_cursor: bool,
+) -> dict[str, dict[str, str]]:
+    collab = str(collaboration_mode or "").strip().lower()
+    phase_key_map = {
+        "plan": ("planner_summary", "plan_summary"),
+        "critique": ("critic_summary", "critique_summary"),
+        "execution": ("execution_summary", "executor_summary"),
+        "synthesis": ("synthesis_summary", "final_summary"),
+    }
+    out: dict[str, dict[str, str]] = {}
+    for phase, keys in phase_key_map.items():
+        phase_summary = ""
+        phase_lane = ""
+        for key in keys:
+            phase_summary = _sanitize_user_safe_text(lockstep_meta.get(key) or "", 320)
+            if phase_summary:
+                break
+        if not phase_summary:
+            phase_summary, phase_lane = _phase_summary_from_machine_trace(machine_trace, phase)
+        if not phase_summary and phase == "plan":
+            phase_summary = collaboration_trace[0] if collaboration_trace else summary
+        if not phase_summary and phase == "critique" and collab in {"cursor_primary", "collaborative"}:
+            phase_summary = "OpenClaw ran a critique pass before handing off or synthesizing the result."
+        if not phase_summary and phase == "execution" and delegated_to_cursor:
+            phase_summary = "Cursor handled the heavier execution step after Andrea/OpenClaw coordination."
+        if not phase_summary and phase == "synthesis":
+            phase_summary = summary
+        if not phase_summary:
+            continue
+        if not phase_lane:
+            phase_lane = "cursor" if phase == "execution" and delegated_to_cursor else "openclaw"
+        out[phase] = {
+            "lane": phase_lane,
+            "status": "completed",
+            "summary": phase_summary,
+        }
+    return out
 
 
 def _build_prompt(
@@ -46,6 +372,7 @@ def _build_prompt(
             "Cursor before giving the final answer unless the request is only a routing clarification.\n"
             "- After Cursor is involved, synthesize the outcome back into a concise assistant answer.\n"
             "- Use OpenClaw for triage and coordination first, then move the repo-heavy execution into Cursor.\n"
+            "- Never ask the user for session keys, labels, runtime identifiers, or tool routing details.\n"
         )
     elif collab == "collaborative":
         collaboration_notes = (
@@ -59,8 +386,8 @@ def _build_prompt(
             "  - Cursor for the heavy repo execution, code edits, and implementation follow-through.\n"
             "- Do not call every model for every task. Use only the best model needed for each subtask.\n"
             "- Your final answer should reflect the combined result, not just one side.\n"
-            "- Include a short collaboration transcript in natural language before the LOCKSTEP_JSON marker. "
-            "Mention which model/provider or execution lane handled which part of the work.\n"
+            "- If you provide visible collaboration, keep it sparse and product-level: plan, critique, synthesis, "
+            "execution, or verification. Never emit raw tool chatter.\n"
         )
     preferred_model_note = ""
     if preferred_family:
@@ -78,13 +405,21 @@ def _build_prompt(
         "- If you offload work to Cursor, wait for the useful outcome and summarize it clearly.\n"
         "- Keep the user-facing answer concise and directly useful.\n"
         "- When collaboration is requested, think like a coordinator: triage first, assign the right model/tool to the right subtask, then synthesize the result.\n"
+        "- Do not expose tool names, config flags, session identifiers, session labels, or runtime mechanics in user-facing text.\n"
+        "- If a handoff is blocked, explain it in calm product language for the user and keep the exact runtime diagnostic in internal_trace only.\n"
+        "- The JSON fields are authoritative. Any prose before the marker is optional and should stay user-safe.\n"
         f"{collaboration_notes}"
         f"{preferred_model_note}"
         "- End your response with exactly one single-line marker in this format:\n"
-        '  LOCKSTEP_JSON: {"delegated_to_cursor":false,"cursor_agent_url":"","cursor_agent_id":"","pr_url":"","summary":"","status":"completed"}\n'
+        '  LOCKSTEP_JSON: {"delegated_to_cursor":false,"cursor_agent_url":"","cursor_agent_id":"","pr_url":"","summary":"","status":"completed","planner_summary":"","critic_summary":"","execution_summary":"","synthesis_summary":"","phase_trace":[],"collaboration_trace":[],"blocked_reason":"","internal_trace":""}\n'
         "- Fill unknown string fields with an empty string.\n"
         "- Set delegated_to_cursor=true only if you actually used Cursor or cursor_handoff.\n"
         "- The summary field should be 1-2 sentences and must describe the final outcome.\n"
+        "- planner_summary, critic_summary, execution_summary, and synthesis_summary should stay concise and user-safe.\n"
+        "- phase_trace should be a short array of structured step objects when possible, e.g. {\"phase\":\"plan\",\"lane\":\"openclaw\",\"summary\":\"...\"}.\n"
+        "- collaboration_trace should be a short array of 0-4 meaningful steps. Keep each step user-safe and concise.\n"
+        "- blocked_reason should stay empty unless a real product-level limitation or fallback needs to be explained.\n"
+        "- internal_trace should contain exact runtime/tool diagnostics only when needed for debugging or optimization.\n"
         "- Do not wrap the marker in a code block.\n\n"
         f"Local repository path for coding work: {repo_path}\n"
         f"Route reason: {route_reason or 'unspecified'}\n"
@@ -135,39 +470,69 @@ def _extract_urls(text: str) -> tuple[str, str, str]:
     return agent_url, agent_id, pr_url
 
 
-def _derive_openclaw_summary(
+def _derive_openclaw_contract(
     lockstep_meta: dict[str, Any],
     clean_text: str,
     payload: dict[str, Any],
-) -> str:
-    """
-    Prefer a user-meaningful summary: LOCKSTEP_JSON summary, then prose before the marker,
-    then outer OpenClaw JSON fields, then generic fallback is applied by the caller.
-    """
-    summary = _normalize_whitespace(str(lockstep_meta.get("summary") or "").strip())
-    if summary:
-        return summary
-    body = _normalize_whitespace(str(clean_text or "").strip())
-    if body:
-        return body
-    top = _normalize_whitespace(str(payload.get("summary") or "").strip())
-    if top:
-        return top
+    *,
+    payloads: Any = None,
+    collaboration_mode: str = "",
+    delegated_to_cursor: bool = False,
+    provider: str = "",
+    model: str = "",
+) -> dict[str, Any]:
+    summary = _sanitize_user_safe_text(lockstep_meta.get("summary") or "", 2000)
+    if not summary:
+        summary = _sanitize_user_safe_text(payload.get("summary") or "", 2000)
     for key in ("message", "response", "answer", "output"):
+        if summary:
+            break
         val = payload.get(key)
         if isinstance(val, str) and val.strip():
-            return _normalize_whitespace(val.strip())
-        if isinstance(val, dict):
+            summary = _sanitize_user_safe_text(val, 2000)
+        elif isinstance(val, dict):
             for sub in ("text", "message", "content"):
                 inner = val.get(sub)
                 if isinstance(inner, str) and inner.strip():
-                    return _normalize_whitespace(inner.strip())
+                    summary = _sanitize_user_safe_text(inner, 2000)
+                    break
     result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
     for key in ("summary", "message", "text"):
+        if summary:
+            break
         val = result.get(key)
         if isinstance(val, str) and val.strip():
-            return _normalize_whitespace(val.strip())
-    return ""
+            summary = _sanitize_user_safe_text(val, 2000)
+    blocked_reason = _derive_blocked_reason(lockstep_meta, clean_text)
+    if not summary and blocked_reason:
+        summary = blocked_reason
+    if not summary:
+        summary = _sanitize_user_safe_text(clean_text, 2000)
+    collaboration_trace = _derive_collaboration_trace(lockstep_meta, clean_text)
+    machine_trace = _derive_machine_collaboration_trace(
+        payloads,
+        lockstep_meta,
+        provider=provider,
+        model=model,
+    )
+    return {
+        "summary": summary,
+        "collaboration_trace": collaboration_trace,
+        "machine_collaboration_trace": machine_trace,
+        "phase_outputs": _derive_phase_outputs(
+            lockstep_meta,
+            summary=summary,
+            collaboration_trace=collaboration_trace,
+            machine_trace=machine_trace,
+            collaboration_mode=collaboration_mode,
+            delegated_to_cursor=delegated_to_cursor,
+        ),
+        "blocked_reason": blocked_reason,
+        "internal_trace": _clip(
+            str(lockstep_meta.get("internal_trace") or clean_text or payload.get("error") or ""),
+            4000,
+        ),
+    }
 
 
 def run_openclaw_hybrid(
@@ -242,6 +607,10 @@ def run_openclaw_hybrid(
     system_prompt_report = (
         meta.get("systemPromptReport") if isinstance(meta.get("systemPromptReport"), dict) else {}
     )
+    provider_text = str(
+        agent_meta.get("provider") or system_prompt_report.get("provider") or ""
+    ).strip()
+    model_text = str(agent_meta.get("model") or system_prompt_report.get("model") or "").strip()
 
     agent_url, cursor_agent_id, pr_url = _extract_urls(clean_text)
     if isinstance(lockstep_meta, dict):
@@ -252,7 +621,17 @@ def run_openclaw_hybrid(
     delegated_to_cursor = bool(lockstep_meta.get("delegated_to_cursor", False))
     delegated_to_cursor = delegated_to_cursor or bool(agent_url or pr_url or cursor_agent_id)
 
-    summary = _derive_openclaw_summary(lockstep_meta, clean_text, payload)
+    contract = _derive_openclaw_contract(
+        lockstep_meta,
+        clean_text,
+        payload,
+        payloads=payloads,
+        collaboration_mode=collaboration_mode,
+        delegated_to_cursor=delegated_to_cursor,
+        provider=provider_text,
+        model=model_text,
+    )
+    summary = str(contract.get("summary") or "").strip()
     if not summary:
         summary = "OpenClaw completed the delegated task."
     status = str(lockstep_meta.get("status") or payload.get("status") or "ok").strip().lower()
@@ -264,11 +643,17 @@ def run_openclaw_hybrid(
         "execution_lane": "openclaw_hybrid",
         "delegated_to_cursor": delegated_to_cursor,
         "summary": _clip(summary, 2000),
+        "user_summary": _clip(summary, 2000),
+        "collaboration_trace": contract.get("collaboration_trace") or [],
+        "machine_collaboration_trace": contract.get("machine_collaboration_trace") or [],
+        "phase_outputs": contract.get("phase_outputs") or {},
+        "blocked_reason": _clip(contract.get("blocked_reason"), 500),
+        "internal_trace": _clip(contract.get("internal_trace"), 4000),
         "raw_text": _clip(clean_text, 4000),
         "openclaw_run_id": str(payload.get("runId") or "").strip(),
         "openclaw_session_id": str(agent_meta.get("sessionId") or system_prompt_report.get("sessionId") or "").strip(),
-        "provider": str(agent_meta.get("provider") or system_prompt_report.get("provider") or "").strip(),
-        "model": str(agent_meta.get("model") or system_prompt_report.get("model") or "").strip(),
+        "provider": provider_text,
+        "model": model_text,
         "cursor_agent_id": cursor_agent_id,
         "agent_url": agent_url,
         "pr_url": pr_url,

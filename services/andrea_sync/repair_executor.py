@@ -10,14 +10,177 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
-from .repair_prompts import build_cursor_handoff_prompt
+from .cursor_plan_execute import (
+    executor_model_for_lane,
+    extract_plan_text_from_conversation,
+    fetch_agent_conversation_payload,
+    plan_first_enabled,
+    planner_model_for_lane,
+    plan_text_usable,
+    run_cursor_handoff_cli,
+)
+from .repair_prompts import (
+    build_cursor_handoff_prompt,
+    build_cursor_planner_prompt,
+)
 from .repair_types import Incident, PatchAttempt, RepairPlan, VerificationCheck
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CURSOR_HANDOFF_SCRIPT = REPO_ROOT / "skills" / "cursor_handoff" / "scripts" / "cursor_handoff.py"
 REPAIR_ARTIFACT_VERSION = "v2"
+
+# Align with skills/cursor_handoff/scripts/cursor_handoff.py TERMINAL_STATUSES
+CURSOR_TERMINAL_AGENT_STATUSES = frozenset({"FINISHED", "FAILED", "CANCELLED", "STOPPED", "EXPIRED"})
+
+
+def _cursor_handoff_poll_max_attempts() -> int:
+    raw = (os.environ.get("ANDREA_REPAIR_CURSOR_POLL_MAX_ATTEMPTS") or "3").strip()
+    try:
+        n = int(raw)
+    except ValueError:
+        n = 3
+    return max(0, min(n, 120))
+
+
+def _cursor_handoff_poll_interval_seconds() -> float:
+    raw = (os.environ.get("ANDREA_REPAIR_CURSOR_POLL_INTERVAL_SECONDS") or "3").strip()
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 3.0
+
+
+def _post_cursor_verify_enabled() -> bool:
+    raw = (os.environ.get("ANDREA_REPAIR_POST_CURSOR_VERIFY") or "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def post_cursor_verification_enabled() -> bool:
+    """Public alias: whether post-Cursor detached worktree verification is enabled (repair + self-heal)."""
+    return _post_cursor_verify_enabled()
+
+
+def resolve_branch_for_verification(repo_path: Path, branch: str) -> Dict[str, Any]:
+    """Resolve a local or origin/* ref for post-Cursor verification worktrees."""
+    b = str(branch or "").strip()
+    if not b:
+        return {"ok": False, "error": "empty_branch"}
+    heads = _run_subprocess(
+        ["git", "show-ref", "--verify", f"refs/heads/{b}"],
+        cwd=repo_path,
+        timeout_seconds=30,
+    )
+    if heads.get("ok"):
+        return {"ok": True, "ref": b, "source": "local_branch"}
+    origin_ref = f"origin/{b}"
+    rem = _run_subprocess(["git", "rev-parse", "--verify", origin_ref], cwd=repo_path, timeout_seconds=30)
+    if rem.get("ok"):
+        return {"ok": True, "ref": origin_ref, "source": "remote_tracking"}
+    fetch = _run_subprocess(
+        ["git", "fetch", "origin", b],
+        cwd=repo_path,
+        timeout_seconds=max(30, int(os.environ.get("ANDREA_REPAIR_CURSOR_FETCH_TIMEOUT_SECONDS", "300"))),
+    )
+    if not fetch.get("ok"):
+        err_txt = str(fetch.get("stderr") or fetch.get("stdout") or "git fetch origin failed").strip()
+        if len(err_txt) > 800:
+            err_txt = err_txt[:797] + "..."
+        return {"ok": False, "error": err_txt}
+    rem2 = _run_subprocess(["git", "rev-parse", "--verify", origin_ref], cwd=repo_path, timeout_seconds=30)
+    if rem2.get("ok"):
+        return {"ok": True, "ref": origin_ref, "source": "fetched"}
+    return {"ok": False, "error": f"branch not found after fetch: {b}"}
+
+
+def create_detached_verification_worktree(
+    repo_path: Path,
+    *,
+    git_ref: str,
+    incident_id: str,
+    stage_suffix: str,
+) -> Dict[str, Any]:
+    root = Path(
+        os.environ.get("ANDREA_REPAIR_WORKTREE_ROOT", str(repo_path / ".andrea-repair-worktrees"))
+    )
+    root.mkdir(parents=True, exist_ok=True)
+    safe = re.sub(r"[^a-z0-9._-]+", "-", stage_suffix.lower()).strip("-") or "verify"
+    wt_name = f"verify-{incident_id[:10]}-{safe}-{uuid.uuid4().hex[:6]}"
+    worktree_path = root / wt_name
+    if worktree_path.exists():
+        shutil.rmtree(worktree_path, ignore_errors=True)
+    result = _run_subprocess(
+        ["git", "worktree", "add", "--detach", str(worktree_path), git_ref],
+        cwd=repo_path,
+        timeout_seconds=int(os.environ.get("ANDREA_REPAIR_WORKTREE_TIMEOUT_SECONDS", "120")),
+    )
+    if not result.get("ok"):
+        err_txt = str(result.get("stderr") or result.get("stdout") or "worktree add failed").strip()
+        if len(err_txt) > 800:
+            err_txt = err_txt[:797] + "..."
+        return {"ok": False, "error": err_txt, "worktree_path": str(worktree_path)}
+    return {"ok": True, "worktree_path": str(worktree_path), "git_ref": git_ref}
+
+
+def verify_cursor_branch_in_isolated_worktree(
+    *,
+    repo_path: Path,
+    branch: str,
+    incident_id: str,
+    verification_checks: List[VerificationCheck],
+) -> Dict[str, Any]:
+    """
+    Run the default verification suite on the given branch in a detached worktree.
+    Does not merge to main. Removes the temporary worktree when done; keeps remote/local branches.
+    """
+    resolved = resolve_branch_for_verification(repo_path, branch)
+    if not resolved.get("ok"):
+        return {
+            "ok": False,
+            "passed": False,
+            "error": str(resolved.get("error") or "resolve_branch_failed"),
+            "verification_report": {},
+            "ref_source": "",
+        }
+    git_ref = str(resolved.get("ref") or "")
+    wt = create_detached_verification_worktree(
+        repo_path,
+        git_ref=git_ref,
+        incident_id=incident_id,
+        stage_suffix="post-cursor",
+    )
+    if not wt.get("ok"):
+        return {
+            "ok": False,
+            "passed": False,
+            "error": str(wt.get("error") or "worktree_failed"),
+            "verification_report": {},
+            "ref_source": str(resolved.get("source") or ""),
+        }
+    wt_path = str(wt.get("worktree_path") or "")
+    try:
+        report = run_verification_suite(
+            checks=verification_checks,
+            cwd_override=Path(wt_path),
+            repo_path=repo_path,
+        )
+        passed = bool(report.get("passed"))
+        return {
+            "ok": True,
+            "passed": passed,
+            "verification_report": report,
+            "ref_source": str(resolved.get("source") or ""),
+            "git_ref": git_ref,
+            "error": "" if passed else str(report.get("summary") or "verification_failed"),
+        }
+    finally:
+        cleanup_worktree(
+            repo_path=repo_path,
+            worktree_path=wt_path,
+            branch="",
+            keep_branch=True,
+        )
 
 
 def _clip(value: Any, limit: int = 1200) -> str:
@@ -566,6 +729,144 @@ def write_repair_artifacts(
     }
 
 
+def _try_repair_cursor_plan_first_handoff(
+    *,
+    repo_path: Path,
+    incident: Incident,
+    plan: RepairPlan,
+    attempts: List[PatchAttempt],
+    verification_checks: List[VerificationCheck],
+    verification_report: Dict[str, Any] | None,
+    cursor_mode: str,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """
+    If plan-first is enabled and planner model is set, run read-only planner then executor.
+    Returns (None, reason) to fall back to single-pass; reason is set only when plan-first was
+    attempted or enabled-but-misconfigured (for conductor traceability).
+    """
+    if not plan_first_enabled("repair"):
+        return None, None
+    pm = planner_model_for_lane("repair")
+    if not pm:
+        return None, "no_planner_model"
+    em = executor_model_for_lane("repair")
+    poll_max = _cursor_handoff_poll_max_attempts()
+    poll_iv = _cursor_handoff_poll_interval_seconds()
+    default_timeout = 900 if poll_max > 0 else 180
+    timeout_sec = int(os.environ.get("ANDREA_REPAIR_CURSOR_TIMEOUT_SECONDS", str(default_timeout)))
+
+    branch_plan = f"repair/{incident.incident_id[:10]}-plan-{uuid.uuid4().hex[:6]}"
+    branch_exec = f"repair/{incident.incident_id[:10]}-cursor-{uuid.uuid4().hex[:6]}"
+
+    planner_prompt = build_cursor_planner_prompt(
+        incident=incident,
+        plan=plan,
+        attempts=attempts,
+        verification_checks=verification_checks,
+    )
+    r1 = run_cursor_handoff_cli(
+        repo_path=repo_path,
+        prompt=planner_prompt,
+        branch=branch_plan,
+        cursor_mode=cursor_mode,
+        read_only=True,
+        model=pm,
+        poll_max_attempts=poll_max,
+        poll_interval_seconds=poll_iv,
+        timeout_seconds=timeout_sec,
+    )
+    p1 = r1.get("payload") if isinstance(r1.get("payload"), dict) else {}
+    if not r1.get("ok") or not p1.get("ok"):
+        return None, "planner_submission_failed"
+    planner_agent = str(p1.get("agent_id") or "").strip()
+    if not planner_agent:
+        return None, "planner_missing_agent_id"
+
+    conv = fetch_agent_conversation_payload(repo_path=repo_path, agent_id=planner_agent)
+    resp = conv.get("response") if conv.get("ok") else None
+    plan_text = extract_plan_text_from_conversation(resp) if resp is not None else ""
+    if not plan_text_usable(plan_text):
+        return None, "plan_unusable" if conv.get("ok") else "planner_conversation_unavailable"
+
+    handoff_prompt = build_cursor_handoff_prompt(
+        incident=incident,
+        plan=plan,
+        attempts=attempts,
+        verification_checks=verification_checks,
+    )
+    artifact_markdown = build_cursor_handoff_markdown(
+        incident=incident,
+        attempts=attempts,
+        plan=plan,
+        verification_report=dict(verification_report or incident.verification or {}),
+        status=incident.current_state,
+    )
+    prompt = (
+        f"{handoff_prompt}\n\n"
+        "## Cursor planner output\n\n"
+        f"{plan_text}\n\n"
+        "Reference incident artifact:\n\n"
+        f"{artifact_markdown}"
+    )
+
+    r2 = run_cursor_handoff_cli(
+        repo_path=repo_path,
+        prompt=prompt,
+        branch=branch_exec,
+        cursor_mode=cursor_mode,
+        read_only=False,
+        model=em,
+        poll_max_attempts=poll_max,
+        poll_interval_seconds=poll_iv,
+        timeout_seconds=timeout_sec,
+    )
+    p2 = r2.get("payload") if isinstance(r2.get("payload"), dict) else {}
+    stdout2 = str(r2.get("stdout") or "").strip()
+    if not r2.get("ok") or not p2.get("ok"):
+        return {
+            "ok": False,
+            "branch": branch_exec,
+            "prompt": prompt,
+            "error": _clip(
+                p2.get("error")
+                or p2.get("response")
+                or r2.get("stderr")
+                or stdout2
+                or "cursor executor handoff failed",
+                1200,
+            ),
+            "cursor_strategy": "plan_first",
+            "planner_model": pm,
+            "executor_model": em,
+            "planner_agent_id": planner_agent,
+            "planner_branch": branch_plan,
+            "planner_status": str(p1.get("status") or ""),
+            "execution_agent_id": str(p2.get("agent_id") or ""),
+            "agent_id": str(p2.get("agent_id") or ""),
+            "plan_summary": _clip(plan_text, 2000),
+            "artifact_markdown": artifact_markdown,
+        }, None
+    return {
+        "ok": True,
+        "branch": str(p2.get("branch") or branch_exec),
+        "backend": str(p2.get("backend") or ""),
+        "agent_id": str(p2.get("agent_id") or ""),
+        "execution_agent_id": str(p2.get("agent_id") or ""),
+        "agent_url": str(p2.get("agent_url") or ""),
+        "pr_url": str(p2.get("pr_url") or ""),
+        "status": str(p2.get("status") or ""),
+        "prompt": prompt,
+        "artifact_markdown": artifact_markdown,
+        "cursor_strategy": "plan_first",
+        "planner_model": pm,
+        "executor_model": em,
+        "planner_agent_id": planner_agent,
+        "planner_branch": branch_plan,
+        "planner_status": str(p1.get("status") or ""),
+        "plan_summary": _clip(plan_text, 2000),
+    }, None
+
+
 def run_cursor_repair_handoff(
     *,
     repo_path: Path,
@@ -576,6 +877,18 @@ def run_cursor_repair_handoff(
     verification_report: Dict[str, Any] | None = None,
     cursor_mode: str,
 ) -> Dict[str, Any]:
+    two_pass, plan_first_fallback_reason = _try_repair_cursor_plan_first_handoff(
+        repo_path=repo_path,
+        incident=incident,
+        plan=plan,
+        attempts=attempts,
+        verification_checks=verification_checks,
+        verification_report=verification_report,
+        cursor_mode=cursor_mode,
+    )
+    if two_pass is not None:
+        return two_pass
+
     branch = f"repair/{incident.incident_id[:10]}-cursor-{uuid.uuid4().hex[:6]}"
     handoff_prompt = build_cursor_handoff_prompt(
         incident=incident,
@@ -595,6 +908,9 @@ def run_cursor_repair_handoff(
         "Reference incident artifact:\n\n"
         f"{artifact_markdown}"
     )
+    poll_max = _cursor_handoff_poll_max_attempts()
+    poll_iv = _cursor_handoff_poll_interval_seconds()
+    exec_model = executor_model_for_lane("repair")
     cmd = [
         os.environ.get("PYTHON", "python3"),
         str(CURSOR_HANDOFF_SCRIPT),
@@ -606,18 +922,25 @@ def run_cursor_repair_handoff(
         cursor_mode,
         "--read-only",
         "false",
+        "--model",
+        exec_model,
         "--json",
         "--poll-max-attempts",
-        "0",
+        str(poll_max),
+        "--poll-interval-seconds",
+        str(poll_iv),
         "--cli-timeout-seconds",
         "0",
         "--branch",
         branch,
     ]
+    default_timeout = 900 if poll_max > 0 else 180
     result = _run_subprocess(
         cmd,
         cwd=repo_path,
-        timeout_seconds=int(os.environ.get("ANDREA_REPAIR_CURSOR_TIMEOUT_SECONDS", "180")),
+        timeout_seconds=int(
+            os.environ.get("ANDREA_REPAIR_CURSOR_TIMEOUT_SECONDS", str(default_timeout))
+        ),
     )
     stdout = str(result.get("stdout") or "").strip()
     payload: Dict[str, Any] = {}
@@ -627,7 +950,7 @@ def run_cursor_repair_handoff(
         except json.JSONDecodeError:
             payload = {}
     if not result.get("ok") or not payload.get("ok"):
-        return {
+        out: Dict[str, Any] = {
             "ok": False,
             "branch": branch,
             "prompt": prompt,
@@ -639,8 +962,13 @@ def run_cursor_repair_handoff(
                 or "cursor handoff failed",
                 1200,
             ),
+            "cursor_strategy": "single_pass_fallback" if plan_first_fallback_reason else "single_pass",
+            "executor_model": exec_model,
         }
-    return {
+        if plan_first_fallback_reason:
+            out["plan_first_fallback_reason"] = plan_first_fallback_reason
+        return out
+    out_ok: Dict[str, Any] = {
         "ok": True,
         "branch": str(payload.get("branch") or branch),
         "backend": str(payload.get("backend") or ""),
@@ -650,4 +978,9 @@ def run_cursor_repair_handoff(
         "status": str(payload.get("status") or ""),
         "prompt": prompt,
         "artifact_markdown": artifact_markdown,
+        "cursor_strategy": "single_pass_fallback" if plan_first_fallback_reason else "single_pass",
+        "executor_model": exec_model,
     }
+    if plan_first_fallback_reason:
+        out_ok["plan_first_fallback_reason"] = plan_first_fallback_reason
+    return out_ok

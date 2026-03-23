@@ -78,5 +78,10 @@ else
 fi
 echo ""
 
+echo "Sprint readiness note:"
+echo "- intentional tri-LLM sprints need a healthy OpenClaw probe and cursor_handoff availability; OPENCLAW_ENFORCE=1 is the strict baseline check"
+echo "- sessions_spawn attachments are optional and only matter for deliberate multi-session handoffs, not normal Telegram chat/news flows"
+echo ""
+
 echo "=== Andrea doctor complete ==="
 echo "Docs: docs/ANDREA_OPERATIONS_PLAYBOOK.md | docs/ANDREA_SECURITY.md | docs/ANDREA_MODEL_POLICY.md | docs/ANDREA_LOCKSTEP_ARCHITECTURE.md"

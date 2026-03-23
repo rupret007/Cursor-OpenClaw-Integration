@@ -42,6 +42,9 @@ git pull origin main
 | `ANDREA_CURSOR_REPO` / `ANDREA_CURSOR_HANDOFF_MODE` | No | Default repo path and Cursor handoff mode used by the lockstep server for Telegram-triggered execution. |
 | `ANDREA_SYNC_CURSOR_REPO` | No | Override repo path used by admin/autonomy helpers such as the local self-heal runner. |
 | `ANDREA_SELF_HEAL_CURSOR_MODE` | No | Cursor backend override for the local auto-heal branch-prep flow (`auto`, `api`, `cli`). |
+| `ANDREA_REPAIR_POST_CURSOR_VERIFY` | No | Default on: after repair Cursor handoff, verify the branch in a detached worktree before **`resolved`**. |
+| `ANDREA_SELF_HEAL_POST_CURSOR_VERIFY` | No | When set, overrides verify for **optimizer auto-heal** only; when unset, follows `ANDREA_REPAIR_POST_CURSOR_VERIFY`. **`LOCAL_AUTO_HEAL_COMPLETED`** requires verification to pass. |
+| `ANDREA_CURSOR_PLAN_FIRST_ENABLED` / `ANDREA_*_CURSOR_PLAN_FIRST` / planner+executor model vars | No | Optional two-pass Cursor (planner then executor) for repair, self-heal, and Telegram; see [ANDREA_LOCKSTEP_ARCHITECTURE.md](ANDREA_LOCKSTEP_ARCHITECTURE.md). |
 | `ANDREA_SYNC_PUBLIC_BASE` | No | Public HTTPS origin for Telegram webhook self-heal and reboot-stable ingress. Required for persistent Telegram webhook recovery. |
 | `CLOUDFLARED_TUNNEL_TOKEN` | No | Named Cloudflare tunnel token for reboot-stable `cloudflared` LaunchAgent startup. |
 | `ANDREA_LOCALTUNNEL_SUBDOMAIN` | No | Fallback stable-ish localtunnel subdomain for hosts that do not have `cloudflared` available. |

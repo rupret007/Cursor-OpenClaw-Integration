@@ -52,6 +52,14 @@ class CommandType(str, Enum):
     RUN_PROACTIVE_SWEEP = "RunProactiveSweep"
     KILL_SWITCH_ENGAGE = "KillSwitchEngage"
     KILL_SWITCH_RELEASE = "KillSwitchRelease"
+    CREATE_GOAL = "CreateGoal"
+    LINK_TASK_TO_GOAL = "LinkTaskToGoal"
+    UPDATE_GOAL_STATUS = "UpdateGoalStatus"
+    RECORD_GOAL_ARTIFACT = "RecordGoalArtifact"
+    CREATE_WORKFLOW = "CreateWorkflow"
+    ADVANCE_WORKFLOW = "AdvanceWorkflow"
+    RESOLVE_GOAL_APPROVAL = "ResolveGoalApproval"
+    RECORD_VERIFICATION_RESULT = "RecordVerificationResult"
 
 
 # --- Event types (facts, append-only) ---
@@ -104,6 +112,16 @@ class EventType(str, Enum):
     CAPABILITY_SNAPSHOT = "CapabilitySnapshot"
     KILL_SWITCH_ENGAGED = "KillSwitchEngaged"
     KILL_SWITCH_RELEASED = "KillSwitchReleased"
+    TASK_GOAL_LINKED = "TaskGoalLinked"
+    GOAL_CREATED = "GoalCreated"
+    GOAL_STATUS_CHANGED = "GoalStatusChanged"
+    GOAL_ARTIFACT_RECORDED = "GoalArtifactRecorded"
+    RECOVERY_ATTEMPT_RECORDED = "RecoveryAttemptRecorded"
+    WORKFLOW_CREATED = "WorkflowCreated"
+    WORKFLOW_STEP_ADVANCED = "WorkflowStepAdvanced"
+    VERIFICATION_RECORDED = "VerificationRecorded"
+    COLLABORATION_RECORDED = "CollaborationRecorded"
+    SCENARIO_RESOLVED = "ScenarioResolved"
 
 
 # --- Task status (projected) ---
@@ -166,6 +184,24 @@ def _clip_meta_text(value: Any, limit: int = 500) -> str:
     if len(text) <= limit:
         return text
     return text[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _fold_cursor_plan_execute_meta(cursor_meta: Dict[str, Any], payload: Dict[str, Any]) -> None:
+    """Merge plan-first Cursor fields from job payloads into projection.meta.cursor."""
+    if payload.get("cursor_strategy"):
+        cursor_meta["cursor_strategy"] = str(payload["cursor_strategy"])[:80]
+    if payload.get("planner_agent_id"):
+        cursor_meta["planner_agent_id"] = _clip_meta_text(payload.get("planner_agent_id"), 200)
+    if payload.get("planner_model"):
+        cursor_meta["planner_model"] = _clip_meta_text(payload.get("planner_model"), 120)
+    if payload.get("executor_model"):
+        cursor_meta["executor_model"] = _clip_meta_text(payload.get("executor_model"), 120)
+    if payload.get("plan_summary"):
+        cursor_meta["plan_summary"] = _clip_meta_text(payload.get("plan_summary"), 800)
+    if payload.get("planner_branch"):
+        cursor_meta["planner_branch"] = _clip_meta_text(payload.get("planner_branch"), 200)
+    if payload.get("planner_status"):
+        cursor_meta["planner_status"] = _clip_meta_text(payload.get("planner_status"), 80)
 
 
 def _ensure_meta_dict(root: Dict[str, Any], key: str) -> Dict[str, Any]:
@@ -415,6 +451,47 @@ def _fold_openclaw_contract_meta(proj: "TaskProjection", payload: Dict[str, Any]
         openclaw_meta["phase_outputs"] = phase_outputs
 
 
+def _fold_conductor_snapshot_into_repair_meta(repair_meta: Dict[str, Any], conductor: Dict[str, Any]) -> None:
+    """Copy compact conductor.handoff / conductor.outcome fields for operator projection."""
+    outcome = conductor.get("outcome")
+    if isinstance(outcome, dict):
+        for key in (
+            "submission_status",
+            "terminal_cursor_status",
+            "verification_status",
+            "next_action",
+            "verification_skip_reason",
+            "ref_source",
+        ):
+            val = outcome.get(key)
+            if val is not None and str(val).strip():
+                repair_meta[f"last_conductor_outcome_{key}"] = _clip_meta_text(val, 240)
+        if outcome.get("post_verify_error"):
+            repair_meta["last_conductor_outcome_post_verify_error"] = _clip_meta_text(
+                outcome.get("post_verify_error"), 500
+            )
+        if outcome.get("can_auto_verify") is not None:
+            repair_meta["last_conductor_outcome_can_auto_verify"] = bool(outcome.get("can_auto_verify"))
+    handoff = conductor.get("handoff")
+    if isinstance(handoff, dict):
+        for key in (
+            "cursor_strategy",
+            "planner_model",
+            "executor_model",
+            "planner_agent_id",
+            "execution_agent_id",
+            "planner_branch",
+            "planner_status",
+        ):
+            val = handoff.get(key)
+            if val is not None and str(val).strip():
+                repair_meta[f"last_conductor_handoff_{key}"] = _clip_meta_text(val, 200)
+        if handoff.get("plan_summary"):
+            repair_meta["last_conductor_handoff_plan_summary"] = _clip_meta_text(
+                handoff.get("plan_summary"), 600
+            )
+
+
 def _fold_repair_event_meta(
     proj: "TaskProjection", event_type: EventType, payload: Dict[str, Any]
 ) -> None:
@@ -529,6 +606,9 @@ def _fold_repair_event_meta(
         if payload.get("error"):
             repair_meta["last_error"] = _clip_meta_text(payload.get("error"), 800)
 
+    if isinstance(payload.get("conductor"), dict):
+        _fold_conductor_snapshot_into_repair_meta(repair_meta, payload["conductor"])
+
 
 def _derive_result_kind(
     proj: "TaskProjection",
@@ -569,6 +649,127 @@ def _derive_result_kind(
     if proj.status == TaskStatus.AWAITING_APPROVAL:
         return "awaiting_approval"
     return proj.status.value
+
+
+def _derive_phase_hints(
+    *,
+    proj_status: TaskStatus,
+    route_mode: str,
+    lane: str,
+    runner: str,
+    backend: str,
+    delegated_to_cursor: bool,
+    openclaw_meta: Dict[str, Any],
+    orchestration_meta: Dict[str, Any],
+) -> Dict[str, Any]:
+    phase_outputs = (
+        openclaw_meta.get("phase_outputs") if isinstance(openclaw_meta.get("phase_outputs"), dict) else {}
+    )
+    orchestration_phases = (
+        orchestration_meta.get("phases")
+        if isinstance(orchestration_meta.get("phases"), dict)
+        else {}
+    )
+    phase_details: Dict[str, Dict[str, str]] = {}
+    for phase in ("plan", "critique", "execution", "synthesis"):
+        detail: Dict[str, str] = {}
+        for source in (phase_outputs.get(phase), orchestration_phases.get(phase)):
+            if not isinstance(source, dict):
+                continue
+            if source.get("status"):
+                detail["status"] = str(source.get("status") or "").strip().lower()
+            if source.get("lane"):
+                detail["lane"] = str(source.get("lane") or "").strip()
+            if source.get("summary"):
+                detail["summary"] = _clip_meta_text(source.get("summary"), 320)
+        if detail:
+            detail.setdefault("status", "completed")
+            phase_details[phase] = detail
+
+    completed_phases = [
+        phase for phase in ("plan", "critique", "execution", "synthesis")
+        if str(phase_details.get(phase, {}).get("status") or "") == "completed"
+    ]
+    last_phase = str(orchestration_meta.get("last_phase") or "").strip().lower()
+    last_status = str(orchestration_meta.get("last_status") or "").strip().lower()
+    failed_phase = str(orchestration_meta.get("failed_phase") or "").strip().lower()
+
+    current_phase = ""
+    current_phase_status = ""
+    current_phase_lane = ""
+    current_phase_summary = ""
+
+    if failed_phase:
+        failed_detail = phase_details.get(failed_phase, {})
+        current_phase = failed_phase
+        current_phase_status = str(failed_detail.get("status") or "failed")
+        current_phase_lane = str(failed_detail.get("lane") or "")
+        current_phase_summary = str(failed_detail.get("summary") or "")
+    elif proj_status in {TaskStatus.RUNNING, TaskStatus.QUEUED}:
+        latest_detail = phase_details.get(last_phase, {}) if last_phase else {}
+        if latest_detail:
+            current_phase = last_phase
+            current_phase_status = str(
+                latest_detail.get("status")
+                or last_status
+                or ("running" if proj_status == TaskStatus.RUNNING else "queued")
+            )
+            current_phase_lane = str(latest_detail.get("lane") or "")
+            current_phase_summary = str(latest_detail.get("summary") or "")
+        elif delegated_to_cursor:
+            current_phase = "execution"
+            current_phase_status = "running" if proj_status == TaskStatus.RUNNING else "queued"
+            current_phase_lane = "cursor"
+        elif route_mode == "delegate":
+            current_phase = "coordination"
+            current_phase_status = "running" if proj_status == TaskStatus.RUNNING else "queued"
+            current_phase_lane = runner or backend or lane or "openclaw"
+    elif proj_status == TaskStatus.COMPLETED and completed_phases:
+        current_phase = completed_phases[-1]
+        current_phase_status = "completed"
+        current_phase_lane = str(phase_details.get(current_phase, {}).get("lane") or "")
+        current_phase_summary = str(phase_details.get(current_phase, {}).get("summary") or "")
+    elif proj_status == TaskStatus.FAILED and last_phase:
+        latest_detail = phase_details.get(last_phase, {})
+        current_phase = last_phase
+        current_phase_status = str(latest_detail.get("status") or last_status or "failed")
+        current_phase_lane = str(latest_detail.get("lane") or "")
+        current_phase_summary = str(latest_detail.get("summary") or "")
+
+    return {
+        "phase_statuses": {
+            phase: str(detail.get("status") or "")
+            for phase, detail in phase_details.items()
+            if detail.get("status")
+        },
+        "completed_phases": completed_phases,
+        "current_phase": current_phase,
+        "current_phase_status": current_phase_status,
+        "current_phase_lane": current_phase_lane,
+        "current_phase_summary": current_phase_summary,
+    }
+
+
+def _fold_execution_continuity_meta(proj: TaskProjection, payload: Dict[str, Any]) -> None:
+    """Fold durable execution-continuity fields from JOB_* and sync payloads into projection meta."""
+    if not payload:
+        return
+    execution_meta = proj.meta.setdefault("execution", {})
+    if payload.get("attempt_id"):
+        execution_meta["attempt_id"] = str(payload["attempt_id"])
+    if payload.get("sync_source"):
+        execution_meta["sync_source"] = str(payload["sync_source"])
+    if payload.get("continuation_state"):
+        execution_meta["continuation_state"] = str(payload["continuation_state"])
+    if payload.get("verification_state"):
+        execution_meta["verification_state"] = str(payload["verification_state"])
+    if payload.get("summary_source"):
+        execution_meta["summary_source"] = str(payload["summary_source"])
+    if payload.get("goal_id"):
+        execution_meta["goal_id"] = str(payload["goal_id"])
+    if payload.get("terminal_status"):
+        cursor_meta = proj.meta.setdefault("cursor", {})
+        cursor_meta["terminal_status"] = str(payload["terminal_status"])
 
 
 def _refresh_outcome_meta(proj: "TaskProjection") -> None:
@@ -712,6 +913,16 @@ def _refresh_outcome_meta(proj: "TaskProjection") -> None:
         _append_outcome_flag(ux_flags, "critic_missing")
     if last_reminder_status == "failed":
         _append_outcome_flag(ux_flags, "proactive_delivery_failed")
+    phase_hints = _derive_phase_hints(
+        proj_status=proj.status,
+        route_mode=route_mode or "unknown",
+        lane=lane,
+        runner=runner,
+        backend=backend,
+        delegated_to_cursor=delegated_to_cursor,
+        openclaw_meta=openclaw_meta,
+        orchestration_meta=orchestration_meta,
+    )
 
     outcome_meta["version"] = 1
     outcome_meta["terminal_status"] = proj.status.value
@@ -740,9 +951,29 @@ def _refresh_outcome_meta(proj: "TaskProjection") -> None:
     outcome_meta["critic_steps"] = critique_count
     outcome_meta["executor_steps"] = execution_count
     outcome_meta["synthesis_steps"] = synthesis_count
+    outcome_meta["phase_statuses"] = phase_hints["phase_statuses"]
+    outcome_meta["completed_phases"] = phase_hints["completed_phases"]
     outcome_meta["principal_bound"] = bool(principal_id)
     outcome_meta["principal_memory_count"] = memory_count
     outcome_meta["pending_reminder_count"] = pending_reminder_count
+    if phase_hints["current_phase"]:
+        outcome_meta["current_phase"] = phase_hints["current_phase"]
+    else:
+        outcome_meta.pop("current_phase", None)
+    if phase_hints["current_phase_status"]:
+        outcome_meta["current_phase_status"] = phase_hints["current_phase_status"]
+    else:
+        outcome_meta.pop("current_phase_status", None)
+    if phase_hints["current_phase_lane"]:
+        outcome_meta["current_phase_lane"] = phase_hints["current_phase_lane"]
+    else:
+        outcome_meta.pop("current_phase_lane", None)
+    if phase_hints["current_phase_summary"]:
+        outcome_meta["current_phase_summary"] = _clip_meta_text(
+            phase_hints["current_phase_summary"], 280
+        )
+    else:
+        outcome_meta.pop("current_phase_summary", None)
     if feedback_average is not None:
         outcome_meta["feedback_average"] = feedback_average
     else:
@@ -822,6 +1053,8 @@ def legal_task_transition(
     if event == EventType.JOB_QUEUED:
         if current in (TaskStatus.CREATED,):
             return True, TaskStatus.QUEUED
+        if current == TaskStatus.AWAITING_APPROVAL:
+            return True, TaskStatus.QUEUED
         if current in (TaskStatus.QUEUED, TaskStatus.RUNNING):
             return True, None
         return False, None
@@ -838,6 +1071,8 @@ def legal_task_transition(
     if event == EventType.ASSISTANT_REPLIED:
         if current in (TaskStatus.CANCELLED, TaskStatus.FAILED, TaskStatus.COMPLETED):
             return False, None
+        if current == TaskStatus.AWAITING_APPROVAL:
+            return True, None
         return True, TaskStatus.COMPLETED
     if event == EventType.JOB_FAILED:
         if current in (TaskStatus.COMPLETED, TaskStatus.CANCELLED):
@@ -853,6 +1088,7 @@ def legal_task_transition(
         EventType.COMMAND_RECEIVED,
         EventType.EXTERNAL_REF,
         EventType.ORCHESTRATION_STEP,
+        EventType.SCENARIO_RESOLVED,
         EventType.PRINCIPAL_LINKED,
         EventType.PRINCIPAL_MEMORY_SAVED,
         EventType.PRINCIPAL_PREFERENCE_UPDATED,
@@ -896,6 +1132,16 @@ def legal_task_transition(
         EventType.CAPABILITY_SNAPSHOT,
         EventType.KILL_SWITCH_ENGAGED,
         EventType.KILL_SWITCH_RELEASED,
+        EventType.TASK_GOAL_LINKED,
+        EventType.GOAL_CREATED,
+        EventType.GOAL_STATUS_CHANGED,
+        EventType.GOAL_ARTIFACT_RECORDED,
+        EventType.RECOVERY_ATTEMPT_RECORDED,
+        EventType.WORKFLOW_CREATED,
+        EventType.WORKFLOW_STEP_ADVANCED,
+        EventType.VERIFICATION_RECORDED,
+        EventType.COLLABORATION_RECORDED,
+        EventType.SCENARIO_RESOLVED,
     ):
         return True, None
     return True, None
@@ -1010,6 +1256,49 @@ def fold_projection(
         if reply_text:
             assistant_meta["last_reply"] = reply_text[:2000]
             proj.summary = reply_text[:500]
+    if event_type == EventType.SCENARIO_RESOLVED:
+        scen_meta = _ensure_meta_dict(proj.meta, "scenario")
+        for key in (
+            "scenario_id",
+            "scenario_version",
+            "support_level",
+            "confidence",
+            "reason",
+            "goal_id",
+            "needs_plan",
+            "suggested_lane",
+            "action_class",
+            "proof_class",
+            "approval_mode",
+        ):
+            if key in payload and payload.get(key) is not None:
+                val = payload.get(key)
+                if key == "confidence":
+                    try:
+                        scen_meta[key] = float(val)
+                    except (TypeError, ValueError):
+                        scen_meta[key] = 0.0
+                elif key == "needs_plan":
+                    scen_meta[key] = bool(val)
+                else:
+                    scen_meta[key] = str(val)
+        plan_meta = _ensure_meta_dict(proj.meta, "plan")
+        if payload.get("scenario_id"):
+            plan_meta["scenario_id"] = str(payload.get("scenario_id"))
+        if payload.get("scenario_version"):
+            plan_meta["scenario_version"] = str(payload.get("scenario_version"))
+        if payload.get("support_level"):
+            plan_meta["support_level"] = str(payload.get("support_level"))
+        if payload.get("proof_class"):
+            plan_meta["proof_class"] = str(payload.get("proof_class"))
+        if payload.get("action_class"):
+            plan_meta["action_class"] = str(payload.get("action_class"))
+        plan_meta["receipt_state"] = str(payload.get("receipt_state") or "pending")
+        execution_meta = proj.meta.setdefault("execution", {})
+        if payload.get("scenario_id"):
+            execution_meta["scenario_id"] = str(payload.get("scenario_id"))
+        if payload.get("proof_class"):
+            execution_meta["proof_class"] = str(payload.get("proof_class"))
     if event_type == EventType.JOB_QUEUED:
         execution_meta = proj.meta.setdefault("execution", {})
         if payload.get("execution_lane"):
@@ -1037,6 +1326,32 @@ def fold_projection(
             execution_meta["preferred_model_family"] = str(payload["preferred_model_family"])
         if payload.get("preferred_model_label"):
             execution_meta["preferred_model_label"] = str(payload["preferred_model_label"])
+        if payload.get("goal_id"):
+            goal_meta = proj.meta.setdefault("goal", {})
+            goal_meta["goal_id"] = str(payload["goal_id"])
+        if payload.get("plan_id"):
+            plan_meta = _ensure_meta_dict(proj.meta, "plan")
+            plan_meta["plan_id"] = str(payload["plan_id"])
+            if payload.get("execute_step_id"):
+                plan_meta["execute_step_id"] = str(payload["execute_step_id"])
+            if payload.get("approval_id"):
+                plan_meta["pending_approval_id"] = str(payload["approval_id"])
+        scen = payload.get("scenario")
+        if isinstance(scen, dict):
+            plan_meta = _ensure_meta_dict(proj.meta, "plan")
+            execution_meta = proj.meta.setdefault("execution", {})
+            for key in (
+                "scenario_id",
+                "scenario_version",
+                "support_level",
+                "action_class",
+                "proof_class",
+                "receipt_state",
+                "approval_mode",
+            ):
+                if scen.get(key) is not None:
+                    plan_meta[key] = str(scen.get(key))
+                    execution_meta[key] = str(scen.get(key))
         if payload.get("cursor_agent_id"):
             proj.cursor_agent_id = str(payload["cursor_agent_id"])
         cursor_meta = proj.meta.setdefault("cursor", {})
@@ -1046,6 +1361,65 @@ def fold_projection(
         if payload.get("kind") == "openclaw":
             openclaw_meta = proj.meta.setdefault("openclaw", {})
             openclaw_meta["kind"] = "openclaw"
+        _fold_execution_continuity_meta(proj, payload)
+    if event_type == EventType.HUMAN_APPROVAL_REQUIRED:
+        approval_meta = _ensure_meta_dict(proj.meta, "approval")
+        if payload.get("approval_id"):
+            approval_meta["approval_id"] = str(payload["approval_id"])
+        if payload.get("plan_id"):
+            plan_meta = _ensure_meta_dict(proj.meta, "plan")
+            plan_meta["plan_id"] = str(payload["plan_id"])
+            if payload.get("step_id"):
+                plan_meta["blocked_step_id"] = str(payload["step_id"])
+            plan_meta["plan_status"] = "awaiting_approval"
+        if payload.get("rationale"):
+            approval_meta["rationale"] = _clip_meta_text(payload.get("rationale"), 400)
+        if payload.get("scenario_id"):
+            approval_meta["scenario_id"] = str(payload.get("scenario_id"))
+        if payload.get("scenario_label"):
+            approval_meta["scenario_label"] = _clip_meta_text(
+                payload.get("scenario_label"), 200
+            )
+        execution_meta = proj.meta.setdefault("execution", {})
+        execution_meta["approval_gate"] = "pending"
+    if event_type == EventType.VERIFICATION_RECORDED:
+        execution_meta = proj.meta.setdefault("execution", {})
+        execution_meta["verification_state"] = str(payload.get("verdict") or "")
+        plan_meta = _ensure_meta_dict(proj.meta, "plan")
+        if payload.get("plan_id"):
+            plan_meta["plan_id"] = str(payload["plan_id"])
+        if payload.get("step_id"):
+            plan_meta["last_verified_step_id"] = str(payload["step_id"])
+        if payload.get("verification_id"):
+            plan_meta["last_verification_id"] = str(payload["verification_id"])
+        plan_meta["verification_verdict"] = str(payload.get("verdict") or "")
+        if payload.get("summary"):
+            plan_meta["verification_summary"] = _clip_meta_text(payload.get("summary"), 500)
+    if event_type == EventType.COLLABORATION_RECORDED:
+        collab_meta = _ensure_meta_dict(proj.meta, "collaboration")
+        if payload.get("collab_id"):
+            collab_meta["last_collab_id"] = str(payload["collab_id"])
+        if payload.get("trigger"):
+            collab_meta["last_trigger"] = str(payload["trigger"])
+        if payload.get("pattern"):
+            collab_meta["last_pattern"] = str(payload["pattern"])
+        if payload.get("repair_strategy"):
+            collab_meta["last_repair_strategy"] = str(payload["repair_strategy"])
+        plan_meta = _ensure_meta_dict(proj.meta, "plan")
+        if payload.get("plan_id"):
+            plan_meta["plan_id"] = str(payload["plan_id"])
+        plan_meta["repair_state"] = _clip_meta_text(payload.get("repair_strategy"), 120)
+        plan_meta["arbitration_state"] = _clip_meta_text(payload.get("arbitration_decision"), 120)
+        execution_meta = proj.meta.setdefault("execution", {})
+        execution_meta["current_role"] = "repair_strategist"
+        try:
+            execution_meta["repair_attempts"] = int(execution_meta.get("repair_attempts") or 0) + 1
+        except (TypeError, ValueError):
+            execution_meta["repair_attempts"] = 1
+        if payload.get("repair_rationale"):
+            execution_meta["last_resource_shift"] = _clip_meta_text(
+                payload.get("repair_rationale"), 400
+            )
     if event_type == EventType.JOB_STARTED:
         execution_meta = proj.meta.setdefault("execution", {})
         if payload.get("backend"):
@@ -1073,6 +1447,7 @@ def fold_projection(
             cursor_meta["pr_url"] = str(payload["pr_url"])
         if payload.get("backend"):
             cursor_meta["backend"] = str(payload["backend"])
+        _fold_cursor_plan_execute_meta(cursor_meta, payload)
         if payload.get("openclaw_run_id"):
             openclaw_meta = proj.meta.setdefault("openclaw", {})
             openclaw_meta["run_id"] = str(payload["openclaw_run_id"])
@@ -1096,6 +1471,7 @@ def fold_projection(
         if payload.get("internal_error"):
             execution_meta["internal_error"] = _clip_meta_text(payload.get("internal_error"), 1200)
         _fold_openclaw_contract_meta(proj, payload)
+        _fold_execution_continuity_meta(proj, payload)
     if event_type == EventType.JOB_PROGRESS:
         execution_meta = proj.meta.setdefault("execution", {})
         if payload.get("backend"):
@@ -1121,6 +1497,7 @@ def fold_projection(
             cursor_meta["agent_url"] = str(payload["agent_url"])
         if payload.get("pr_url"):
             cursor_meta["pr_url"] = str(payload["pr_url"])
+        _fold_cursor_plan_execute_meta(cursor_meta, payload)
         if payload.get("provider"):
             openclaw_meta = proj.meta.setdefault("openclaw", {})
             openclaw_meta["provider"] = str(payload["provider"])
@@ -1164,6 +1541,7 @@ def fold_projection(
             cursor_meta["agent_url"] = str(payload["agent_url"])
         if payload.get("pr_url"):
             cursor_meta["pr_url"] = str(payload["pr_url"])
+        _fold_cursor_plan_execute_meta(cursor_meta, payload)
         if payload.get("openclaw_run_id"):
             openclaw_meta = proj.meta.setdefault("openclaw", {})
             openclaw_meta["run_id"] = str(payload["openclaw_run_id"])
@@ -1189,6 +1567,7 @@ def fold_projection(
         elif payload.get("message"):
             execution_meta["internal_error"] = _clip_meta_text(payload.get("message"), 1200)
         _fold_openclaw_contract_meta(proj, payload)
+        _fold_execution_continuity_meta(proj, payload)
     if event_type == EventType.JOB_COMPLETED:
         proj.last_error = None
         if payload.get("summary"):
@@ -1217,6 +1596,7 @@ def fold_projection(
             cursor_meta["agent_url"] = str(payload["agent_url"])
         if payload.get("pr_url"):
             cursor_meta["pr_url"] = str(payload["pr_url"])
+        _fold_cursor_plan_execute_meta(cursor_meta, payload)
         if payload.get("openclaw_run_id"):
             openclaw_meta = proj.meta.setdefault("openclaw", {})
             openclaw_meta["run_id"] = str(payload["openclaw_run_id"])
@@ -1240,6 +1620,10 @@ def fold_projection(
         if payload.get("internal_error"):
             execution_meta["internal_error"] = _clip_meta_text(payload.get("internal_error"), 1200)
         _fold_openclaw_contract_meta(proj, payload)
+        _fold_execution_continuity_meta(proj, payload)
+        if payload.get("receipt_state"):
+            plan_meta = _ensure_meta_dict(proj.meta, "plan")
+            plan_meta["receipt_state"] = str(payload.get("receipt_state") or "")
     if event_type == EventType.ORCHESTRATION_STEP:
         _fold_orchestration_step_meta(proj, payload)
     if event_type == EventType.PRINCIPAL_LINKED:
@@ -1408,6 +1792,21 @@ def fold_projection(
             optimization_meta["last_auto_heal_agent_url"] = str(payload.get("agent_url"))
         if payload.get("pr_url"):
             optimization_meta["last_auto_heal_pr_url"] = str(payload.get("pr_url"))
+        for src, dst in (
+            ("submission_status", "last_auto_heal_submission_status"),
+            ("terminal_cursor_status", "last_auto_heal_terminal_cursor_status"),
+            ("verification_status", "last_auto_heal_verification_status"),
+            ("next_action", "last_auto_heal_next_action"),
+        ):
+            if payload.get(src):
+                optimization_meta[dst] = _clip_meta_text(payload.get(src), 120)
+        if payload.get("ref_source"):
+            optimization_meta["last_auto_heal_ref_source"] = _clip_meta_text(payload.get("ref_source"), 120)
+        if payload.get("can_auto_verify") is not None:
+            optimization_meta["last_auto_heal_can_auto_verify"] = bool(payload.get("can_auto_verify"))
+        pv = payload.get("post_cursor_verification")
+        if isinstance(pv, dict) and pv.get("passed") is not None:
+            optimization_meta["last_auto_heal_post_verify_passed"] = bool(pv.get("passed"))
     if event_type == EventType.LOCAL_AUTO_HEAL_FAILED:
         optimization_meta = _ensure_meta_dict(proj.meta, "optimization")
         optimization_meta["last_auto_heal_status"] = "failed"
@@ -1418,6 +1817,19 @@ def fold_projection(
             optimization_meta["last_auto_heal_proposal_id"] = str(payload.get("proposal_id"))
         if payload.get("error"):
             optimization_meta["last_auto_heal_error"] = _clip_meta_text(payload.get("error"), 800)
+        for src, dst in (
+            ("submission_status", "last_auto_heal_submission_status"),
+            ("terminal_cursor_status", "last_auto_heal_terminal_cursor_status"),
+            ("verification_status", "last_auto_heal_verification_status"),
+            ("next_action", "last_auto_heal_next_action"),
+        ):
+            if payload.get(src):
+                optimization_meta[dst] = _clip_meta_text(payload.get(src), 120)
+        if payload.get("ref_source"):
+            optimization_meta["last_auto_heal_ref_source"] = _clip_meta_text(payload.get("ref_source"), 120)
+        pv = payload.get("post_cursor_verification")
+        if isinstance(pv, dict) and pv.get("passed") is not None:
+            optimization_meta["last_auto_heal_post_verify_passed"] = bool(pv.get("passed"))
     if event_type == EventType.CAPABILITY_HEAL_STARTED:
         capability_meta = _ensure_meta_dict(proj.meta, "capability_heal")
         capability_meta["last_status"] = "running"
@@ -1443,6 +1855,47 @@ def fold_projection(
         proj.meta["last_capability_excerpt"] = str(payload.get("summary_json_excerpt", ""))[:500]
     if event_type in (EventType.KILL_SWITCH_ENGAGED, EventType.KILL_SWITCH_RELEASED):
         proj.meta["kill_switch_last"] = event_type.value
+    if event_type == EventType.TASK_GOAL_LINKED:
+        goal_meta = proj.meta.setdefault("goal", {})
+        if payload.get("goal_id"):
+            goal_meta["goal_id"] = str(payload["goal_id"])
+        if payload.get("goal_summary"):
+            goal_meta["summary"] = _clip_meta_text(payload.get("goal_summary"), 400)
+        if payload.get("goal_status"):
+            goal_meta["status"] = str(payload.get("goal_status"))
+    if event_type == EventType.GOAL_STATUS_CHANGED:
+        goal_meta = proj.meta.setdefault("goal", {})
+        if payload.get("goal_id"):
+            goal_meta["goal_id"] = str(payload["goal_id"])
+        if payload.get("status"):
+            goal_meta["status"] = str(payload["status"])
+        if payload.get("summary"):
+            goal_meta["summary"] = _clip_meta_text(payload.get("summary"), 400)
+    if event_type == EventType.GOAL_ARTIFACT_RECORDED:
+        gmeta = proj.meta.setdefault("goal", {})
+        arts = gmeta.setdefault("artifacts", [])
+        entry = {
+            "artifact_id": str(payload.get("artifact_id") or ""),
+            "label": _clip_meta_text(payload.get("label"), 200),
+            "uri": _clip_meta_text(payload.get("uri"), 500),
+            "kind": str(payload.get("kind") or "file"),
+        }
+        if any(entry.values()):
+            arts.append(entry)
+            if len(arts) > 24:
+                del arts[:-24]
+    if event_type == EventType.RECOVERY_ATTEMPT_RECORDED:
+        rec = proj.meta.setdefault("recovery", {})
+        attempts = rec.setdefault("attempts", [])
+        attempts.append(
+            {
+                "phase": str(payload.get("phase") or ""),
+                "action": str(payload.get("action") or ""),
+                "detail": _clip_meta_text(payload.get("detail"), 400),
+            }
+        )
+        if len(attempts) > 12:
+            del attempts[:-12]
     if event_type in (
         EventType.INCIDENT_RECORDED,
         EventType.INCIDENT_TRIAGED,

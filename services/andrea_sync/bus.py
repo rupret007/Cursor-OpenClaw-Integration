@@ -24,21 +24,31 @@ from .schema import (
 from .store import (
     SYSTEM_TASK_ID,
     append_event,
+    append_goal_event,
     claim_idempotency_and_create_task,
     claim_scoped_idempotency,
+    create_goal,
     create_reminder,
+    create_workflow,
     ensure_system_task,
+    get_goal,
     get_principal_recent_telegram_chat_id,
     get_task_principal_id,
+    get_workflow,
     link_principal_identity,
+    link_task_to_goal,
     link_task_principal,
     list_due_reminders,
+    list_tasks_for_goal,
+    record_goal_artifact,
     resolve_principal_id,
     save_principal_memory,
     set_meta,
     set_principal_preference,
     task_exists,
+    update_goal_status,
     update_reminder,
+    update_workflow,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -55,6 +65,14 @@ _ADMIN_COMMAND_TYPES: Set[CommandType] = {
     CommandType.RUN_PROACTIVE_SWEEP,
     CommandType.KILL_SWITCH_ENGAGE,
     CommandType.KILL_SWITCH_RELEASE,
+    CommandType.CREATE_GOAL,
+    CommandType.LINK_TASK_TO_GOAL,
+    CommandType.UPDATE_GOAL_STATUS,
+    CommandType.RECORD_GOAL_ARTIFACT,
+    CommandType.CREATE_WORKFLOW,
+    CommandType.ADVANCE_WORKFLOW,
+    CommandType.RESOLVE_GOAL_APPROVAL,
+    CommandType.RECORD_VERIFICATION_RESULT,
 }
 
 
@@ -135,6 +153,22 @@ def handle_command(conn: sqlite3.Connection, body: Dict[str, Any]) -> Dict[str, 
         return _handle_kill_switch_engage(conn, env)
     if ctype == CommandType.KILL_SWITCH_RELEASE:
         return _handle_kill_switch_release(conn, env)
+    if ctype == CommandType.CREATE_GOAL:
+        return _handle_create_goal(conn, env)
+    if ctype == CommandType.LINK_TASK_TO_GOAL:
+        return _handle_link_task_to_goal(conn, env)
+    if ctype == CommandType.UPDATE_GOAL_STATUS:
+        return _handle_update_goal_status(conn, env)
+    if ctype == CommandType.RECORD_GOAL_ARTIFACT:
+        return _handle_record_goal_artifact(conn, env)
+    if ctype == CommandType.CREATE_WORKFLOW:
+        return _handle_create_workflow(conn, env)
+    if ctype == CommandType.ADVANCE_WORKFLOW:
+        return _handle_advance_workflow(conn, env)
+    if ctype == CommandType.RESOLVE_GOAL_APPROVAL:
+        return _handle_resolve_goal_approval(conn, env)
+    if ctype == CommandType.RECORD_VERIFICATION_RESULT:
+        return _handle_record_verification_result(conn, env)
     return {"ok": False, "error": f"unhandled command_type: {ctype.value}"}
 
 
@@ -569,8 +603,18 @@ def _handle_cursor_followup(conn: sqlite3.Connection, env: CommandEnvelope) -> D
     tid = env.task_id
     if not task_exists(conn, tid):
         return {"ok": False, "error": f"unknown task_id: {tid}"}
-    _append(conn, tid, EventType.JOB_PROGRESS, {"message": "followup", "detail": env.payload})
-    return {"ok": True, "task_id": tid}
+    from .execution_runtime import continue_cursor_followup_for_task
+
+    text = str(
+        env.payload.get("prompt") or env.payload.get("text") or env.payload.get("message") or ""
+    ).strip()
+    if not text:
+        return {"ok": False, "error": "prompt or text required"}
+    out = continue_cursor_followup_for_task(conn, tid, text)
+    merged = {"task_id": tid, **out}
+    if not out.get("ok"):
+        return {"ok": False, **merged}
+    return {"ok": True, **merged}
 
 
 def _handle_cursor_stop(conn: sqlite3.Connection, env: CommandEnvelope) -> Dict[str, Any]:
@@ -1229,6 +1273,237 @@ def _handle_kill_switch_release(conn: sqlite3.Connection, env: CommandEnvelope) 
         {"source": env.channel.value},
     )
     return {"ok": True, "kill_switch": False}
+
+
+def _handle_create_goal(conn: sqlite3.Connection, env: CommandEnvelope) -> Dict[str, Any]:
+    ensure_system_task(conn)
+    principal_id = str(env.payload.get("principal_id") or "").strip()
+    if not principal_id:
+        principal_id = _resolve_principal_for_command(conn, env)
+    if not principal_id:
+        return {"ok": False, "error": "principal_id required"}
+    summary = str(env.payload.get("summary") or "")[:2000]
+    channel = str(env.payload.get("channel") or env.channel.value or "internal")
+    meta = env.payload.get("metadata")
+    metadata = meta if isinstance(meta, dict) else {}
+    gid = create_goal(conn, principal_id, summary, channel=channel, metadata=metadata)
+    append_goal_event(
+        conn,
+        gid,
+        "created",
+        {"principal_id": principal_id, "summary": summary[:500]},
+    )
+    _append(
+        conn,
+        SYSTEM_TASK_ID,
+        EventType.GOAL_CREATED,
+        {"goal_id": gid, "principal_id": principal_id},
+    )
+    return {"ok": True, "goal_id": gid, "principal_id": principal_id}
+
+
+def _handle_link_task_to_goal(conn: sqlite3.Connection, env: CommandEnvelope) -> Dict[str, Any]:
+    task_id = str(env.task_id or env.payload.get("task_id") or "").strip()
+    goal_id = str(env.payload.get("goal_id") or "").strip()
+    if not task_id or not goal_id:
+        return {"ok": False, "error": "task_id and goal_id required"}
+    if not task_exists(conn, task_id):
+        return {"ok": False, "error": "unknown task"}
+    goal_row = get_goal(conn, goal_id)
+    if not goal_row:
+        return {"ok": False, "error": "unknown goal"}
+    pid_task = get_task_principal_id(conn, task_id)
+    if pid_task and str(goal_row["principal_id"]) != pid_task:
+        return {"ok": False, "error": "principal_mismatch"}
+    link_task_to_goal(conn, task_id, goal_id)
+    _append(
+        conn,
+        task_id,
+        EventType.TASK_GOAL_LINKED,
+        {
+            "goal_id": goal_id,
+            "goal_summary": str(goal_row.get("summary") or ""),
+            "goal_status": str(goal_row.get("status") or ""),
+        },
+    )
+    append_goal_event(conn, goal_id, "task_linked", {"task_id": task_id})
+    return {"ok": True, "task_id": task_id, "goal_id": goal_id}
+
+
+def _handle_update_goal_status(conn: sqlite3.Connection, env: CommandEnvelope) -> Dict[str, Any]:
+    goal_id = str(env.payload.get("goal_id") or "").strip()
+    status = str(env.payload.get("status") or "").strip()
+    if not goal_id or not status:
+        return {"ok": False, "error": "goal_id and status required"}
+    if not update_goal_status(conn, goal_id, status):
+        return {"ok": False, "error": "goal not found"}
+    append_goal_event(conn, goal_id, "status_changed", {"status": status})
+    g = get_goal(conn, goal_id) or {}
+    gsummary = str(g.get("summary") or "")
+    for linked_tid in list_tasks_for_goal(conn, goal_id, limit=200):
+        _append(
+            conn,
+            linked_tid,
+            EventType.GOAL_STATUS_CHANGED,
+            {"goal_id": goal_id, "status": status, "summary": gsummary},
+        )
+    return {"ok": True, "goal_id": goal_id, "status": status}
+
+
+def _handle_record_goal_artifact(conn: sqlite3.Connection, env: CommandEnvelope) -> Dict[str, Any]:
+    goal_id = str(env.payload.get("goal_id") or "").strip()
+    task_id = str(env.payload.get("task_id") or env.task_id or "").strip()
+    if not goal_id:
+        return {"ok": False, "error": "goal_id required"}
+    meta = env.payload.get("metadata")
+    metadata = meta if isinstance(meta, dict) else {}
+    aid = record_goal_artifact(
+        conn,
+        goal_id,
+        task_id=task_id,
+        kind=str(env.payload.get("kind") or "file"),
+        label=str(env.payload.get("label") or ""),
+        uri=str(env.payload.get("uri") or ""),
+        metadata=metadata,
+    )
+    if task_id and task_exists(conn, task_id):
+        _append(
+            conn,
+            task_id,
+            EventType.GOAL_ARTIFACT_RECORDED,
+            {
+                "artifact_id": aid,
+                "goal_id": goal_id,
+                "label": env.payload.get("label"),
+                "uri": env.payload.get("uri"),
+                "kind": env.payload.get("kind"),
+            },
+        )
+    append_goal_event(
+        conn, goal_id, "artifact_recorded", {"artifact_id": aid, "task_id": task_id}
+    )
+    return {"ok": True, "artifact_id": aid}
+
+
+def _handle_create_workflow(conn: sqlite3.Connection, env: CommandEnvelope) -> Dict[str, Any]:
+    ensure_system_task(conn)
+    principal_id = str(env.payload.get("principal_id") or "").strip()
+    if not principal_id:
+        principal_id = _resolve_principal_for_command(conn, env)
+    if not principal_id:
+        return {"ok": False, "error": "principal_id required"}
+    name = str(env.payload.get("name") or "workflow")[:500]
+    defn = env.payload.get("definition")
+    definition = defn if isinstance(defn, dict) else {}
+    status = str(env.payload.get("status") or "draft")
+    next_run = float(env.payload.get("next_run_at") or 0.0)
+    wid = create_workflow(
+        conn,
+        principal_id,
+        name,
+        definition=definition,
+        status=status,
+        next_run_at=next_run,
+    )
+    _append(
+        conn,
+        SYSTEM_TASK_ID,
+        EventType.WORKFLOW_CREATED,
+        {"workflow_id": wid, "principal_id": principal_id, "name": name},
+    )
+    return {"ok": True, "workflow_id": wid, "principal_id": principal_id}
+
+
+def _handle_advance_workflow(conn: sqlite3.Connection, env: CommandEnvelope) -> Dict[str, Any]:
+    ensure_system_task(conn)
+    workflow_id = str(env.payload.get("workflow_id") or "").strip()
+    step = str(env.payload.get("step") or "")
+    if not workflow_id:
+        return {"ok": False, "error": "workflow_id required"}
+    wf = get_workflow(conn, workflow_id)
+    if not wf:
+        return {"ok": False, "error": "unknown workflow"}
+    raw_def = wf.get("definition_json") or "{}"
+    try:
+        definition = json.loads(raw_def) if isinstance(raw_def, str) else dict(raw_def)
+    except json.JSONDecodeError:
+        definition = {}
+    if not isinstance(definition, dict):
+        definition = {}
+    steps_done = definition.get("completed_steps")
+    if not isinstance(steps_done, list):
+        steps_done = []
+    if step and step not in steps_done:
+        steps_done.append(step)
+    definition["completed_steps"] = steps_done
+    update_workflow(conn, workflow_id, definition=definition, status="running")
+    _append(
+        conn,
+        SYSTEM_TASK_ID,
+        EventType.WORKFLOW_STEP_ADVANCED,
+        {"workflow_id": workflow_id, "step": step},
+    )
+    return {"ok": True, "workflow_id": workflow_id, "step": step}
+
+
+def _handle_resolve_goal_approval(conn: sqlite3.Connection, env: CommandEnvelope) -> Dict[str, Any]:
+    from .plan_runtime import resolve_goal_approval_command
+
+    task_id = str(env.task_id or env.payload.get("task_id") or "").strip()
+    approval_id = str(env.payload.get("approval_id") or "").strip()
+    resolution = str(env.payload.get("resolution") or "").strip()
+    if not task_id or not task_exists(conn, task_id):
+        return {"ok": False, "error": "task_id required"}
+    if not approval_id:
+        return {"ok": False, "error": "approval_id required"}
+    result = resolve_goal_approval_command(conn, task_id, approval_id, resolution)
+    if not result.get("ok"):
+        return result
+    if result.get("resolution") == "rejected":
+        _append(
+            conn,
+            task_id,
+            EventType.ORCHESTRATION_STEP,
+            {
+                "phase": "plan",
+                "status": "blocked",
+                "lane": "policy",
+                "summary": "Delegated execution was not approved; plan paused.",
+                "plan_status": "blocked",
+            },
+        )
+        _append(
+            conn,
+            task_id,
+            EventType.ASSISTANT_REPLIED,
+            {
+                "text": "I stopped the delegated plan because approval was not granted.",
+                "route": "direct",
+                "reason": "approval_denied",
+            },
+        )
+        return {"ok": True, "task_id": task_id}
+    jp = result.get("job_payload")
+    if not isinstance(jp, dict):
+        return {"ok": False, "error": "missing job_payload"}
+    _append(conn, task_id, EventType.JOB_QUEUED, jp)
+    return {"ok": True, "task_id": task_id, "plan_id": result.get("plan_id")}
+
+
+def _handle_record_verification_result(conn: sqlite3.Connection, env: CommandEnvelope) -> Dict[str, Any]:
+    task_id = str(env.task_id or env.payload.get("task_id") or "").strip()
+    if not task_id or not task_exists(conn, task_id):
+        return {"ok": False, "error": "task_id required"}
+    payload = {
+        "plan_id": str(env.payload.get("plan_id") or ""),
+        "step_id": str(env.payload.get("step_id") or ""),
+        "verification_id": str(env.payload.get("verification_id") or ""),
+        "verdict": str(env.payload.get("verdict") or ""),
+        "summary": str(env.payload.get("summary") or ""),
+        "method": str(env.payload.get("method") or ""),
+    }
+    _append(conn, task_id, EventType.VERIFICATION_RECORDED, payload)
+    return {"ok": True, "task_id": task_id}
 
 
 def append_internal_event(

@@ -43,6 +43,7 @@ Use this skill when a request requires broad codebase context, multi-file edits,
 6. When Andrea/OpenClaw marked the turn as `cursor_primary` or collaborative, involve Cursor before the final answer even if you can partially reason about the task yourself.
 7. Never ask the user for session keys, session labels, runtime identifiers, or other internal routing details. Andrea owns that abstraction.
 8. Keep any user-facing summary product-level and calm. Exact runtime/tool diagnostics belong in internal notes, not in the primary reply.
+9. In a multi-LLM sprint, OpenClaw remains the conductor and Cursor is the execution specialist. Do not take over user-facing routing or orchestration policy that Andrea already decided.
 
 ## Branch Guidance
 
@@ -59,6 +60,7 @@ Before handoff, convert the user request into a clean implementation prompt:
 - Include repository context and any relevant paths.
 - State whether task is read-only analysis or edit implementation.
 - Ask Cursor to summarize changes/results concisely.
+- If this is part of a collaborative sprint, ask Cursor for concrete repo execution, validation, and implementation follow-through rather than open-ended orchestration.
 - Avoid leaking secrets or unrelated private context.
 - Ask for a compact, user-safe result summary plus any exact internal diagnostics separately when something is blocked or fails.
 
@@ -131,3 +133,4 @@ User asks: "Fix failing tests and push branch for PR."
 - **Lockstep bus** (Telegram/Alexa/Cursor shared task timeline): `docs/ANDREA_LOCKSTEP_ARCHITECTURE.md` — after spawning a Cursor job, report lifecycle with `scripts/andrea_sync_cursor_report.py` so all channels stay aligned.
 - Telegram intent hints: `@Andrea` means keep it direct when possible, `@Cursor` means Cursor-first collaboration, and `@Andrea @Cursor` / `work together` / `double-check` means OpenClaw and Cursor should collaborate before the final answer.
 - For the aggressive Telegram tri-LLM sprint mode, OpenClaw should coordinate model use by strength: Gemini 2.5 for broad planning, Minimax 2.7 for alternate critique, OpenAI for precise synthesis, and Cursor for heavy repo execution.
+- Visible collaboration / sprint operator guide: `docs/ANDREA_TELEGRAM_TRI_LLM_SPRINT.md`

@@ -31,7 +31,7 @@ Hardened **Cursor Cloud Agents** integration toolkit for **OpenClaw**, shell wor
 - **Andrea lockstep bus** (`services/andrea_sync/`): shared task/event timeline for Telegram, Alexa, OpenClaw, and Cursor with Andrea-first routing.
 - **Planner/critic/executor trace:** machine-derived orchestration steps and user-safe collaboration summaries instead of raw runtime chatter.
 - **Principal memory + reminders:** durable identity, memory notes, preferences, and scheduled follow-through across Telegram and Alexa.
-- **Closed-loop local self-heal:** regression-backed optimization proposals and gated Cursor branch prep via `services/andrea_sync/optimizer.py` and `scripts/andrea_optimize.py`.
+- **Closed-loop local self-heal:** regression-backed optimization proposals and gated Cursor branch prep via `services/andrea_sync/optimizer.py` and `scripts/andrea_optimize.py`. **`LOCAL_AUTO_HEAL_COMPLETED` means post-handoff detached-worktree verification passed**, not merely that Cursor accepted the handoff (same contract as incident repair; tune with `ANDREA_SELF_HEAL_POST_CURSOR_VERIFY`).
 - **Incident-driven repair loop:** Gemini triage, GPT mini patching, MiniMax challenge, GPT deep-debug planning, isolated verification, rollback, and optional Cursor escalation via `services/andrea_sync/repair_orchestrator.py` and `scripts/andrea_repair_cycle.py`.
 - **Voice + chat coordination**: direct Andrea replies stay concise, delegated work runs through OpenClaw/Cursor, and Alexa sessions can mirror a single compact summary back to Telegram.
 
@@ -268,7 +268,7 @@ Full steps and flow: [docs/OPENCLAW_SKILL.md](docs/OPENCLAW_SKILL.md).
 | [docs/ANDREA_READINESS_REPORT.md](docs/ANDREA_READINESS_REPORT.md) | Readiness template / sign-off |
 | [docs/ANDREA_SECURITY.md](docs/ANDREA_SECURITY.md) | Secrets, redaction, gateway token, rotation |
 | [docs/ANDREA_MODEL_POLICY.md](docs/ANDREA_MODEL_POLICY.md) | Model profiles + fallbacks + rate limits |
-| [docs/ANDREA_LOCKSTEP_ARCHITECTURE.md](docs/ANDREA_LOCKSTEP_ARCHITECTURE.md) | Telegram / Alexa / Cursor shared lockstep bus + SQLite store |
+| [docs/ANDREA_LOCKSTEP_ARCHITECTURE.md](docs/ANDREA_LOCKSTEP_ARCHITECTURE.md) | Telegram / Alexa / Cursor shared lockstep bus + SQLite store, including the Andrea-vs-OpenClaw conductor split |
 | [docs/ANDREA_SYNC_RUNBOOK.md](docs/ANDREA_SYNC_RUNBOOK.md) | Lockstep maintenance notes for kill switch, reminders, autonomy loop, and migrations |
 | [docs/ANDREA_TELEGRAM_LOCKSTEP_E2E.md](docs/ANDREA_TELEGRAM_LOCKSTEP_E2E.md) | Telegram webhook + `cloudflared` + `scripts/andrea_lockstep_telegram_e2e.py` |
 | [docs/ANDREA_TELEGRAM_TRI_LLM_SPRINT.md](docs/ANDREA_TELEGRAM_TRI_LLM_SPRINT.md) | High-visibility one-hour Telegram collaboration sprint across OpenClaw multi-model reasoning and Cursor execution, including direct `@Gemini` / `@Minimax` / `@OpenAI` model-lane requests |
@@ -367,6 +367,12 @@ python3 scripts/andrea_repair_cycle.py --repo "$PWD"
 # python3 scripts/andrea_repair_cycle.py --repo "$PWD" --runtime-error-json data/sample_runtime_error.json
 ```
 
+Heavy Cursor repair uses **bounded polling** on `cursor_handoff.py`. For **`backend=api`**, the repair orchestrator also **polls Cloud Agent status** after submission (same `ANDREA_REPAIR_CURSOR_POLL_*` knobs) until the agent reaches a **terminal** state before deciding whether to run **post-handoff verification** in a detached git worktree. An incident is only marked **`resolved`** after that verification passes. **`cursor_handoff_ready`** means the handoff succeeded but the fix is **not** auto-verified yet (verify skipped, still running, or waiting on you to monitor Cursor)—not “the bug is fixed.” **`human_review_required`** covers failed verification, non-`FINISHED` terminal Cursor states, or a missing branch for verify. Conductor metadata includes an **`outcome`** block (`submission_status`, `terminal_cursor_status`, `verification_status`, `next_action`, etc.) and **`handoff.plan_first_fallback_reason`** when plan-first was enabled but the planner path fell back to single-pass. Tune with `ANDREA_REPAIR_CURSOR_POLL_MAX_ATTEMPTS`, `ANDREA_REPAIR_CURSOR_POLL_INTERVAL_SECONDS`, `ANDREA_REPAIR_POST_CURSOR_VERIFY` (`0` disables post-handoff verify), and `ANDREA_REPAIR_WORKTREE_ROOT` / `ANDREA_REPAIR_CURSOR_TIMEOUT_SECONDS` as needed.
+
+**Local auto-heal (optimizer)** reuses the same polling + verification semantics: `ApplyOptimizationProposal` only records **`LOCAL_AUTO_HEAL_COMPLETED`** when verification passes. Set `ANDREA_SELF_HEAL_POST_CURSOR_VERIFY=0` only when you intentionally want to allow “handoff succeeded” without detached verify (the apply result will fail closed with `self_heal_post_cursor_verify_disabled` when verify is required but off).
+
+**Plan-first Cursor (optional):** repair and auto-heal can run a **read-only planner** agent (strong model via `ANDREA_CURSOR_PLANNER_MODEL` / lane overrides), extract a `## CursorExecutionPlan` section from the planner conversation, then launch a second **executor** agent with `ANDREA_CURSOR_EXECUTOR_MODEL` (default `default`). Enable with `ANDREA_CURSOR_PLAN_FIRST_ENABLED` and/or `ANDREA_REPAIR_CURSOR_PLAN_FIRST`, `ANDREA_SELF_HEAL_CURSOR_PLAN_FIRST`. Direct **Telegram → Cursor** can use `ANDREA_TELEGRAM_CURSOR_PLAN_FIRST` (off by default). `cursor_handoff.py` **`--mode`** selects API vs CLI **transport**; **`--model`** selects the Cloud Agents **model** id—do not confuse with `mode=auto` on the handoff script.
+
 ## Documentation
 
 | Doc | Purpose |
@@ -452,7 +458,12 @@ See [.env.example](.env.example) and [skills/cursor_handoff/.env.example](skills
 | `ANDREA_SELF_HEAL_CURSOR_MODE` | No | Cursor backend override for auto-heal branch-prep proposals (`auto`, `api`, `cli`). |
 | `ANDREA_AUTONOMY_INCIDENT_REPAIR` / `ANDREA_AUTONOMY_INCIDENT_CURSOR_EXECUTE` | No | Controls whether `andrea_autonomy_cycle.sh` runs the incident repair loop and whether deep repair plans may auto-escalate into Cursor. |
 | `ANDREA_SYNC_BACKGROUND_INCIDENT_REPAIR_ENABLED` / `ANDREA_SYNC_BACKGROUND_INCIDENT_CURSOR_EXECUTE` | No | Lets the idle background optimizer optionally run the incident repair loop and, if desired, allow Cursor escalation. |
+| `ANDREA_SYNC_BACKGROUND_REGRESSION_MAX_AGE_SECONDS` | No | Max age (default `172800` = 48h) for the **latest persisted experience assurance run** to count as fresh evidence for the idle background optimizer. Older runs close the autonomy gate and force **heuristic-only** optimizer ticks (no Gemini background bundle). |
 | `ANDREA_REPAIR_ENABLED` / `ANDREA_REPAIR_CURSOR_MODE` | No | Global on/off switch for the incident repair control plane and the deep Cursor handoff backend (`auto`, `api`, `cli`). |
+| `ANDREA_REPAIR_AUTO_CURSOR_HEAVY` | No | When `1`/`true`, auto-run Cursor handoff on deep escalation when the repair plan is heavy and the main worktree is clean (without requiring `cursor_execute`). |
+| `ANDREA_REPAIR_CURSOR_POLL_MAX_ATTEMPTS` / `ANDREA_REPAIR_CURSOR_POLL_INTERVAL_SECONDS` | No | Bounded synchronous polling for Cursor handoff status (defaults: a few attempts with a short interval). |
+| `ANDREA_REPAIR_POST_CURSOR_VERIFY` | No | When `1` (default), after a successful Cursor handoff with a resolvable branch, run verification in an isolated worktree before marking the incident resolved. |
+| `ANDREA_SELF_HEAL_POST_CURSOR_VERIFY` | No | Override for the **optimizer / auto-heal** lane: when unset, follows `ANDREA_REPAIR_POST_CURSOR_VERIFY`. When `0`/`false`, auto-heal apply fails closed unless you explicitly accept handoff-only semantics. |
 | `ANDREA_REPAIR_PROMPT_VERSION` + per-role `ANDREA_REPAIR_*_PROMPT_VERSION` | No | Pins prompt contracts for triage, primary patching, challenger patching, deep planning, and Cursor handoff artifacts. |
 | `ANDREA_REPAIR_SAFE_ROOTS` / `ANDREA_REPAIR_MAX_PATCH_ATTEMPTS` | No | Overrides the repo-safe auto-repair roots and the number of lightweight patch attempts before escalation. |
 | `ANDREA_REPAIR_MAX_MODEL_INVOCATIONS` / `ANDREA_REPAIR_MAX_CHANGED_LINES` | No | Budget controls for per-incident model usage and patch scope. |
@@ -460,6 +471,8 @@ See [.env.example](.env.example) and [skills/cursor_handoff/.env.example](skills
 | `BRAVE_SEARCH_API_KEY` / `BRAVE_ANSWERS_API_KEY` | No | Optional Brave Search skill keys (`brave-api-search` expects both names; answers key may reuse search key). |
 | `MINIMAX_API_KEY` | No | Optional MiniMax provider key for MiniMax integrations. |
 | `SSL_CERT_FILE` | No | Optional path to CA bundle for Python TLS (macOS `CERTIFICATE_VERIFY_FAILED`); see README troubleshooting. |
+
+**Idle background optimizer trust:** When `ANDREA_SYNC_BACKGROUND_OPTIMIZER_ENABLED=1`, the server **does not** inject a synthetic passing regression report. The autonomy gate uses the latest **`experience_runs`** row from `python3 scripts/andrea_experience_cycle.py` (or any caller that persists via the same store). Without a fresh run, proposals stay **`gated`**, Gemini/MiniMax/OpenAI background lanes are skipped, and optional background incident repair only runs when the latest experience snapshot is **fresh** (and passes the gate’s skill/digest checks as before). See dashboard **`Bg autonomy`** and `GET /v1/dashboard/summary` → **`background_autonomy`**. Task rows include **`delegated_lifecycle`** (unified OpenClaw/Cursor contract) and **`resource_lane`** / **`verification_story`** for scripting.
 
 ## Security
 

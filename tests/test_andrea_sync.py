@@ -33,7 +33,8 @@ from services.andrea_sync.store import (  # noqa: E402
     migrate,
     set_meta,
 )
-from services.andrea_sync.andrea_router import route_message  # noqa: E402
+from services.andrea_sync.andrea_router import _scrub_history_for_direct, route_message  # noqa: E402
+from services.andrea_sync.user_surface import is_stale_openclaw_narrative  # noqa: E402
 from services.andrea_sync.telegram_format import (  # noqa: E402
     format_ack_message,
     format_direct_message,
@@ -181,6 +182,52 @@ class TestAndreaSync(unittest.TestCase):
         proj = project_task_dict(self.conn, tid, "telegram")
         self.assertEqual(proj["status"], TaskStatus.COMPLETED.value)
         self.assertEqual(proj["cursor_agent_id"], "bc-test")
+
+    @mock.patch(
+        "services.andrea_sync.execution_runtime.submit_agent_followup_payload",
+        return_value={"ok": True, "returncode": 0, "outer": {}, "response": {}},
+    )
+    def test_cursor_followup_command_runs_execution_runtime(self, _m: mock.MagicMock) -> None:
+        from services.andrea_sync.store import create_execution_attempt
+
+        created = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.CREATE_TASK.value,
+                "channel": "cli",
+                "external_id": "cfollow-1",
+                "payload": {"summary": "delegated"},
+            },
+        )
+        self.assertTrue(created.get("ok"), created)
+        tid = str(created["task_id"])
+        create_execution_attempt(
+            self.conn,
+            tid,
+            "",
+            lane="direct_cursor",
+            backend="cursor",
+            handle_dict={"cursor_agent_id": "ag_cf"},
+        )
+        r = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.CURSOR_FOLLOWUP.value,
+                "channel": "cursor",
+                "task_id": tid,
+                "payload": {"prompt": "Please continue"},
+            },
+        )
+        self.assertTrue(r.get("ok"), r)
+        ev = load_events_for_task(self.conn, tid)
+        self.assertTrue(
+            any(
+                e[2] == EventType.JOB_PROGRESS.value
+                and "cursor_followup" in str((e[3] or {}).get("message", ""))
+                for e in ev
+            ),
+            ev,
+        )
 
     def test_projection_outcome_marks_overdelegated_meta_question(self) -> None:
         created = handle_command(
@@ -553,6 +600,31 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(routing["collaboration_mode"], "collaborative")
         self.assertEqual(routing["visibility_mode"], "full")
         self.assertEqual(routing["requested_capability"], "collaboration")
+
+    def test_telegram_extract_routing_hints_masterclass_with_collaboration_sets_full_visibility(
+        self,
+    ) -> None:
+        routing = tg_adapt.extract_routing_hints(
+            "@Andrea @Cursor I want a disciplined masterclass sprint on this repo"
+        )
+        self.assertEqual(routing["routing_hint"], "collaborate")
+        self.assertEqual(routing["visibility_mode"], "full")
+
+    def test_telegram_extract_routing_hints_masterclass_with_two_models_sets_full_visibility(
+        self,
+    ) -> None:
+        routing = tg_adapt.extract_routing_hints(
+            "@Gemini @Minimax run a masterclass-style review of the plan"
+        )
+        self.assertEqual(routing["visibility_mode"], "full")
+        self.assertEqual(routing["model_mentions"], ["gemini", "minimax"])
+
+    def test_telegram_extract_routing_hints_masterclass_alone_stays_summary(self) -> None:
+        routing = tg_adapt.extract_routing_hints(
+            "That keynote was a real masterclass on distributed systems"
+        )
+        self.assertEqual(routing["visibility_mode"], "summary")
+        self.assertEqual(routing["routing_hint"], "auto")
 
     def test_telegram_extract_routing_hints_detects_direct_model_lane(self) -> None:
         routing = tg_adapt.extract_routing_hints("@Gemini review this plan with Andrea")
@@ -1944,6 +2016,166 @@ class TestAndreaSync(unittest.TestCase):
         self.assertIn("live news", reply.lower())
         self.assertNotIn("completed the delegated task", reply.lower())
 
+    def test_run_direct_openclaw_lookup_rejects_contaminated_summary(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        with mock.patch.object(
+            server,
+            "_create_openclaw_job",
+            return_value={
+                "ok": True,
+                "user_summary": (
+                    "Continuing the Extreme Masterclass Self-Improvement Sprint from yesterday."
+                ),
+            },
+        ):
+            reply, reason = server._run_direct_openclaw_lookup(
+                "t_contaminated",
+                prompt="news",
+                route_reason="structured_live_news",
+                success_reason="news_summary_ready",
+                success_fallback="fallback ok",
+                failure_reason="news_summary_failed",
+                failure_reply="I couldn't pull a grounded live news summary cleanly just now.",
+            )
+        self.assertEqual(reason, "news_summary_failed_contaminated")
+        self.assertEqual(reply, "I couldn't pull a grounded live news summary cleanly just now.")
+        self.assertNotIn("Masterclass", reply)
+
+    def test_run_direct_openclaw_lookup_rejects_embedding_quota_summary(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        with mock.patch.object(
+            server,
+            "_create_openclaw_job",
+            return_value={
+                "ok": True,
+                "user_summary": "embedding quota exceeded; try again later.",
+            },
+        ):
+            reply, reason = server._run_direct_openclaw_lookup(
+                "t_embed_leak",
+                prompt="msgs",
+                route_reason="structured_recent_text_messages",
+                success_reason="recent_text_messages_ready",
+                success_fallback="fallback ok",
+                failure_reason="recent_text_messages_failed",
+                failure_reply="I couldn't retrieve your recent text messages cleanly just now.",
+            )
+        self.assertEqual(reason, "recent_text_messages_failed_contaminated")
+        self.assertEqual(
+            reply,
+            "I couldn't retrieve your recent text messages cleanly just now.",
+        )
+
+    def test_run_direct_openclaw_lookup_uses_ephemeral_openclaw_session(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        captured: dict[str, str] = {}
+
+        def capture_job(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+            captured["session_id"] = str(kwargs.get("session_id") or "")
+            return {"ok": True, "user_summary": "Grounded one-line summary."}
+
+        with mock.patch.object(server, "_create_openclaw_job", side_effect=capture_job):
+            server._run_direct_openclaw_lookup(
+                "t_eph",
+                prompt="news",
+                route_reason="structured_live_news",
+                success_reason="news_summary_ready",
+                success_fallback="fb",
+                failure_reason="news_summary_failed",
+                failure_reply="fail",
+            )
+        sid = captured.get("session_id", "")
+        self.assertTrue(sid.startswith("andrea-lookup-structured_live_news-"), msg=sid)
+
+    def test_run_direct_openclaw_lookup_respects_task_session_when_ephemeral_disabled(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        with mock.patch.dict(os.environ, {"ANDREA_OPENCLAW_LOOKUP_EPHEMERAL_SESSION": "0"}):
+            from services.andrea_sync.server import SyncServer  # noqa: E402
+
+            server = SyncServer()
+            captured: dict[str, str] = {}
+
+            def capture_job(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+                captured["session_id"] = str(kwargs.get("session_id") or "")
+                return {"ok": True, "user_summary": "OK"}
+
+            with mock.patch.object(server, "_create_openclaw_job", side_effect=capture_job):
+                server._run_direct_openclaw_lookup(
+                    "t_task_sess",
+                    prompt="x",
+                    route_reason="structured_recent_text_messages",
+                    success_reason="ok",
+                    success_fallback="fb",
+                    failure_reason="failed",
+                    failure_reply="fail",
+                )
+        self.assertEqual(captured.get("session_id"), "andrea-sync-main-t_task_sess-0")
+
+    def test_is_stale_openclaw_narrative_detects_handoff_and_runtime(self) -> None:
+        self.assertTrue(is_stale_openclaw_narrative("Extreme Masterclass recap"))
+        self.assertTrue(is_stale_openclaw_narrative("multi-agent handoff complete"))
+        self.assertTrue(is_stale_openclaw_narrative("Set sessions_spawn.attachments.enabled to true"))
+        self.assertTrue(is_stale_openclaw_narrative("OpenClaw embedding quota exceeded for this session."))
+        self.assertTrue(is_stale_openclaw_narrative("context window exceeded for the model"))
+        self.assertFalse(is_stale_openclaw_narrative("Live news: markets moved higher today."))
+
+    def test_scrub_history_for_direct_drops_stale_assistant_turn(self) -> None:
+        hist = [
+            {"role": "user", "content": "Hi"},
+            {
+                "role": "assistant",
+                "content": "We are in an Extreme Masterclass Self-Improvement Sprint.",
+            },
+            {"role": "user", "content": "What's the weather like?"},
+        ]
+        out = _scrub_history_for_direct(hist)
+        self.assertEqual(len(out), 2)
+        self.assertEqual(out[0]["role"], "user")
+        self.assertEqual(out[1]["content"], "What's the weather like?")
+
+    def test_scrub_history_for_direct_keeps_clean_assistant_turn(self) -> None:
+        hist = [
+            {"role": "assistant", "content": "Your meeting is at 3pm."},
+        ]
+        out = _scrub_history_for_direct(hist)
+        self.assertEqual(len(out), 1)
+        self.assertIn("3pm", out[0]["content"])
+
+    def test_scrub_history_for_direct_drops_embedding_quota_assistant_turn(self) -> None:
+        hist = [
+            {"role": "user", "content": "Any texts today?"},
+            {
+                "role": "assistant",
+                "content": "Sorry, embedding quota exceeded for this session.",
+            },
+            {"role": "user", "content": "What's the weather?"},
+        ]
+        out = _scrub_history_for_direct(hist)
+        self.assertEqual(len(out), 2)
+        self.assertEqual(out[1]["content"], "What's the weather?")
+
+    def test_parse_recent_text_messages_request_accepts_from_today_phrasing(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        text = "Any texts from today?"
+        self.assertEqual(server._parse_recent_text_messages_request(text), text)
+
     def test_server_live_news_request_stays_truthful_when_lane_unavailable(self) -> None:
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
         os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
@@ -2463,6 +2695,121 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(proj["meta"]["execution"]["visibility_mode"], "full")
         self.assertEqual(proj["meta"]["telegram"]["requested_capability"], "collaboration")
 
+    def test_task_projection_sets_phase_hint_for_running_cursor_execution(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        result = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-phase-running",
+                "payload": {
+                    "text": "@Cursor fix the repo issue",
+                    "routing_text": "fix the repo issue",
+                    "routing_hint": "cursor",
+                    "collaboration_mode": "cursor_primary",
+                    "chat_id": 1,
+                    "message_id": 303,
+                },
+            },
+        )
+        append_event(
+            server.conn,
+            result["task_id"],
+            EventType.JOB_QUEUED,
+            {
+                "kind": "openclaw",
+                "execution_lane": "openclaw_hybrid",
+                "runner": "openclaw",
+                "collaboration_mode": "cursor_primary",
+            },
+        )
+        append_event(
+            server.conn,
+            result["task_id"],
+            EventType.JOB_STARTED,
+            {
+                "backend": "openclaw",
+                "execution_lane": "openclaw_hybrid",
+                "runner": "openclaw",
+                "delegated_to_cursor": True,
+                "agent_url": "https://cursor.com/agents/running-phase",
+            },
+        )
+        proj = project_task_dict(server.conn, result["task_id"], "telegram")
+        outcome = proj["meta"]["outcome"]
+        self.assertEqual(outcome["current_phase"], "execution")
+        self.assertEqual(outcome["current_phase_status"], "running")
+        self.assertEqual(outcome["current_phase_lane"], "cursor")
+        self.assertEqual(outcome["completed_phases"], [])
+
+    def test_task_projection_records_completed_phase_hints_from_phase_outputs(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        result = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-phase-complete",
+                "payload": {
+                    "text": "@Andrea @Cursor work together on a fix",
+                    "routing_text": "work together on a fix",
+                    "routing_hint": "collaborate",
+                    "collaboration_mode": "collaborative",
+                    "visibility_mode": "full",
+                    "chat_id": 1,
+                    "message_id": 304,
+                },
+            },
+        )
+        append_event(
+            server.conn,
+            result["task_id"],
+            EventType.JOB_QUEUED,
+            {
+                "kind": "openclaw",
+                "execution_lane": "openclaw_hybrid",
+                "runner": "openclaw",
+                "collaboration_mode": "collaborative",
+                "visibility_mode": "full",
+            },
+        )
+        append_event(
+            server.conn,
+            result["task_id"],
+            EventType.JOB_COMPLETED,
+            {
+                "summary": "Finished the fix.",
+                "backend": "openclaw",
+                "execution_lane": "openclaw_hybrid",
+                "runner": "openclaw",
+                "delegated_to_cursor": True,
+                "phase_outputs": {
+                    "plan": {"lane": "openclaw", "status": "completed", "summary": "Planned the fix."},
+                    "critique": {"lane": "openclaw", "status": "completed", "summary": "Critiqued the plan."},
+                    "execution": {"lane": "cursor", "status": "completed", "summary": "Applied and tested the patch."},
+                    "synthesis": {"lane": "openclaw", "status": "completed", "summary": "Finished the fix."},
+                },
+            },
+        )
+        proj = project_task_dict(server.conn, result["task_id"], "telegram")
+        outcome = proj["meta"]["outcome"]
+        self.assertEqual(outcome["current_phase"], "synthesis")
+        self.assertEqual(outcome["current_phase_status"], "completed")
+        self.assertEqual(
+            outcome["completed_phases"],
+            ["plan", "critique", "execution", "synthesis"],
+        )
+        self.assertEqual(outcome["phase_statuses"]["execution"], "completed")
+
     def test_task_visibility_mode_prefers_full_when_telegram_upgrades(self) -> None:
         """When telegram has 'full' and execution has 'summary', use full (continuation upgrade)."""
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
@@ -2638,23 +2985,29 @@ class TestAndreaSync(unittest.TestCase):
             },
         )
         server._handle_task_followups(result["task_id"])
-        with mock.patch.object(
+        oc_ret = {
+            "ok": True,
+            "summary": "OpenClaw used cursor_handoff and a PR is ready.",
+            "backend": "openclaw",
+            "execution_lane": "openclaw_hybrid",
+            "delegated_to_cursor": True,
+            "openclaw_run_id": "run-demo",
+            "openclaw_session_id": "sess-demo",
+            "provider": "google",
+            "model": "gemini-2.5-flash",
+            "cursor_agent_id": "bc-demo",
+            "agent_url": "https://cursor.com/agents/demo",
+            "pr_url": "https://github.com/example/repo/pull/1",
+        }
+        with mock.patch.object(server, "_create_openclaw_job", return_value=oc_ret), mock.patch.object(
             server,
-            "_create_openclaw_job",
-            return_value={
-                "ok": True,
-                "summary": "OpenClaw used cursor_handoff and a PR is ready.",
-                "backend": "openclaw",
-                "execution_lane": "openclaw_hybrid",
-                "delegated_to_cursor": True,
-                "openclaw_run_id": "run-demo",
-                "openclaw_session_id": "sess-demo",
-                "provider": "google",
-                "model": "gemini-2.5-flash",
-                "cursor_agent_id": "bc-demo",
-                "agent_url": "https://cursor.com/agents/demo",
-                "pr_url": "https://github.com/example/repo/pull/1",
-            },
+            "_poll_cursor_agent_terminal",
+            return_value=(
+                "FINISHED",
+                {},
+                str(oc_ret.get("agent_url") or ""),
+                str(oc_ret.get("pr_url") or ""),
+            ),
         ):
             server._run_delegated_job(result["task_id"])
         proj = project_task_dict(server.conn, result["task_id"], "telegram")
@@ -2867,6 +3220,95 @@ class TestAndreaSync(unittest.TestCase):
         self.assertIsNone(proj["last_error"])
         events = load_events_for_task(server.conn, task_id)
         self.assertEqual(events[-1][2], EventType.JOB_PROGRESS.value)
+
+    def test_server_cursor_plan_first_two_pass_when_enabled(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        os.environ["ANDREA_TELEGRAM_CURSOR_PLAN_FIRST"] = "1"
+        os.environ["ANDREA_TELEGRAM_CURSOR_PLANNER_MODEL"] = "planner-model"
+        os.environ["ANDREA_TELEGRAM_CURSOR_EXECUTOR_MODEL"] = "executor-model"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        try:
+            server = SyncServer()
+            result = handle_command(
+                server.conn,
+                {
+                    "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                    "channel": "telegram",
+                    "external_id": "tg-plan-first",
+                    "payload": {
+                        "text": "Please refactor the sync server for clarity.",
+                        "chat_id": 1,
+                        "message_id": 50,
+                        "auto_cursor_job": True,
+                    },
+                },
+            )
+            task_id = result["task_id"]
+            server.cursor_status_poll_attempts = 1
+            server.cursor_status_poll_interval = 0.0
+            calls: list[tuple[str, dict[str, object]]] = []
+
+            def create_side_effect(prompt: str, **kwargs: object) -> dict[str, object]:
+                calls.append((prompt, dict(kwargs)))
+                if len(calls) == 1:
+                    return {
+                        "agent_id": "planner-agent",
+                        "backend": "api",
+                        "status": "SUBMITTED",
+                    }
+                return {
+                    "agent_id": "exec-agent",
+                    "backend": "api",
+                    "status": "FINISHED",
+                }
+
+            conv_payload = {
+                "messages": [
+                    {
+                        "type": "assistant_message",
+                        "text": (
+                            "## CursorExecutionPlan\n\n"
+                            "1. Open services/andrea_sync/server.py\n"
+                            "2. Add comments\n"
+                            "3. Run unit tests\n"
+                        ),
+                    }
+                ]
+            }
+
+            with (
+                mock.patch.object(server, "_create_cursor_job", side_effect=create_side_effect),
+                mock.patch.object(
+                    server,
+                    "_poll_cursor_agent_terminal",
+                    return_value=("FINISHED", {}, "https://cursor.example/a", ""),
+                ),
+                mock.patch.object(
+                    server,
+                    "_cursor_agent_conversation",
+                    return_value={"response": conv_payload},
+                ),
+                mock.patch.object(
+                    server,
+                    "_cursor_terminal_summary",
+                    return_value="summary text",
+                ),
+            ):
+                server._run_cursor_job(task_id)
+            self.assertEqual(len(calls), 2)
+            self.assertTrue(calls[0][1].get("read_only"))
+            self.assertEqual(calls[0][1].get("model"), "planner-model")
+            self.assertIsNone(calls[1][1].get("read_only"))
+            self.assertEqual(calls[1][1].get("model"), "executor-model")
+            self.assertIn("Cursor planner output", calls[1][0])
+            proj = project_task_dict(server.conn, task_id, "telegram")
+            self.assertEqual(proj["meta"]["cursor"].get("cursor_strategy"), "plan_first")
+        finally:
+            os.environ.pop("ANDREA_TELEGRAM_CURSOR_PLAN_FIRST", None)
+            os.environ.pop("ANDREA_TELEGRAM_CURSOR_PLANNER_MODEL", None)
+            os.environ.pop("ANDREA_TELEGRAM_CURSOR_EXECUTOR_MODEL", None)
 
     def test_cursor_report_rejects_non_object_payload(self) -> None:
         created = handle_command(
@@ -3358,6 +3800,85 @@ class TestAndreaSync(unittest.TestCase):
             },
         )
         self.assertTrue(ok.get("ok"))
+
+    def test_sanitize_user_surface_text_rejects_stale_fallback(self) -> None:
+        from services.andrea_sync.user_surface import sanitize_user_surface_text
+
+        out = sanitize_user_surface_text(
+            "sessions_spawn.attachments.enabled",
+            fallback="OpenClaw embedding quota exceeded for this workspace.",
+            limit=200,
+        )
+        self.assertEqual(out, "")
+
+    def test_build_direct_reply_fail_closed_on_contaminated_contextual_fallback(self) -> None:
+        """OpenAI path failed: contaminated contextual fallback must not reach the user."""
+        from services.andrea_sync import andrea_router
+
+        with mock.patch.dict(os.environ, {"OPENAI_API_ENABLED": "0"}, clear=False):
+            with mock.patch.object(
+                andrea_router,
+                "_openai_direct_reply",
+                side_effect=RuntimeError("openai_direct_disabled"),
+            ):
+                with mock.patch.object(
+                    andrea_router,
+                    "_contextual_fallback",
+                    return_value="sessions_spawn.attachments.enabled is on",
+                ):
+                    reply = andrea_router.build_direct_reply(
+                        "What should I know about the timeline for the kitchen project?",
+                        history=[],
+                        memory_notes=[],
+                    )
+        self.assertNotIn("sessions_spawn", reply.lower())
+        self.assertNotIn("attachments.enabled", reply.lower())
+
+    def test_build_direct_reply_rejects_openai_sessions_spawn_leak(self) -> None:
+        from services.andrea_sync.andrea_router import build_direct_reply
+
+        mock_resp = mock.Mock()
+        mock_resp.__enter__ = mock.Mock(return_value=mock_resp)
+        mock_resp.__exit__ = mock.Mock(return_value=False)
+        mock_resp.read.return_value = json.dumps(
+            {
+                "choices": [
+                    {"message": {"content": "sessions_spawn.attachments.enabled is true"}}
+                ],
+            }
+        ).encode()
+
+        with mock.patch.dict(
+            os.environ,
+            {"OPENAI_API_KEY": "test-key", "OPENAI_API_ENABLED": "1"},
+            clear=False,
+        ):
+            with mock.patch(
+                "services.andrea_sync.andrea_router.urllib.request.urlopen",
+                return_value=mock_resp,
+            ):
+                reply = build_direct_reply(
+                    "What should I know about the timeline for the kitchen project?",
+                    history=[],
+                    memory_notes=[],
+                )
+        self.assertNotIn("sessions_spawn", reply.lower())
+        self.assertNotIn("attachments.enabled", reply.lower())
+
+    def test_expand_recent_text_shorthand_requires_prior_structured_reason(self) -> None:
+        from services.andrea_sync.server import SyncServer
+
+        server = SyncServer()
+        with mock.patch.object(server, "_last_assistant_reply_reason", return_value=""):
+            self.assertIsNone(server._expand_recent_text_messages_shorthand("task-x", "from today?"))
+        with mock.patch.object(
+            server,
+            "_last_assistant_reply_reason",
+            return_value="recent_text_messages_ready",
+        ):
+            expanded = server._expand_recent_text_messages_shorthand("task-x", "from today?")
+        self.assertIsNotNone(expanded)
+        self.assertIn("today", str(expanded).lower())
 
 
 if __name__ == "__main__":

@@ -28,7 +28,7 @@ Subcommands:
 | `conversation` | `--id` |
 | `artifacts` | `--id` |
 | `artifact-download-url` | `--id`, `--path` |
-| `create-agent` | `--branch-name`, repo **or** `--pr-url`; **`--prompt` / `--intent` / `--triage-repo`** (see above); `--dry-run`, polling flags |
+| `create-agent` | `--branch-name`, repo **or** `--pr-url`; **`--prompt` / `--intent` / `--triage-repo`** (see above); **`--model`** (explicit model id from `models` subcommand, or `default`); optional **`--ref`** (git ref when using `--repository`); `--dry-run`, polling flags |
 | `followup` | `--id`, `--prompt` |
 | `stop-agent` | `--id` |
 | `delete-agent` | `--id` |
@@ -48,7 +48,8 @@ API contract aligns with [Cursor Cloud Agents API](https://cursor.com/docs/cloud
 | `--intent` | `code-review`, `refactor`, `release-notes`, or `brief` — prepends a structured scaffold |
 | `--triage` | Prepend repo triage block; **requires local** `--repo` path (not URL-only) |
 | `--read-only` | `true` / `false` |
-| `--mode` | `auto`, `api`, `cli` |
+| `--model` | API only: Cloud Agents `model` field (`default` or an id from `cursor_openclaw.py models`). Empty uses `CURSOR_HANDOFF_MODEL` or `default`. |
+| `--mode` | `auto`, `api`, `cli` — **transport** (API vs local CLI), not model selection |
 | `--branch` | Optional; default generated `openclaw/task-YYYYMMDD-HHMMSS` |
 | `--pr-url` | API: `source.prUrl` |
 | `--auto-create-pr` etc. | API PR targets |

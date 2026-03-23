@@ -15,6 +15,7 @@ INCIDENT_STATES = (
     "verifying_challenger",
     "planning_escalation",
     "cursor_handoff_ready",
+    "cursor_verifying",
     "resolved",
     "rolled_back",
     "human_review_required",

@@ -10,10 +10,16 @@ from .adapters import telegram as tg_adapt
 from .kill_switch import kill_switch_status
 from .policy import digest_age_seconds, get_capability_digest
 from .projector import project_task_dict
+from .delegated_lifecycle import build_delegated_lifecycle_contract
+from .optimizer import build_background_regression_report, evaluate_autonomy_gate
 from .repair_policy import configured_safe_repair_roots, repair_enabled
+from .policy_governance import governance_snapshot
+from .resource_vocabulary import infer_resource_lane, verification_story_from_outcome
+from .scenario_registry import FIRST_SUPPORTED_SCENARIO_IDS, get_contract
 from .schema import EventType
 from .store import (
     SYSTEM_TASK_ID,
+    count_active_execution_attempts,
     count_active_memories,
     count_due_reminders,
     get_latest_experience_run,
@@ -21,6 +27,7 @@ from .store import (
     count_principals,
     list_experience_runs,
     list_incidents,
+    list_recent_execution_plans,
     list_tasks,
     load_events_for_task,
     task_exists,
@@ -161,6 +168,66 @@ def build_runtime_truth_snapshot(
         "capability_digest_age_seconds": age,
         "capability_digest_status": digest_status,
         "webhook": webhook,
+        "execution_continuity": {
+            "active_execution_attempts": count_active_execution_attempts(conn),
+        },
+    }
+
+
+def _project_incident_for_dashboard(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """Flatten incident + repair conductor fields for operators and dashboard HTML."""
+    if not raw:
+        return {}
+    meta = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
+    conductor = meta.get("conductor") if isinstance(meta.get("conductor"), dict) else {}
+    handoff = conductor.get("handoff") if isinstance(conductor.get("handoff"), dict) else {}
+    reasons = conductor.get("escalation_reasons") or []
+    if not isinstance(reasons, list):
+        reasons = []
+    reason_strs = [str(r).strip() for r in reasons if str(r).strip()][:8]
+    preferred = str(conductor.get("preferred_executor") or "").strip()
+    outcome = conductor.get("outcome") if isinstance(conductor.get("outcome"), dict) else {}
+    sub_st = str(outcome.get("submission_status") or "").strip()
+    ver_st = str(outcome.get("verification_status") or "").strip()
+    next_act = str(outcome.get("next_action") or "").strip()
+    summary_bits = [preferred] if preferred else []
+    if reason_strs:
+        summary_bits.append("reasons: " + ", ".join(reason_strs))
+    if sub_st:
+        summary_bits.append(f"submission: {sub_st}")
+    if ver_st:
+        summary_bits.append(f"verify: {ver_st}")
+    if next_act:
+        summary_bits.append(f"next: {next_act}")
+    if handoff.get("ok"):
+        summary_bits.append("Cursor handoff submitted")
+    elif handoff and conductor.get("effective_cursor_execute"):
+        summary_bits.append("Cursor handoff attempted")
+    conductor_summary = " · ".join(summary_bits) if summary_bits else ""
+
+    return {
+        **raw,
+        "conductor_preferred_executor": preferred,
+        "conductor_reasons": reason_strs,
+        "conductor_summary": conductor_summary,
+        "conductor_recommended_cursor_execute": bool(conductor.get("recommended_cursor_execute")),
+        "conductor_cursor_execute_requested": bool(conductor.get("cursor_execute_requested")),
+        "conductor_auto_cursor_heavy": bool(conductor.get("auto_cursor_heavy")),
+        "conductor_effective_cursor_execute": bool(conductor.get("effective_cursor_execute")),
+        "conductor_worktree_clean": bool(conductor.get("worktree_clean")),
+        "cursor_handoff_active": bool(handoff.get("ok")),
+        "cursor_handoff_branch": str(handoff.get("branch") or ""),
+        "cursor_handoff_agent_url": str(handoff.get("agent_url") or ""),
+        "cursor_handoff_pr_url": str(handoff.get("pr_url") or ""),
+        "cursor_handoff_error": str(handoff.get("error") or ""),
+        "conductor_metrics": conductor.get("metrics")
+        if isinstance(conductor.get("metrics"), dict)
+        else {},
+        "conductor_outcome_submission_status": sub_st,
+        "conductor_outcome_verification_status": ver_st,
+        "conductor_outcome_next_action": next_act,
+        "conductor_outcome_terminal_cursor_status": str(outcome.get("terminal_cursor_status") or ""),
+        "conductor_outcome_skip_reason": str(outcome.get("verification_skip_reason") or ""),
     }
 
 
@@ -172,11 +239,15 @@ def _task_list_item(row: Dict[str, Any], proj: Dict[str, Any]) -> Dict[str, Any]
     cursor = meta.get("cursor") if isinstance(meta.get("cursor"), dict) else {}
     outcome = meta.get("outcome") if isinstance(meta.get("outcome"), dict) else {}
     identity = meta.get("identity") if isinstance(meta.get("identity"), dict) else {}
+    resource_lane = infer_resource_lane(execution)
     return {
         "task_id": proj.get("task_id") or row.get("task_id"),
         "channel": proj.get("channel") or row.get("channel") or "",
         "status": proj.get("status") or "created",
         "summary": proj.get("summary") or "",
+        "resource_lane": resource_lane,
+        "verification_story": verification_story_from_outcome(outcome),
+        "delegated_lifecycle": build_delegated_lifecycle_contract(meta),
         "last_error": proj.get("last_error"),
         "created_at": row.get("created_at"),
         "updated_at": row.get("updated_at"),
@@ -199,6 +270,11 @@ def _task_list_item(row: Dict[str, Any], proj: Dict[str, Any]) -> Dict[str, Any]
         "critic_steps": int(outcome.get("critic_steps") or 0),
         "executor_steps": int(outcome.get("executor_steps") or 0),
         "synthesis_steps": int(outcome.get("synthesis_steps") or 0),
+        "current_phase": outcome.get("current_phase") or "",
+        "current_phase_status": outcome.get("current_phase_status") or "",
+        "current_phase_lane": outcome.get("current_phase_lane") or "",
+        "current_phase_summary": outcome.get("current_phase_summary") or "",
+        "completed_phases": outcome.get("completed_phases") or [],
         "principal_id": identity.get("principal_id") or "",
         "pending_reminder_count": int(outcome.get("pending_reminder_count") or 0),
         "agent_url": cursor.get("agent_url") or "",
@@ -266,6 +342,9 @@ def _build_optimization_summary(conn: Any) -> Dict[str, Any]:
             row["gate_allowed"] = bool(payload.get("gate_allowed"))
             row["proposal_count"] = int(payload.get("proposal_count") or 0)
             row["finding_count"] = int(payload.get("finding_count") or 0)
+            ae = payload.get("autonomy_evidence")
+            if isinstance(ae, dict) and ae:
+                row["autonomy_evidence"] = dict(ae)
         elif et == EventType.OPTIMIZATION_RUN_FAILED.value:
             run_id = str(payload.get("run_id") or "")
             if not run_id:
@@ -340,6 +419,10 @@ def _build_optimization_summary(conn: Any) -> Dict[str, Any]:
                     "agent_url": str(payload.get("agent_url") or ""),
                     "pr_url": str(payload.get("pr_url") or ""),
                     "error": str(payload.get("error") or ""),
+                    "submission_status": str(payload.get("submission_status") or ""),
+                    "terminal_cursor_status": str(payload.get("terminal_cursor_status") or ""),
+                    "verification_status": str(payload.get("verification_status") or ""),
+                    "next_action": str(payload.get("next_action") or ""),
                     "ts": ts,
                 }
             )
@@ -356,7 +439,8 @@ def _build_optimization_summary(conn: Any) -> Dict[str, Any]:
     recent_proposals = sorted(
         proposals, key=lambda row: float(row.get("ts") or 0.0), reverse=True
     )[:8]
-    recent_incidents = list_incidents(conn, limit=6)
+    raw_incidents = list_incidents(conn, limit=6)
+    projected = [_project_incident_for_dashboard(row) for row in raw_incidents]
     return {
         "latest_run": recent_runs[0] if recent_runs else {},
         "recent_runs": recent_runs,
@@ -368,8 +452,8 @@ def _build_optimization_summary(conn: Any) -> Dict[str, Any]:
             key=lambda row: float(row.get("ts") or 0.0),
             reverse=True,
         )[:8],
-        "latest_incident": recent_incidents[0] if recent_incidents else {},
-        "recent_incidents": recent_incidents,
+        "latest_incident": projected[0] if projected else {},
+        "recent_incidents": projected,
     }
 
 
@@ -379,6 +463,29 @@ def _build_memory_summary(conn: Any) -> Dict[str, Any]:
         "active_memory_count": count_active_memories(conn),
         "pending_reminder_count": count_pending_reminders(conn),
         "due_reminder_count": count_due_reminders(conn),
+    }
+
+
+def _build_background_autonomy_summary(conn: Any) -> Dict[str, Any]:
+    """Snapshot for idle background optimizer: experience-derived regression gate."""
+    max_age = float(os.environ.get("ANDREA_SYNC_BACKGROUND_REGRESSION_MAX_AGE_SECONDS") or "172800")
+    report, meta = build_background_regression_report(conn, max_age_seconds=max_age)
+    gate = evaluate_autonomy_gate(
+        conn,
+        regression_report=report if report else None,
+        required_skills=["cursor_handoff"],
+    )
+    return {
+        "max_age_seconds": max_age,
+        "experience_run_id": str(meta.get("run_id") or ""),
+        "regression_source": str(meta.get("source") or ""),
+        "fresh": bool(meta.get("fresh")),
+        "age_seconds": meta.get("age_seconds"),
+        "total_checks": int(meta.get("total_checks") or 0),
+        "eligible_for_background_repair": bool(meta.get("eligible_for_background_repair")),
+        "blocked_reason": str(meta.get("blocked_reason") or ""),
+        "gate_allowed": bool(gate.get("allowed")),
+        "gate_reasons": list(gate.get("reasons") or []),
     }
 
 
@@ -456,6 +563,152 @@ def _build_experience_assurance_summary(conn: Any) -> Dict[str, Any]:
         "category_counts": list(latest.get("category_counts") or [])[:6],
         "pass_rate": round(float(passing) / float(len(recent_rows)), 2) if recent_rows else None,
     }
+
+
+def _build_plan_orchestration_summary(conn: Any) -> Dict[str, Any]:
+    """Active / blocked execution plans for operator visibility."""
+    try:
+        rows = list_recent_execution_plans(conn, limit=40)
+        active = [
+            r
+            for r in rows
+            if str(r.get("status") or "")
+            not in ("completed", "failed", "abandoned")
+        ]
+        awaiting = [r for r in active if str(r.get("status") or "") == "awaiting_approval"]
+        blocked = [r for r in active if str(r.get("status") or "") == "blocked"]
+        by_scenario: Dict[str, int] = {}
+        proof_coverage = {"with_proof_class": 0, "without_proof_class": 0}
+        false_support_incidents = 0
+        receipt_state_counts: Dict[str, int] = {}
+        blocked_trust_count = 0
+        draft_only_active = 0
+        first_pack_active = 0
+        collaboration_plan_count = 0
+        collaboration_repair_strategies: Dict[str, int] = {}
+        for r in rows:
+            summ = r.get("summary") if isinstance(r.get("summary"), dict) else {}
+            sid = str(summ.get("scenario_id") or "").strip()
+            if sid:
+                by_scenario[sid] = by_scenario.get(sid, 0) + 1
+            if summ.get("proof_class"):
+                proof_coverage["with_proof_class"] += 1
+            else:
+                proof_coverage["without_proof_class"] += 1
+            if str(summ.get("support_level") or "") == "unsupported" and str(
+                r.get("status") or ""
+            ) in ("queued", "executing"):
+                false_support_incidents += 1
+            rs = str(summ.get("receipt_state") or "").strip() or "pending"
+            receipt_state_counts[rs] = receipt_state_counts.get(rs, 0) + 1
+            if rs == "blocked_trust":
+                blocked_trust_count += 1
+            st = str(r.get("status") or "")
+            if st in ("draft", "awaiting_approval", "queued", "executing", "verifying"):
+                c = get_contract(sid) if sid else None
+                if c and str(c.support_level or "") == "draft_only":
+                    draft_only_active += 1
+                if sid in FIRST_SUPPORTED_SCENARIO_IDS:
+                    first_pack_active += 1
+            collab = summ.get("collaboration") if isinstance(summ.get("collaboration"), dict) else {}
+            if collab:
+                collaboration_plan_count += 1
+                ls = str(collab.get("last_strategy") or "").strip() or "unknown"
+                collaboration_repair_strategies[ls] = collaboration_repair_strategies.get(ls, 0) + 1
+        first_pack_health = [
+            {
+                "scenario_id": pack_id,
+                "active_plans": sum(
+                    1
+                    for row in active
+                    if str(
+                        (row.get("summary") or {}).get("scenario_id")
+                        if isinstance(row.get("summary"), dict)
+                        else ""
+                    )
+                    == pack_id
+                ),
+            }
+            for pack_id in sorted(FIRST_SUPPORTED_SCENARIO_IDS)
+        ]
+        return {
+            "ok": True,
+            "recent_count": len(rows),
+            "active_count": len(active),
+            "awaiting_approval_count": len(awaiting),
+            "blocked_count": len(blocked),
+            "scenario_counts": dict(
+                sorted(by_scenario.items(), key=lambda kv: (-kv[1], kv[0]))[:16]
+            ),
+            "proof_coverage": proof_coverage,
+            "false_support_incidents": false_support_incidents,
+            "receipt_state_counts": receipt_state_counts,
+            "blocked_trust_count": blocked_trust_count,
+            "draft_only_active_count": draft_only_active,
+            "first_pack_active_count": first_pack_active,
+            "first_pack_health": first_pack_health,
+            "collaboration_plan_count": collaboration_plan_count,
+            "collaboration_repair_strategies": dict(
+                sorted(collaboration_repair_strategies.items(), key=lambda kv: (-kv[1], kv[0]))[:12]
+            ),
+            "first_supported_scenario_ids": sorted(FIRST_SUPPORTED_SCENARIO_IDS),
+            "awaiting_approval": [
+                {
+                    "plan_id": r.get("plan_id"),
+                    "task_id": r.get("task_id"),
+                    "goal_id": r.get("goal_id"),
+                    "status": r.get("status"),
+                    "approval_state": r.get("approval_state"),
+                    "scenario_id": (
+                        (r.get("summary") or {}).get("scenario_id")
+                        if isinstance(r.get("summary"), dict)
+                        else ""
+                    ),
+                }
+                for r in awaiting[:12]
+            ],
+            "blocked": [
+                {
+                    "plan_id": r.get("plan_id"),
+                    "task_id": r.get("task_id"),
+                    "verification_state": r.get("verification_state"),
+                    "scenario_id": (
+                        (r.get("summary") or {}).get("scenario_id")
+                        if isinstance(r.get("summary"), dict)
+                        else ""
+                    ),
+                }
+                for r in blocked[:12]
+            ],
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)}
+
+
+def _build_blueprint_platform_summary(conn: Any) -> Dict[str, Any]:
+    """Counts for goals/workflows/task links + governance versions (Phase 6)."""
+    try:
+        g_active = conn.execute(
+            "SELECT COUNT(*) AS n FROM goals WHERE status = 'active'"
+        ).fetchone()
+        g_total = conn.execute("SELECT COUNT(*) AS n FROM goals").fetchone()
+        w = conn.execute(
+            """
+            SELECT COUNT(*) AS n FROM workflows
+            WHERE status NOT IN ('completed', 'cancelled')
+            """
+        ).fetchone()
+        tg = conn.execute("SELECT COUNT(*) AS n FROM task_goals").fetchone()
+        return {
+            "ok": True,
+            "active_goals": int(g_active["n"] if g_active else 0),
+            "goals_total": int(g_total["n"] if g_total else 0),
+            "open_workflows": int(w["n"] if w else 0),
+            "task_goal_links": int(tg["n"] if tg else 0),
+            "governance": governance_snapshot(),
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)}
 
 
 def build_dashboard_summary(
@@ -567,6 +820,9 @@ def build_dashboard_summary(
         "memory": _build_memory_summary(conn),
         "optimization": _build_optimization_summary(conn),
         "experience_assurance": _build_experience_assurance_summary(conn),
+        "background_autonomy": _build_background_autonomy_summary(conn),
+        "blueprint_platform": _build_blueprint_platform_summary(conn),
+        "plan_orchestration": _build_plan_orchestration_summary(conn),
     }
 
 
@@ -716,11 +972,15 @@ def render_dashboard_html() -> str:
     function renderCards(data) {
       const latestRun = (data.optimization || {}).latest_run || {};
       const latestExperience = (data.experience_assurance || {}).latest_run || {};
+      const bgAuto = data.background_autonomy || {};
       const runtime = data.runtime || {};
       const runtimeTelegram = runtime.telegram || {};
       const experienceStatus = !latestExperience.run_id
         ? "warn"
         : (latestExperience.passed ? "healthy" : "failed");
+      const bgGateOk = !!bgAuto.gate_allowed;
+      const bgFresh = !!bgAuto.fresh;
+      const bgLabel = !bgAuto.experience_run_id ? "no_run" : (bgFresh ? "fresh" : "stale");
       const cards = [
         { label: "Kill Switch", value: data.service.kill_switch.engaged ? "ENGAGED" : "Released", status: data.service.kill_switch.engaged ? "blocked" : "ready", note: "Server safety state" },
         { label: "Webhook", value: data.webhook.status, status: data.webhook.status, note: data.webhook.reason || "Telegram webhook state" },
@@ -731,7 +991,8 @@ def render_dashboard_html() -> str:
         { label: "Digest Age", value: `${Math.round(Number(data.service.capability_digest_age_seconds || 0))}s`, status: Number(data.service.capability_digest_age_seconds || 0) > 1800 ? "warn" : "ready", note: "Capability snapshot freshness" },
         { label: "Repair Loop", value: data.service.repair_enabled ? "enabled" : "disabled", status: data.service.repair_enabled ? "ready" : "warn", note: `Cursor ${data.service.repair_cursor_mode || "auto"} · safe roots ${(data.service.repair_safe_roots || []).join(", ") || "default"}` },
         { label: "Optimizer", value: latestRun.status || "idle", status: latestRun.status || "warn", note: latestRun.run_id ? `Latest run ${latestRun.run_id}` : "No optimization run recorded yet" },
-        { label: "Experience", value: latestExperience.run_id ? `${Math.round(Number(latestExperience.average_score || 0))}` : "idle", status: experienceStatus, note: latestExperience.run_id ? `${latestExperience.failed_checks || 0}/${latestExperience.total_checks || 0} failed in ${latestExperience.run_id}` : "No experience replay has been recorded yet" }
+        { label: "Experience", value: latestExperience.run_id ? `${Math.round(Number(latestExperience.average_score || 0))}` : "idle", status: experienceStatus, note: latestExperience.run_id ? `${latestExperience.failed_checks || 0}/${latestExperience.total_checks || 0} failed in ${latestExperience.run_id}` : "No experience replay has been recorded yet" },
+        { label: "Bg autonomy", value: bgLabel, status: bgGateOk ? "healthy" : "warn", note: bgAuto.experience_run_id ? `Gate ${bgGateOk ? "open" : "closed"} · age ${bgAuto.age_seconds != null ? Math.round(Number(bgAuto.age_seconds)) + "s" : "n/a"} · max ${Math.round(Number(bgAuto.max_age_seconds || 0))}s${(bgAuto.gate_reasons || []).length ? " · " + (bgAuto.gate_reasons || []).join(", ") : ""}` : (bgAuto.blocked_reason || "Run experience replay to unlock idle optimizer gate") }
       ];
       document.getElementById("cards").innerHTML = cards.map((card) => `
         <div class="card">
@@ -812,13 +1073,40 @@ def render_dashboard_html() -> str:
         const incidentState = latestIncident.current_state || latestIncident.status || "open";
         const incidentPill = incidentState === "resolved"
           ? "ready"
-          : (incidentState === "cursor_handoff_ready" || incidentState === "human_review_required" || incidentState === "rolled_back")
+          : (incidentState === "cursor_handoff_ready" || incidentState === "human_review_required" || incidentState === "rolled_back" || incidentState === "cursor_verifying")
             ? "warn"
             : "bad";
+        const cond = latestIncident.conductor_preferred_executor || "";
+        const reasons = (latestIncident.conductor_reasons || []).join(", ");
+        const condLine = cond
+          ? `Preferred executor ${cond}${reasons ? ` · ${reasons}` : ""}`
+          : (reasons ? `Escalation: ${reasons}` : "");
+        const handoffBits = [];
+        if (latestIncident.cursor_handoff_active) {
+          handoffBits.push("Cursor handoff ok");
+          if (latestIncident.cursor_handoff_branch) handoffBits.push(latestIncident.cursor_handoff_branch);
+        } else if (latestIncident.cursor_handoff_error) {
+          handoffBits.push(`Handoff: ${latestIncident.cursor_handoff_error}`);
+        } else if (latestIncident.conductor_effective_cursor_execute && !latestIncident.cursor_handoff_active) {
+          handoffBits.push("Cursor handoff attempted");
+        }
+        const outcomeBits = [];
+        if (latestIncident.conductor_outcome_verification_status) {
+          outcomeBits.push(`verify ${latestIncident.conductor_outcome_verification_status}`);
+        }
+        if (latestIncident.conductor_outcome_next_action) {
+          outcomeBits.push(`next ${latestIncident.conductor_outcome_next_action}`);
+        }
+        const extraParts = [
+          `State ${incidentState}${latestIncident.confidence !== undefined ? ` · confidence ${latestIncident.confidence}` : ""}`,
+          condLine,
+          handoffBits.join(" · "),
+          outcomeBits.join(" · "),
+        ].filter(Boolean);
         loopItems.push({
           title: `Latest incident: ${latestIncident.error_type || latestIncident.incident_id || "incident"}`,
           note: latestIncident.summary || "No incident summary",
-          extra: `State ${incidentState}${latestIncident.confidence !== undefined ? ` · confidence ${latestIncident.confidence}` : ""}`,
+          extra: extraParts.join(" · "),
           status: incidentPill
         });
       }

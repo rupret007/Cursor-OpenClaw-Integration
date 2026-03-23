@@ -15,7 +15,9 @@ if str(REPO_ROOT) not in sys.path:
 
 from services.andrea_sync.bus import handle_command  # noqa: E402
 from services.andrea_sync.optimizer import (  # noqa: E402
+    _try_self_heal_plan_first,
     apply_optimization_proposal,
+    build_background_regression_report,
     collect_recent_task_outcomes,
     detect_failure_categories,
     evaluate_autonomy_gate,
@@ -24,7 +26,7 @@ from services.andrea_sync.optimizer import (  # noqa: E402
     run_optimization_cycle,
 )
 from services.andrea_sync.schema import CommandType, EventType  # noqa: E402
-from services.andrea_sync.store import append_event, connect, migrate  # noqa: E402
+from services.andrea_sync.store import append_event, connect, migrate, save_experience_run  # noqa: E402
 
 
 class AndreaSyncOptimizerTests(unittest.TestCase):
@@ -128,6 +130,76 @@ class AndreaSyncOptimizerTests(unittest.TestCase):
         category_names = {row["category"] for row in categories}
         self.assertIn("blocked_capability", category_names)
         self.assertIn("runtime_leakage", category_names)
+
+    def test_build_background_regression_report_no_experience_run(self) -> None:
+        rep, meta = build_background_regression_report(self.conn, max_age_seconds=3600.0)
+        self.assertEqual(rep, {})
+        self.assertEqual(meta.get("source"), "none")
+        self.assertIn("no_experience_run", str(meta.get("blocked_reason") or ""))
+
+    def test_build_background_regression_report_fresh_passing(self) -> None:
+        save_experience_run(
+            self.conn,
+            {
+                "run_id": "exp_bg_fresh",
+                "actor": "test",
+                "status": "completed",
+                "passed": True,
+                "summary": "2/2 ok",
+                "total_checks": 2,
+                "failed_checks": 0,
+                "checks": [
+                    {"scenario_id": "s1", "passed": True, "score": 95.0},
+                    {"scenario_id": "s2", "passed": True, "score": 90.0},
+                ],
+            },
+        )
+        rep, meta = build_background_regression_report(self.conn, max_age_seconds=86400.0)
+        self.assertTrue(rep.get("passed"))
+        self.assertEqual(int(rep.get("total") or 0), 2)
+        self.assertEqual(rep.get("command"), "experience_assurance")
+        self.assertTrue(meta.get("fresh"))
+        self.assertTrue(meta.get("eligible_for_background_repair"))
+        vr = meta.get("verification_report") or {}
+        self.assertTrue(vr.get("passed"))
+
+    def test_build_background_regression_report_stale_marks_failed(self) -> None:
+        save_experience_run(
+            self.conn,
+            {
+                "run_id": "exp_bg_stale",
+                "actor": "test",
+                "status": "completed",
+                "passed": True,
+                "summary": "ok",
+                "total_checks": 2,
+                "checks": [{"scenario_id": "a", "passed": True}],
+            },
+        )
+        self.conn.execute(
+            "UPDATE experience_runs SET updated_at = ? WHERE run_id = ?",
+            (1.0, "exp_bg_stale"),
+        )
+        self.conn.commit()
+        rep, meta = build_background_regression_report(self.conn, max_age_seconds=60.0)
+        self.assertFalse(rep.get("passed"))
+        self.assertEqual(rep.get("command"), "experience_assurance_stale")
+        self.assertFalse(meta.get("fresh"))
+        self.assertFalse(meta.get("eligible_for_background_repair"))
+
+    def test_run_optimization_cycle_includes_autonomy_evidence(self) -> None:
+        self._make_overdelegated_task()
+        ev = {"source": "experience_assurance", "run_id": "x", "fresh": True, "total_checks": 2}
+        result = run_optimization_cycle(
+            self.conn,
+            limit=10,
+            regression_report={"passed": True, "total": 2},
+            required_skills=[],
+            emit_proposals=True,
+            analysis_mode="heuristic",
+            autonomy_evidence=ev,
+        )
+        self.assertEqual(result.get("autonomy_evidence", {}).get("run_id"), "x")
 
     def test_evaluate_autonomy_gate_requires_regression_and_clear_kill_switch(self) -> None:
         gate = evaluate_autonomy_gate(
@@ -272,17 +344,33 @@ class AndreaSyncOptimizerTests(unittest.TestCase):
         self.assertIn("sensitive_target_path", result["error"])
 
     def test_apply_optimization_proposal_runs_cursor_handoff(self) -> None:
-        with mock.patch(
-            "services.andrea_sync.optimizer._run_cursor_handoff_prompt",
-            return_value={
-                "ok": True,
-                "backend": "cli",
-                "branch": "openclaw/autoheal-prop_ready",
-                "agent_id": "",
-                "agent_url": "",
-                "pr_url": "",
-                "status": "submitted",
-            },
+        with (
+            mock.patch(
+                "services.andrea_sync.optimizer._run_cursor_handoff_prompt",
+                return_value={
+                    "ok": True,
+                    "backend": "cli",
+                    "branch": "openclaw/autoheal-prop_ready",
+                    "agent_id": "ag_cli",
+                    "agent_url": "",
+                    "pr_url": "",
+                    "status": "FINISHED",
+                },
+            ),
+            mock.patch(
+                "services.andrea_sync.optimizer.poll_cursor_agent_until_terminal",
+                return_value=("FINISHED", {}),
+            ),
+            mock.patch(
+                "services.andrea_sync.optimizer.verify_cursor_branch_in_isolated_worktree",
+                return_value={
+                    "ok": True,
+                    "passed": True,
+                    "verification_report": {"passed": True},
+                    "ref_source": "local_branch",
+                    "error": "",
+                },
+            ),
         ):
             result = apply_optimization_proposal(
                 self.conn,
@@ -300,6 +388,51 @@ class AndreaSyncOptimizerTests(unittest.TestCase):
             )
         self.assertTrue(result["ok"])
         self.assertEqual(result["proposal_id"], "prop_ready")
+        self.assertEqual(result.get("verification_status"), "passed")
+
+    def test_apply_optimization_proposal_fails_when_post_verify_disabled(self) -> None:
+        prev = os.environ.get("ANDREA_SELF_HEAL_POST_CURSOR_VERIFY")
+        os.environ["ANDREA_SELF_HEAL_POST_CURSOR_VERIFY"] = "0"
+        try:
+            with (
+                mock.patch(
+                    "services.andrea_sync.optimizer._run_cursor_handoff_prompt",
+                    return_value={
+                        "ok": True,
+                        "backend": "cli",
+                        "branch": "openclaw/autoheal-prop_verify",
+                        "agent_id": "ag1",
+                        "agent_url": "",
+                        "pr_url": "",
+                        "status": "FINISHED",
+                    },
+                ),
+                mock.patch(
+                    "services.andrea_sync.optimizer.poll_cursor_agent_until_terminal",
+                    return_value=("FINISHED", {}),
+                ),
+            ):
+                result = apply_optimization_proposal(
+                    self.conn,
+                    proposal_payload={
+                        "proposal_id": "prop_verify_off",
+                        "title": "x",
+                        "category": "overdelegation",
+                        "status": "branch_prep_ready",
+                        "branch_prep_allowed": True,
+                        "target_files": ["services/andrea_sync/andrea_router.py"],
+                        "recommended_action": "y",
+                    },
+                    repo_path=REPO_ROOT,
+                    actor="test",
+                )
+            self.assertFalse(result["ok"])
+            self.assertIn("self_heal_post_cursor_verify_disabled", result["error"])
+        finally:
+            if prev is None:
+                os.environ.pop("ANDREA_SELF_HEAL_POST_CURSOR_VERIFY", None)
+            else:
+                os.environ["ANDREA_SELF_HEAL_POST_CURSOR_VERIFY"] = prev
 
     def test_heal_runtime_capability_installs_missing_dependency(self) -> None:
         before = {
@@ -379,6 +512,41 @@ class AndreaSyncOptimizerTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertTrue(result["refresh_required"])
         self.assertTrue(any(action.get("kind") == "config_repair" for action in result["actions"]))
+
+    def test_try_self_heal_plan_first_skips_without_planner_model(self) -> None:
+        saved: dict[str, str | None] = {}
+        for key in (
+            "ANDREA_SELF_HEAL_CURSOR_PLAN_FIRST",
+            "ANDREA_CURSOR_PLAN_FIRST_ENABLED",
+            "ANDREA_SELF_HEAL_CURSOR_PLANNER_MODEL",
+            "ANDREA_CURSOR_PLANNER_MODEL",
+        ):
+            saved[key] = os.environ.get(key)
+            os.environ.pop(key, None)
+        try:
+            self.assertIsNone(
+                _try_self_heal_plan_first(
+                    repo_path=REPO_ROOT,
+                    executor_prompt="fix tests",
+                    branch="openclaw/autoheal-unittest",
+                    cursor_mode="cli",
+                )
+            )
+            os.environ["ANDREA_SELF_HEAL_CURSOR_PLAN_FIRST"] = "1"
+            self.assertIsNone(
+                _try_self_heal_plan_first(
+                    repo_path=REPO_ROOT,
+                    executor_prompt="fix tests",
+                    branch="openclaw/autoheal-unittest",
+                    cursor_mode="cli",
+                )
+            )
+        finally:
+            for key, val in saved.items():
+                if val is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = val
 
     def test_heal_runtime_capability_command_is_internal_only(self) -> None:
         denied = handle_command(

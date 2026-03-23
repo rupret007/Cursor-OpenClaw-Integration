@@ -19,12 +19,33 @@ from .policy import (
     evaluate_skill_absence_claim,
 )
 from .projector import project_task_dict
+from .cursor_plan_execute import (
+    TERMINAL_CURSOR_AGENT_STATUSES,
+    build_self_heal_cursor_planner_prompt,
+    enrich_handoff_payload_from_agent_status,
+    executor_model_for_lane,
+    extract_plan_text_from_conversation,
+    fetch_agent_conversation_payload,
+    plan_first_enabled,
+    planner_model_for_lane,
+    plan_text_usable,
+    poll_cursor_agent_until_terminal,
+    run_cursor_handoff_cli,
+    self_heal_handoff_poll_params,
+    self_heal_handoff_timeout_seconds,
+)
+from .repair_executor import (
+    build_default_verification_checks,
+    post_cursor_verification_enabled,
+    verify_cursor_branch_in_isolated_worktree,
+)
 from .repair_policy import SAFE_REPAIR_ROOTS
 from .schema import EventType
 from .store import (
     SYSTEM_TASK_ID,
     append_event,
     ensure_system_task,
+    get_latest_experience_run,
     load_events_for_task,
     list_tasks,
     set_meta,
@@ -823,6 +844,93 @@ def build_structured_proposals(
     return proposals
 
 
+def build_background_regression_report(
+    conn: sqlite3.Connection,
+    *,
+    max_age_seconds: float,
+) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    """Build regression_report for autonomy gate from latest persisted experience run.
+
+    Background autonomy must not use synthetic passing regressions. Returns ``({}, meta)``
+    when no usable run exists. When the latest run is older than ``max_age_seconds``,
+    returns a failing report (``passed: False``) so the gate stays closed, but
+    ``meta["fresh"]`` is False so callers can skip expensive background lanes.
+
+    Meta keys:
+      - source: ``none`` | ``experience_assurance``
+      - run_id, total_checks, age_seconds, fresh, eligible_for_background_repair
+      - verification_report: dict suitable for ``run_incident_repair_cycle`` when fresh
+      - blocked_reason: optional string
+    """
+    now = time.time()
+    run = get_latest_experience_run(conn)
+    rid = str(run.get("run_id") or "").strip()
+    meta: Dict[str, Any] = {
+        "source": "experience_assurance",
+        "run_id": rid,
+        "fresh": False,
+        "age_seconds": None,
+        "total_checks": 0,
+        "verification_report": None,
+        "eligible_for_background_repair": False,
+        "blocked_reason": "",
+    }
+    if not rid:
+        meta["source"] = "none"
+        meta["blocked_reason"] = "no_experience_run"
+        return {}, meta
+
+    checks = run.get("checks") if isinstance(run.get("checks"), list) else []
+    total = int(run.get("total_checks") or 0) or len(checks)
+    meta["total_checks"] = total
+    if total <= 0:
+        meta["blocked_reason"] = "experience_run_empty"
+        meta["source"] = "none"
+        return {}, meta
+
+    ts = float(run.get("updated_at") or run.get("completed_at") or run.get("created_at") or 0.0)
+    age = (now - ts) if ts > 0.0 else float("inf")
+    meta["age_seconds"] = None if age == float("inf") else float(age)
+
+    vr_in = run.get("verification_report")
+    if isinstance(vr_in, dict) and vr_in:
+        verification_report = dict(vr_in)
+    else:
+        verification_report = {
+            "passed": bool(run.get("passed")),
+            "summary": str(run.get("summary") or ""),
+            "checks": checks,
+            "metadata": {
+                "run_id": rid,
+                "actor": str(run.get("actor") or ""),
+                "source": "experience_assurance",
+            },
+        }
+    meta["verification_report"] = verification_report
+
+    if age > float(max_age_seconds):
+        meta["blocked_reason"] = "experience_run_stale"
+        report = {
+            "passed": False,
+            "total": total,
+            "command": "experience_assurance_stale",
+            "run_id": rid,
+        }
+        return report, meta
+
+    meta["fresh"] = True
+    meta["eligible_for_background_repair"] = True
+    passed = bool(run.get("passed"))
+    report = {
+        "passed": passed,
+        "total": total,
+        "command": "experience_assurance",
+        "run_id": rid,
+        "actor": str(run.get("actor") or ""),
+    }
+    return report, meta
+
+
 def evaluate_autonomy_gate(
     conn: sqlite3.Connection,
     *,
@@ -1114,7 +1222,9 @@ def _run_cursor_handoff_prompt(
     prompt: str,
     branch: str,
     cursor_mode: str,
+    model: str | None = None,
 ) -> Dict[str, Any]:
+    em = (model or "").strip() or executor_model_for_lane("self_heal")
     cmd = [
         sys.executable,
         str(CURSOR_HANDOFF_SCRIPT),
@@ -1126,6 +1236,8 @@ def _run_cursor_handoff_prompt(
         cursor_mode,
         "--read-only",
         "false",
+        "--model",
+        em,
         "--json",
         "--poll-max-attempts",
         "0",
@@ -1153,7 +1265,116 @@ def _run_cursor_handoff_prompt(
     if proc.returncode != 0 or not payload.get("ok"):
         detail = str(payload.get("error") or payload.get("response") or proc.stderr or stdout[:400])
         raise RuntimeError(detail)
+    payload["cursor_strategy"] = str(payload.get("cursor_strategy") or "single_pass")
+    payload["executor_model"] = str(payload.get("executor_model") or em)
     return payload
+
+
+def _try_self_heal_plan_first(
+    *,
+    repo_path: Path,
+    executor_prompt: str,
+    branch: str,
+    cursor_mode: str,
+) -> Dict[str, Any] | None:
+    """Planner read-only pass then executor; None triggers single-pass fallback."""
+    if not plan_first_enabled("self_heal"):
+        return None
+    pm = planner_model_for_lane("self_heal")
+    if not pm:
+        return None
+    em = executor_model_for_lane("self_heal")
+    poll_max, poll_iv = self_heal_handoff_poll_params()
+    timeout_sec = self_heal_handoff_timeout_seconds()
+    branch_plan = f"{branch}-plan-{uuid.uuid4().hex[:8]}"
+    planner_prompt = build_self_heal_cursor_planner_prompt(executor_prompt)
+    r1 = run_cursor_handoff_cli(
+        repo_path=repo_path,
+        prompt=planner_prompt,
+        branch=branch_plan,
+        cursor_mode=cursor_mode,
+        read_only=True,
+        model=pm,
+        poll_max_attempts=poll_max,
+        poll_interval_seconds=poll_iv,
+        timeout_seconds=timeout_sec,
+    )
+    p1 = r1.get("payload") if isinstance(r1.get("payload"), dict) else {}
+    if not r1.get("ok") or not p1.get("ok"):
+        return None
+    planner_agent = str(p1.get("agent_id") or "").strip()
+    if not planner_agent:
+        return None
+    conv = fetch_agent_conversation_payload(
+        repo_path=repo_path,
+        agent_id=planner_agent,
+        timeout_seconds=min(timeout_sec, 120),
+    )
+    resp = conv.get("response") if conv.get("ok") else None
+    plan_text = extract_plan_text_from_conversation(resp) if resp is not None else ""
+    if not plan_text_usable(plan_text):
+        return None
+    full_prompt = (
+        f"{executor_prompt}\n\n## Cursor planner output\n\n{plan_text}\n\n"
+        "Apply minimal, safe changes following the plan above.\n"
+    )
+    r2 = run_cursor_handoff_cli(
+        repo_path=repo_path,
+        prompt=full_prompt,
+        branch=branch,
+        cursor_mode=cursor_mode,
+        read_only=False,
+        model=em,
+        poll_max_attempts=poll_max,
+        poll_interval_seconds=poll_iv,
+        timeout_seconds=timeout_sec,
+    )
+    p2 = r2.get("payload") if isinstance(r2.get("payload"), dict) else {}
+    stdout2 = str(r2.get("stdout") or "").strip()
+    if not r2.get("ok") or not p2.get("ok"):
+        detail = str(
+            p2.get("error") or p2.get("response") or r2.get("stderr") or stdout2 or "cursor executor failed"
+        )
+        raise RuntimeError(detail)
+    out = dict(p2)
+    out["cursor_strategy"] = "plan_first"
+    out["planner_model"] = pm
+    out["executor_model"] = em
+    out["planner_agent_id"] = planner_agent
+    out["planner_branch"] = branch_plan
+    out["planner_status"] = str(p1.get("status") or "")
+    out["plan_summary"] = _clip(plan_text, 800)
+    return out
+
+
+def _run_self_heal_cursor_handoff(
+    *,
+    repo_path: Path,
+    prompt: str,
+    branch: str,
+    cursor_mode: str,
+) -> Dict[str, Any]:
+    planned = _try_self_heal_plan_first(
+        repo_path=repo_path,
+        executor_prompt=prompt,
+        branch=branch,
+        cursor_mode=cursor_mode,
+    )
+    if planned is not None:
+        return planned
+    return _run_cursor_handoff_prompt(
+        repo_path=repo_path,
+        prompt=prompt,
+        branch=branch,
+        cursor_mode=cursor_mode,
+    )
+
+
+def _self_heal_post_cursor_verify_enabled() -> bool:
+    raw = os.environ.get("ANDREA_SELF_HEAL_POST_CURSOR_VERIFY")
+    if raw is not None and str(raw).strip() != "":
+        return str(raw).strip().lower() not in {"0", "false", "no", "off"}
+    return post_cursor_verification_enabled()
 
 
 def apply_optimization_proposal(
@@ -1211,7 +1432,7 @@ def apply_optimization_proposal(
         or "auto"
     )
     try:
-        payload = _run_cursor_handoff_prompt(
+        payload = _run_self_heal_cursor_handoff(
             repo_path=repo_path,
             prompt=_build_auto_heal_prompt(proposal),
             branch=branch,
@@ -1229,40 +1450,241 @@ def apply_optimization_proposal(
                 "actor": actor,
                 "branch": branch,
                 "error": str(exc),
+                "submission_status": "failed",
+                "verification_status": "not_attempted",
+                "next_action": "retry_cursor_handoff_or_human",
             },
         )
         return {"ok": False, "proposal_id": proposal_id, "error": str(exc), "gate": gate}
-    result = {
-        "ok": True,
-        "proposal_id": proposal_id,
-        "title": str(proposal.get("title") or ""),
-        "category": str(proposal.get("category") or ""),
-        "branch": str(payload.get("branch") or branch),
-        "backend": str(payload.get("backend") or ""),
-        "agent_id": str(payload.get("agent_id") or ""),
-        "agent_url": str(payload.get("agent_url") or ""),
-        "pr_url": str(payload.get("pr_url") or ""),
-        "status": str(payload.get("status") or ""),
-        "gate": gate,
-    }
-    append_event(
-        conn,
-        SYSTEM_TASK_ID,
-        EventType.LOCAL_AUTO_HEAL_COMPLETED,
-        {
+
+    def _fail_auto_heal(
+        error: str,
+        *,
+        submission_status: str,
+        terminal_cursor_status: str,
+        verification_status: str,
+        next_action: str,
+        can_auto_verify: bool | None = None,
+        post_verify_error: str = "",
+        ref_source: str = "",
+        post_cursor_verification: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        append_event(
+            conn,
+            SYSTEM_TASK_ID,
+            EventType.LOCAL_AUTO_HEAL_FAILED,
+            {
+                "proposal_id": proposal_id,
+                "title": str(proposal.get("title") or ""),
+                "category": str(proposal.get("category") or ""),
+                "actor": actor,
+                "branch": str(payload.get("branch") or branch),
+                "backend": str(payload.get("backend") or ""),
+                "agent_id": str(payload.get("agent_id") or ""),
+                "agent_url": str(payload.get("agent_url") or ""),
+                "pr_url": str(payload.get("pr_url") or ""),
+                "status": str(payload.get("status") or ""),
+                "error": _clip(error, 800),
+                "submission_status": submission_status,
+                "terminal_cursor_status": terminal_cursor_status,
+                "verification_status": verification_status,
+                "next_action": next_action,
+                "can_auto_verify": can_auto_verify,
+                "post_verify_error": _clip(post_verify_error, 400),
+                "ref_source": ref_source,
+                "cursor_strategy": str(payload.get("cursor_strategy") or ""),
+                "planner_model": str(payload.get("planner_model") or ""),
+                "executor_model": str(payload.get("executor_model") or ""),
+                "planner_agent_id": str(payload.get("planner_agent_id") or ""),
+                "plan_summary": _clip(str(payload.get("plan_summary") or ""), 400),
+                "post_cursor_verification": dict(post_cursor_verification or {}),
+            },
+        )
+        return {
+            "ok": False,
             "proposal_id": proposal_id,
-            "title": result["title"],
-            "category": result["category"],
-            "actor": actor,
-            "branch": result["branch"],
-            "backend": result["backend"],
-            "agent_id": result["agent_id"],
-            "agent_url": result["agent_url"],
-            "pr_url": result["pr_url"],
-            "status": result["status"],
-        },
+            "error": error,
+            "gate": gate,
+            "branch": str(payload.get("branch") or branch),
+            "backend": str(payload.get("backend") or ""),
+            "agent_id": str(payload.get("agent_id") or ""),
+            "agent_url": str(payload.get("agent_url") or ""),
+            "pr_url": str(payload.get("pr_url") or ""),
+            "status": str(payload.get("status") or ""),
+            "submission_status": submission_status,
+            "terminal_cursor_status": terminal_cursor_status,
+            "verification_status": verification_status,
+            "next_action": next_action,
+            "post_cursor_verification": dict(post_cursor_verification or {}),
+        }
+
+    handoff = dict(payload)
+    backend = str(handoff.get("backend") or "").lower()
+    branch_name = str(handoff.get("branch") or branch).strip()
+    agent_id = str(handoff.get("agent_id") or "").strip()
+    poll_max, poll_iv = self_heal_handoff_poll_params()
+    status_timeout = min(120, self_heal_handoff_timeout_seconds())
+    terminal_up = str(handoff.get("status") or "").strip().upper()
+
+    if agent_id:
+        terminal_up, last_resp = poll_cursor_agent_until_terminal(
+            repo_path=repo_path,
+            agent_id=agent_id,
+            max_attempts=poll_max,
+            interval_seconds=poll_iv,
+            status_timeout_seconds=status_timeout,
+        )
+        enrich_handoff_payload_from_agent_status(handoff, last_resp)
+        handoff["status"] = terminal_up or str(handoff.get("status") or "")
+        terminal_up = str(handoff.get("status") or "").strip().upper()
+    elif backend == "api":
+        return _fail_auto_heal(
+            "cursor_handoff_missing_agent_id",
+            submission_status="succeeded",
+            terminal_cursor_status=terminal_up,
+            verification_status="not_attempted",
+            next_action="retry_cursor_handoff_or_human",
+            can_auto_verify=False,
+        )
+
+    if agent_id and terminal_up not in TERMINAL_CURSOR_AGENT_STATUSES:
+        return _fail_auto_heal(
+            "cursor_agent_not_terminal_after_poll",
+            submission_status="succeeded",
+            terminal_cursor_status=terminal_up or "UNKNOWN",
+            verification_status="not_attempted",
+            next_action="monitor_cursor_or_verify_manually",
+            can_auto_verify=False,
+        )
+
+    if agent_id and terminal_up in TERMINAL_CURSOR_AGENT_STATUSES and terminal_up != "FINISHED":
+        return _fail_auto_heal(
+            f"cursor_agent_ended_{terminal_up.lower() or 'unknown'}",
+            submission_status="succeeded",
+            terminal_cursor_status=terminal_up,
+            verification_status="not_attempted",
+            next_action="human_review_cursor_failed",
+            can_auto_verify=False,
+        )
+
+    if not _self_heal_post_cursor_verify_enabled():
+        return _fail_auto_heal(
+            "self_heal_post_cursor_verify_disabled",
+            submission_status="succeeded",
+            terminal_cursor_status=terminal_up,
+            verification_status="skipped",
+            next_action="enable_post_verify_or_verify_manually",
+            can_auto_verify=None,
+            post_verify_error="disabled_by_env",
+        )
+
+    if not branch_name:
+        return _fail_auto_heal(
+            "self_heal_missing_branch_for_verify",
+            submission_status="succeeded",
+            terminal_cursor_status=terminal_up,
+            verification_status="unverified",
+            next_action="human_review_branch_unavailable",
+            can_auto_verify=False,
+            post_verify_error="missing_branch",
+        )
+
+    should_verify = True
+    if backend == "api":
+        should_verify = terminal_up == "FINISHED"
+    if not should_verify:
+        return _fail_auto_heal(
+            "self_heal_api_agent_not_finished",
+            submission_status="succeeded",
+            terminal_cursor_status=terminal_up,
+            verification_status="skipped",
+            next_action="monitor_cursor_or_verify_manually",
+            can_auto_verify=False,
+            post_verify_error="agent_not_finished",
+        )
+
+    checks = build_default_verification_checks(repo_path)
+    vres = verify_cursor_branch_in_isolated_worktree(
+        repo_path=repo_path,
+        branch=branch_name,
+        incident_id=f"autoheal-{proposal_id}",
+        verification_checks=checks,
     )
-    return result
+    if vres.get("ok") and vres.get("passed"):
+        result = {
+            "ok": True,
+            "proposal_id": proposal_id,
+            "title": str(proposal.get("title") or ""),
+            "category": str(proposal.get("category") or ""),
+            "branch": branch_name,
+            "backend": backend,
+            "agent_id": agent_id,
+            "agent_url": str(handoff.get("agent_url") or ""),
+            "pr_url": str(handoff.get("pr_url") or ""),
+            "status": terminal_up or str(handoff.get("status") or ""),
+            "gate": gate,
+            "submission_status": "succeeded",
+            "terminal_cursor_status": terminal_up,
+            "verification_status": "passed",
+            "next_action": "none",
+            "can_auto_verify": True,
+            "post_cursor_verification": dict(vres),
+        }
+        append_event(
+            conn,
+            SYSTEM_TASK_ID,
+            EventType.LOCAL_AUTO_HEAL_COMPLETED,
+            {
+                "proposal_id": proposal_id,
+                "title": result["title"],
+                "category": result["category"],
+                "actor": actor,
+                "branch": result["branch"],
+                "backend": result["backend"],
+                "agent_id": result["agent_id"],
+                "agent_url": result["agent_url"],
+                "pr_url": result["pr_url"],
+                "status": result["status"],
+                "submission_status": result["submission_status"],
+                "terminal_cursor_status": result["terminal_cursor_status"],
+                "verification_status": result["verification_status"],
+                "next_action": result["next_action"],
+                "can_auto_verify": result["can_auto_verify"],
+                "ref_source": str(vres.get("ref_source") or ""),
+                "cursor_strategy": str(handoff.get("cursor_strategy") or ""),
+                "planner_model": str(handoff.get("planner_model") or ""),
+                "executor_model": str(handoff.get("executor_model") or ""),
+                "planner_agent_id": str(handoff.get("planner_agent_id") or ""),
+                "plan_summary": _clip(str(handoff.get("plan_summary") or ""), 400),
+                "post_cursor_verification": dict(vres),
+            },
+        )
+        return result
+
+    if vres.get("ok") and not vres.get("passed"):
+        return _fail_auto_heal(
+            str(vres.get("error") or "post_cursor_verification_failed"),
+            submission_status="succeeded",
+            terminal_cursor_status=terminal_up,
+            verification_status="failed",
+            next_action="human_review_verification_failed",
+            can_auto_verify=True,
+            post_verify_error=str(vres.get("error") or ""),
+            ref_source=str(vres.get("ref_source") or ""),
+            post_cursor_verification=vres,
+        )
+
+    return _fail_auto_heal(
+        str(vres.get("error") or "post_cursor_verification_unavailable"),
+        submission_status="succeeded",
+        terminal_cursor_status=terminal_up,
+        verification_status="unverified",
+        next_action="human_review_branch_unavailable",
+        can_auto_verify=False,
+        post_verify_error=str(vres.get("error") or ""),
+        ref_source=str(vres.get("ref_source") or ""),
+        post_cursor_verification=vres,
+    )
 
 
 def apply_ready_proposals(
@@ -1306,6 +1728,7 @@ def run_optimization_cycle(
     repo_path: Path | None = None,
     auto_apply_ready: bool = False,
     idle_seconds: float = 120.0,
+    autonomy_evidence: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     ensure_system_task(conn)
     run_id = f"opt_{uuid.uuid4().hex[:12]}"
@@ -1419,25 +1842,38 @@ def run_optimization_cycle(
                 actor=actor,
                 auto_apply_ready=auto_apply_ready,
             )
+        completed_payload: Dict[str, Any] = {
+            "run_id": run_id,
+            "actor": actor,
+            "analysis_mode": analysis_mode,
+            "outcome_count": len(outcomes),
+            "finding_count": len(findings),
+            "proposal_count": len(proposals),
+            "gate_allowed": bool(gate.get("allowed")),
+            "gate_reasons": list(gate.get("reasons") or []),
+            "background_ready": readiness.get("ready") if readiness else None,
+            "background_budget_usage": lane_bundle.get("budget_usage") if lane_bundle else {},
+            "background_auto_applied": len(lane_bundle.get("auto_heal", {}).get("applied") or [])
+            if lane_bundle
+            else 0,
+        }
+        if isinstance(autonomy_evidence, dict) and autonomy_evidence:
+            completed_payload["autonomy_evidence"] = {
+                "source": str(autonomy_evidence.get("source") or ""),
+                "run_id": str(autonomy_evidence.get("run_id") or ""),
+                "fresh": bool(autonomy_evidence.get("fresh")),
+                "age_seconds": autonomy_evidence.get("age_seconds"),
+                "total_checks": int(autonomy_evidence.get("total_checks") or 0),
+                "eligible_for_background_repair": bool(
+                    autonomy_evidence.get("eligible_for_background_repair")
+                ),
+                "blocked_reason": str(autonomy_evidence.get("blocked_reason") or ""),
+            }
         append_event(
             conn,
             SYSTEM_TASK_ID,
             EventType.OPTIMIZATION_RUN_COMPLETED,
-            {
-                "run_id": run_id,
-                "actor": actor,
-                "analysis_mode": analysis_mode,
-                "outcome_count": len(outcomes),
-                "finding_count": len(findings),
-                "proposal_count": len(proposals),
-                "gate_allowed": bool(gate.get("allowed")),
-                "gate_reasons": list(gate.get("reasons") or []),
-                "background_ready": readiness.get("ready") if readiness else None,
-                "background_budget_usage": lane_bundle.get("budget_usage") if lane_bundle else {},
-                "background_auto_applied": len(lane_bundle.get("auto_heal", {}).get("applied") or [])
-                if lane_bundle
-                else 0,
-            },
+            completed_payload,
         )
         metric_log(
             "optimization_cycle_completed",
@@ -1473,6 +1909,8 @@ def run_optimization_cycle(
             }
             result["budget_usage"] = lane_bundle.get("budget_usage")
             result["auto_heal"] = lane_bundle.get("auto_heal")
+        if isinstance(autonomy_evidence, dict) and autonomy_evidence:
+            result["autonomy_evidence"] = dict(autonomy_evidence)
         if analysis_mode != "heuristic":
             result["openclaw_analysis_prompt"] = openclaw_prompt
         return result

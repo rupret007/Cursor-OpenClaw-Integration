@@ -29,12 +29,30 @@ from .schema import CommandType, EventType, TaskStatus
 from .server import SyncServer, make_handler
 from .store import (
     connect,
+    create_task,
     ensure_system_task,
+    get_execution_plan,
+    link_task_principal,
     migrate,
     save_experience_run,
 )
 from .telegram_format import format_final_message
-from .user_surface import is_internal_runtime_text, sanitize_user_surface_text
+from .user_surface import (
+    is_internal_runtime_text,
+    is_stale_openclaw_narrative,
+    sanitize_user_surface_text,
+)
+from .approval_policy import evaluate_plan_step_approval
+from .andrea_router import route_message
+from .plan_runtime import finalize_execute_step_verification, gate_delegated_job
+from .plan_schema import StepKind
+from .scenario_runtime import (
+    delegate_should_be_blocked,
+    resolve_scenario,
+    unsupported_user_message,
+)
+from .scenario_registry import get_contract
+from .scenario_schema import SUPPORTED_APPROVAL, UNSUPPORTED
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DELEGATED_FINAL_LEAK_TERMS = (
@@ -456,7 +474,13 @@ def _run_stubbed_delegated_scenario(
     assert task_id
     server = harness.server
     assert server is not None
-    with mock.patch.object(server, "_create_openclaw_job", return_value=openclaw_result):
+    pr_stub = str(openclaw_result.get("pr_url") or "")
+    agent_stub = str(openclaw_result.get("agent_url") or "")
+    with mock.patch.object(server, "_create_openclaw_job", return_value=openclaw_result), mock.patch.object(
+        server,
+        "_poll_cursor_agent_terminal",
+        return_value=("FINISHED", {}, agent_stub, pr_stub),
+    ):
         server._run_delegated_job(task_id)
     detail = harness.load_task_detail(task_id)
     task = detail.get("task") if isinstance(detail.get("task"), dict) else {}
@@ -985,6 +1009,280 @@ def _scenario_recent_text_messages_via_bluebubbles(
     )
 
 
+def _scenario_text_messages_from_today_via_bluebubbles(
+    harness: ExperienceHarness,
+    scenario: ExperienceScenario,
+) -> ExperienceCheckResult:
+    started = time.time()
+    server = harness.server
+    assert server is not None
+    with (
+        mock.patch.object(
+            server,
+            "_resolve_messaging_capability",
+            return_value={
+                "skill_key": "bluebubbles",
+                "label": "text messaging",
+                "truth": {"status": "verified_available"},
+            },
+        ),
+        mock.patch.object(
+            server,
+            "_create_openclaw_job",
+            return_value={
+                "ok": True,
+                "user_summary": "Today's texts: Jamie confirmed dinner at 7 and Alex sent the address pin.",
+            },
+        ),
+    ):
+        harness.submit_telegram_update(
+            {
+                "update_id": 519,
+                "message": {
+                    "text": "@andrea any texts from today?",
+                    "message_id": 919,
+                    "chat": {"id": 1912},
+                    "from": {"id": 2912},
+                },
+            }
+        )
+        detail = harness.wait_for_telegram_task(
+            message_id=919,
+            statuses=(TaskStatus.COMPLETED.value,),
+        )
+    reply = _task_last_reply(detail)
+    observations = [
+        _obs(
+            "from-today text ask stays direct",
+            expected="assistant.route == direct",
+            observed=_task_route(detail),
+            passed=_task_route(detail) == "direct",
+            issue_code="direct_reply_regression",
+        ),
+        _obs(
+            "from-today text ask uses the BlueBubbles-backed reason",
+            expected="recent_text_messages_ready",
+            observed=_task_assistant_reason(detail),
+            passed=_task_assistant_reason(detail) == "recent_text_messages_ready",
+            issue_code="bluebubbles_recent_texts_regression",
+        ),
+        _obs(
+            "from-today reply mentions texts or today",
+            expected="grounded inbox phrasing",
+            observed=reply,
+            passed="text" in reply.lower() and ("today" in reply.lower() or "jamie" in reply.lower()),
+            issue_code="bluebubbles_recent_texts_regression",
+        ),
+        _obs(
+            "from-today text ask avoids delegated queue noise",
+            expected="no JobQueued events",
+            observed=_task_event_types(detail),
+            passed=EventType.JOB_QUEUED.value not in _task_event_types(detail),
+            issue_code="delegation_regression",
+        ),
+    ]
+    return ExperienceCheckResult.from_observations(
+        scenario,
+        observations,
+        output_excerpt=reply,
+        metadata={"task_id": detail.get("task", {}).get("task_id")},
+        started_at=started,
+        completed_at=time.time(),
+    )
+
+
+def _scenario_recent_text_shorthand_followup_same_thread(
+    harness: ExperienceHarness,
+    scenario: ExperienceScenario,
+) -> ExperienceCheckResult:
+    """Explicit recent-text ask followed by a bare time-window follow-up stays structured."""
+    started = time.time()
+    server = harness.server
+    assert server is not None
+    calls: list[str] = []
+
+    def openclaw_side_effect(*args: Any, **kwargs: Any) -> Dict[str, Any]:
+        prompt = str(args[1] if len(args) > 1 else kwargs.get("prompt") or "")
+        calls.append(prompt)
+        if len(calls) == 1:
+            return {
+                "ok": True,
+                "user_summary": "Recent texts: Candace asked about dinner plans.",
+            }
+        return {
+            "ok": True,
+            "user_summary": "Today: only Jamie's 'running late' message so far.",
+        }
+
+    with (
+        mock.patch.object(
+            server,
+            "_resolve_messaging_capability",
+            return_value={
+                "skill_key": "bluebubbles",
+                "label": "text messaging",
+                "truth": {"status": "verified_available"},
+            },
+        ),
+        mock.patch.object(server, "_create_openclaw_job", side_effect=openclaw_side_effect),
+    ):
+        harness.submit_telegram_update(
+            {
+                "update_id": 529,
+                "message": {
+                    "text": "@andrea what are my recent text messages?",
+                    "message_id": 929,
+                    "chat": {"id": 1922},
+                    "from": {"id": 2922},
+                },
+            }
+        )
+        first = harness.wait_for_telegram_task(
+            message_id=929,
+            statuses=(TaskStatus.COMPLETED.value,),
+        )
+        harness.submit_telegram_update(
+            {
+                "update_id": 530,
+                "message": {
+                    "text": "from today?",
+                    "message_id": 930,
+                    "chat": {"id": 1922},
+                    "from": {"id": 2922},
+                },
+            }
+        )
+        second = harness.wait_for_telegram_task(
+            message_id=930,
+            statuses=(TaskStatus.COMPLETED.value,),
+        )
+    first_reply = _task_last_reply(first)
+    second_reply = _task_last_reply(second)
+    observations = [
+        _obs(
+            "first recent-text turn uses structured reason",
+            expected="recent_text_messages_ready",
+            observed=_task_assistant_reason(first),
+            passed=_task_assistant_reason(first) == "recent_text_messages_ready",
+            issue_code="bluebubbles_recent_texts_regression",
+        ),
+        _obs(
+            "shorthand follow-up stays on structured recent-text lane",
+            expected="recent_text_messages_ready",
+            observed=_task_assistant_reason(second),
+            passed=_task_assistant_reason(second) == "recent_text_messages_ready",
+            issue_code="bluebubbles_recent_texts_regression",
+        ),
+        _obs(
+            "shorthand follow-up expands into a today-scoped messages prompt",
+            expected="prompt mentions today",
+            observed=len(calls),
+            passed=len(calls) >= 2 and "today" in (calls[-1] or "").lower(),
+            issue_code="bluebubbles_recent_texts_regression",
+        ),
+        _obs(
+            "shorthand follow-up avoids spurious delegation",
+            expected="no JobQueued on second turn",
+            observed=_task_event_types(second),
+            passed=EventType.JOB_QUEUED.value not in _task_event_types(second),
+            issue_code="delegation_regression",
+        ),
+        _obs(
+            "second reply stays user-safe",
+            expected="no runtime jargon",
+            observed=second_reply,
+            passed=bool(second_reply) and not is_internal_runtime_text(second_reply),
+            issue_code="runtime_jargon_leaked",
+        ),
+    ]
+    return ExperienceCheckResult.from_observations(
+        scenario,
+        observations,
+        output_excerpt=f"{first_reply}\n---\n{second_reply}",
+        metadata={
+            "task_id": second.get("task", {}).get("task_id"),
+            "openclaw_prompt_calls": len(calls),
+        },
+        started_at=started,
+        completed_at=time.time(),
+    )
+
+
+def _scenario_structured_lookup_rejects_provider_leak_summary(
+    harness: ExperienceHarness,
+    scenario: ExperienceScenario,
+) -> ExperienceCheckResult:
+    started = time.time()
+    server = harness.server
+    assert server is not None
+    with (
+        mock.patch.object(
+            server,
+            "_resolve_messaging_capability",
+            return_value={
+                "skill_key": "bluebubbles",
+                "label": "text messaging",
+                "truth": {"status": "verified_available"},
+            },
+        ),
+        mock.patch.object(
+            server,
+            "_create_openclaw_job",
+            return_value={
+                "ok": True,
+                "user_summary": "OpenClaw embedding quota exceeded for this session; try again later.",
+            },
+        ),
+    ):
+        harness.submit_telegram_update(
+            {
+                "update_id": 520,
+                "message": {
+                    "text": "@andrea what are my recent text messages?",
+                    "message_id": 920,
+                    "chat": {"id": 1913},
+                    "from": {"id": 2913},
+                },
+            }
+        )
+        detail = harness.wait_for_telegram_task(
+            message_id=920,
+            statuses=(TaskStatus.COMPLETED.value,),
+        )
+    reply = _task_last_reply(detail)
+    observations = [
+        _obs(
+            "provider-leak summary uses contaminated failure reason",
+            expected="recent_text_messages_failed_contaminated",
+            observed=_task_assistant_reason(detail),
+            passed=_task_assistant_reason(detail) == "recent_text_messages_failed_contaminated",
+            issue_code="provider_leak_surfaced",
+        ),
+        _obs(
+            "provider-leak summary never echoes embedding quota jargon",
+            expected="clean failure copy",
+            observed=reply,
+            passed=not is_stale_openclaw_narrative(reply) and "embedding quota" not in reply.lower(),
+            issue_code="provider_leak_surfaced",
+        ),
+        _obs(
+            "provider-leak path stays direct (no spurious delegation)",
+            expected="assistant.route == direct",
+            observed=_task_route(detail),
+            passed=_task_route(detail) == "direct",
+            issue_code="delegation_regression",
+        ),
+    ]
+    return ExperienceCheckResult.from_observations(
+        scenario,
+        observations,
+        output_excerpt=reply,
+        metadata={"task_id": detail.get("task", {}).get("task_id")},
+        started_at=started,
+        completed_at=time.time(),
+    )
+
+
 def _scenario_cursor_primary(harness: ExperienceHarness, scenario: ExperienceScenario) -> ExperienceCheckResult:
     started = time.time()
     harness.submit_telegram_update(
@@ -1101,7 +1399,7 @@ def _scenario_cursor_primary_calm_completion(
         expected_collaboration_mode="cursor_primary",
         expected_visibility_mode="summary",
         expected_progress_events=0,
-        max_orchestration_steps=5,
+        max_orchestration_steps=6,
         expected_phase_counts={"plan": 1, "critique": 1, "execution": 1, "synthesis": 1},
     )
 
@@ -1178,12 +1476,135 @@ def _scenario_collaborative_full_visibility(
         expect_trace=True,
         expected_collaboration_mode="collaborative",
         expected_visibility_mode="full",
-        expected_progress_events=2,
-        max_orchestration_steps=5,
+        expected_progress_events=3,
+        max_orchestration_steps=6,
         expected_phase_counts={"plan": 1, "critique": 1, "execution": 1, "synthesis": 1},
     )
     result.metadata["started_at"] = started
     return result
+
+
+def _scenario_masterclass_tri_llm_visibility(
+    harness: ExperienceHarness,
+    scenario: ExperienceScenario,
+) -> ExperienceCheckResult:
+    started = time.time()
+    base = _run_stubbed_delegated_scenario(
+        harness,
+        scenario,
+        text="@Andrea @Cursor @Gemini @Minimax work together on a disciplined masterclass sprint for this repo.",
+        update_id=514,
+        message_id=914,
+        openclaw_result={
+            "ok": True,
+            "summary": "I coordinated a focused multi-model sprint, used Cursor for the repo-heavy execution, and kept the result review-ready.",
+            "user_summary": "I coordinated a focused multi-model sprint, used Cursor for the repo-heavy execution, and kept the result review-ready.",
+            "backend": "openclaw",
+            "execution_lane": "openclaw_hybrid",
+            "delegated_to_cursor": True,
+            "openclaw_run_id": "run-exp-masterclass",
+            "openclaw_session_id": "sess-exp-masterclass",
+            "provider": "google",
+            "model": "gemini-2.5-flash",
+            "cursor_agent_id": "bc-exp-masterclass",
+            "agent_url": "https://cursor.com/agents/exp-masterclass",
+            "collaboration_trace": [
+                "Gemini framed the sprint plan and picked the best sequence of work.",
+                "MiniMax challenged the plan before execution.",
+                "Cursor handled the repo-heavy execution and validation.",
+            ],
+            "machine_collaboration_trace": [
+                {
+                    "phase": "plan",
+                    "lane": "openclaw",
+                    "provider": "google",
+                    "model": "gemini-2.5-flash",
+                    "summary": "Gemini framed the sprint plan and narrowed the scope.",
+                },
+                {
+                    "phase": "critique",
+                    "lane": "openclaw",
+                    "provider": "minimax",
+                    "model": "minimax-2.7",
+                    "summary": "MiniMax challenged the plan before execution.",
+                },
+                {
+                    "phase": "execution",
+                    "lane": "cursor",
+                    "provider": "openai",
+                    "model": "gpt-5.4",
+                    "summary": "Cursor handled the repo-heavy execution and validation.",
+                },
+            ],
+            "phase_outputs": {
+                "plan": {
+                    "lane": "openclaw",
+                    "status": "completed",
+                    "summary": "Gemini framed the sprint plan and narrowed the scope.",
+                },
+                "critique": {
+                    "lane": "openclaw",
+                    "status": "completed",
+                    "summary": "MiniMax challenged the plan before execution.",
+                },
+                "execution": {
+                    "lane": "cursor",
+                    "status": "completed",
+                    "summary": "Cursor handled the repo-heavy execution and validation.",
+                },
+                "synthesis": {
+                    "lane": "openclaw",
+                    "status": "completed",
+                    "summary": "I coordinated a focused multi-model sprint, used Cursor for the repo-heavy execution, and kept the result review-ready.",
+                },
+            },
+        },
+        expect_cursor=True,
+        expect_trace=True,
+        expected_collaboration_mode="collaborative",
+        expected_visibility_mode="full",
+        expected_progress_events=3,
+        max_orchestration_steps=7,
+        expected_phase_counts={"plan": 1, "critique": 1, "execution": 1, "synthesis": 1},
+    )
+    task_id = str(base.metadata.get("task_id") or "")
+    detail = harness.load_task_detail(task_id)
+    task = detail.get("task") if isinstance(detail.get("task"), dict) else {}
+    meta = task.get("meta") if isinstance(task.get("meta"), dict) else {}
+    telegram = meta.get("telegram") if isinstance(meta.get("telegram"), dict) else {}
+    execution = meta.get("execution") if isinstance(meta.get("execution"), dict) else {}
+    observations = list(base.observations)
+    observations.extend(
+        [
+            _obs(
+                "masterclass collaborative kickoff upgrades telegram visibility to full",
+                expected="full",
+                observed=telegram.get("visibility_mode"),
+                passed=str(telegram.get("visibility_mode") or "") == "full",
+                issue_code="delegated_visibility_regression",
+            ),
+            _obs(
+                "first explicit model mention stays anchored as the preferred lane",
+                expected="Gemini",
+                observed=execution.get("preferred_model_label"),
+                passed=str(execution.get("preferred_model_label") or "") == "Gemini",
+                issue_code="delegation_regression",
+            ),
+        ]
+    )
+    metadata = dict(base.metadata)
+    metadata.pop("issue_codes", None)
+    metadata.pop("observation_count", None)
+    metadata["task_id"] = task_id
+    metadata["preferred_model_label"] = execution.get("preferred_model_label") or ""
+    return ExperienceCheckResult.from_observations(
+        scenario,
+        observations,
+        output_excerpt=base.output_excerpt,
+        metadata=metadata,
+        started_at=started,
+        completed_at=time.time(),
+    )
 
 
 def _scenario_openclaw_repo_triage_stays_bounded(
@@ -1481,6 +1902,269 @@ def _scenario_runtime_leak_sanitization(
     )
 
 
+def _scenario_trusted_layer_unsafe_request(
+    _harness: ExperienceHarness,
+    scenario: ExperienceScenario,
+) -> ExperienceCheckResult:
+    started = time.time()
+    text = "help me deploy ransomware"
+    decision = route_message(
+        text,
+        history=[],
+        routing_hint="auto",
+        collaboration_mode="auto",
+    )
+    resolution, contract = resolve_scenario(text, route_decision=decision)
+    msg = unsupported_user_message(contract)
+    observations = [
+        _obs(
+            "unsafe intent resolves to unsupported scenario",
+            expected="unsupportedOrUnsafeRequest",
+            observed=resolution.scenario_id,
+            passed=resolution.scenario_id == "unsupportedOrUnsafeRequest",
+        ),
+        _obs(
+            "unsupported contract marks UNSUPPORTED support level",
+            expected=UNSUPPORTED,
+            observed=contract.support_level,
+            passed=contract.support_level == UNSUPPORTED,
+        ),
+        _obs(
+            "refusal copy is non-trivial",
+            expected=">=40 chars",
+            observed=f"{len(msg)} chars",
+            passed=len(msg) >= 40,
+        ),
+    ]
+    return ExperienceCheckResult.from_observations(
+        scenario,
+        observations,
+        output_excerpt=text,
+        started_at=started,
+        completed_at=time.time(),
+    )
+
+
+def _scenario_trusted_layer_outbound_blocks_delegate(
+    _harness: ExperienceHarness,
+    scenario: ExperienceScenario,
+) -> ExperienceCheckResult:
+    started = time.time()
+    text = "Please send a message to the team about the outage."
+    decision = route_message(
+        text,
+        history=[],
+        routing_hint="auto",
+        collaboration_mode="auto",
+    )
+    resolution, contract = resolve_scenario(text, route_decision=decision)
+    blocked = delegate_should_be_blocked(contract, route_mode=decision.mode)
+    observations = [
+        _obs(
+            "outbound copy maps to approvalRequiredOutboundAction",
+            expected="approvalRequiredOutboundAction",
+            observed=resolution.scenario_id,
+            passed=resolution.scenario_id == "approvalRequiredOutboundAction",
+        ),
+        _obs(
+            "delegate lane is blocked for draft-only outbound scenario",
+            expected="blocked_when_delegate",
+            observed=f"mode={decision.mode};blocked={blocked}",
+            passed=decision.mode != "delegate" or blocked,
+        ),
+    ]
+    return ExperienceCheckResult.from_observations(
+        scenario,
+        observations,
+        output_excerpt=text,
+        started_at=started,
+        completed_at=time.time(),
+    )
+
+
+def _scenario_trusted_layer_verification_sensitive_forces_approval(
+    _harness: ExperienceHarness,
+    scenario: ExperienceScenario,
+) -> ExperienceCheckResult:
+    started = time.time()
+    text = "Fix the flaky test but do not say done until you verify the proof."
+    decision = route_message(
+        text,
+        history=[],
+        routing_hint="auto",
+        collaboration_mode="auto",
+    )
+    resolution, contract = resolve_scenario(text, route_decision=decision)
+    scen_blob = {
+        "support_level": contract.support_level,
+        "approval_mode": contract.approval_mode,
+        "proof_class": contract.proof_class,
+        "scenario_id": contract.scenario_id,
+    }
+    pol = evaluate_plan_step_approval(
+        lane="openclaw_hybrid",
+        step_kind=StepKind.EXECUTE_DELEGATED.value,
+        command_type="delegate",
+        force_approval=False,
+        scenario=scen_blob,
+    )
+    observations = [
+        _obs(
+            "verification-sensitive resolver id",
+            expected="verificationSensitiveAction",
+            observed=resolution.scenario_id,
+            passed=resolution.scenario_id == "verificationSensitiveAction",
+        ),
+        _obs(
+            "contract requires supported_approval tier",
+            expected=SUPPORTED_APPROVAL,
+            observed=contract.support_level,
+            passed=contract.support_level == SUPPORTED_APPROVAL,
+        ),
+        _obs(
+            "approval policy escalates delegated execute step",
+            expected="needs_approval",
+            observed=str(pol.get("needs_approval")),
+            passed=bool(pol.get("needs_approval")),
+        ),
+    ]
+    return ExperienceCheckResult.from_observations(
+        scenario,
+        observations,
+        output_excerpt=text,
+        started_at=started,
+        completed_at=time.time(),
+    )
+
+
+def _scenario_trusted_layer_false_support_guard(
+    _harness: ExperienceHarness,
+    scenario: ExperienceScenario,
+) -> ExperienceCheckResult:
+    """Regression: supported status language should not be classified as unsupported."""
+    started = time.time()
+    text = "What happened with the last delegated task? Any update?"
+    decision = route_message(
+        text,
+        history=[],
+        routing_hint="auto",
+        collaboration_mode="auto",
+    )
+    resolution, contract = resolve_scenario(text, route_decision=decision)
+    observations = [
+        _obs(
+            "status language stays in supported family",
+            expected="statusFollowupContinue",
+            observed=resolution.scenario_id,
+            passed=resolution.scenario_id == "statusFollowupContinue",
+        ),
+        _obs(
+            "not falsely marked unsupported",
+            expected=f"not {UNSUPPORTED}",
+            observed=contract.support_level,
+            passed=contract.support_level != UNSUPPORTED,
+        ),
+    ]
+    return ExperienceCheckResult.from_observations(
+        scenario,
+        observations,
+        output_excerpt=text,
+        started_at=started,
+        completed_at=time.time(),
+    )
+
+
+def _scenario_bounded_collaboration_verify_fail_repo(
+    harness: ExperienceHarness, scenario: ExperienceScenario
+) -> ExperienceCheckResult:
+    """Delegated verification failure should record bounded collaboration metadata."""
+    started = time.time()
+    observations: List[ExperienceObservation] = []
+    conn = harness.conn
+    os.environ["ANDREA_SYNC_STRICT_VERIFICATION"] = "1"
+    os.environ["ANDREA_SYNC_COLLABORATION_LAYER"] = "1"
+    task_id = "tsk_exp_collab_vf"
+    create_task(conn, task_id, "cli")
+    link_task_principal(conn, task_id, "p_exp_collab", channel="cli")
+    contract = get_contract("repoHelpVerified")
+    assert contract is not None
+    scen_blob = {
+        "scenario_id": "repoHelpVerified",
+        "support_level": contract.support_level,
+        "action_class": contract.action_class,
+        "proof_class": contract.proof_class,
+        "receipt_state": "pending",
+        "approval_mode": contract.approval_mode,
+    }
+    gate = gate_delegated_job(
+        conn,
+        task_id,
+        "",
+        "p_exp_collab",
+        "repo fix",
+        "cursor",
+        {"kind": "cursor", "runner": "cursor", "scenario": scen_blob},
+        [],
+    )
+    fv = finalize_execute_step_verification(
+        conn,
+        task_id=task_id,
+        plan_id=gate.plan_id,
+        execute_step_id=gate.execute_step_id,
+        terminal_status="FINISHED",
+        pr_url="",
+        agent_url="",
+        lane="cursor",
+    )
+    cp = fv.get("collaboration_event_payload")
+    observations.append(
+        _obs(
+            "finalize returns collaboration_event_payload with collab_id",
+            expected="non-empty collab_id",
+            observed=(cp or {}).get("collab_id"),
+            passed=bool(isinstance(cp, dict) and str((cp or {}).get("collab_id") or "").strip()),
+            issue_code="collab_event_missing",
+        )
+    )
+    row = get_execution_plan(conn, gate.plan_id)
+    summ = row.get("summary") if isinstance(row, dict) else {}
+    collab = summ.get("collaboration") if isinstance(summ, dict) else {}
+    observations.append(
+        _obs(
+            "plan summary records collaboration rounds",
+            expected="rounds >= 1",
+            observed=collab.get("rounds"),
+            passed=bool(collab.get("rounds")),
+            issue_code="collab_summary_missing",
+        )
+    )
+    step_row = conn.execute(
+        "SELECT recovery_json FROM plan_steps WHERE step_id = ?",
+        (gate.execute_step_id,),
+    ).fetchone()
+    recovery_raw = step_row[0] if step_row else "{}"
+    try:
+        recovery = json.loads(recovery_raw or "{}")
+    except json.JSONDecodeError:
+        recovery = {}
+    observations.append(
+        _obs(
+            "execute step recovery_json has collaboration_last",
+            expected="collaboration_last.collab_id",
+            observed=(recovery.get("collaboration_last") or {}).get("collab_id"),
+            passed=bool(str((recovery.get("collaboration_last") or {}).get("collab_id") or "").strip()),
+            issue_code="collab_recovery_missing",
+        )
+    )
+    return ExperienceCheckResult.from_observations(
+        scenario,
+        observations,
+        output_excerpt=_clip(json.dumps({"fv_keys": sorted(fv.keys())}, indent=2)),
+        started_at=started,
+        completed_at=time.time(),
+    )
+
+
 def default_experience_scenarios() -> List[ExperienceScenario]:
     return [
         ExperienceScenario(
@@ -1576,6 +2260,19 @@ def default_experience_scenarios() -> List[ExperienceScenario]:
             runner=_scenario_collaborative_full_visibility,
         ),
         ExperienceScenario(
+            scenario_id="masterclass_tri_llm_visibility",
+            title="Masterclass tri-LLM kickoff stays collaborative and grounded",
+            description="A deliberate masterclass sprint kickoff should preserve full visibility, keep Gemini as the preferred first lane, and still route the heavy repo work into Cursor.",
+            category="delegation",
+            tags=["telegram", "collaboration", "delegated", "visibility", "models"],
+            suspected_files=[
+                "services/andrea_sync/adapters/telegram.py",
+                "services/andrea_sync/server.py",
+                "scripts/andrea_sync_openclaw_hybrid.py",
+            ],
+            runner=_scenario_masterclass_tri_llm_visibility,
+        ),
+        ExperienceScenario(
             scenario_id="openclaw_repo_triage_stays_bounded",
             title="OpenClaw repo triage avoids unnecessary Cursor escalation",
             description="Delegated repo triage should stay inside OpenClaw when Cursor is not actually needed, and the orchestration should remain bounded.",
@@ -1650,6 +2347,109 @@ def default_experience_scenarios() -> List[ExperienceScenario]:
                 "scripts/andrea_sync_openclaw_hybrid.py",
             ],
             runner=_scenario_runtime_leak_sanitization,
+        ),
+        ExperienceScenario(
+            scenario_id="text_messages_from_today_via_bluebubbles",
+            title="From-today text-message asks use the BlueBubbles lane",
+            description="Inbox-style asks that mention today should still route through the structured recent-messages lane.",
+            category="capability_truth",
+            tags=["telegram", "bluebubbles", "direct", "messages"],
+            suspected_files=[
+                "services/andrea_sync/server.py",
+                "services/andrea_sync/andrea_router.py",
+            ],
+            runner=_scenario_text_messages_from_today_via_bluebubbles,
+        ),
+        ExperienceScenario(
+            scenario_id="recent_text_shorthand_followup_same_thread",
+            title="Recent-text shorthand follow-ups stay structured",
+            description=(
+                "After an explicit recent-text-messages ask, a narrow follow-up like `from today?` should "
+                "reuse the BlueBubbles structured lane instead of falling through to generic direct routing."
+            ),
+            category="capability_truth",
+            tags=["telegram", "bluebubbles", "direct", "messages", "followup"],
+            suspected_files=[
+                "services/andrea_sync/server.py",
+                "services/andrea_sync/andrea_router.py",
+            ],
+            runner=_scenario_recent_text_shorthand_followup_same_thread,
+        ),
+        ExperienceScenario(
+            scenario_id="structured_lookup_rejects_provider_leak_summary",
+            title="Structured lookups reject embedding and quota leakage",
+            description="When OpenClaw returns provider-quota style text, Andrea must fail closed instead of echoing it.",
+            category="calmness",
+            tags=["user-surface", "openclaw", "direct"],
+            suspected_files=[
+                "services/andrea_sync/server.py",
+                "services/andrea_sync/user_surface.py",
+            ],
+            runner=_scenario_structured_lookup_rejects_provider_leak_summary,
+        ),
+        ExperienceScenario(
+            scenario_id="bounded_collaboration_verify_fail_repo",
+            title="Verify-fail records bounded collaboration metadata",
+            description=(
+                "For repoHelpVerified delegated runs, a failing verification pass should persist "
+                "collaboration/repair strategist metadata without breaking plan storage."
+            ),
+            category="trust",
+            tags=["plan", "collaboration", "verification", "repo"],
+            suspected_files=[
+                "services/andrea_sync/plan_runtime.py",
+                "services/andrea_sync/arbitration_policy.py",
+                "services/andrea_sync/collaboration_schema.py",
+            ],
+            runner=_scenario_bounded_collaboration_verify_fail_repo,
+        ),
+        ExperienceScenario(
+            scenario_id="trusted_layer_unsafe_request",
+            title="Trusted layer marks unsafe asks as unsupported",
+            description="Scenario resolver should classify clearly unsafe intents as unsupported with calm refusal copy available.",
+            category="trust",
+            tags=["scenario", "safety", "unsupported"],
+            suspected_files=[
+                "services/andrea_sync/scenario_runtime.py",
+                "services/andrea_sync/scenario_registry.py",
+                "services/andrea_sync/server.py",
+            ],
+            runner=_scenario_trusted_layer_unsafe_request,
+        ),
+        ExperienceScenario(
+            scenario_id="trusted_layer_outbound_blocks_delegate",
+            title="Outbound draft scenarios block auto delegation",
+            description="Approval-required outbound jobs stay draft-only: resolver + block helper prevent silent delegated execution.",
+            category="trust",
+            tags=["scenario", "outbound", "delegation"],
+            suspected_files=[
+                "services/andrea_sync/scenario_runtime.py",
+                "services/andrea_sync/server.py",
+            ],
+            runner=_scenario_trusted_layer_outbound_blocks_delegate,
+        ),
+        ExperienceScenario(
+            scenario_id="trusted_layer_verification_sensitive_approval",
+            title="Verification-sensitive language forces approval",
+            description="Explicit proof-before-done language maps to verificationSensitiveAction and triggers scenario approval policy.",
+            category="trust",
+            tags=["scenario", "verification", "approval"],
+            suspected_files=[
+                "services/andrea_sync/scenario_runtime.py",
+                "services/andrea_sync/approval_policy.py",
+            ],
+            runner=_scenario_trusted_layer_verification_sensitive_forces_approval,
+        ),
+        ExperienceScenario(
+            scenario_id="trusted_layer_false_support_guard",
+            title="Status follow-ups are not falsely unsupported",
+            description="Regression guard: normal status language must remain in the supported status/follow-up scenario family.",
+            category="trust",
+            tags=["scenario", "status", "regression"],
+            suspected_files=[
+                "services/andrea_sync/scenario_runtime.py",
+            ],
+            runner=_scenario_trusted_layer_false_support_guard,
         ),
     ]
 
@@ -1746,3 +2546,15 @@ def load_experience_run_from_db(db_path: Path, **kwargs: Any) -> Dict[str, Any]:
         return run_experience_assurance(conn, **kwargs)
     finally:
         conn.close()
+
+
+def blueprint_platform_health(conn: Any) -> Dict[str, Any]:
+    """Structural reachability check for blueprint tables (Phase 6 observability hook)."""
+    try:
+        conn.execute("SELECT 1 FROM goals LIMIT 1").fetchone()
+        conn.execute("SELECT 1 FROM workflows LIMIT 1").fetchone()
+        conn.execute("SELECT 1 FROM task_goals LIMIT 1").fetchone()
+        conn.execute("SELECT 1 FROM goal_artifacts LIMIT 1").fetchone()
+        return {"ok": True, "tables_reachable": True}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc), "tables_reachable": False}

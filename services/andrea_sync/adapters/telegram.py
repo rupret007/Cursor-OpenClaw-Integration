@@ -59,6 +59,15 @@ def extract_routing_hints(text: str) -> Dict[str, Any]:
     visibility_mode = "summary"
     if FULL_DIALOGUE_RE.search(raw_text):
         visibility_mode = "full"
+    elif re.search(r"\bmasterclass\b", raw_text, re.I):
+        # Intentional sprint language + collaboration signals (not casual "masterclass" alone).
+        masterclass_collab = (
+            routing_hint == "collaborate"
+            or bool(COLLABORATION_RE.search(raw_text))
+            or len(model_mentions) >= 2
+        )
+        if masterclass_collab:
+            visibility_mode = "full"
     requested_capability = "assistant"
     if routing_hint == "cursor":
         requested_capability = "cursor_execution"

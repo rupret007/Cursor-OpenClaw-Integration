@@ -16,6 +16,30 @@ INTERNAL_RUNTIME_RE = re.compile(
     re.I,
 )
 
+# Long-lived OpenClaw / multi-agent transcripts sometimes leak into user-facing summaries.
+# Keep this list tight to avoid false positives on normal prose.
+STALE_OPENCLAW_HANDOFF_RE = re.compile(
+    r"\b("
+    r"extreme\s+masterclass|self-improvement\s+sprint|delegated\s+the\s+task|"
+    r"multi-?agent\s+handoff|spawned\s+(?:a\s+)?(?:new\s+)?session|stale\s+sprint"
+    r")\b",
+    re.I,
+)
+
+# Provider / memory subsystem errors that should not surface as "answers" on lightweight asks.
+MEMORY_PROVIDER_LEAK_RE = re.compile(
+    r"\b("
+    r"embedding\s+quota|"
+    r"memory\s+quota\s+(?:exceeded|hit|reached|error)|"
+    r"vector\s+(?:store|database|db)\s+(?:error|unavailable|quota)|"
+    r"active\s+context\s+(?:overflow|exceeded)|"
+    r"context\s+window\s+exceeded|"
+    r"token\s+limit\s+exceeded|"
+    r"rate\s+limit(?:ed)?\s+(?:for\s+)?(?:embeddings?|vectors?)"
+    r")\b",
+    re.I,
+)
+
 
 def clip_text(value: Any, limit: int) -> str:
     text = str(value or "").strip()
@@ -45,18 +69,36 @@ def is_internal_runtime_text(text: Any) -> bool:
     )
 
 
+def is_stale_openclaw_narrative(text: Any) -> bool:
+    """True when text looks like internal runtime chatter or unrelated multi-agent session recap."""
+    normalized = normalize_whitespace(text)
+    if not normalized:
+        return False
+    if is_internal_runtime_text(normalized):
+        return True
+    if STALE_OPENCLAW_HANDOFF_RE.search(normalized):
+        return True
+    if MEMORY_PROVIDER_LEAK_RE.search(normalized):
+        return True
+    return False
+
+
 def sanitize_user_surface_text(text: Any, *, fallback: Any = "", limit: int = 500) -> str:
     safe_lines: list[str] = []
     for raw_line in str(text or "").splitlines():
         stripped = normalize_whitespace(str(raw_line).lstrip("-*• "))
-        if not stripped or is_internal_runtime_text(stripped):
+        if not stripped or is_internal_runtime_text(stripped) or is_stale_openclaw_narrative(stripped):
             continue
         safe_lines.append(stripped)
     collapsed = normalize_whitespace(" ".join(safe_lines))
     if collapsed:
         return clip_text(collapsed, limit)
     backup = normalize_whitespace(fallback)
-    if backup and not is_internal_runtime_text(backup):
+    if (
+        backup
+        and not is_internal_runtime_text(backup)
+        and not is_stale_openclaw_narrative(backup)
+    ):
         return clip_text(backup, limit)
     return ""
 
@@ -99,3 +141,31 @@ def dedupe_user_surface_items(
         if len(out) >= limit:
             break
     return out
+
+
+def format_scenario_proof_receipt(
+    *,
+    scenario_id: str,
+    scenario_label: str,
+    verified: bool,
+    proof_summary: str,
+    next_step: str = "",
+    remaining_risks: Iterable[str] | None = None,
+) -> str:
+    """User-facing proof receipt lines (calm, non-runtime)."""
+    label = clip_text(scenario_label or scenario_id, 120)
+    status = "Verified" if verified else "Not fully verified yet"
+    lines = [
+        f"**Job type:** {label} (`{clip_text(scenario_id, 80)}`)",
+        f"**Proof status:** {status}",
+    ]
+    ps = clip_text(proof_summary, 900)
+    if ps:
+        lines.append(f"**What was checked:** {ps}")
+    risks = list(remaining_risks or [])[:6]
+    if risks:
+        lines.append("**Still open:** " + "; ".join(clip_text(r, 160) for r in risks))
+    ns = clip_text(next_step, 400)
+    if ns:
+        lines.append(f"**Next safe step:** {ns}")
+    return "\n".join(lines)

@@ -43,7 +43,7 @@ import env_loader  # noqa: E402
 import cursor_api_common  # noqa: E402
 import handoff_context  # noqa: E402
 
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 
 EXIT_OK = 0
 EXIT_VALIDATION = 2
@@ -339,6 +339,8 @@ def emit_text(payload: Dict[str, Any]) -> None:
     if payload.get("ok"):
         print("Handoff submitted successfully.")
         print(f"Backend: {payload.get('backend')}")
+        if payload.get("model"):
+            print(f"Model: {payload.get('model')}")
         print(f"Read-only: {payload.get('read_only')}")
         print(f"Branch: {payload.get('branch')}")
         if payload.get("agent_id"):
@@ -402,6 +404,14 @@ def parse_args() -> argparse.Namespace:
         default="true",
         dest="read_only",
         help="true|false. Use true for analysis/review/planning tasks.",
+    )
+    parser.add_argument(
+        "--model",
+        default="",
+        help=(
+            "API only. Cursor Cloud Agents model id (e.g. from GET /v0/models) or "
+            "'default' for configured default. Empty uses CURSOR_HANDOFF_MODEL env or 'default'."
+        ),
     )
     parser.add_argument(
         "--pr-url",
@@ -506,6 +516,10 @@ def main() -> int:
         payload = {"ok": False, "error": str(err)}
         emit_json(payload) if args.json else emit_text(payload)
         return EXIT_VALIDATION
+
+    api_model = (getattr(args, "model", "") or "").strip()
+    if not api_model:
+        api_model = (os.getenv("CURSOR_HANDOFF_MODEL") or "default").strip() or "default"
 
     if args.poll_max_attempts < 0:
         payload = {"ok": False, "error": "--poll-max-attempts must be >= 0"}
@@ -674,6 +688,7 @@ def main() -> int:
             "api_retries": args.api_retries,
             "cli_timeout_seconds": args.cli_timeout_seconds,
             "prompt_preview": final_prompt[:500],
+            "model": api_model,
         }
         emit_json(payload) if args.json else emit_text(payload)
         return EXIT_OK
@@ -746,6 +761,7 @@ def main() -> int:
             "status": "submitted",
             "read_only": read_only,
             "branch": branch,
+            "model": api_model,
             "cli_binary": cli_binary,
             "stdout": proc.stdout.strip(),
         }
@@ -798,7 +814,7 @@ def main() -> int:
 
     create_payload: Dict[str, Any] = {
         "prompt": {"text": final_prompt},
-        "model": "default",
+        "model": api_model,
         "source": source_block,
         "target": target_block,
     }
@@ -854,6 +870,7 @@ def main() -> int:
         "submitted": True,
         "read_only": read_only,
         "branch": branch,
+        "model": api_model,
         "auth_mode": auth_mode,
         "agent_id": agent_id,
         "status": status_text,

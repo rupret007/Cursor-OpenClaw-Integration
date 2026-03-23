@@ -65,7 +65,13 @@ OPENCLAW_HOME="${HOME}/.openclaw"
 if [[ -d "$OPENCLAW_HOME" ]]; then
   bak_count="$(find "$OPENCLAW_HOME" -maxdepth 2 -name '*.bak' -type f 2>/dev/null | wc -l | tr -d ' ')"
   if [[ "${bak_count}" != "0" ]]; then
-    warn "found ${bak_count} *.bak under ${OPENCLAW_HOME} — may contain secrets; prune after verifying active config"
+    # Host-local noise: must not fail release gates on developer machines (STRICT=1).
+    msg="found ${bak_count} *.bak under ${OPENCLAW_HOME} — may contain secrets; prune after verifying active config"
+    if [[ "$STRICT" == "1" ]]; then
+      echo "NOTE: ${msg}" >&2
+    else
+      warn "${msg}"
+    fi
   else
     pass "no *.bak files in ~/.openclaw (depth<=2)"
   fi

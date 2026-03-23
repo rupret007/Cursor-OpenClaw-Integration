@@ -351,6 +351,7 @@ def _build_prompt(
     elif collab == "collaborative":
         collaboration_notes = (
             "- The user wants a visible collaboration sprint between Andrea/OpenClaw and Cursor.\n"
+            "- You are the conductor inside this delegated run. Andrea already handled the outer routing and user/channel policy.\n"
             "- Start with your own reasoning or skills, then involve Cursor for a second pass, heavier repo work, "
             "browsing/tool use, or implementation.\n"
             "- Use model strengths deliberately when they are available inside OpenClaw:\n"
@@ -359,6 +360,8 @@ def _build_prompt(
             "  - OpenAI for precise synthesis, instruction following, and tool-friendly substeps.\n"
             "  - Cursor for the heavy repo execution, code edits, and implementation follow-through.\n"
             "- Do not call every model for every task. Use only the best model needed for each subtask.\n"
+            "- Stay in one coordinated OpenClaw session unless a real child-session handoff adds value and the runtime supports it.\n"
+            "- When code or config changes happen, include verification in the execution/synthesis story instead of stopping at planning.\n"
             "- Your final answer should reflect the combined result, not just one side.\n"
             "- If you provide visible collaboration, keep it sparse and product-level: plan, critique, synthesis, "
             "execution, or verification. Never emit raw tool chatter.\n"
@@ -377,6 +380,7 @@ def _build_prompt(
         "- Use OpenClaw skills first when they are the right fit.\n"
         "- If the task is repo-heavy, coding-heavy, debugging-heavy, or PR-oriented, use the cursor_handoff skill rather than answering from general model reasoning alone.\n"
         "- If you offload work to Cursor, wait for the useful outcome and summarize it clearly.\n"
+        "- Prefer a disciplined flow: triage, plan, critique when useful, execute, verify, then synthesize.\n"
         "- Keep the user-facing answer concise and directly useful.\n"
         "- When collaboration is requested, think like a coordinator: triage first, assign the right model/tool to the right subtask, then synthesize the result.\n"
         "- Do not expose tool names, config flags, session identifiers, session labels, or runtime mechanics in user-facing text.\n"

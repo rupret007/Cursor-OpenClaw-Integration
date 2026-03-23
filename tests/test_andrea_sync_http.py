@@ -24,7 +24,7 @@ from services.andrea_sync.adapters import telegram as tg_adapt  # noqa: E402
 from services.andrea_sync.bus import handle_command  # noqa: E402
 from services.andrea_sync.experience_assurance import run_experience_assurance  # noqa: E402
 from services.andrea_sync.schema import EventType  # noqa: E402
-from services.andrea_sync.store import append_event  # noqa: E402
+from services.andrea_sync.store import append_event, ensure_system_task, save_incident  # noqa: E402
 
 
 class TestAndreaSyncHTTP(unittest.TestCase):
@@ -207,6 +207,55 @@ class TestAndreaSyncHTTP(unittest.TestCase):
         task_ids = [task["task_id"] for task in data["tasks"]["items"]]
         self.assertIn(created["task_id"], task_ids)
 
+    def test_dashboard_summary_exposes_phase_hints_for_running_delegated_task(self) -> None:
+        created = self._srv.with_lock(
+            lambda c: handle_command(
+                c,
+                {
+                    "command_type": "CreateTask",
+                    "channel": "telegram",
+                    "external_id": "dashboard-phase-task",
+                    "payload": {"summary": "phase hint coverage"},
+                },
+            )
+        )
+        self._srv.with_lock(
+            lambda c: append_event(
+                c,
+                created["task_id"],
+                EventType.JOB_QUEUED,
+                {
+                    "kind": "openclaw",
+                    "execution_lane": "openclaw_hybrid",
+                    "runner": "openclaw",
+                    "collaboration_mode": "cursor_primary",
+                },
+            )
+        )
+        self._srv.with_lock(
+            lambda c: append_event(
+                c,
+                created["task_id"],
+                EventType.JOB_STARTED,
+                {
+                    "backend": "openclaw",
+                    "execution_lane": "openclaw_hybrid",
+                    "runner": "openclaw",
+                    "delegated_to_cursor": True,
+                    "agent_url": "https://cursor.com/agents/dashboard-phase",
+                },
+            )
+        )
+        req = urllib.request.Request(self._url("/v1/dashboard/summary?limit=10"), method="GET")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            self.assertEqual(resp.status, 200)
+            data = json.loads(resp.read().decode("utf-8"))
+        item = next(task for task in data["tasks"]["items"] if task["task_id"] == created["task_id"])
+        self.assertEqual(item["current_phase"], "execution")
+        self.assertEqual(item["current_phase_status"], "running")
+        self.assertEqual(item["current_phase_lane"], "cursor")
+        self.assertEqual(item["completed_phases"], [])
+
     def test_dashboard_summary_includes_optimization_loop(self) -> None:
         created = self._srv.with_lock(
             lambda c: handle_command(
@@ -306,16 +355,86 @@ class TestAndreaSyncHTTP(unittest.TestCase):
             data = json.loads(resp.read().decode("utf-8"))
         latest = data["experience_assurance"]["latest_run"]
         self.assertEqual(latest["run_id"], result["run"]["run_id"])
-        self.assertGreaterEqual(latest["total_checks"], 13)
+        self.assertGreaterEqual(latest["total_checks"], 16)
         self.assertIn("runtime", data)
         self.assertGreaterEqual(
             data["experience_assurance"]["delegated_summary"]["total"],
-            3,
+            4,
         )
         self.assertEqual(
             data["experience_assurance"]["delegated_summary"]["failed"],
             0,
         )
+
+    def test_dashboard_summary_projects_incident_conductor_fields(self) -> None:
+        def seed(conn) -> None:
+            ensure_system_task(conn)
+            save_incident(
+                conn,
+                {
+                    "incident_id": "inc_http_conductor",
+                    "source_task_id": "",
+                    "source": "http_test",
+                    "service_name": "andrea_sync",
+                    "environment": "local",
+                    "error_type": "code_bug",
+                    "summary": "Synthetic incident for dashboard conductor projection.",
+                    "current_state": "cursor_handoff_ready",
+                    "status": "cursor_handoff_ready",
+                    "fingerprint": "fp_http_cond",
+                    "metadata": {
+                        "conductor": {
+                            "preferred_executor": "cursor_handoff",
+                            "escalation_reasons": ["heavy_repair_plan", "lightweight_attempts_exhausted"],
+                            "recommended_cursor_execute": True,
+                            "cursor_execute_requested": True,
+                            "auto_cursor_heavy": False,
+                            "effective_cursor_execute": True,
+                            "worktree_clean": True,
+                            "metrics": {"plan_files": 3, "plan_steps": 2, "patch_attempts": 2},
+                            "handoff": {
+                                "ok": True,
+                                "branch": "repair/http-demo-branch",
+                                "agent_url": "https://cursor.com/agents/http-demo",
+                                "pr_url": "",
+                            },
+                            "outcome": {
+                                "submission_status": "succeeded",
+                                "verification_status": "skipped",
+                                "next_action": "monitor_cursor_or_verify_manually",
+                                "terminal_cursor_status": "FINISHED",
+                            },
+                        },
+                    },
+                },
+            )
+
+        self._srv.with_lock(seed)
+        req = urllib.request.Request(self._url("/v1/dashboard/summary?limit=10"), method="GET")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            self.assertEqual(resp.status, 200)
+            data = json.loads(resp.read().decode("utf-8"))
+        latest = data["optimization"]["latest_incident"]
+        self.assertEqual(latest.get("incident_id"), "inc_http_conductor")
+        self.assertEqual(latest.get("conductor_preferred_executor"), "cursor_handoff")
+        self.assertEqual(
+            latest.get("conductor_reasons"),
+            ["heavy_repair_plan", "lightweight_attempts_exhausted"],
+        )
+        self.assertTrue(latest.get("conductor_effective_cursor_execute"))
+        self.assertTrue(latest.get("conductor_worktree_clean"))
+        self.assertTrue(latest.get("cursor_handoff_active"))
+        self.assertEqual(latest.get("cursor_handoff_branch"), "repair/http-demo-branch")
+        self.assertIn("cursor.com", latest.get("cursor_handoff_agent_url") or "")
+        self.assertIn("cursor_handoff", latest.get("conductor_summary") or "")
+        self.assertEqual(latest.get("conductor_outcome_verification_status"), "skipped")
+        self.assertEqual(
+            latest.get("conductor_outcome_next_action"),
+            "monitor_cursor_or_verify_manually",
+        )
+        recent = data["optimization"]["recent_incidents"]
+        self.assertTrue(recent)
+        self.assertEqual(recent[0].get("incident_id"), "inc_http_conductor")
 
     def test_run_incident_repair_internal_command_requires_auth_and_executes(self) -> None:
         body = json.dumps(

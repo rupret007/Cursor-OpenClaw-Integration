@@ -177,6 +177,143 @@ def migrate(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_experience_checks_run
             ON experience_checks(run_id, updated_at DESC);
+        CREATE TABLE IF NOT EXISTS goals (
+            goal_id TEXT PRIMARY KEY,
+            principal_id TEXT NOT NULL,
+            channel TEXT NOT NULL DEFAULT 'internal',
+            status TEXT NOT NULL,
+            summary TEXT NOT NULL DEFAULT '',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_goals_principal_status
+            ON goals(principal_id, status, updated_at DESC);
+        CREATE TABLE IF NOT EXISTS goal_events (
+            seq INTEGER PRIMARY KEY AUTOINCREMENT,
+            goal_id TEXT NOT NULL REFERENCES goals(goal_id) ON DELETE CASCADE,
+            ts REAL NOT NULL,
+            event_type TEXT NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_goal_events_goal_ts ON goal_events(goal_id, seq);
+        CREATE TABLE IF NOT EXISTS task_goals (
+            task_id TEXT PRIMARY KEY REFERENCES tasks(task_id) ON DELETE CASCADE,
+            goal_id TEXT NOT NULL REFERENCES goals(goal_id) ON DELETE CASCADE,
+            created_at REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_task_goals_goal ON task_goals(goal_id);
+        CREATE TABLE IF NOT EXISTS goal_artifacts (
+            artifact_id TEXT PRIMARY KEY,
+            goal_id TEXT NOT NULL REFERENCES goals(goal_id) ON DELETE CASCADE,
+            task_id TEXT NOT NULL DEFAULT '',
+            kind TEXT NOT NULL DEFAULT 'file',
+            label TEXT NOT NULL DEFAULT '',
+            uri TEXT NOT NULL DEFAULT '',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_goal_artifacts_goal
+            ON goal_artifacts(goal_id, created_at DESC);
+        CREATE TABLE IF NOT EXISTS goal_approvals (
+            approval_id TEXT PRIMARY KEY,
+            goal_id TEXT NOT NULL REFERENCES goals(goal_id) ON DELETE CASCADE,
+            task_id TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'pending',
+            rationale TEXT NOT NULL DEFAULT '',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_goal_approvals_goal
+            ON goal_approvals(goal_id, status);
+        CREATE TABLE IF NOT EXISTS workflows (
+            workflow_id TEXT PRIMARY KEY,
+            principal_id TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'draft',
+            name TEXT NOT NULL DEFAULT '',
+            definition_json TEXT NOT NULL DEFAULT '{}',
+            next_run_at REAL NOT NULL DEFAULT 0,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_workflows_principal
+            ON workflows(principal_id, status, updated_at DESC);
+        CREATE TABLE IF NOT EXISTS execution_attempts (
+            exec_attempt_id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+            goal_id TEXT NOT NULL DEFAULT '',
+            lane TEXT NOT NULL DEFAULT '',
+            backend TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'active',
+            handle_json TEXT NOT NULL DEFAULT '{}',
+            summary_json TEXT NOT NULL DEFAULT '{}',
+            parent_attempt_id TEXT NOT NULL DEFAULT '',
+            continuation_state TEXT NOT NULL DEFAULT '',
+            verification_state TEXT NOT NULL DEFAULT '',
+            recovery_state TEXT NOT NULL DEFAULT '',
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            last_synced_at REAL NOT NULL DEFAULT 0,
+            completed_at REAL NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_execution_attempts_task_status
+            ON execution_attempts(task_id, status);
+        CREATE INDEX IF NOT EXISTS idx_execution_attempts_goal
+            ON execution_attempts(goal_id, updated_at DESC);
+        CREATE TABLE IF NOT EXISTS execution_plans (
+            plan_id TEXT PRIMARY KEY,
+            goal_id TEXT NOT NULL DEFAULT '',
+            task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+            principal_id TEXT NOT NULL DEFAULT '',
+            intent_summary TEXT NOT NULL DEFAULT '',
+            plan_kind TEXT NOT NULL DEFAULT 'delegated_repo_task',
+            status TEXT NOT NULL DEFAULT 'draft',
+            risk_tier INTEGER NOT NULL DEFAULT 2,
+            approval_state TEXT NOT NULL DEFAULT 'none',
+            verification_state TEXT NOT NULL DEFAULT 'pending',
+            recovery_state TEXT NOT NULL DEFAULT '',
+            current_step_id TEXT NOT NULL DEFAULT '',
+            router_snapshot_json TEXT NOT NULL DEFAULT '{}',
+            summary_json TEXT NOT NULL DEFAULT '{}',
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            completed_at REAL NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_execution_plans_goal
+            ON execution_plans(goal_id, status);
+        CREATE INDEX IF NOT EXISTS idx_execution_plans_task
+            ON execution_plans(task_id, updated_at DESC);
+        CREATE TABLE IF NOT EXISTS plan_steps (
+            step_id TEXT PRIMARY KEY,
+            plan_id TEXT NOT NULL REFERENCES execution_plans(plan_id) ON DELETE CASCADE,
+            ordinal INTEGER NOT NULL,
+            title TEXT NOT NULL DEFAULT '',
+            step_kind TEXT NOT NULL DEFAULT '',
+            lane TEXT NOT NULL DEFAULT '',
+            action_json TEXT NOT NULL DEFAULT '{}',
+            policy_json TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'pending',
+            execution_attempt_id TEXT NOT NULL DEFAULT '',
+            checkpoint_json TEXT NOT NULL DEFAULT '{}',
+            recovery_json TEXT NOT NULL DEFAULT '{}',
+            result_json TEXT NOT NULL DEFAULT '{}',
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_plan_steps_plan ON plan_steps(plan_id, ordinal);
+        CREATE TABLE IF NOT EXISTS verification_results (
+            verification_id TEXT PRIMARY KEY,
+            plan_id TEXT NOT NULL DEFAULT '',
+            step_id TEXT NOT NULL DEFAULT '',
+            method TEXT NOT NULL DEFAULT '',
+            verdict TEXT NOT NULL DEFAULT '',
+            summary TEXT NOT NULL DEFAULT '',
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            created_at REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_verification_results_plan
+            ON verification_results(plan_id, step_id);
         """
     )
     conn.execute(
@@ -1436,6 +1573,902 @@ def list_telegram_task_ids_for_chat(
         ),
     ).fetchall()
     return [str(r["task_id"]) for r in rows]
+
+
+def new_goal_id() -> str:
+    return f"gol_{uuid.uuid4().hex[:26]}"
+
+
+def create_goal(
+    conn: sqlite3.Connection,
+    principal_id: str,
+    summary: str,
+    *,
+    channel: str = "internal",
+    metadata: Optional[Dict[str, Any]] = None,
+    status: str = "active",
+) -> str:
+    gid = new_goal_id()
+    ts = time.time()
+    meta_json = json.dumps(metadata or {}, ensure_ascii=False)
+    conn.execute(
+        """
+        INSERT INTO goals(
+            goal_id, principal_id, channel, status, summary, metadata_json, created_at, updated_at
+        ) VALUES (?,?,?,?,?,?,?,?)
+        """,
+        (gid, principal_id, channel, status, summary[:2000], meta_json, ts, ts),
+    )
+    conn.commit()
+    return gid
+
+
+def update_goal_status(conn: sqlite3.Connection, goal_id: str, status: str) -> bool:
+    ts = time.time()
+    cur = conn.execute(
+        "UPDATE goals SET status = ?, updated_at = ? WHERE goal_id = ?",
+        (status, ts, goal_id),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def get_goal(conn: sqlite3.Connection, goal_id: str) -> Optional[Dict[str, Any]]:
+    row = conn.execute("SELECT * FROM goals WHERE goal_id = ?", (goal_id,)).fetchone()
+    if not row:
+        return None
+    return dict(row)
+
+
+def list_goals_for_principal(
+    conn: sqlite3.Connection,
+    principal_id: str,
+    *,
+    status: Optional[str] = None,
+    limit: int = 10,
+) -> List[Dict[str, Any]]:
+    if status:
+        rows = conn.execute(
+            """
+            SELECT * FROM goals
+            WHERE principal_id = ? AND status = ?
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            (principal_id, status, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT * FROM goals
+            WHERE principal_id = ?
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            (principal_id, limit),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def append_goal_event(
+    conn: sqlite3.Connection, goal_id: str, event_type: str, payload: Dict[str, Any]
+) -> int:
+    ts = time.time()
+    cur = conn.execute(
+        "INSERT INTO goal_events(goal_id, ts, event_type, payload_json) VALUES (?,?,?,?)",
+        (goal_id, ts, event_type, json.dumps(payload, ensure_ascii=False)),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def link_task_to_goal(conn: sqlite3.Connection, task_id: str, goal_id: str) -> None:
+    ts = time.time()
+    conn.execute(
+        """
+        INSERT INTO task_goals(task_id, goal_id, created_at) VALUES (?,?,?)
+        ON CONFLICT(task_id) DO UPDATE SET goal_id = excluded.goal_id, created_at = excluded.created_at
+        """,
+        (task_id, goal_id, ts),
+    )
+    conn.commit()
+
+
+def get_goal_id_for_task(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
+    row = conn.execute(
+        "SELECT goal_id FROM task_goals WHERE task_id = ?", (task_id,)
+    ).fetchone()
+    return str(row["goal_id"]) if row else None
+
+
+def list_tasks_for_goal(
+    conn: sqlite3.Connection, goal_id: str, *, limit: int = 20
+) -> List[str]:
+    rows = conn.execute(
+        """
+        SELECT tg.task_id FROM task_goals tg
+        JOIN tasks t ON t.task_id = tg.task_id
+        WHERE tg.goal_id = ?
+        ORDER BY t.updated_at DESC
+        LIMIT ?
+        """,
+        (goal_id, limit),
+    ).fetchall()
+    return [str(r["task_id"]) for r in rows]
+
+
+def record_goal_artifact(
+    conn: sqlite3.Connection,
+    goal_id: str,
+    *,
+    task_id: str = "",
+    kind: str = "file",
+    label: str = "",
+    uri: str = "",
+    metadata: Optional[Dict[str, Any]] = None,
+) -> str:
+    aid = f"art_{uuid.uuid4().hex[:24]}"
+    ts = time.time()
+    conn.execute(
+        """
+        INSERT INTO goal_artifacts(
+            artifact_id, goal_id, task_id, kind, label, uri, metadata_json, created_at
+        ) VALUES (?,?,?,?,?,?,?,?)
+        """,
+        (
+            aid,
+            goal_id,
+            task_id,
+            kind,
+            label[:500],
+            uri[:2000],
+            json.dumps(metadata or {}, ensure_ascii=False),
+            ts,
+        ),
+    )
+    conn.commit()
+    return aid
+
+
+def list_goal_artifacts(
+    conn: sqlite3.Connection, goal_id: str, *, limit: int = 50
+) -> List[Dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT * FROM goal_artifacts
+        WHERE goal_id = ?
+        ORDER BY created_at DESC
+        LIMIT ?
+        """,
+        (goal_id, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def new_execution_attempt_id() -> str:
+    return f"atm_{uuid.uuid4().hex[:20]}"
+
+
+def supersede_active_execution_attempts(conn: sqlite3.Connection, task_id: str) -> None:
+    ts = time.time()
+    conn.execute(
+        """
+        UPDATE execution_attempts
+        SET status = 'superseded', updated_at = ?
+        WHERE task_id = ? AND status = 'active'
+        """,
+        (ts, task_id),
+    )
+
+
+def create_execution_attempt(
+    conn: sqlite3.Connection,
+    task_id: str,
+    goal_id: str,
+    *,
+    lane: str,
+    backend: str,
+    handle_dict: Dict[str, Any],
+    parent_attempt_id: str = "",
+) -> str:
+    """Create a new active execution attempt after superseding prior actives for the task."""
+    supersede_active_execution_attempts(conn, task_id)
+    eid = new_execution_attempt_id()
+    ts = time.time()
+    conn.execute(
+        """
+        INSERT INTO execution_attempts(
+            exec_attempt_id, task_id, goal_id, lane, backend, status,
+            handle_json, summary_json, parent_attempt_id,
+            continuation_state, verification_state, recovery_state,
+            created_at, updated_at, last_synced_at, completed_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            eid,
+            task_id,
+            goal_id or "",
+            lane or "",
+            backend or "",
+            "active",
+            json.dumps(handle_dict or {}, ensure_ascii=False),
+            "{}",
+            parent_attempt_id or "",
+            "",
+            "",
+            "",
+            ts,
+            ts,
+            0.0,
+            0.0,
+        ),
+    )
+    conn.commit()
+    return eid
+
+
+def get_active_execution_attempt_for_task(
+    conn: sqlite3.Connection, task_id: str
+) -> Optional[Dict[str, Any]]:
+    row = conn.execute(
+        """
+        SELECT * FROM execution_attempts
+        WHERE task_id = ? AND status = 'active'
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (task_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def get_execution_attempt(conn: sqlite3.Connection, exec_attempt_id: str) -> Optional[Dict[str, Any]]:
+    row = conn.execute(
+        "SELECT * FROM execution_attempts WHERE exec_attempt_id = ?",
+        (exec_attempt_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def update_execution_attempt_handles(
+    conn: sqlite3.Connection,
+    exec_attempt_id: str,
+    handle_patch: Dict[str, Any],
+    *,
+    touch_last_synced: bool = False,
+) -> bool:
+    row = conn.execute(
+        "SELECT handle_json FROM execution_attempts WHERE exec_attempt_id = ?",
+        (exec_attempt_id,),
+    ).fetchone()
+    if not row:
+        return False
+    try:
+        cur = json.loads(row["handle_json"] or "{}")
+    except json.JSONDecodeError:
+        cur = {}
+    if not isinstance(cur, dict):
+        cur = {}
+    cur.update(handle_patch)
+    ts = time.time()
+    if touch_last_synced:
+        conn.execute(
+            """
+            UPDATE execution_attempts
+            SET handle_json = ?, updated_at = ?, last_synced_at = ?
+            WHERE exec_attempt_id = ?
+            """,
+            (json.dumps(cur, ensure_ascii=False), ts, ts, exec_attempt_id),
+        )
+    else:
+        conn.execute(
+            """
+            UPDATE execution_attempts
+            SET handle_json = ?, updated_at = ?
+            WHERE exec_attempt_id = ?
+            """,
+            (json.dumps(cur, ensure_ascii=False), ts, exec_attempt_id),
+        )
+    conn.commit()
+    return True
+
+
+def complete_execution_attempt(
+    conn: sqlite3.Connection,
+    exec_attempt_id: str,
+    status: str,
+    summary: Optional[Dict[str, Any]] = None,
+) -> bool:
+    row = get_execution_attempt(conn, exec_attempt_id)
+    if not row:
+        return False
+    ts = time.time()
+    merged: Dict[str, Any] = {}
+    try:
+        merged = json.loads(row["summary_json"] or "{}")
+    except json.JSONDecodeError:
+        merged = {}
+    if not isinstance(merged, dict):
+        merged = {}
+    if summary:
+        merged.update(summary)
+    conn.execute(
+        """
+        UPDATE execution_attempts
+        SET status = ?, completed_at = ?, updated_at = ?, summary_json = ?
+        WHERE exec_attempt_id = ?
+        """,
+        (status, ts, ts, json.dumps(merged, ensure_ascii=False), exec_attempt_id),
+    )
+    conn.commit()
+    return True
+
+
+def list_execution_attempts_for_goal(
+    conn: sqlite3.Connection, goal_id: str, *, limit: int = 20
+) -> List[Dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT * FROM execution_attempts
+        WHERE goal_id = ?
+        ORDER BY updated_at DESC
+        LIMIT ?
+        """,
+        (goal_id, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def count_active_execution_attempts(conn: sqlite3.Connection) -> int:
+    row = conn.execute(
+        "SELECT COUNT(*) AS c FROM execution_attempts WHERE status = 'active'"
+    ).fetchone()
+    return int(row["c"]) if row else 0
+
+
+def new_workflow_id() -> str:
+    return f"wfl_{uuid.uuid4().hex[:24]}"
+
+
+def create_workflow(
+    conn: sqlite3.Connection,
+    principal_id: str,
+    name: str,
+    *,
+    definition: Optional[Dict[str, Any]] = None,
+    status: str = "draft",
+    next_run_at: float = 0.0,
+) -> str:
+    wid = new_workflow_id()
+    ts = time.time()
+    conn.execute(
+        """
+        INSERT INTO workflows(
+            workflow_id, principal_id, status, name, definition_json, next_run_at, created_at, updated_at
+        ) VALUES (?,?,?,?,?,?,?,?)
+        """,
+        (
+            wid,
+            principal_id,
+            status,
+            name[:500],
+            json.dumps(definition or {}, ensure_ascii=False),
+            float(next_run_at),
+            ts,
+            ts,
+        ),
+    )
+    conn.commit()
+    return wid
+
+
+def get_workflow(conn: sqlite3.Connection, workflow_id: str) -> Optional[Dict[str, Any]]:
+    row = conn.execute(
+        "SELECT * FROM workflows WHERE workflow_id = ?", (workflow_id,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def update_workflow(
+    conn: sqlite3.Connection,
+    workflow_id: str,
+    *,
+    status: Optional[str] = None,
+    definition: Optional[Dict[str, Any]] = None,
+    next_run_at: Optional[float] = None,
+) -> bool:
+    row = get_workflow(conn, workflow_id)
+    if not row:
+        return False
+    ts = time.time()
+    st = status if status is not None else str(row["status"])
+    def_json = (
+        json.dumps(definition, ensure_ascii=False)
+        if definition is not None
+        else str(row["definition_json"])
+    )
+    nrun = float(next_run_at) if next_run_at is not None else float(row["next_run_at"] or 0)
+    conn.execute(
+        """
+        UPDATE workflows
+        SET status = ?, definition_json = ?, next_run_at = ?, updated_at = ?
+        WHERE workflow_id = ?
+        """,
+        (st, def_json, nrun, ts, workflow_id),
+    )
+    conn.commit()
+    return True
+
+
+def list_workflows_for_principal(
+    conn: sqlite3.Connection, principal_id: str, *, limit: int = 20
+) -> List[Dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT * FROM workflows
+        WHERE principal_id = ?
+        ORDER BY updated_at DESC
+        LIMIT ?
+        """,
+        (principal_id, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# --- Execution plans / plan steps / verification (orchestrator) ---
+
+
+def new_plan_id() -> str:
+    return f"pln_{uuid.uuid4().hex[:20]}"
+
+
+def new_plan_step_id() -> str:
+    return f"pst_{uuid.uuid4().hex[:20]}"
+
+
+def new_verification_id() -> str:
+    return f"ver_{uuid.uuid4().hex[:20]}"
+
+
+def new_goal_approval_id() -> str:
+    return f"gap_{uuid.uuid4().hex[:20]}"
+
+
+def insert_execution_plan(
+    conn: sqlite3.Connection,
+    plan_id: str,
+    task_id: str,
+    *,
+    goal_id: str = "",
+    principal_id: str = "",
+    intent_summary: str = "",
+    plan_kind: str = "delegated_repo_task",
+    status: str = "draft",
+    risk_tier: int = 2,
+    approval_state: str = "none",
+    verification_state: str = "pending",
+    recovery_state: str = "",
+    current_step_id: str = "",
+    router_snapshot: Optional[Dict[str, Any]] = None,
+    summary: Optional[Dict[str, Any]] = None,
+) -> None:
+    ts = time.time()
+    conn.execute(
+        """
+        INSERT INTO execution_plans(
+            plan_id, goal_id, task_id, principal_id, intent_summary, plan_kind,
+            status, risk_tier, approval_state, verification_state, recovery_state,
+            current_step_id, router_snapshot_json, summary_json, created_at, updated_at, completed_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)
+        """,
+        (
+            plan_id,
+            goal_id or "",
+            task_id,
+            principal_id or "",
+            intent_summary[:2000] if intent_summary else "",
+            plan_kind or "delegated_repo_task",
+            status,
+            int(risk_tier),
+            approval_state,
+            verification_state,
+            recovery_state or "",
+            current_step_id or "",
+            json.dumps(router_snapshot or {}, ensure_ascii=False),
+            json.dumps(summary or {}, ensure_ascii=False),
+            ts,
+            ts,
+        ),
+    )
+    conn.commit()
+
+
+def insert_plan_step(
+    conn: sqlite3.Connection,
+    step_id: str,
+    plan_id: str,
+    ordinal: int,
+    *,
+    title: str = "",
+    step_kind: str = "",
+    lane: str = "",
+    action: Optional[Dict[str, Any]] = None,
+    policy: Optional[Dict[str, Any]] = None,
+    status: str = "pending",
+    execution_attempt_id: str = "",
+    checkpoint: Optional[Dict[str, Any]] = None,
+    recovery: Optional[Dict[str, Any]] = None,
+    result: Optional[Dict[str, Any]] = None,
+) -> None:
+    ts = time.time()
+    conn.execute(
+        """
+        INSERT INTO plan_steps(
+            step_id, plan_id, ordinal, title, step_kind, lane,
+            action_json, policy_json, status, execution_attempt_id,
+            checkpoint_json, recovery_json, result_json, created_at, updated_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            step_id,
+            plan_id,
+            int(ordinal),
+            title[:500] if title else "",
+            step_kind or "",
+            lane or "",
+            json.dumps(action or {}, ensure_ascii=False),
+            json.dumps(policy or {}, ensure_ascii=False),
+            status,
+            execution_attempt_id or "",
+            json.dumps(checkpoint or {}, ensure_ascii=False),
+            json.dumps(recovery or {}, ensure_ascii=False),
+            json.dumps(result or {}, ensure_ascii=False),
+            ts,
+            ts,
+        ),
+    )
+    conn.commit()
+
+
+def get_execution_plan(conn: sqlite3.Connection, plan_id: str) -> Optional[Dict[str, Any]]:
+    row = conn.execute(
+        "SELECT * FROM execution_plans WHERE plan_id = ?", (plan_id,)
+    ).fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    d["router_snapshot"] = json.loads(d.pop("router_snapshot_json") or "{}")
+    d["summary"] = json.loads(d.pop("summary_json") or "{}")
+    return d
+
+
+def get_active_execution_plan_for_task(conn: sqlite3.Connection, task_id: str) -> Optional[Dict[str, Any]]:
+    row = conn.execute(
+        """
+        SELECT * FROM execution_plans
+        WHERE task_id = ?
+          AND status NOT IN ('completed', 'failed', 'abandoned')
+        ORDER BY updated_at DESC
+        LIMIT 1
+        """,
+        (task_id,),
+    ).fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    d["router_snapshot"] = json.loads(d.pop("router_snapshot_json") or "{}")
+    d["summary"] = json.loads(d.pop("summary_json") or "{}")
+    return d
+
+
+def list_recent_execution_plans(conn: sqlite3.Connection, *, limit: int = 30) -> List[Dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT * FROM execution_plans
+        ORDER BY updated_at DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        d = dict(row)
+        d["router_snapshot"] = json.loads(d.pop("router_snapshot_json") or "{}")
+        d["summary"] = json.loads(d.pop("summary_json") or "{}")
+        out.append(d)
+    return out
+
+
+def update_execution_plan(
+    conn: sqlite3.Connection,
+    plan_id: str,
+    *,
+    status: Optional[str] = None,
+    approval_state: Optional[str] = None,
+    verification_state: Optional[str] = None,
+    recovery_state: Optional[str] = None,
+    current_step_id: Optional[str] = None,
+    summary_patch: Optional[Dict[str, Any]] = None,
+    completed: Optional[bool] = None,
+) -> bool:
+    row = conn.execute(
+        "SELECT * FROM execution_plans WHERE plan_id = ?", (plan_id,)
+    ).fetchone()
+    if not row:
+        return False
+    d = dict(row)
+    ts = time.time()
+    st = status if status is not None else str(d["status"])
+    ap = approval_state if approval_state is not None else str(d["approval_state"])
+    vs = verification_state if verification_state is not None else str(d["verification_state"])
+    rs = recovery_state if recovery_state is not None else str(d["recovery_state"])
+    cs = current_step_id if current_step_id is not None else str(d["current_step_id"])
+    summ = json.loads(d["summary_json"] or "{}")
+    if not isinstance(summ, dict):
+        summ = {}
+    if summary_patch:
+        summ.update(summary_patch)
+    comp_at = float(d["completed_at"] or 0)
+    if completed is True:
+        comp_at = ts
+    conn.execute(
+        """
+        UPDATE execution_plans SET
+            status = ?, approval_state = ?, verification_state = ?, recovery_state = ?,
+            current_step_id = ?, summary_json = ?, updated_at = ?, completed_at = ?
+        WHERE plan_id = ?
+        """,
+        (
+            st,
+            ap,
+            vs,
+            rs,
+            cs,
+            json.dumps(summ, ensure_ascii=False),
+            ts,
+            comp_at,
+            plan_id,
+        ),
+    )
+    conn.commit()
+    return True
+
+
+def list_plan_steps(conn: sqlite3.Connection, plan_id: str) -> List[Dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT * FROM plan_steps WHERE plan_id = ? ORDER BY ordinal ASC
+        """,
+        (plan_id,),
+    ).fetchall()
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        d = dict(row)
+        d["action"] = json.loads(d.pop("action_json") or "{}")
+        d["policy"] = json.loads(d.pop("policy_json") or "{}")
+        d["checkpoint"] = json.loads(d.pop("checkpoint_json") or "{}")
+        d["recovery"] = json.loads(d.pop("recovery_json") or "{}")
+        d["result"] = json.loads(d.pop("result_json") or "{}")
+        out.append(d)
+    return out
+
+
+def get_plan_step(conn: sqlite3.Connection, step_id: str) -> Optional[Dict[str, Any]]:
+    row = conn.execute("SELECT * FROM plan_steps WHERE step_id = ?", (step_id,)).fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    d["action"] = json.loads(d.pop("action_json") or "{}")
+    d["policy"] = json.loads(d.pop("policy_json") or "{}")
+    d["checkpoint"] = json.loads(d.pop("checkpoint_json") or "{}")
+    d["recovery"] = json.loads(d.pop("recovery_json") or "{}")
+    d["result"] = json.loads(d.pop("result_json") or "{}")
+    return d
+
+
+def update_plan_step(
+    conn: sqlite3.Connection,
+    step_id: str,
+    *,
+    status: Optional[str] = None,
+    execution_attempt_id: Optional[str] = None,
+    action_patch: Optional[Dict[str, Any]] = None,
+    recovery_patch: Optional[Dict[str, Any]] = None,
+    result_patch: Optional[Dict[str, Any]] = None,
+    checkpoint_patch: Optional[Dict[str, Any]] = None,
+) -> bool:
+    row = conn.execute("SELECT * FROM plan_steps WHERE step_id = ?", (step_id,)).fetchone()
+    if not row:
+        return False
+    d = dict(row)
+    ts = time.time()
+    st = status if status is not None else str(d["status"])
+    eid = (
+        execution_attempt_id
+        if execution_attempt_id is not None
+        else str(d["execution_attempt_id"] or "")
+    )
+    action = json.loads(d["action_json"] or "{}")
+    if not isinstance(action, dict):
+        action = {}
+    if action_patch:
+        action.update(action_patch)
+    recovery = json.loads(d["recovery_json"] or "{}")
+    if not isinstance(recovery, dict):
+        recovery = {}
+    if recovery_patch:
+        recovery.update(recovery_patch)
+    result = json.loads(d["result_json"] or "{}")
+    if not isinstance(result, dict):
+        result = {}
+    if result_patch:
+        result.update(result_patch)
+    checkpoint = json.loads(d["checkpoint_json"] or "{}")
+    if not isinstance(checkpoint, dict):
+        checkpoint = {}
+    if checkpoint_patch:
+        checkpoint.update(checkpoint_patch)
+    conn.execute(
+        """
+        UPDATE plan_steps SET
+            status = ?, execution_attempt_id = ?,
+            action_json = ?, recovery_json = ?, result_json = ?, checkpoint_json = ?, updated_at = ?
+        WHERE step_id = ?
+        """,
+        (
+            st,
+            eid,
+            json.dumps(action, ensure_ascii=False),
+            json.dumps(recovery, ensure_ascii=False),
+            json.dumps(result, ensure_ascii=False),
+            json.dumps(checkpoint, ensure_ascii=False),
+            ts,
+            step_id,
+        ),
+    )
+    conn.commit()
+    return True
+
+
+def insert_verification_result(
+    conn: sqlite3.Connection,
+    verification_id: str,
+    *,
+    plan_id: str,
+    step_id: str,
+    method: str,
+    verdict: str,
+    summary: str = "",
+    evidence: Optional[Dict[str, Any]] = None,
+) -> None:
+    ts = time.time()
+    conn.execute(
+        """
+        INSERT INTO verification_results(
+            verification_id, plan_id, step_id, method, verdict, summary, evidence_json, created_at
+        ) VALUES (?,?,?,?,?,?,?,?)
+        """,
+        (
+            verification_id,
+            plan_id or "",
+            step_id or "",
+            method or "",
+            verdict or "",
+            summary[:2000] if summary else "",
+            json.dumps(evidence or {}, ensure_ascii=False),
+            ts,
+        ),
+    )
+    conn.commit()
+
+
+def list_verification_results_for_plan(
+    conn: sqlite3.Connection, plan_id: str, *, limit: int = 20
+) -> List[Dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT * FROM verification_results
+        WHERE plan_id = ?
+        ORDER BY created_at DESC
+        LIMIT ?
+        """,
+        (plan_id, limit),
+    ).fetchall()
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        d = dict(row)
+        d["evidence"] = json.loads(d.pop("evidence_json") or "{}")
+        out.append(d)
+    return out
+
+
+def create_goal_approval(
+    conn: sqlite3.Connection,
+    goal_id: str,
+    task_id: str,
+    *,
+    rationale: str = "",
+    metadata: Optional[Dict[str, Any]] = None,
+) -> str:
+    aid = new_goal_approval_id()
+    ts = time.time()
+    meta = dict(metadata or {})
+    conn.execute(
+        """
+        INSERT INTO goal_approvals(
+            approval_id, goal_id, task_id, status, rationale, metadata_json, created_at, updated_at
+        ) VALUES (?,?,?,?,?,?,?,?)
+        """,
+        (
+            aid,
+            goal_id or "",
+            task_id or "",
+            "pending",
+            rationale[:2000] if rationale else "",
+            json.dumps(meta, ensure_ascii=False),
+            ts,
+            ts,
+        ),
+    )
+    conn.commit()
+    return aid
+
+
+def get_goal_approval(conn: sqlite3.Connection, approval_id: str) -> Optional[Dict[str, Any]]:
+    row = conn.execute(
+        "SELECT * FROM goal_approvals WHERE approval_id = ?", (approval_id,)
+    ).fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    d["metadata"] = json.loads(d.pop("metadata_json") or "{}")
+    return d
+
+
+def update_goal_approval_status(
+    conn: sqlite3.Connection,
+    approval_id: str,
+    status: str,
+    *,
+    rationale_patch: Optional[str] = None,
+) -> bool:
+    row = conn.execute(
+        "SELECT * FROM goal_approvals WHERE approval_id = ?", (approval_id,)
+    ).fetchone()
+    if not row:
+        return False
+    ts = time.time()
+    rat = str(row["rationale"] or "")
+    if rationale_patch is not None:
+        rat = rationale_patch[:2000]
+    conn.execute(
+        """
+        UPDATE goal_approvals SET status = ?, rationale = ?, updated_at = ?
+        WHERE approval_id = ?
+        """,
+        (status, rat, ts, approval_id),
+    )
+    conn.commit()
+    return True
+
+
+def list_pending_goal_approvals_for_task(
+    conn: sqlite3.Connection, task_id: str
+) -> List[Dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT * FROM goal_approvals
+        WHERE task_id = ? AND status = 'pending'
+        ORDER BY created_at DESC
+        """,
+        (task_id,),
+    ).fetchall()
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        d = dict(row)
+        d["metadata"] = json.loads(d.pop("metadata_json") or "{}")
+        out.append(d)
+    return out
 
 
 SYSTEM_TASK_ID = "tsk_system_lockstep"

@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 import urllib.parse
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from queue import Empty, Queue
@@ -20,7 +21,22 @@ from .adapters import alexa as alexa_adapt
 from .adapters import telegram as tg_adapt
 from .alexa_request_verify import verify_alexa_http_request
 from .andrea_router import AndreaRouteDecision, route_message
+from .goal_runtime import ensure_delegate_goal_link, try_goal_status_nl_reply
+from .plan_runtime import (
+    bind_step_to_attempt,
+    finalize_execute_step_verification,
+    gate_delegated_job,
+    record_verification_event_payload,
+)
 from .bus import handle_command
+from .cursor_plan_execute import (
+    build_telegram_cursor_planner_prompt,
+    executor_model_for_lane,
+    extract_plan_text_from_conversation,
+    plan_first_enabled,
+    planner_model_for_lane,
+    plan_text_usable,
+)
 from .dashboard import (
     build_dashboard_summary,
     build_runtime_truth_snapshot,
@@ -29,6 +45,8 @@ from .dashboard import (
 )
 from .kill_switch import is_kill_switch_engaged, kill_switch_status
 from .observability import metric_log, structured_log
+from .policy_learning import record_routing_alignment
+from .resource_router import rank_execution_lanes
 from .policy import (
     digest_age_seconds,
     evaluate_skill_absence_claim,
@@ -36,27 +54,42 @@ from .policy import (
     resolve_skill_truth,
 )
 from .projector import project_task_dict
+from .scenario_registry import SCENARIO_CATALOG, get_contract
+from .scenario_runtime import (
+    delegate_should_be_blocked,
+    draft_only_delegate_message,
+    lane_allowed_for_scenario,
+    resolve_scenario,
+    scenario_job_payload_fields,
+    scenario_lane_mismatch_message,
+    unsupported_user_message,
+)
+from .scenario_schema import UNSUPPORTED, ScenarioResolution
 from .schema import EventType
 from .telegram_continuation import attach_continuation_if_applicable
 from .store import (
     append_event,
+    complete_execution_attempt,
     count_active_memories,
     count_due_reminders,
     count_pending_reminders,
     connect,
+    create_execution_attempt,
     delete_meta,
     ensure_system_task,
+    get_goal_id_for_task,
     get_meta,
     get_principal_preferences,
     get_task_principal_id,
     get_task_channel,
     list_tasks,
-    list_principal_memories,
+    list_telegram_task_ids_for_chat,
     load_recent_principal_history,
     load_events_for_task,
     load_recent_telegram_history,
     migrate,
     set_meta,
+    update_execution_attempt_handles,
 )
 from .telegram_format import (
     format_ack_message,
@@ -70,6 +103,7 @@ from .telegram_format import (
 )
 from .user_surface import (
     dedupe_user_surface_items,
+    is_stale_openclaw_narrative,
     sanitize_user_surface_text as shared_sanitize_user_surface_text,
 )
 
@@ -150,10 +184,31 @@ LIVE_NEWS_RE = re.compile(r"\b(news|headline|headlines)\b", re.I)
 RECENT_TEXT_MESSAGES_RE = re.compile(
     r"(?:"
     r"\b(?:recent|latest|last)\b.*\b(?:text(?:s| messages?)?|imessages?|messages?|threads?)\b|"
-    r"\b(?:text(?:s| messages?)?|imessages?|threads?)\b.*\b(?:recent|latest|last)\b"
+    r"\b(?:text(?:s| messages?)?|imessages?|threads?)\b.*\b(?:recent|latest|last)\b|"
+    r"\b(?:text(?:s| messages?)?|imessages?|messages?|threads?)\b.*\b(?:from|since)\s+"
+    r"(?:today|this\s+morning|this\s+afternoon|tonight)\b|"
+    r"\b(?:from|since)\s+(?:today|this\s+morning|this\s+afternoon|tonight)\b.*"
+    r"\b(?:text(?:s| messages?)?|imessages?|messages?)\b"
     r")",
     re.I,
 )
+RECENT_TEXT_SHORTHAND_FOLLOWUP_RE = re.compile(
+    r"^\s*("
+    r"from\s+today|what\s+about\s+today|how\s+about\s+today|"
+    r"since\s+(?:this\s+)?morning|since\s+(?:this\s+)?afternoon|since\s+tonight|since\s+today"
+    r")\s*[?.!]*\s*$",
+    re.I,
+)
+RECENT_TEXT_ASSISTANT_REASONS = frozenset(
+    {
+        "recent_text_messages_ready",
+        "recent_text_messages_failed",
+        "recent_text_messages_failed_contaminated",
+        "recent_text_messages_unavailable",
+    }
+)
+# Shorthand follow-ups (e.g. "from today?") only after a successful structured recent-text turn.
+RECENT_TEXT_SHORTHAND_CONTEXT_REASONS = frozenset({"recent_text_messages_ready"})
 OUTBOUND_SEND_PATTERNS = (
     re.compile(
         r"^\s*(?:(?:please|can you|could you)\s+)?send\s+(?:a\s+)?(?:message|text)\s+to\s+(?P<target>.+?)(?:\s+(?:that|saying|saying that)\s+(?P<body>.+))?\s*$",
@@ -298,6 +353,10 @@ class SyncServer:
             "ANDREA_OPENCLAW_FALLBACK_TO_CURSOR", True
         )
         self.openclaw_thinking = os.environ.get("ANDREA_OPENCLAW_THINKING", "medium").strip() or "medium"
+        # Fresh session per structured lookup (news, recent texts) avoids long-lived OpenClaw transcript bleed.
+        self.openclaw_lookup_ephemeral_session = _env_bool(
+            "ANDREA_OPENCLAW_LOOKUP_EPHEMERAL_SESSION", True
+        )
         self.openclaw_refresh_mode = (
             os.environ.get("ANDREA_OPENCLAW_REFRESH_MODE", "auto").strip().lower()
             or "auto"
@@ -428,30 +487,51 @@ class SyncServer:
             conn = connect(self.db_path)
             try:
                 migrate(conn)
-                from .optimizer import run_optimization_cycle
+                from .optimizer import (
+                    build_background_regression_report,
+                    run_optimization_cycle,
+                )
                 from .repair_orchestrator import run_incident_repair_cycle
+
+                max_age = _env_float(
+                    "ANDREA_SYNC_BACKGROUND_REGRESSION_MAX_AGE_SECONDS",
+                    172800.0,
+                )
+                regression_report, reg_evidence = build_background_regression_report(
+                    conn,
+                    max_age_seconds=max_age,
+                )
+                use_heavy = bool(reg_evidence.get("fresh")) and int(
+                    reg_evidence.get("total_checks") or 0
+                ) > 0
+                analysis_mode = "gemini_background" if use_heavy else "heuristic"
 
                 result = run_optimization_cycle(
                     conn,
                     limit=60,
-                    regression_report={
-                        "passed": True,
-                        "total": 1,
-                        "command": "background_idle_scheduler",
-                    },
+                    regression_report=regression_report if regression_report else None,
                     required_skills=["cursor_handoff"],
                     emit_proposals=True,
                     actor="background",
-                    analysis_mode="gemini_background",
+                    analysis_mode=analysis_mode,
                     repo_path=self.cursor_repo_path,
                     auto_apply_ready=self.background_optimizer_auto_apply,
                     idle_seconds=self.background_optimizer_idle_seconds,
+                    autonomy_evidence=reg_evidence,
                 )
-                if self.background_incident_repair_enabled and not bool(result.get("skipped")):
+                if (
+                    self.background_incident_repair_enabled
+                    and not bool(result.get("skipped"))
+                    and bool(reg_evidence.get("eligible_for_background_repair"))
+                ):
+                    vrep = reg_evidence.get("verification_report")
                     run_incident_repair_cycle(
                         conn,
                         repo_path=self.cursor_repo_path,
                         actor="background",
+                        verification_report=dict(vrep)
+                        if isinstance(vrep, dict)
+                        else None,
                         cursor_execute=self.background_incident_cursor_execute,
                         write_report=True,
                     )
@@ -639,8 +719,14 @@ class SyncServer:
             return []
 
         def read(c: sqlite3.Connection) -> list[str]:
-            rows = list_principal_memories(c, principal_id, limit=6)
-            return [str(row.get("content") or "").strip() for row in rows if str(row.get("content") or "").strip()]
+            from .memory_engine import build_memory_notes_for_principal
+
+            return build_memory_notes_for_principal(
+                c,
+                principal_id,
+                task_id=task_id,
+                limit_memories=6,
+            )
 
         return self.with_lock(read)
 
@@ -1176,6 +1262,51 @@ class SyncServer:
             execution_prompt = self._extract_cursor_prompt(task_id)
             principal_prefs = self._principal_preferences(task_id)
             effective_history = history if history is not None else self._recent_task_history(task_id)
+            goal_nl = self.with_lock(
+                lambda c: try_goal_status_nl_reply(c, task_id, classify_text)
+            )
+            if goal_nl:
+                gid = self.with_lock(lambda c: get_goal_id_for_task(c, task_id) or "")
+                sc = SCENARIO_CATALOG["statusFollowupContinue"]
+                scen_res = ScenarioResolution(
+                    scenario_id=sc.scenario_id,
+                    confidence=0.92,
+                    support_level=sc.support_level,
+                    reason="goal_runtime_status_reply",
+                    goal_id=gid,
+                    needs_plan=False,
+                    suggested_lane="direct_assistant",
+                    action_class=sc.action_class,
+                    proof_class=sc.proof_class,
+                    approval_mode=sc.approval_mode,
+                )
+                self._append_task_event(
+                    task_id,
+                    EventType.SCENARIO_RESOLVED,
+                    scen_res.to_event_payload(),
+                )
+                decision = AndreaRouteDecision(
+                    mode="direct",
+                    reason="goal_runtime_status",
+                    reply_text=goal_nl,
+                    collaboration_mode=str(
+                        user_payload.get("collaboration_mode")
+                        or principal_prefs.get("collaboration_mode")
+                        or "auto"
+                    ),
+                )
+                applied = self._append_task_event(
+                    task_id,
+                    EventType.ASSISTANT_REPLIED,
+                    {
+                        "text": decision.reply_text,
+                        "route": "direct",
+                        "reason": decision.reason,
+                    },
+                )
+                if applied:
+                    self.with_lock(lambda c: set_meta(c, marker, str(time.time())))
+                return decision, applied
             structured_action = self._maybe_handle_structured_assistant_action(task_id)
             if structured_action is not None:
                 reply_text, reason = structured_action
@@ -1216,43 +1347,220 @@ class SyncServer:
                     or ""
                 ),
             )
-            if decision.mode == "delegate":
-                execution_lane = decision.delegate_target or self.telegram_delegate_lane
-                kind = "openclaw" if execution_lane == "openclaw_hybrid" else "cursor"
+            gid_for_scenario = self.with_lock(
+                lambda c: get_goal_id_for_task(c, task_id) or ""
+            )
+            resolution, scenario_contract = resolve_scenario(
+                classify_text,
+                goal_id=gid_for_scenario,
+                route_decision=decision,
+            )
+            self._append_task_event(
+                task_id,
+                EventType.SCENARIO_RESOLVED,
+                resolution.to_event_payload(),
+            )
+            metric_log(
+                "scenario_resolved",
+                task_id=task_id,
+                scenario_id=resolution.scenario_id,
+                support_level=resolution.support_level,
+            )
+            if scenario_contract.support_level == UNSUPPORTED:
+                decision = AndreaRouteDecision(
+                    mode="direct",
+                    reason="scenario_unsupported",
+                    reply_text=unsupported_user_message(scenario_contract),
+                    collaboration_mode=decision.collaboration_mode,
+                )
                 applied = self._append_task_event(
                     task_id,
-                    EventType.JOB_QUEUED,
+                    EventType.ASSISTANT_REPLIED,
                     {
-                        "kind": kind,
-                        "prompt_excerpt": execution_prompt[:300],
-                        "source": source,
-                        "route_reason": decision.reason,
-                        "execution_lane": execution_lane,
-                        "runner": "openclaw" if kind == "openclaw" else "cursor",
-                        "routing_hint": str(user_payload.get("routing_hint") or "auto"),
-                        "collaboration_mode": decision.collaboration_mode,
-                        "visibility_mode": str(
-                            user_payload.get("visibility_mode")
-                            or principal_prefs.get("visibility_mode")
-                            or "summary"
-                        ),
-                        "requested_capability": str(
-                            user_payload.get("requested_capability") or ""
-                        ),
-                        "mention_targets": user_payload.get("mention_targets", []),
-                        "model_mentions": user_payload.get("model_mentions", []),
-                        "preferred_model_family": str(
-                            user_payload.get("preferred_model_family")
-                            or principal_prefs.get("preferred_model_family")
-                            or ""
-                        ),
-                        "preferred_model_label": str(
-                            user_payload.get("preferred_model_label")
-                            or principal_prefs.get("preferred_model_label")
-                            or ""
-                        ),
+                        "text": decision.reply_text,
+                        "route": "direct",
+                        "reason": decision.reason,
                     },
                 )
+                if applied:
+                    self.with_lock(lambda c: set_meta(c, marker, str(time.time())))
+                return decision, applied
+            if delegate_should_be_blocked(
+                scenario_contract, route_mode=decision.mode
+            ):
+                decision = AndreaRouteDecision(
+                    mode="direct",
+                    reason="scenario_blocks_delegate",
+                    reply_text=draft_only_delegate_message(scenario_contract),
+                    collaboration_mode=decision.collaboration_mode,
+                )
+                applied = self._append_task_event(
+                    task_id,
+                    EventType.ASSISTANT_REPLIED,
+                    {
+                        "text": decision.reply_text,
+                        "route": "direct",
+                        "reason": decision.reason,
+                    },
+                )
+                if applied:
+                    self.with_lock(lambda c: set_meta(c, marker, str(time.time())))
+                return decision, applied
+            if decision.mode == "delegate":
+                execution_lane = decision.delegate_target or self.telegram_delegate_lane
+                if not lane_allowed_for_scenario(scenario_contract, execution_lane):
+                    decision = AndreaRouteDecision(
+                        mode="direct",
+                        reason="scenario_lane_mismatch",
+                        reply_text=scenario_lane_mismatch_message(
+                            scenario_contract, execution_lane
+                        ),
+                        collaboration_mode=decision.collaboration_mode,
+                    )
+                    applied = self._append_task_event(
+                        task_id,
+                        EventType.ASSISTANT_REPLIED,
+                        {
+                            "text": decision.reply_text,
+                            "route": "direct",
+                            "reason": decision.reason,
+                        },
+                    )
+                    if applied:
+                        self.with_lock(lambda c: set_meta(c, marker, str(time.time())))
+                    return decision, applied
+                kind = "openclaw" if execution_lane == "openclaw_hybrid" else "cursor"
+                ranks = rank_execution_lanes(
+                    classify_text,
+                    chosen_lane=execution_lane,
+                    routing_hint=str(user_payload.get("routing_hint") or "auto"),
+                )
+                structured_log(
+                    "resource_router_rank",
+                    task_id=task_id,
+                    ranks=ranks,
+                    chosen=execution_lane,
+                )
+                metric_log(
+                    "resource_router_decision",
+                    task_id=task_id,
+                    chosen=execution_lane,
+                    top_lane=ranks[0][0] if ranks else "",
+                )
+                record_routing_alignment(
+                    task_id=task_id,
+                    chosen_lane=execution_lane,
+                    top_suggested_lane=ranks[0][0] if ranks else "",
+                )
+
+                def _goal_link(c: sqlite3.Connection) -> Optional[str]:
+                    return ensure_delegate_goal_link(
+                        c,
+                        task_id,
+                        user_summary=classify_text or execution_prompt[:200],
+                        channel=get_task_channel(c, task_id) or "cli",
+                        auto_create=_env_bool("ANDREA_SYNC_GOAL_AUTO_LINK", False),
+                    )
+
+                goal_id = self.with_lock(_goal_link)
+                job_payload: Dict[str, Any] = {
+                    "kind": kind,
+                    "prompt_excerpt": execution_prompt[:300],
+                    "source": source,
+                    "route_reason": decision.reason,
+                    "execution_lane": execution_lane,
+                    "runner": "openclaw" if kind == "openclaw" else "cursor",
+                    "routing_hint": str(user_payload.get("routing_hint") or "auto"),
+                    "collaboration_mode": decision.collaboration_mode,
+                    "visibility_mode": str(
+                        user_payload.get("visibility_mode")
+                        or principal_prefs.get("visibility_mode")
+                        or "summary"
+                    ),
+                    "requested_capability": str(
+                        user_payload.get("requested_capability") or ""
+                    ),
+                    "mention_targets": user_payload.get("mention_targets", []),
+                    "model_mentions": user_payload.get("model_mentions", []),
+                    "preferred_model_family": str(
+                        user_payload.get("preferred_model_family")
+                        or principal_prefs.get("preferred_model_family")
+                        or ""
+                    ),
+                    "preferred_model_label": str(
+                        user_payload.get("preferred_model_label")
+                        or principal_prefs.get("preferred_model_label")
+                        or ""
+                    ),
+                }
+                if goal_id:
+                    job_payload["goal_id"] = goal_id
+                job_payload.update(
+                    scenario_job_payload_fields(resolution, scenario_contract)
+                )
+                principal_id = self.with_lock(
+                    lambda c: get_task_principal_id(c, task_id) or ""
+                )
+                gate = self.with_lock(
+                    lambda c: gate_delegated_job(
+                        c,
+                        task_id,
+                        goal_id or "",
+                        principal_id,
+                        classify_text or execution_prompt[:200],
+                        execution_lane,
+                        dict(job_payload),
+                        ranks,
+                    )
+                )
+                if gate.mode == "await_approval":
+                    appr_payload: Dict[str, Any] = {
+                        "approval_id": gate.approval_id,
+                        "plan_id": gate.plan_id,
+                        "step_id": gate.execute_step_id,
+                        "rationale": gate.rationale,
+                        "scope_summary": f"lane={execution_lane}",
+                    }
+                    scen = job_payload.get("scenario")
+                    if isinstance(scen, dict) and scen.get("scenario_id"):
+                        sid = str(scen.get("scenario_id") or "")
+                        appr_payload["scenario_id"] = sid
+                        cmeta = get_contract(sid)
+                        if cmeta and cmeta.user_facing_label:
+                            appr_payload["scenario_label"] = cmeta.user_facing_label
+                    self._append_task_event(
+                        task_id,
+                        EventType.HUMAN_APPROVAL_REQUIRED,
+                        appr_payload,
+                    )
+                    self._append_orchestration_step(
+                        task_id,
+                        "plan",
+                        "awaiting_approval",
+                        lane=execution_lane,
+                        summary=(
+                            "Delegated execution is gated pending human approval. "
+                            f"plan_id={gate.plan_id}"
+                        ),
+                    )
+                    applied = self._append_task_event(
+                        task_id,
+                        EventType.ASSISTANT_REPLIED,
+                        {
+                            "text": gate.user_message,
+                            "route": "direct",
+                            "reason": "plan_awaiting_approval",
+                        },
+                    )
+                else:
+                    if gate.plan_id:
+                        job_payload["plan_id"] = gate.plan_id
+                        job_payload["execute_step_id"] = gate.execute_step_id
+                    applied = self._append_task_event(
+                        task_id,
+                        EventType.JOB_QUEUED,
+                        job_payload,
+                    )
             else:
                 applied = self._append_task_event(
                     task_id,
@@ -1434,6 +1742,13 @@ class SyncServer:
         agent_slug = agent_slug or "main"
         task_slug = task_slug or "task"
         return f"andrea-sync-{agent_slug}-{task_slug}-{attempt}"
+
+    def _openclaw_lookup_session_id(self, task_id: str, route_reason: str) -> str:
+        if self.openclaw_lookup_ephemeral_session:
+            slug = re.sub(r"[^a-z0-9_-]+", "-", str(route_reason or "lookup").lower()).strip("-")
+            slug = slug or "lookup"
+            return f"andrea-lookup-{slug}-{uuid.uuid4().hex[:12]}"
+        return self._openclaw_session_id(task_id, attempt=0)
 
     def _refresh_openclaw_runtime(
         self,
@@ -1669,11 +1984,82 @@ class SyncServer:
                     "summarise",
                     "latest",
                     "recent",
+                    "any",
                 )
             )
+            or re.search(r"\b(?:from|since)\s+(?:today|this\s+morning|this\s+afternoon|tonight)\b", lowered)
         ):
             return None
         return clean
+
+    def _last_assistant_reply_reason(self, task_id: str) -> str:
+        snapshot = self._task_snapshot(task_id)
+        if not snapshot:
+            return ""
+        projection = snapshot.get("projection") if isinstance(snapshot.get("projection"), dict) else {}
+        meta = projection.get("meta") if isinstance(projection.get("meta"), dict) else {}
+        assistant = meta.get("assistant") if isinstance(meta.get("assistant"), dict) else {}
+        return str(assistant.get("reason") or "").strip()
+
+    def _recent_text_lane_context_reason(self, task_id: str) -> str:
+        """
+        Same-task assistant.reason first, then other Telegram tasks in the same chat (new task after
+        a completed turn still sees the prior structured recent-text outcome).
+        """
+        direct = self._last_assistant_reply_reason(task_id)
+        if direct in RECENT_TEXT_ASSISTANT_REASONS:
+            return direct
+        snapshot = self._task_snapshot(task_id)
+        if not snapshot or str(snapshot.get("channel") or "") != "telegram":
+            return ""
+        projection = snapshot.get("projection") if isinstance(snapshot.get("projection"), dict) else {}
+        meta = projection.get("meta") if isinstance(projection.get("meta"), dict) else {}
+        tg = meta.get("telegram") if isinstance(meta.get("telegram"), dict) else {}
+        chat_id = tg.get("chat_id")
+        if chat_id is None:
+            return ""
+
+        def scan(conn: sqlite3.Connection) -> str:
+            for tid in list_telegram_task_ids_for_chat(conn, chat_id, limit=18):
+                if tid == task_id:
+                    continue
+                channel = get_task_channel(conn, tid)
+                if not channel:
+                    continue
+                proj = project_task_dict(conn, tid, channel)
+                am = (proj.get("meta") or {}).get("assistant") or {}
+                if not isinstance(am, dict):
+                    continue
+                prior = str(am.get("reason") or "").strip()
+                if prior in RECENT_TEXT_ASSISTANT_REASONS:
+                    return prior
+            return ""
+
+        return self.with_lock(scan)
+
+    def _expand_recent_text_messages_shorthand(
+        self, task_id: str, text: str
+    ) -> Optional[str]:
+        """
+        Narrow follow-up resolver: map bare time-window phrases to the structured recent-texts lane
+        only when the last assistant turn was already on that lane.
+        """
+        clean = str(text or "").strip()
+        if not clean or not RECENT_TEXT_SHORTHAND_FOLLOWUP_RE.match(clean):
+            return None
+        prev = self._recent_text_lane_context_reason(task_id)
+        if prev not in RECENT_TEXT_SHORTHAND_CONTEXT_REASONS:
+            return None
+        lowered = clean.lower()
+        if "morning" in lowered:
+            window = "this morning"
+        elif "afternoon" in lowered:
+            window = "this afternoon"
+        elif "tonight" in lowered:
+            window = "tonight"
+        else:
+            window = "today"
+        return f"What are my recent text messages from {window}?"
 
     def _select_messaging_capability(self, text: str) -> Dict[str, Any]:
         clean = str(text or "").strip().lower()
@@ -1871,6 +2257,7 @@ class SyncServer:
         failure_reason: str,
         failure_reply: str,
     ) -> tuple[str, str]:
+        contaminated_reason = f"{failure_reason}_contaminated"
         try:
             result = self._create_openclaw_job(
                 task_id,
@@ -1879,7 +2266,7 @@ class SyncServer:
                 "andrea_primary",
                 "",
                 "",
-                session_id=self._openclaw_session_id(task_id, attempt=0),
+                session_id=self._openclaw_lookup_session_id(task_id, route_reason),
             )
         except Exception:  # noqa: BLE001
             return failure_reply, failure_reason
@@ -1891,6 +2278,9 @@ class SyncServer:
             result.get("blocked_reason"),
             result.get("error"),
         ):
+            raw_preview = str(candidate or "").strip()
+            if raw_preview and is_stale_openclaw_narrative(raw_preview):
+                return failure_reply, contaminated_reason
             sanitized = shared_sanitize_user_surface_text(
                 candidate,
                 fallback="",
@@ -1899,6 +2289,8 @@ class SyncServer:
             if sanitized and not _is_generic_openclaw_summary(sanitized):
                 summary = sanitized
                 break
+        if summary and is_stale_openclaw_narrative(summary):
+            return failure_reply, contaminated_reason
         if result.get("ok"):
             return summary or success_fallback, success_reason
         if summary:
@@ -2140,7 +2532,10 @@ class SyncServer:
         if news_request is not None:
             return self._fetch_live_news_summary(task_id, news_request)
 
-        recent_text_messages = self._parse_recent_text_messages_request(text)
+        expanded_recent = self._expand_recent_text_messages_shorthand(task_id, text)
+        recent_text_messages = self._parse_recent_text_messages_request(
+            expanded_recent if expanded_recent is not None else text
+        )
         if recent_text_messages is not None:
             return self._fetch_recent_text_messages(task_id, recent_text_messages)
 
@@ -2277,27 +2672,70 @@ class SyncServer:
             timeout_seconds=self.openclaw_timeout_seconds + 10,
         )
 
-    def _create_cursor_job(self, prompt: str) -> Dict[str, Any]:
+    def _create_cursor_job(
+        self,
+        prompt: str,
+        *,
+        read_only: bool | None = None,
+        model: str | None = None,
+        branch: str | None = None,
+    ) -> Dict[str, Any]:
+        ro = self.cursor_read_only if read_only is None else read_only
+        cmd = [
+            sys.executable,
+            str(self.repo_root / "skills" / "cursor_handoff" / "scripts" / "cursor_handoff.py"),
+            "--repo",
+            str(self.cursor_repo_path),
+            "--prompt",
+            prompt,
+            "--mode",
+            self.cursor_mode,
+            "--read-only",
+            "true" if ro else "false",
+            "--json",
+            "--poll-max-attempts",
+            "0",
+            "--cli-timeout-seconds",
+            "0",
+        ]
+        if model is not None and str(model).strip():
+            cmd.extend(["--model", str(model).strip()])
+        if branch is not None and str(branch).strip():
+            cmd.extend(["--branch", str(branch).strip()])
         return self._run_json_subprocess(
-            [
-                sys.executable,
-                str(self.repo_root / "skills" / "cursor_handoff" / "scripts" / "cursor_handoff.py"),
-                "--repo",
-                str(self.cursor_repo_path),
-                "--prompt",
-                prompt,
-                "--mode",
-                self.cursor_mode,
-                "--read-only",
-                "true" if self.cursor_read_only else "false",
-                "--json",
-                "--poll-max-attempts",
-                "0",
-                "--cli-timeout-seconds",
-                "0",
-            ],
+            cmd,
             timeout_seconds=self.cursor_create_timeout_seconds or None,
         )
+
+    def _poll_cursor_agent_terminal(
+        self,
+        agent_id: str,
+        *,
+        agent_url: str = "",
+        pr_url: str = "",
+    ) -> tuple[str, Dict[str, Any], str, str]:
+        latest_status = "submitted"
+        latest_response: Dict[str, Any] = {}
+        out_url = agent_url or ""
+        out_pr = pr_url or ""
+        attempts = max(1, self.cursor_status_poll_attempts)
+        for attempt in range(attempts):
+            status_payload = self._cursor_agent_status(agent_id)
+            response = (
+                status_payload.get("response")
+                if isinstance(status_payload.get("response"), dict)
+                else {}
+            )
+            latest_response = response
+            latest_status = _clip(response.get("status"), 80) or latest_status
+            target = response.get("target") if isinstance(response.get("target"), dict) else {}
+            out_url = _clip(target.get("url") or out_url, 1000)
+            out_pr = _clip(target.get("prUrl") or out_pr, 1000)
+            if latest_status in TERMINAL_CURSOR_STATUSES:
+                break
+            if attempt < attempts - 1 and self.cursor_status_poll_interval > 0:
+                time.sleep(self.cursor_status_poll_interval)
+        return latest_status, latest_response, out_url, out_pr
 
     def _cursor_agent_status(self, agent_id: str) -> Dict[str, Any]:
         return self._run_json_subprocess(
@@ -2356,6 +2794,359 @@ class SyncServer:
         if agent_url:
             return f"Cursor finished with status {terminal_status}. Agent: {agent_url}"
         return f"Cursor finished with status {terminal_status}."
+
+    def _register_cursor_execution_attempt(
+        self,
+        task_id: str,
+        *,
+        lane: str,
+        agent_id: str,
+        agent_url: str = "",
+        pr_url: str = "",
+        openclaw_run_id: Optional[str] = None,
+        openclaw_session_id: Optional[str] = None,
+    ) -> Optional[str]:
+        """Create a durable execution attempt for an active Cursor agent handle."""
+
+        def _go(c: sqlite3.Connection) -> str:
+            gid = get_goal_id_for_task(c, task_id) or ""
+            handles: Dict[str, Any] = {
+                "handle_kind": "cursor_agent",
+                "cursor_agent_id": agent_id,
+                "agent_url": agent_url or "",
+                "pr_url": pr_url or "",
+            }
+            if openclaw_run_id:
+                handles["openclaw_run_id"] = str(openclaw_run_id)
+            if openclaw_session_id:
+                handles["openclaw_session_id"] = str(openclaw_session_id)
+            return create_execution_attempt(
+                c,
+                task_id,
+                gid,
+                lane=lane or "",
+                backend="cursor",
+                handle_dict=handles,
+            )
+
+        eid = self.with_lock(_go)
+        self._maybe_bind_plan_step_to_attempt(task_id, eid)
+        return eid
+
+    def _maybe_bind_plan_step_to_attempt(
+        self, task_id: str, attempt_id: Optional[str]
+    ) -> None:
+        if not attempt_id:
+            return
+        snap = self._task_snapshot(task_id)
+        if not snap:
+            return
+        proj = snap.get("projection") or {}
+        meta = proj.get("meta") if isinstance(proj.get("meta"), dict) else {}
+        plan = meta.get("plan") if isinstance(meta.get("plan"), dict) else {}
+        step_id = str(plan.get("execute_step_id") or "").strip()
+        if not step_id:
+            return
+
+        def _go(c: sqlite3.Connection) -> None:
+            bind_step_to_attempt(c, step_id, attempt_id)
+
+        self.with_lock(_go)
+
+    def _complete_store_execution_attempt(
+        self,
+        attempt_id: Optional[str],
+        status: str,
+        summary: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if not attempt_id:
+            return
+
+        def _go(c: sqlite3.Connection) -> None:
+            complete_execution_attempt(c, attempt_id, status, summary)
+
+        self.with_lock(_go)
+
+    def _finalize_cursor_agent_poll_for_task(
+        self,
+        task_id: str,
+        agent_id: str,
+        agent_url: str,
+        pr_url: str,
+        *,
+        visibility_mode: str,
+        preferred_model_family: str,
+        preferred_model_label: str,
+        cursor_trace: Dict[str, Any],
+        attempt_id: Optional[str] = None,
+        execution_lane: str = "direct_cursor",
+        completion_extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Poll Cursor until terminal and emit JOB_COMPLETED / JOB_FAILED / running JOB_PROGRESS."""
+        extra = dict(completion_extra or {})
+        try:
+            latest_status, latest_response, out_url, out_pr = self._poll_cursor_agent_terminal(
+                agent_id,
+                agent_url=agent_url,
+                pr_url=pr_url,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._append_orchestration_step(
+                task_id,
+                "execution",
+                "failed",
+                lane="cursor",
+                summary="Cursor did not return a clean status during the execution pass.",
+            )
+            self._complete_store_execution_attempt(
+                attempt_id,
+                "failed",
+                {"error": "cursor_poll_failed", "message": _clip(exc, 500)},
+            )
+            fail_payload: Dict[str, Any] = {
+                "error": "cursor_poll_failed",
+                "message": _clip(exc, 1500),
+                "user_safe_error": (
+                    "I could not get a clean status back from the Cursor execution lane."
+                ),
+                "internal_error": _clip(exc, 1500),
+                "cursor_agent_id": agent_id,
+                "agent_url": agent_url or None,
+                "pr_url": pr_url or None,
+                "visibility_mode": visibility_mode,
+                "preferred_model_family": preferred_model_family,
+                "preferred_model_label": preferred_model_label,
+                "backend": "cursor",
+                "runner": "cursor",
+                "execution_lane": execution_lane,
+                **cursor_trace,
+                **extra,
+            }
+            if attempt_id:
+                fail_payload["attempt_id"] = attempt_id
+            self._append_task_event(task_id, EventType.JOB_FAILED, fail_payload)
+            return
+        if attempt_id:
+            def _sync_handles(c: sqlite3.Connection) -> None:
+                update_execution_attempt_handles(
+                    c,
+                    attempt_id,
+                    {
+                        "cursor_agent_id": agent_id,
+                        "agent_url": out_url or agent_url,
+                        "pr_url": out_pr or pr_url,
+                        "last_polled_status": str(latest_response.get("status") or latest_status),
+                    },
+                    touch_last_synced=True,
+                )
+
+            self.with_lock(_sync_handles)
+        if latest_status == "FINISHED":
+            summary_text = self._cursor_terminal_summary(
+                agent_id, latest_status, out_pr or pr_url, out_url or agent_url
+            )
+            self._append_orchestration_step(
+                task_id,
+                "execution",
+                "completed",
+                lane="cursor",
+                summary="Cursor completed the heavy execution step.",
+            )
+            snap = self._task_snapshot(task_id)
+            proj = (snap or {}).get("projection") or {}
+            meta = proj.get("meta") if isinstance(proj.get("meta"), dict) else {}
+            plan_m = meta.get("plan") if isinstance(meta.get("plan"), dict) else {}
+            plan_id = str(plan_m.get("plan_id") or "").strip()
+            step_id = str(plan_m.get("execute_step_id") or "").strip()
+            fv: Optional[Dict[str, Any]] = None
+            if plan_id and step_id:
+                def _run_fin(c: sqlite3.Connection) -> Dict[str, Any]:
+                    return finalize_execute_step_verification(
+                        c,
+                        task_id=task_id,
+                        plan_id=plan_id,
+                        execute_step_id=step_id,
+                        terminal_status=latest_status,
+                        pr_url=out_pr or pr_url,
+                        agent_url=out_url or agent_url,
+                        lane=execution_lane,
+                    )
+
+                fv = self.with_lock(_run_fin)
+            if fv:
+                self._append_task_event(
+                    task_id,
+                    EventType.VERIFICATION_RECORDED,
+                    record_verification_event_payload(
+                        plan_id=plan_id,
+                        step_id=step_id,
+                        verification_id=str(fv.get("verification_id") or ""),
+                        verdict=str(fv.get("verdict") or ""),
+                        summary=str(fv.get("summary") or ""),
+                        method="delegation_terminal",
+                    ),
+                )
+                collab_payload = fv.get("collaboration_event_payload")
+                if isinstance(collab_payload, dict) and collab_payload:
+                    self._append_task_event(
+                        task_id,
+                        EventType.COLLABORATION_RECORDED,
+                        collab_payload,
+                    )
+            if fv and not fv.get("should_complete_job", True):
+                self._append_orchestration_step(
+                    task_id,
+                    "verifying",
+                    "failed",
+                    lane="cursor",
+                    summary=str(fv.get("summary") or "Verification did not pass."),
+                )
+                self._complete_store_execution_attempt(
+                    attempt_id,
+                    "failed",
+                    {
+                        "verification_failed": True,
+                        "verdict": fv.get("verdict"),
+                        "summary": fv.get("summary"),
+                    },
+                )
+                scen_rx = str(fv.get("scenario_user_receipt") or "").strip()
+                collab_note = str(fv.get("collaboration_user_note") or "").strip()
+                base_user_err = (
+                    shared_sanitize_user_surface_text(
+                        scen_rx,
+                        fallback=(
+                            "The execution reported finished, but verification did not accept the outcome."
+                        ),
+                        limit=1200,
+                    )
+                    or "The execution reported finished, but verification did not accept the outcome."
+                )
+                if collab_note:
+                    base_user_err = shared_sanitize_user_surface_text(
+                        f"{base_user_err}\n\n{collab_note}",
+                        fallback=base_user_err,
+                        limit=1400,
+                    ) or base_user_err
+                vfail_payload: Dict[str, Any] = {
+                    "error": "verification_failed",
+                    "message": _clip(str(fv.get("summary") or ""), 1500),
+                    "user_safe_error": base_user_err,
+                    "cursor_agent_id": agent_id,
+                    "agent_url": out_url or None,
+                    "pr_url": out_pr or None,
+                    "visibility_mode": visibility_mode,
+                    "preferred_model_family": preferred_model_family,
+                    "preferred_model_label": preferred_model_label,
+                    "backend": "cursor",
+                    "runner": "cursor",
+                    "execution_lane": execution_lane,
+                    **cursor_trace,
+                    **extra,
+                }
+                if attempt_id:
+                    vfail_payload["attempt_id"] = attempt_id
+                self._append_task_event(task_id, EventType.JOB_FAILED, vfail_payload)
+                return
+            self._append_orchestration_step(
+                task_id,
+                "synthesis",
+                "completed",
+                lane="cursor",
+                summary=summary_text,
+            )
+            self._complete_store_execution_attempt(
+                attempt_id,
+                "completed",
+                {"summary": summary_text, "terminal_status": latest_status},
+            )
+            done_payload: Dict[str, Any] = {
+                "summary": summary_text,
+                "cursor_agent_id": agent_id,
+                "agent_url": out_url or None,
+                "pr_url": out_pr or None,
+                "status": latest_status,
+                "raw_status": latest_response.get("status"),
+                "visibility_mode": visibility_mode,
+                "preferred_model_family": preferred_model_family,
+                "preferred_model_label": preferred_model_label,
+                "backend": "cursor",
+                "runner": "cursor",
+                "execution_lane": execution_lane,
+                "summary_source": "cursor_terminal_poll",
+                **cursor_trace,
+                **extra,
+            }
+            if fv:
+                su = str(fv.get("scenario_user_receipt") or "").strip()
+                if su:
+                    done_payload["user_summary"] = su
+                rs = str(fv.get("receipt_state") or "").strip()
+                if rs:
+                    done_payload["receipt_state"] = rs
+            if attempt_id:
+                done_payload["attempt_id"] = attempt_id
+            self._append_task_event(task_id, EventType.JOB_COMPLETED, done_payload)
+            return
+        if latest_status in TERMINAL_CURSOR_STATUSES:
+            self._append_orchestration_step(
+                task_id,
+                "execution",
+                "failed",
+                lane="cursor",
+                summary=f"Cursor ended with status {latest_status or 'unknown'}.",
+            )
+            self._complete_store_execution_attempt(
+                attempt_id,
+                "failed",
+                {"terminal_status": latest_status},
+            )
+            term_payload: Dict[str, Any] = {
+                "error": f"cursor_status_{latest_status.lower() or 'unknown'}",
+                "message": f"Cursor ended with status {latest_status or 'unknown'}.",
+                "user_safe_error": (
+                    "Cursor did not finish the execution cleanly on this pass."
+                ),
+                "cursor_agent_id": agent_id,
+                "agent_url": out_url or None,
+                "pr_url": out_pr or None,
+                "raw_status": latest_response.get("status"),
+                "visibility_mode": visibility_mode,
+                "preferred_model_family": preferred_model_family,
+                "preferred_model_label": preferred_model_label,
+                "backend": "cursor",
+                "runner": "cursor",
+                "execution_lane": execution_lane,
+                **cursor_trace,
+                **extra,
+            }
+            if attempt_id:
+                term_payload["attempt_id"] = attempt_id
+            self._append_task_event(task_id, EventType.JOB_FAILED, term_payload)
+            return
+        running_payload: Dict[str, Any] = {
+            "message": (
+                f"Cursor is still running with status {latest_status or 'unknown'} after "
+                "the configured polling window; leaving the task in running state."
+            ),
+            "cursor_agent_id": agent_id,
+            "agent_url": out_url or None,
+            "pr_url": out_pr or None,
+            "raw_status": latest_response.get("status"),
+            "terminal_status": latest_status,
+            "visibility_mode": visibility_mode,
+            "preferred_model_family": preferred_model_family,
+            "preferred_model_label": preferred_model_label,
+            "backend": "cursor",
+            "runner": "cursor",
+            "execution_lane": execution_lane,
+            "sync_source": "cursor_terminal_poll_exhausted",
+            **cursor_trace,
+            **extra,
+        }
+        if attempt_id:
+            running_payload["attempt_id"] = attempt_id
+        self._append_task_event(task_id, EventType.JOB_PROGRESS, running_payload)
 
     def _run_delegated_job(self, task_id: str) -> None:
         marker = self._meta_key("executor_started", task_id)
@@ -2627,6 +3418,110 @@ class SyncServer:
             )
             self._run_cursor_job(task_id)
             return
+        if (
+            result.get("ok")
+            and result.get("delegated_to_cursor")
+            and result.get("cursor_agent_id")
+        ):
+            agent_id = _clip(result.get("cursor_agent_id"), 200) or ""
+            agent_url = _clip(payload.get("agent_url"), 1000) or ""
+            pr_url = _clip(payload.get("pr_url"), 1000) or ""
+            execution_entry = phase_outputs.get("execution")
+            execution_summary = ""
+            if isinstance(execution_entry, dict):
+                execution_summary = str(execution_entry.get("summary") or "")
+            self._append_orchestration_step(
+                task_id,
+                "execution",
+                "started",
+                lane="cursor",
+                summary=execution_summary
+                or "OpenClaw delegated execution to Cursor; Andrea will poll for terminal status.",
+                provider=str(result.get("provider") or ""),
+                model=str(result.get("model") or ""),
+            )
+            if visibility_mode == "full":
+                self._append_task_event(
+                    task_id,
+                    EventType.JOB_PROGRESS,
+                    {
+                        "message": (
+                            "OpenClaw finished coordination and handed execution to Cursor. "
+                            "Andrea is waiting for Cursor to reach a terminal state before completing this task."
+                        ),
+                        "backend": "cursor",
+                        "execution_lane": "openclaw_hybrid",
+                        "runner": "cursor",
+                        "delegated_to_cursor": True,
+                        "cursor_agent_id": agent_id or None,
+                        "routing_hint": routing_hint,
+                        "collaboration_mode": collaboration_mode,
+                        "visibility_mode": visibility_mode,
+                        "preferred_model_family": preferred_model_family,
+                        "preferred_model_label": preferred_model_label,
+                        "force_telegram_note": True,
+                    },
+                )
+            goal_for_task = self.with_lock(lambda c: get_goal_id_for_task(c, task_id))
+            oc_run = str(payload.get("openclaw_run_id") or "").strip() or None
+            oc_sess = str(payload.get("openclaw_session_id") or "").strip() or None
+            attempt_id = self._register_cursor_execution_attempt(
+                task_id,
+                lane="openclaw_hybrid",
+                agent_id=agent_id,
+                agent_url=agent_url,
+                pr_url=pr_url,
+                openclaw_run_id=oc_run,
+                openclaw_session_id=oc_sess,
+            )
+            hybrid_started: Dict[str, Any] = {
+                "backend": "cursor",
+                "runner": "cursor",
+                "execution_lane": "openclaw_hybrid",
+                "delegated_to_cursor": True,
+                "cursor_agent_id": agent_id or None,
+                "agent_url": agent_url or None,
+                "pr_url": pr_url or None,
+                "status": "handed_off_from_openclaw",
+                "openclaw_run_id": payload.get("openclaw_run_id"),
+                "openclaw_session_id": payload.get("openclaw_session_id"),
+                "provider": payload.get("provider"),
+                "model": payload.get("model"),
+                "visibility_mode": visibility_mode,
+                "preferred_model_family": preferred_model_family,
+                "preferred_model_label": preferred_model_label,
+                "routing_hint": routing_hint,
+                "collaboration_mode": collaboration_mode,
+            }
+            if attempt_id:
+                hybrid_started["attempt_id"] = attempt_id
+            if goal_for_task:
+                hybrid_started["goal_id"] = goal_for_task
+            self._append_task_event(task_id, EventType.JOB_STARTED, hybrid_started)
+            completion_extra: Dict[str, Any] = {
+                "openclaw_run_id": payload.get("openclaw_run_id"),
+                "openclaw_session_id": payload.get("openclaw_session_id"),
+                "provider": payload.get("provider"),
+                "model": payload.get("model"),
+                "delegated_to_cursor": True,
+                "collaboration_trace": payload.get("collaboration_trace") or [],
+                "machine_collaboration_trace": payload.get("machine_collaboration_trace") or [],
+                "phase_outputs": payload.get("phase_outputs") or {},
+            }
+            self._finalize_cursor_agent_poll_for_task(
+                task_id,
+                agent_id,
+                agent_url,
+                pr_url,
+                visibility_mode=visibility_mode,
+                preferred_model_family=preferred_model_family,
+                preferred_model_label=preferred_model_label,
+                cursor_trace={"cursor_strategy": "openclaw_hybrid_handoff"},
+                attempt_id=attempt_id,
+                execution_lane="openclaw_hybrid",
+                completion_extra=completion_extra,
+            )
+            return
         if result.get("ok"):
             execution_entry = phase_outputs.get("execution")
             if isinstance(execution_entry, dict):
@@ -2741,9 +3636,86 @@ class SyncServer:
                 },
             )
             return
+        executor_model = executor_model_for_lane("telegram")
+        cursor_trace: Dict[str, Any] = {
+            "cursor_strategy": "single_pass",
+            "executor_model": executor_model,
+        }
+        exec_prompt = prompt
+        short_tid = re.sub(r"[^a-zA-Z0-9._-]+", "-", (task_id or "task")[:40]).strip("-") or "task"
+        pm = planner_model_for_lane("telegram")
+        if plan_first_enabled("telegram") and pm:
+            try:
+                planner_prompt = build_telegram_cursor_planner_prompt(prompt)
+                branch_pl = f"telegram/{short_tid}-plan-{uuid.uuid4().hex[:8]}"
+                created_pl = self._create_cursor_job(
+                    planner_prompt,
+                    read_only=True,
+                    model=pm,
+                    branch=branch_pl,
+                )
+                pl_id = _clip(created_pl.get("agent_id"), 200)
+                if pl_id:
+                    pl_status, _pl_resp, _pl_url, _pl_pr = self._poll_cursor_agent_terminal(
+                        pl_id,
+                        agent_url=_clip(created_pl.get("agent_url"), 1000),
+                        pr_url=_clip(created_pl.get("pr_url"), 1000),
+                    )
+                    if pl_status == "FINISHED":
+                        conv = self._cursor_agent_conversation(pl_id)
+                        resp = conv.get("response") if isinstance(conv, dict) else None
+                        plan_text = extract_plan_text_from_conversation(resp)
+                        if plan_text_usable(plan_text):
+                            exec_prompt = (
+                                f"{prompt}\n\n## Cursor planner output\n\n{plan_text}\n\n"
+                                "Execute the plan above in this repository. Prefer minimal, safe edits.\n"
+                            )
+                            cursor_trace = {
+                                "cursor_strategy": "plan_first",
+                                "planner_agent_id": pl_id,
+                                "planner_model": pm,
+                                "executor_model": executor_model,
+                                "plan_summary": _clip(plan_text, 800),
+                                "planner_branch": branch_pl,
+                                "planner_status": pl_status,
+                            }
+                            if visibility_mode == "full":
+                                self._append_task_event(
+                                    task_id,
+                                    EventType.JOB_PROGRESS,
+                                    {
+                                        "message": (
+                                            "Cursor planner pass finished; starting executor agent "
+                                            "with the structured plan."
+                                        ),
+                                        "backend": "cursor",
+                                        "runner": "cursor",
+                                        **cursor_trace,
+                                        "visibility_mode": visibility_mode,
+                                        "preferred_model_family": preferred_model_family,
+                                        "preferred_model_label": preferred_model_label,
+                                        "force_telegram_note": True,
+                                    },
+                                )
+            except Exception:
+                cursor_trace = {
+                    "cursor_strategy": "single_pass",
+                    "executor_model": executor_model,
+                }
+                exec_prompt = prompt
+
+        branch_exec = None
+        if cursor_trace.get("cursor_strategy") == "plan_first":
+            branch_exec = f"telegram/{short_tid}-exec-{uuid.uuid4().hex[:8]}"
+
         self._append_orchestration_step(task_id, "execution", "started", lane="cursor")
         try:
-            created = self._create_cursor_job(prompt)
+            created = self._create_cursor_job(
+                exec_prompt,
+                read_only=None,
+                model=executor_model,
+                branch=branch_exec,
+            )
         except Exception as exc:  # noqa: BLE001
             self._append_orchestration_step(
                 task_id,
@@ -2765,6 +3737,9 @@ class SyncServer:
                     "visibility_mode": visibility_mode,
                     "preferred_model_family": preferred_model_family,
                     "preferred_model_label": preferred_model_label,
+                    "backend": "cursor",
+                    "runner": "cursor",
+                    **cursor_trace,
                 },
             )
             return
@@ -2773,39 +3748,55 @@ class SyncServer:
         pr_url = _clip(created.get("pr_url"), 1000)
         backend = _clip(created.get("backend"), 80) or "unknown"
         initial_status = _clip(created.get("status"), 80) or "submitted"
-        self._append_task_event(
-            task_id,
-            EventType.JOB_STARTED,
-            {
-                "backend": backend,
+        exec_lane = self._task_execution_lane(task_id) or "direct_cursor"
+        goal_for_task = self.with_lock(lambda c: get_goal_id_for_task(c, task_id))
+        attempt_id: Optional[str] = None
+        if agent_id:
+            attempt_id = self._register_cursor_execution_attempt(
+                task_id,
+                lane=exec_lane,
+                agent_id=agent_id,
+                agent_url=agent_url or "",
+                pr_url=pr_url or "",
+            )
+        started_payload: Dict[str, Any] = {
+            "backend": backend,
+            "cursor_agent_id": agent_id or None,
+            "agent_url": agent_url or None,
+            "pr_url": pr_url or None,
+            "status": initial_status,
+            "visibility_mode": visibility_mode,
+            "preferred_model_family": preferred_model_family,
+            "preferred_model_label": preferred_model_label,
+            "runner": "cursor",
+            "execution_lane": exec_lane,
+            **cursor_trace,
+        }
+        if attempt_id:
+            started_payload["attempt_id"] = attempt_id
+        if goal_for_task:
+            started_payload["goal_id"] = goal_for_task
+        self._append_task_event(task_id, EventType.JOB_STARTED, started_payload)
+        if visibility_mode == "full" and collaboration_mode in {"cursor_primary", "collaborative"}:
+            collab_progress: Dict[str, Any] = {
+                "message": (
+                    "Cursor has started the heavy execution pass after the Andrea/OpenClaw coordination step."
+                ),
+                "backend": "cursor",
+                "runner": "cursor",
                 "cursor_agent_id": agent_id or None,
                 "agent_url": agent_url or None,
                 "pr_url": pr_url or None,
-                "status": initial_status,
                 "visibility_mode": visibility_mode,
                 "preferred_model_family": preferred_model_family,
                 "preferred_model_label": preferred_model_label,
-            },
-        )
-        if visibility_mode == "full" and collaboration_mode in {"cursor_primary", "collaborative"}:
-            self._append_task_event(
-                task_id,
-                EventType.JOB_PROGRESS,
-                {
-                    "message": (
-                        "Cursor has started the heavy execution pass after the Andrea/OpenClaw coordination step."
-                    ),
-                    "backend": "cursor",
-                    "runner": "cursor",
-                    "cursor_agent_id": agent_id or None,
-                    "agent_url": agent_url or None,
-                    "pr_url": pr_url or None,
-                    "visibility_mode": visibility_mode,
-                    "preferred_model_family": preferred_model_family,
-                    "preferred_model_label": preferred_model_label,
-                    "force_telegram_note": True,
-                },
-            )
+                "force_telegram_note": True,
+                "execution_lane": exec_lane,
+                **cursor_trace,
+            }
+            if attempt_id:
+                collab_progress["attempt_id"] = attempt_id
+            self._append_task_event(task_id, EventType.JOB_PROGRESS, collab_progress)
         if not agent_id:
             self._append_orchestration_step(
                 task_id,
@@ -2828,133 +3819,23 @@ class SyncServer:
                     "visibility_mode": visibility_mode,
                     "preferred_model_family": preferred_model_family,
                     "preferred_model_label": preferred_model_label,
+                    "backend": "cursor",
+                    "runner": "cursor",
+                    **cursor_trace,
                 },
             )
             return
-        latest_status = initial_status
-        latest_response: Dict[str, Any] = {}
-        try:
-            attempts = max(1, self.cursor_status_poll_attempts)
-            for attempt in range(attempts):
-                status_payload = self._cursor_agent_status(agent_id)
-                response = (
-                    status_payload.get("response")
-                    if isinstance(status_payload.get("response"), dict)
-                    else {}
-                )
-                latest_response = response
-                latest_status = _clip(response.get("status"), 80) or latest_status
-                target = response.get("target") if isinstance(response.get("target"), dict) else {}
-                agent_url = _clip(target.get("url") or agent_url, 1000)
-                pr_url = _clip(target.get("prUrl") or pr_url, 1000)
-                if latest_status in TERMINAL_CURSOR_STATUSES:
-                    break
-                if attempt < attempts - 1 and self.cursor_status_poll_interval > 0:
-                    time.sleep(self.cursor_status_poll_interval)
-        except Exception as exc:  # noqa: BLE001
-            self._append_orchestration_step(
-                task_id,
-                "execution",
-                "failed",
-                lane="cursor",
-                summary="Cursor did not return a clean status during the execution pass.",
-            )
-            self._append_task_event(
-                task_id,
-                EventType.JOB_FAILED,
-                {
-                    "error": "cursor_poll_failed",
-                    "message": _clip(exc, 1500),
-                    "user_safe_error": (
-                        "I could not get a clean status back from the Cursor execution lane."
-                    ),
-                    "internal_error": _clip(exc, 1500),
-                    "cursor_agent_id": agent_id,
-                    "agent_url": agent_url or None,
-                    "pr_url": pr_url or None,
-                    "visibility_mode": visibility_mode,
-                    "preferred_model_family": preferred_model_family,
-                    "preferred_model_label": preferred_model_label,
-                },
-            )
-            return
-        if latest_status == "FINISHED":
-            summary_text = self._cursor_terminal_summary(
-                agent_id, latest_status, pr_url, agent_url
-            )
-            self._append_orchestration_step(
-                task_id,
-                "execution",
-                "completed",
-                lane="cursor",
-                summary="Cursor completed the heavy execution step.",
-            )
-            self._append_orchestration_step(
-                task_id,
-                "synthesis",
-                "completed",
-                lane="cursor",
-                summary=summary_text,
-            )
-            self._append_task_event(
-                task_id,
-                EventType.JOB_COMPLETED,
-                {
-                    "summary": summary_text,
-                    "cursor_agent_id": agent_id,
-                    "agent_url": agent_url or None,
-                    "pr_url": pr_url or None,
-                    "status": latest_status,
-                    "raw_status": latest_response.get("status"),
-                    "visibility_mode": visibility_mode,
-                    "preferred_model_family": preferred_model_family,
-                    "preferred_model_label": preferred_model_label,
-                },
-            )
-            return
-        if latest_status in TERMINAL_CURSOR_STATUSES:
-            self._append_orchestration_step(
-                task_id,
-                "execution",
-                "failed",
-                lane="cursor",
-                summary=f"Cursor ended with status {latest_status or 'unknown'}.",
-            )
-            self._append_task_event(
-                task_id,
-                EventType.JOB_FAILED,
-                {
-                    "error": f"cursor_status_{latest_status.lower() or 'unknown'}",
-                    "message": f"Cursor ended with status {latest_status or 'unknown'}.",
-                    "user_safe_error": (
-                        "Cursor did not finish the execution cleanly on this pass."
-                    ),
-                    "cursor_agent_id": agent_id,
-                    "agent_url": agent_url or None,
-                    "pr_url": pr_url or None,
-                    "raw_status": latest_response.get("status"),
-                    "visibility_mode": visibility_mode,
-                    "preferred_model_family": preferred_model_family,
-                    "preferred_model_label": preferred_model_label,
-                },
-            )
-            return
-        self._append_task_event(
+        self._finalize_cursor_agent_poll_for_task(
             task_id,
-            EventType.JOB_PROGRESS,
-            {
-                "message": (
-                    f"Cursor is still running with status {latest_status or 'unknown'} after "
-                    "the configured polling window; leaving the task in running state."
-                ),
-                "cursor_agent_id": agent_id,
-                "agent_url": agent_url or None,
-                "pr_url": pr_url or None,
-                "raw_status": latest_response.get("status"),
-                "visibility_mode": visibility_mode,
-                "preferred_model_family": preferred_model_family,
-                "preferred_model_label": preferred_model_label,
-            },
+            agent_id,
+            agent_url,
+            pr_url,
+            visibility_mode=visibility_mode,
+            preferred_model_family=preferred_model_family,
+            preferred_model_label=preferred_model_label,
+            cursor_trace=cursor_trace,
+            attempt_id=attempt_id,
+            execution_lane=exec_lane,
         )
 
 
@@ -2989,6 +3870,8 @@ def make_handler(server: SyncServer) -> type:
                 "RunProactiveSweep",
                 "KillSwitchEngage",
                 "KillSwitchRelease",
+                "ResolveGoalApproval",
+                "RecordVerificationResult",
             }
         )
 

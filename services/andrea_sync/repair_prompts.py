@@ -245,6 +245,56 @@ def build_deep_debug_prompt(
     )
 
 
+def build_cursor_planner_prompt(
+    *,
+    incident: Incident,
+    plan: RepairPlan,
+    attempts: List[PatchAttempt],
+    verification_checks: List[VerificationCheck],
+) -> str:
+    """
+    Read-only Cursor pass: produce a concise execution plan text (no repo edits).
+    Output should include a markdown section headed ## CursorExecutionPlan for reliable extraction.
+    """
+    prompt_version = repair_prompt_version("CURSOR_PLANNER")
+    prior_attempts = []
+    for attempt in attempts[-2:]:
+        prior_attempts.append(
+            f"- Attempt {attempt.attempt_number} ({attempt.stage}, {attempt.model_used}): "
+            f"status={attempt.status}; error={_clip(attempt.error, 240) or 'n/a'}"
+        )
+    verification_lines = [
+        f"- {check.label}: `{check.command}`" for check in verification_checks if check.enabled
+    ]
+    return (
+        f"You are Andrea's Cursor planning lane (read-only). Prompt version: {prompt_version}.\n"
+        "Do NOT edit files, commit, or open PRs. Your job is to produce a precise, reviewable "
+        "implementation plan for a follow-up Cursor execution agent.\n\n"
+        "Respond with markdown that includes a section exactly headed:\n"
+        "## CursorExecutionPlan\n"
+        "Under that heading, provide:\n"
+        "- Ordered steps (numbered)\n"
+        "- Files to touch (repo-relative paths)\n"
+        "- Tests or verification commands to run\n"
+        "- Risks and rollback notes (short)\n"
+        "Keep the plan under ~120 lines. Do not repeat the full incident artifact verbatim.\n\n"
+        f"Incident: {incident.summary}\n"
+        f"Root cause (from repair plan): {plan.root_cause}\n\n"
+        "Draft repair steps (from Andrea plan):\n"
+        f"{_render_lines(plan.steps)}\n\n"
+        "Files to modify (from Andrea plan):\n"
+        f"{_render_lines(plan.files_to_modify)}\n\n"
+        "Risks:\n"
+        f"{_render_lines(plan.risks)}\n\n"
+        "Stop conditions:\n"
+        f"{_render_lines(plan.stop_conditions)}\n\n"
+        "Verification plan:\n"
+        f"{_render_lines(plan.verification_plan or verification_lines)}\n\n"
+        "Prior lightweight attempts:\n"
+        f"{chr(10).join(prior_attempts) or '- none'}\n"
+    )
+
+
 def build_cursor_handoff_prompt(
     *,
     incident: Incident,

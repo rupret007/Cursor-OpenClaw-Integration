@@ -8,9 +8,17 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from .observability import metric_log, structured_log
+from .cursor_plan_execute import (
+    TERMINAL_CURSOR_AGENT_STATUSES,
+    enrich_handoff_payload_from_agent_status,
+    poll_cursor_agent_until_terminal,
+    repair_handoff_poll_params,
+    repair_handoff_status_timeout_seconds,
+)
 from .repair_adapters import run_role_json
 from .repair_detectors import detect_incident, heuristic_triage, recent_diff_summary
 from .repair_executor import (
+    _post_cursor_verify_enabled,
     apply_unified_diff,
     build_default_verification_checks,
     cleanup_worktree,
@@ -20,6 +28,7 @@ from .repair_executor import (
     main_worktree_clean,
     run_cursor_repair_handoff,
     run_verification_suite,
+    verify_cursor_branch_in_isolated_worktree,
     write_repair_artifacts,
 )
 from .repair_policy import (
@@ -180,6 +189,98 @@ def _proposal_from_model(result: Dict[str, Any]) -> PatchProposal:
         test_change_reason=str(payload.get("test_change_reason") or ""),
         raw_response=payload,
     )
+
+
+def _repair_auto_cursor_heavy_enabled() -> bool:
+    raw = (os.environ.get("ANDREA_REPAIR_AUTO_CURSOR_HEAVY") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _conductor_repair_escalation_meta(
+    *,
+    plan: RepairPlan,
+    incident: Incident,
+    guard: Dict[str, Any],
+    existing_attempts: List[PatchAttempt],
+    attempts: List[PatchAttempt],
+    clean_state: Dict[str, Any],
+    cursor_execute: bool,
+    deep_ok: bool,
+) -> Dict[str, Any]:
+    """Record why lightweight OpenClaw repair stopped and when Cursor handoff is preferred."""
+    reasons: List[str] = []
+    total_patch_attempts = len(existing_attempts) + len(attempts)
+    n_files = len(plan.files_to_modify or [])
+    n_steps = len(plan.steps or [])
+    n_verify = len(plan.verification_plan or [])
+
+    heavy_plan = bool(
+        n_files >= 3
+        or n_steps >= 5
+        or n_verify >= 4
+        or (deep_ok and n_files >= 2 and n_steps >= 3)
+    )
+    exhausted_local = total_patch_attempts >= 2
+    guard_blocked = not bool(guard.get("allowed"))
+
+    if heavy_plan:
+        reasons.append("heavy_repair_plan")
+    if exhausted_local:
+        reasons.append("lightweight_attempts_exhausted")
+    if guard_blocked:
+        reasons.append("lightweight_guard_blocked")
+    if not deep_ok:
+        reasons.append("deep_plan_lane_failed")
+    elif str(plan.status or "").lower() == "failed":
+        reasons.append("deep_plan_status_failed")
+
+    worktree_clean = bool(clean_state.get("clean"))
+    recommended_cursor = bool(
+        deep_ok
+        and str(plan.status or "").lower() != "failed"
+        and (heavy_plan or exhausted_local or guard_blocked)
+    )
+
+    if not deep_ok or str(plan.status or "").lower() == "failed":
+        preferred = "human_review"
+    elif recommended_cursor:
+        preferred = "cursor_handoff"
+    else:
+        preferred = "plan_only"
+
+    auto_heavy = _repair_auto_cursor_heavy_enabled()
+    effective_cursor = bool(
+        worktree_clean
+        and (
+            cursor_execute
+            or (auto_heavy and recommended_cursor and deep_ok and str(plan.status or "").lower() != "failed")
+        )
+    )
+
+    return {
+        "preferred_executor": preferred,
+        "escalation_reasons": reasons,
+        "recommended_cursor_execute": recommended_cursor,
+        "cursor_execute_requested": bool(cursor_execute),
+        "auto_cursor_heavy": auto_heavy,
+        "effective_cursor_execute": effective_cursor,
+        "worktree_clean": worktree_clean,
+        "metrics": {
+            "plan_files": n_files,
+            "plan_steps": n_steps,
+            "plan_verification_checks": n_verify,
+            "patch_attempts": total_patch_attempts,
+        },
+        "outcome": {
+            "submission_status": "pending",
+            "terminal_cursor_status": "",
+            "verification_status": "pending",
+            "next_action": "",
+            "can_auto_verify": None,
+            "post_verify_error": "",
+            "ref_source": "",
+        },
+    }
 
 
 def _plan_from_model(
@@ -1054,6 +1155,24 @@ def run_incident_repair_cycle(
             },
         )
     )
+    deep_ok = bool(deep_result.get("ok"))
+    conductor_meta = _conductor_repair_escalation_meta(
+        plan=plan,
+        incident=incident,
+        guard=guard,
+        existing_attempts=existing_attempts,
+        attempts=attempts,
+        clean_state=clean_state,
+        cursor_execute=cursor_execute,
+        deep_ok=deep_ok,
+    )
+    if isinstance(plan.metadata, dict):
+        plan.metadata = {**plan.metadata, "conductor": conductor_meta}
+    if isinstance(incident.metadata, dict):
+        incident.metadata["conductor"] = dict(conductor_meta)
+    else:
+        incident.metadata = {"conductor": dict(conductor_meta)}
+    save_incident(conn, incident.as_dict())
     save_repair_plan(conn, plan.as_dict())
     append_event(
         conn,
@@ -1067,6 +1186,7 @@ def run_incident_repair_cycle(
             "summary": incident.summary,
             "current_state": incident.current_state,
             "prompt_version": plan.prompt_version,
+            "conductor": conductor_meta,
         },
     )
 
@@ -1086,7 +1206,8 @@ def run_incident_repair_cycle(
         save_repair_plan(conn, plan.as_dict())
 
     cursor_handoff: Dict[str, Any] = {}
-    if cursor_execute and clean_state.get("clean"):
+    post_cursor_verification: Dict[str, Any] = {}
+    if conductor_meta.get("effective_cursor_execute"):
         handoff_verification = (
             attempts[-1].verification_results
             if attempts and isinstance(attempts[-1].verification_results, dict)
@@ -1101,18 +1222,224 @@ def run_incident_repair_cycle(
             verification_report=handoff_verification,
             cursor_mode=(os.environ.get("ANDREA_REPAIR_CURSOR_MODE") or "auto").strip() or "auto",
         )
-        if cursor_handoff.get("ok"):
-            _save_state(
-                conn,
-                incident,
-                "cursor_handoff_ready",
-                reason="cursor handoff package generated",
-                extra={
-                    "branch": str(cursor_handoff.get("branch") or ""),
-                    "agent_url": str(cursor_handoff.get("agent_url") or ""),
-                    "pr_url": str(cursor_handoff.get("pr_url") or ""),
-                },
+        c_cond = dict(incident.metadata.get("conductor") or conductor_meta)
+        oc = dict(c_cond.get("outcome") or {})
+        backend = str(cursor_handoff.get("backend") or "").lower()
+        agent_id_h = str(cursor_handoff.get("agent_id") or "").strip()
+
+        if cursor_handoff.get("ok") and backend == "api" and agent_id_h:
+            poll_max, poll_iv = repair_handoff_poll_params()
+            status_timeout = repair_handoff_status_timeout_seconds()
+            term_up, last_resp = poll_cursor_agent_until_terminal(
+                repo_path=repo,
+                agent_id=agent_id_h,
+                max_attempts=max(1, int(poll_max)),
+                interval_seconds=float(poll_iv),
+                status_timeout_seconds=status_timeout,
             )
+            enrich_handoff_payload_from_agent_status(cursor_handoff, last_resp)
+            cursor_handoff["status"] = term_up or str(cursor_handoff.get("status") or "")
+
+        terminal_raw = str(cursor_handoff.get("status") or "").strip()
+        terminal_up = terminal_raw.upper()
+
+        c_cond["handoff"] = {
+            "ok": bool(cursor_handoff.get("ok")),
+            "branch": str(cursor_handoff.get("branch") or ""),
+            "agent_url": str(cursor_handoff.get("agent_url") or ""),
+            "pr_url": str(cursor_handoff.get("pr_url") or ""),
+            "backend": backend,
+            "terminal_status": terminal_raw,
+            "cursor_strategy": str(cursor_handoff.get("cursor_strategy") or ""),
+            "planner_model": str(cursor_handoff.get("planner_model") or ""),
+            "executor_model": str(cursor_handoff.get("executor_model") or ""),
+            "planner_agent_id": str(cursor_handoff.get("planner_agent_id") or ""),
+            "execution_agent_id": str(
+                cursor_handoff.get("agent_id") or cursor_handoff.get("execution_agent_id") or ""
+            ),
+            "planner_branch": str(cursor_handoff.get("planner_branch") or ""),
+            "planner_status": str(cursor_handoff.get("planner_status") or ""),
+            "plan_summary": _clip(str(cursor_handoff.get("plan_summary") or ""), 600),
+            "plan_first_fallback_reason": str(cursor_handoff.get("plan_first_fallback_reason") or ""),
+        }
+        if not cursor_handoff.get("ok"):
+            c_cond["handoff"]["error"] = _clip(str(cursor_handoff.get("error") or ""), 400)
+            oc["submission_status"] = "failed"
+            oc["terminal_cursor_status"] = terminal_raw
+            oc["verification_status"] = "not_attempted"
+            oc["next_action"] = "retry_cursor_handoff_or_human"
+            oc["can_auto_verify"] = False
+            c_cond["outcome"] = oc
+            incident.metadata["conductor"] = c_cond
+            conductor_meta = c_cond
+            if isinstance(plan.metadata, dict):
+                plan.metadata["conductor"] = dict(c_cond)
+            save_incident(conn, incident.as_dict())
+            save_repair_plan(conn, plan.as_dict())
+        else:
+            oc["submission_status"] = "succeeded"
+            oc["terminal_cursor_status"] = terminal_raw
+            branch_name = str(cursor_handoff.get("branch") or "")
+            post_v = _post_cursor_verify_enabled()
+            oc.pop("verification_skip_reason", None)
+
+            run_verify = False
+            if not post_v:
+                oc["verification_status"] = "skipped"
+                oc["verification_skip_reason"] = "disabled_by_env"
+                oc["next_action"] = "monitor_cursor_or_verify_manually"
+                oc["can_auto_verify"] = None
+                oc["post_verify_error"] = ""
+            elif backend == "api":
+                if terminal_up not in TERMINAL_CURSOR_AGENT_STATUSES:
+                    oc["verification_status"] = "not_attempted"
+                    oc["next_action"] = "monitor_cursor_or_verify_manually"
+                    oc["post_verify_error"] = "cursor_agent_not_terminal_after_poll"
+                    oc["can_auto_verify"] = False
+                elif terminal_up != "FINISHED":
+                    oc["verification_status"] = "not_attempted"
+                    oc["next_action"] = "human_review_cursor_failed"
+                    oc["post_verify_error"] = ""
+                    oc["can_auto_verify"] = False
+                elif not branch_name:
+                    oc["verification_status"] = "unverified"
+                    oc["next_action"] = "human_review_branch_unavailable"
+                    oc["post_verify_error"] = "missing_branch"
+                    oc["can_auto_verify"] = False
+                else:
+                    run_verify = True
+            elif not branch_name:
+                oc["verification_status"] = "unverified"
+                oc["next_action"] = "human_review_branch_unavailable"
+                oc["post_verify_error"] = "missing_branch"
+                oc["can_auto_verify"] = False
+            else:
+                run_verify = True
+
+            if run_verify:
+                _save_state(
+                    conn,
+                    incident,
+                    "cursor_verifying",
+                    reason="running post-cursor verification in isolated worktree",
+                    extra={
+                        "plan_id": plan.plan_id,
+                        "branch": branch_name,
+                    },
+                )
+                vres = verify_cursor_branch_in_isolated_worktree(
+                    repo_path=repo,
+                    branch=branch_name,
+                    incident_id=incident.incident_id,
+                    verification_checks=verification_checks,
+                )
+                post_cursor_verification = vres
+                if vres.get("ok") and vres.get("passed"):
+                    oc["verification_status"] = "passed"
+                    oc["next_action"] = "none"
+                    oc["can_auto_verify"] = True
+                    oc["post_verify_error"] = ""
+                    oc["ref_source"] = str(vres.get("ref_source") or "")
+                    c_cond["outcome"] = oc
+                    incident.metadata["conductor"] = c_cond
+                    conductor_meta = c_cond
+                    if isinstance(plan.metadata, dict):
+                        plan.metadata["conductor"] = dict(c_cond)
+                    save_incident(conn, incident.as_dict())
+                    save_repair_plan(conn, plan.as_dict())
+                    _save_state(
+                        conn,
+                        incident,
+                        "resolved",
+                        reason="cursor handoff verified in isolated worktree",
+                        extra={
+                            "plan_id": plan.plan_id,
+                            "branch": branch_name,
+                            "ref_source": str(vres.get("ref_source") or ""),
+                        },
+                    )
+                    if write_report:
+                        report_paths = write_repair_artifacts(
+                            repo_path=repo,
+                            incident=incident,
+                            attempts=existing_attempts + attempts,
+                            plan=plan,
+                            verification_report=dict(vres.get("verification_report") or {}),
+                            status=incident.current_state,
+                        )
+                        plan.cursor_handoff_payload = {
+                            **plan.cursor_handoff_payload,
+                            **report_paths,
+                        }
+                        save_repair_plan(conn, plan.as_dict())
+                    append_event(
+                        conn,
+                        audit_task_id,
+                        EventType.INCIDENT_RESOLVED,
+                        {
+                            "incident_id": incident.incident_id,
+                            "plan_id": plan.plan_id,
+                            "branch": branch_name,
+                            "summary": incident.summary,
+                            "current_state": incident.current_state,
+                            "report_path": str(report_paths.get("json_path") or ""),
+                            "markdown_path": str(report_paths.get("markdown_path") or ""),
+                            "conductor": dict(conductor_meta),
+                            "post_cursor_verification": dict(vres),
+                        },
+                    )
+                    metric_log(
+                        "incident_repair_resolved",
+                        incident_id=incident.incident_id,
+                        attempts=incident.attempt_count,
+                    )
+                    structured_log(
+                        "incident_repair_resolved_post_cursor",
+                        incident_id=incident.incident_id,
+                        plan_id=plan.plan_id,
+                        branch=branch_name,
+                    )
+                    return {
+                        "ok": True,
+                        "resolved": True,
+                        "status": incident.current_state,
+                        "incident": incident.as_dict(),
+                        "attempts": [attempt.as_dict() for attempt in existing_attempts + attempts],
+                        "plan": plan.as_dict(),
+                        "verification_report": dict(vres.get("verification_report") or {}),
+                        "guard": guard,
+                        "conductor_escalation": dict(conductor_meta),
+                        "cursor_handoff": cursor_handoff,
+                        "post_cursor_verification": vres,
+                        "report_path": str(report_paths.get("json_path") or ""),
+                        "artifact_paths": report_paths,
+                        "budget": budget.as_dict(),
+                        "repair_history": {
+                            "incident": get_incident(conn, incident.incident_id),
+                            "attempts": list_repair_attempts(conn, incident.incident_id),
+                            "latest_plan": get_latest_repair_plan(conn, incident.incident_id),
+                        },
+                    }
+                if vres.get("ok") and not vres.get("passed"):
+                    oc["verification_status"] = "failed"
+                    oc["next_action"] = "human_review_verification_failed"
+                    oc["can_auto_verify"] = True
+                    oc["post_verify_error"] = _clip(str(vres.get("error") or ""), 400)
+                    oc["ref_source"] = str(vres.get("ref_source") or "")
+                else:
+                    oc["verification_status"] = "unverified"
+                    oc["next_action"] = "human_review_branch_unavailable"
+                    oc["can_auto_verify"] = False
+                    oc["post_verify_error"] = _clip(str(vres.get("error") or ""), 400)
+                    oc["ref_source"] = str(vres.get("ref_source") or "")
+
+            c_cond["outcome"] = oc
+            incident.metadata["conductor"] = c_cond
+            conductor_meta = c_cond
+            if isinstance(plan.metadata, dict):
+                plan.metadata["conductor"] = dict(c_cond)
+            save_incident(conn, incident.as_dict())
+            save_repair_plan(conn, plan.as_dict())
             append_event(
                 conn,
                 audit_task_id,
@@ -1127,12 +1454,30 @@ def run_incident_repair_cycle(
                     "current_state": incident.current_state,
                     "report_path": str(report_paths.get("json_path") or ""),
                     "markdown_path": str(report_paths.get("markdown_path") or ""),
+                    "conductor": dict(conductor_meta),
+                    "post_cursor_verification": dict(post_cursor_verification or {}),
                 },
             )
 
+    outcome_next = str(
+        (
+            dict(incident.metadata.get("conductor") or conductor_meta).get("outcome")
+            or {}
+        ).get("next_action")
+        or ""
+    )
     final_state = "human_review_required"
     if cursor_handoff.get("ok"):
-        final_state = "cursor_handoff_ready"
+        if post_cursor_verification:
+            final_state = "human_review_required"
+        elif outcome_next in (
+            "human_review_cursor_failed",
+            "human_review_verification_failed",
+            "human_review_branch_unavailable",
+        ):
+            final_state = "human_review_required"
+        else:
+            final_state = "cursor_handoff_ready"
     _save_state(
         conn,
         incident,
@@ -1140,6 +1485,7 @@ def run_incident_repair_cycle(
         reason="repair escalated beyond safe lightweight attempts",
         extra={"plan_id": plan.plan_id},
     )
+    conductor_meta = dict(incident.metadata.get("conductor") or conductor_meta)
     append_event(
         conn,
         audit_task_id,
@@ -1152,6 +1498,7 @@ def run_incident_repair_cycle(
             "report_path": str(report_paths.get("json_path") or ""),
             "markdown_path": str(report_paths.get("markdown_path") or ""),
             "current_state": incident.current_state,
+            "conductor": conductor_meta,
         },
     )
     structured_log(
@@ -1159,6 +1506,8 @@ def run_incident_repair_cycle(
         incident_id=incident.incident_id,
         plan_id=plan.plan_id,
         cursor_execute=cursor_execute,
+        conductor_preferred_executor=str(conductor_meta.get("preferred_executor") or ""),
+        effective_cursor_execute=bool(conductor_meta.get("effective_cursor_execute")),
     )
     return {
         "ok": True,
@@ -1169,7 +1518,9 @@ def run_incident_repair_cycle(
         "plan": plan.as_dict(),
         "verification_report": verification,
         "guard": guard,
+        "conductor_escalation": conductor_meta,
         "cursor_handoff": cursor_handoff,
+        "post_cursor_verification": post_cursor_verification,
         "report_path": str(report_paths.get("json_path") or ""),
         "artifact_paths": report_paths,
         "budget": budget.as_dict(),

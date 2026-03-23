@@ -37,6 +37,20 @@ The current Telegram routing understands:
   - also request collaboration
 - phrases like `show the full dialogue`, `show all handoffs`, `visible collaboration`
   - enable richer Telegram collaboration updates
+- messages that mention **masterclass** (or similar) **and** clear collaboration signals (`@Andrea @Cursor`, `work together`, two or more `@Gemini`/`@Minimax`/`@OpenAI` mentions, etc.)
+  - Andrea may also set **full** collaboration visibility for Telegram (same as explicit “visible collaboration” phrasing)
+
+## OpenClaw config for spawn handoffs (optional)
+
+Some **intentional** multi-step OpenClaw flows spawn **child sessions** and pass context between them. If your sprint hits errors about **`sessions_spawn`** or **`attachments.enabled`**, the gateway may be blocking attachment pass-through between spawned sessions.
+
+**When to enable:** Only if you are deliberately running that kind of multi-session pipeline (e.g. visible multi-model handoffs). It is **not** required for normal Telegram chat, reminders, live news, or single-session hybrid runs.
+
+**What to set:** In your OpenClaw configuration, enable the tool setting that allows attachments on spawned sessions (often documented as something like `tools.sessions_spawn.attachments.enabled`). The exact path and schema depend on your OpenClaw version—confirm with `openclaw` docs or `openclaw config` / your local config file.
+
+**After changing config:** `openclaw gateway restart` (or your usual restart path) so the gateway picks it up.
+
+**Trade-off:** Allowing attachments between spawned sessions increases how much data can flow across session boundaries. Treat this as a **sprint / power-user** toggle, not a default for every chat.
 
 ## Recommended one-hour sprint structure
 

@@ -8,6 +8,8 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 
+from .user_surface import is_stale_openclaw_narrative, sanitize_user_surface_text
+
 
 def _env_truthy(name: str, default: bool = False) -> bool:
     raw = os.environ.get(name)
@@ -260,6 +262,15 @@ def classify_route(
     return "direct", "explicit_andrea_mention" if andrea_preferred else "balanced_default_direct", "", "andrea_primary" if andrea_preferred else collab
 
 
+def _finalize_direct_surface_reply(text: str, *, user_seed: str) -> str:
+    """Last-line guard: never return stale/runtime/provider chatter from direct or fallback paths."""
+    raw = str(text or "").strip()
+    safe = sanitize_user_surface_text(raw, fallback="", limit=2000)
+    if safe and not is_stale_openclaw_narrative(raw):
+        return safe
+    return _heuristic_reply(user_seed)
+
+
 def _clip(text: str, limit: int = 220) -> str:
     text = str(text or "").strip()
     if len(text) <= limit:
@@ -276,13 +287,25 @@ def _history_hint(history: list[dict[str, str]] | None) -> str:
             and turn.get("content")
             and not GENERIC_DIRECT_REPLY_RE.search(str(turn.get("content") or ""))
         ):
-            return _clip(turn["content"], 180)
+            cleaned = sanitize_user_surface_text(
+                _clip(turn["content"], 180), fallback="", limit=180
+            )
+            if cleaned:
+                return cleaned
     for turn in reversed(history):
         if turn.get("role") == "user" and turn.get("content"):
-            return _clip(turn["content"], 180)
+            cleaned = sanitize_user_surface_text(
+                _clip(turn["content"], 180), fallback="", limit=180
+            )
+            if cleaned:
+                return cleaned
     for turn in reversed(history):
         if turn.get("role") == "assistant" and turn.get("content"):
-            return _clip(turn["content"], 180)
+            cleaned = sanitize_user_surface_text(
+                _clip(turn["content"], 180), fallback="", limit=180
+            )
+            if cleaned:
+                return cleaned
     return ""
 
 
@@ -290,9 +313,9 @@ def _memory_hint(memory_notes: list[str] | None) -> str:
     if not memory_notes:
         return ""
     for note in memory_notes:
-        clipped = _clip(note, 180)
-        if clipped:
-            return clipped
+        cleaned = sanitize_user_surface_text(_clip(note, 180), fallback="", limit=180)
+        if cleaned:
+            return cleaned
     return ""
 
 
@@ -306,31 +329,39 @@ def _contextual_fallback(
     memory_hint = _memory_hint(memory_notes)
     if MEMORY_RE.search(clean):
         if hint and memory_hint:
-            return (
+            reply = (
                 "Yes. I remember the recent conversation and I also have a durable note for this principal. "
                 f"Recent thread: {hint} Durable note: {memory_hint}"
             )
+            safe = sanitize_user_surface_text(reply, fallback="", limit=2000)
+            return safe or _heuristic_reply(text)
         if hint:
-            return (
+            reply = (
                 "Yes, I remember the recent conversation in this chat. "
                 f"The latest useful context I have is: {hint} What would you like to continue?"
             )
+            safe = sanitize_user_surface_text(reply, fallback="", limit=2000)
+            return safe or _heuristic_reply(text)
         if memory_hint:
-            return (
+            reply = (
                 "Yes. I have a durable note for this principal, even if this specific chat thread is light. "
                 f"The strongest saved note I have is: {memory_hint}"
             )
+            safe = sanitize_user_surface_text(reply, fallback="", limit=2000)
+            return safe or _heuristic_reply(text)
         return (
             "I can remember the recent conversation in this chat once we build a little history together. "
             "Tell me what you want to continue, and I'll pick it up from there."
         )
     if "anything else" in clean or "say more" in clean or "tell me more" in clean:
         if hint:
-            return (
+            reply = (
                 "Yes. Building on what we were just discussing, "
                 f"the most relevant recent context is: {hint}"
             )
-        return "Yes. Tell me what direction you want to go next, and I'll expand from there."
+            safe = sanitize_user_surface_text(reply, fallback="", limit=2000)
+            return safe or _heuristic_reply(text)
+        return _heuristic_reply(text)
     return _heuristic_reply(text)
 
 
@@ -392,6 +423,28 @@ def _heuristic_reply(text: str) -> str:
     )
 
 
+def _scrub_history_for_direct(history: list[dict[str, str]] | None) -> list[dict[str, str]]:
+    """Drop poisoned assistant turns and strip internal lines before OpenAI direct."""
+    if not history:
+        return []
+    out: list[dict[str, str]] = []
+    for turn in history:
+        raw = str(turn.get("content") or "").strip()
+        if not raw:
+            continue
+        role = "assistant" if turn.get("role") == "assistant" else "user"
+        if is_stale_openclaw_narrative(raw):
+            continue
+        if role == "assistant":
+            content = sanitize_user_surface_text(raw, fallback="", limit=2000)
+            if not content:
+                continue
+        else:
+            content = raw
+        out.append({"role": role, "content": content})
+    return out
+
+
 def _openai_direct_reply(
     text: str,
     history: list[dict[str, str]] | None = None,
@@ -406,6 +459,14 @@ def _openai_direct_reply(
         5,
         int((os.environ.get("ANDREA_DIRECT_OPENAI_TIMEOUT_SECONDS") or "25").strip()),
     )
+    clean_user = _normalize(str(text).strip())
+    news_extra = ""
+    if NEWS_RE.search(clean_user):
+        news_extra = (
+            " The user is asking about current news or headlines: do not answer by recycling unrelated "
+            "past assistant messages about projects, sprints, or tool handoffs; answer briefly from general "
+            "knowledge or ask what topic or region they want."
+        )
     messages = [
         {
             "role": "system",
@@ -414,10 +475,14 @@ def _openai_direct_reply(
                 "Answer directly, naturally, and concisely. "
                 "Do not mention Cursor unless the user asks. "
                 "Never mention session IDs, session labels, tool configuration flags, or runtime internals. "
+                "Never echo embedding-quota, memory-quota, vector-store, or active-context errors from prior "
+                "turns as if they were facts about the user's question. "
                 "If the user asks about Cursor or collaboration, explain it in product terms instead. "
                 "Use the recent conversation history when it is relevant, "
                 "but do not claim memories beyond what is provided in this chat context. "
+                "Do not treat unrelated prior assistant turns as the answer to a new question. "
                 "Keep replies short and useful for chat or voice."
+                f"{news_extra}"
             ),
         }
     ]
@@ -429,7 +494,8 @@ def _openai_direct_reply(
                 "content": "Durable user context:\n- " + "\n- ".join(durable_notes[:4]),
             }
         )
-    for turn in (history or [])[-history_turns:]:
+    scrubbed = _scrub_history_for_direct(history)
+    for turn in scrubbed[-history_turns:]:
         role = "assistant" if turn.get("role") == "assistant" else "user"
         content = str(turn.get("content") or "").strip()
         if content:
@@ -471,7 +537,10 @@ def _openai_direct_reply(
     text_out = str(content or "").strip()
     if not text_out:
         raise RuntimeError("openai_direct_empty_content")
-    return text_out
+    safe = sanitize_user_surface_text(text_out, fallback="", limit=2000)
+    if not safe or is_stale_openclaw_narrative(text_out):
+        raise RuntimeError("openai_direct_contaminated")
+    return safe
 
 
 def build_direct_reply(
@@ -480,20 +549,32 @@ def build_direct_reply(
     memory_notes: list[str] | None = None,
 ) -> str:
     clean = _normalize(text)
+    has_memory = bool(memory_notes and any(str(n).strip() for n in memory_notes))
+    greeting_short = _is_greeting_only(clean) and len(clean.split()) <= 6
+    # Longer turns with principal memory should reach the model/heuristic fallback chain
+    # instead of the ultra-short greeting fast-path.
+    if has_memory and len(clean.split()) > 8:
+        greeting_short = False
     if (
-        (_is_greeting_only(clean) and len(clean.split()) <= 6)
+        greeting_short
         or THANKS_RE.search(clean)
         or IDENTITY_RE.search(clean)
         or META_CURSOR_RE.search(clean)
         or NEWS_RE.search(clean)
         or _meta_stack_question(clean, text)
-        or (HELP_RE.search(clean) and len(clean.split()) <= 6)
+        or (HELP_RE.search(clean) and len(clean.split()) <= 6 and not has_memory)
     ):
-        return _heuristic_reply(text)
+        return _finalize_direct_surface_reply(_heuristic_reply(text), user_seed=text)
     try:
-        return _openai_direct_reply(text, history=history, memory_notes=memory_notes)
+        return _finalize_direct_surface_reply(
+            _openai_direct_reply(text, history=history, memory_notes=memory_notes),
+            user_seed=text,
+        )
     except Exception:
-        return _contextual_fallback(text, history=history, memory_notes=memory_notes)
+        return _finalize_direct_surface_reply(
+            _contextual_fallback(text, history=history, memory_notes=memory_notes),
+            user_seed=text,
+        )
 
 
 def route_message(

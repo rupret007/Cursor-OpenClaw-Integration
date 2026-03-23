@@ -21,7 +21,11 @@
 set -euo pipefail
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export ANDREA_REPO_ROOT="${BASE_DIR}"
+# shellcheck disable=SC1091
+source "${BASE_DIR}/scripts/macos/andrea_launchagent_lib.sh"
 cd "$BASE_DIR"
+andrea_load_runtime_env
 
 say() { echo "[andrea_full_cycle] $*"; }
 warn() { echo "[andrea_full_cycle] WARN: $*" >&2; }
@@ -31,6 +35,7 @@ die() { echo "[andrea_full_cycle] FAIL: $*" >&2; exit 1; }
 [[ -f scripts/andrea_kill_switch.sh ]] || die "missing scripts/andrea_kill_switch.sh"
 [[ -f scripts/andrea_communication_smoke.sh ]] || die "missing scripts/andrea_communication_smoke.sh"
 [[ -f scripts/andrea_lockstep_telegram_e2e.py ]] || die "missing scripts/andrea_lockstep_telegram_e2e.py"
+[[ -f scripts/andrea_services.sh ]] || die "missing scripts/andrea_services.sh"
 
 command -v curl >/dev/null 2>&1 || die "curl not on PATH"
 command -v python3 >/dev/null 2>&1 || die "python3 not on PATH"
@@ -39,6 +44,9 @@ command -v python3 >/dev/null 2>&1 || die "python3 not on PATH"
 
 export ANDREA_SYNC_URL="${ANDREA_SYNC_URL:-http://127.0.0.1:8765}"
 export ANDREA_SYNC_URL="${ANDREA_SYNC_URL%/}"
+
+say "andrea_services.sh status all"
+bash scripts/andrea_services.sh status all || die "andrea_services status failed"
 
 if [[ "${SKIP_GIT:-0}" != "1" ]]; then
   current_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
@@ -68,8 +76,8 @@ echo "$pol_out" | python3 -c "import json,sys; json.load(sys.stdin)" || die "pol
 echo "$pol_out" | python3 -m json.tool
 
 if [[ "${SKIP_GATEWAY_RESTART:-0}" != "1" ]] && command -v openclaw >/dev/null 2>&1; then
-  say "openclaw gateway restart"
-  openclaw gateway restart || die "openclaw gateway restart failed"
+  say "andrea_services.sh restart gateway"
+  bash scripts/andrea_services.sh restart gateway || die "gateway restart failed"
 elif [[ "${SKIP_GATEWAY_RESTART:-0}" == "1" ]]; then
   say "skip gateway restart (SKIP_GATEWAY_RESTART=1)"
 else

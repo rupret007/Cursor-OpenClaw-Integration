@@ -11,6 +11,10 @@
 #
 set -euo pipefail
 BASE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+export ANDREA_REPO_ROOT="${BASE_DIR}"
+# shellcheck disable=SC1091
+source "${BASE_DIR}/scripts/macos/andrea_launchagent_lib.sh"
+andrea_load_runtime_env
 BASE_URL="${ANDREA_SYNC_URL:-http://127.0.0.1:8765}"
 BASE_URL="${BASE_URL%/}"
 TOKEN="${ANDREA_SYNC_INTERNAL_TOKEN:-}"
@@ -46,7 +50,7 @@ case "$cmd" in
   hard-stop)
     reason="${*:-hard-stop}"
     "$BASE_DIR/scripts/andrea_kill_switch.sh" engage "$reason"
-    labels="${ANDREA_LAUNCHD_LABELS:-com.andrea.andrea-sync,com.andrea.andrea-cloudflared}"
+    labels="${ANDREA_LAUNCHD_LABELS:-$(andrea_default_stop_labels_csv)}"
     uid="$(id -u)"
     IFS=',' read -r -a arr <<< "$labels"
     for lab in "${arr[@]}"; do

@@ -32,13 +32,14 @@ if ! command -v curl >/dev/null 2>&1; then
 fi
 
 if ! out="$(curl -sS -m 10 "${ANDREA_SYNC_URL}/v1/health" 2>&1)"; then
-  say "FAIL: cannot reach ${ANDREA_SYNC_URL}/v1/health — start: python3 scripts/andrea_sync_server.py"
+  say "FAIL: cannot reach ${ANDREA_SYNC_URL}/v1/health — start: bash scripts/andrea_services.sh start all (or python3 scripts/andrea_sync_server.py)"
   ok=0
 elif ! echo "$out" | python3 -c "import json,sys; d=json.load(sys.stdin); assert d.get('ok') is True" 2>/dev/null; then
   say "FAIL: /v1/health not ok: ${out:0:200}"
   ok=0
 else
   say "OK: andrea_sync /v1/health"
+  say "TIP: bash scripts/andrea_services.sh status all"
 fi
 
 if [[ -z "${ANDREA_SYNC_TELEGRAM_SECRET:-}" ]]; then

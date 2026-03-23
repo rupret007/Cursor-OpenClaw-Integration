@@ -2,6 +2,9 @@
 set -euo pipefail
 
 BASE_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+export ANDREA_REPO_ROOT="${BASE_DIR}"
+# shellcheck disable=SC1091
+source "${BASE_DIR}/scripts/macos/andrea_launchagent_lib.sh"
 LOG_PREFIX="[andrea_post_login_bootstrap]"
 export PATH="${HOME}/.npm-global/bin:${HOME}/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
 
@@ -11,15 +14,6 @@ say() {
 
 warn() {
   echo "${LOG_PREFIX} WARN: $*" >&2
-}
-
-load_env_file() {
-  local path="$1"
-  [[ -f "$path" ]] || return 0
-  set -a
-  # shellcheck disable=SC1090
-  source "$path"
-  set +a
 }
 
 sync_cursor_handoff_skill() {
@@ -44,15 +38,21 @@ restart_openclaw_gateway() {
     say "Skip OpenClaw gateway restart (ANDREA_OPENCLAW_GATEWAY_REFRESH_ON_LOGIN!=1)"
     return 0
   fi
-  if ! command -v openclaw >/dev/null 2>&1; then
+  if andrea_restart_openclaw_gateway_debounced "post_login_bootstrap"; then
+    if [[ "${ANDREA_LAST_GATEWAY_RESTART_ACTION:-}" == "skipped_recent" ]]; then
+      say "OpenClaw gateway restart already handled recently"
+    else
+      say "Restarted OpenClaw gateway"
+    fi
+    return 0
+  fi
+  local rc=$?
+  if [[ "${rc}" -eq 127 ]]; then
     warn "openclaw not found on PATH"
-    return 0
-  fi
-  if ! openclaw gateway restart; then
+  else
     warn "openclaw gateway restart failed"
-    return 0
   fi
-  say "Restarted OpenClaw gateway"
+  return 0
 }
 
 wait_for_sync_health() {
@@ -112,11 +112,7 @@ ensure_telegram_webhook() {
 
 main() {
   cd "$BASE_DIR"
-  load_env_file "${BASE_DIR}/.env"
-  load_env_file "${HOME}/andrea-lockstep.env"
-  if [[ -n "${ANDREA_ENV_FILE:-}" ]]; then
-    load_env_file "${ANDREA_ENV_FILE}"
-  fi
+  andrea_load_runtime_env
 
   sync_cursor_handoff_skill
   restart_openclaw_gateway

@@ -166,6 +166,28 @@ cd /path/to/Cursor-OpenClaw-Integration
 set -a && source .env && set +a
 ```
 
+### Admin service control (macOS)
+
+Use the canonical runtime control surface for everyday operator tasks:
+
+```bash
+bash scripts/andrea_services.sh status all
+bash scripts/andrea_services.sh start all
+bash scripts/andrea_services.sh restart all
+bash scripts/andrea_services.sh stop all
+bash scripts/andrea_services.sh bootstrap
+```
+
+For reboot-ready auto-start after login, install the LaunchAgents through the same surface:
+
+```bash
+bash scripts/andrea_services.sh install-launchagents --with-cloudflared --load
+# Fallback when cloudflared is unavailable:
+# bash scripts/andrea_services.sh install-launchagents --with-localtunnel --load
+```
+
+The recommended model is per-user LaunchAgents in `gui/$UID`, not system boot daemons. The legacy `--with-openclaw-refresh` agent remains available for compatibility, but the post-login bootstrap already restarts the gateway and now debounces duplicate login-time restarts.
+
 ## Quick start
 
 ### 1. Clone and use `main`

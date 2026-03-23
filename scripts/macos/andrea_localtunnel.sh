@@ -2,27 +2,17 @@
 set -euo pipefail
 
 BASE_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+export ANDREA_REPO_ROOT="${BASE_DIR}"
+# shellcheck disable=SC1091
+source "${BASE_DIR}/scripts/macos/andrea_launchagent_lib.sh"
 LOG_PREFIX="[andrea_localtunnel]"
 
 say() {
   echo "${LOG_PREFIX} $*"
 }
 
-load_env_file() {
-  local path="$1"
-  [[ -f "$path" ]] || return 0
-  set -a
-  # shellcheck disable=SC1090
-  source "$path"
-  set +a
-}
-
 cd "$BASE_DIR"
-load_env_file "${BASE_DIR}/.env"
-load_env_file "${HOME}/andrea-lockstep.env"
-if [[ -n "${ANDREA_ENV_FILE:-}" ]]; then
-  load_env_file "${ANDREA_ENV_FILE}"
-fi
+andrea_load_runtime_env
 
 PORT="${ANDREA_SYNC_PORT:-8765}"
 SUBDOMAIN="${ANDREA_LOCALTUNNEL_SUBDOMAIN:-}"
@@ -36,7 +26,7 @@ update_public_base() {
     --env-file "${HOME}/andrea-lockstep.env" \
     --value "$public_base" >/dev/null
   say "Updated ANDREA_SYNC_PUBLIC_BASE=${public_base}"
-  launchctl kickstart -k "gui/$(id -u)/com.andrea.andrea-sync" >/dev/null 2>&1 || true
+  andrea_kickstart_agent "${ANDREA_SYNC_LABEL}" >/dev/null 2>&1 || true
   if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
     sleep 2
     python3 "${BASE_DIR}/scripts/andrea_lockstep_telegram_e2e.py" set-webhook >/dev/null \

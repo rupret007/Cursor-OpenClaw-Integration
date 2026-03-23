@@ -11,12 +11,15 @@
 set -euo pipefail
 BASE_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 REPO_ROOT="${REPO_ROOT:-$BASE_DIR}"
+export ANDREA_REPO_ROOT="${REPO_ROOT}"
+# shellcheck disable=SC1091
+source "${BASE_DIR}/scripts/macos/andrea_launchagent_lib.sh"
 HOME_DIR="${HOME}"
 PY3="${PYTHON3:-$(command -v python3)}"
 CLOUDFLARED_BIN="${CLOUDFLARED_BIN:-$(command -v cloudflared || true)}"
 NPX_BIN="${NPX_BIN:-$(command -v npx || true)}"
-AGENT_DIR="${HOME_DIR}/Library/LaunchAgents"
-LOG_DIR="${HOME_DIR}/Library/Logs/andrea"
+AGENT_DIR="${ANDREA_LAUNCHAGENT_DIR}"
+LOG_DIR="${ANDREA_LOG_DIR}"
 WITH_CF=0
 WITH_LT=0
 WITH_OC=0
@@ -50,19 +53,19 @@ render() {
 }
 
 render "${BASE_DIR}/scripts/macos/com.andrea.andrea-sync.plist.template" \
-  "${AGENT_DIR}/com.andrea.andrea-sync.plist"
+  "${AGENT_DIR}/${ANDREA_SYNC_LABEL}.plist"
 render "${BASE_DIR}/scripts/macos/com.andrea.andrea-post-login-bootstrap.plist.template" \
-  "${AGENT_DIR}/com.andrea.andrea-post-login-bootstrap.plist"
+  "${AGENT_DIR}/${ANDREA_BOOTSTRAP_LABEL}.plist"
 
-echo "Installed ${AGENT_DIR}/com.andrea.andrea-sync.plist"
-echo "Installed ${AGENT_DIR}/com.andrea.andrea-post-login-bootstrap.plist"
+echo "Installed ${AGENT_DIR}/${ANDREA_SYNC_LABEL}.plist"
+echo "Installed ${AGENT_DIR}/${ANDREA_BOOTSTRAP_LABEL}.plist"
 echo "The sync LaunchAgent sources repo .env first, then ~/andrea-lockstep.env for overrides."
 echo "Put secrets/runtime overrides in ~/andrea-lockstep.env (export TELEGRAM_BOT_TOKEN=... etc.) then:"
-echo "  launchctl bootstrap gui/\$(id -u) ${AGENT_DIR}/com.andrea.andrea-sync.plist"
-echo "  launchctl bootstrap gui/\$(id -u) ${AGENT_DIR}/com.andrea.andrea-post-login-bootstrap.plist"
+echo "  launchctl bootstrap gui/\$(id -u) ${AGENT_DIR}/${ANDREA_SYNC_LABEL}.plist"
+echo "  launchctl bootstrap gui/\$(id -u) ${AGENT_DIR}/${ANDREA_BOOTSTRAP_LABEL}.plist"
 echo "  # if updating an existing agent first run:"
-echo "  launchctl bootout gui/\$(id -u) ${AGENT_DIR}/com.andrea.andrea-sync.plist || true"
-echo "  launchctl bootout gui/\$(id -u) ${AGENT_DIR}/com.andrea.andrea-post-login-bootstrap.plist || true"
+echo "  launchctl bootout gui/\$(id -u) ${AGENT_DIR}/${ANDREA_SYNC_LABEL}.plist || true"
+echo "  launchctl bootout gui/\$(id -u) ${AGENT_DIR}/${ANDREA_BOOTSTRAP_LABEL}.plist || true"
 
 if [[ "$WITH_CF" -eq 1 ]]; then
   if [[ -z "${CLOUDFLARED_TUNNEL_TOKEN:-}" ]]; then
@@ -74,7 +77,7 @@ if [[ "$WITH_CF" -eq 1 ]]; then
     exit 1
   fi
   render "${BASE_DIR}/scripts/macos/com.andrea.andrea-cloudflared.plist.template" \
-    "${AGENT_DIR}/com.andrea.andrea-cloudflared.plist"
+    "${AGENT_DIR}/${ANDREA_CLOUDFLARED_LABEL}.plist"
   echo "Installed cloudflared agent using ${CLOUDFLARED_BIN}."
 fi
 
@@ -84,33 +87,33 @@ if [[ "$WITH_LT" -eq 1 ]]; then
     exit 1
   fi
   render "${BASE_DIR}/scripts/macos/com.andrea.andrea-localtunnel.plist.template" \
-    "${AGENT_DIR}/com.andrea.andrea-localtunnel.plist"
+    "${AGENT_DIR}/${ANDREA_LOCALTUNNEL_LABEL}.plist"
   echo "Installed localtunnel agent using ${NPX_BIN}."
 fi
 
 if [[ "$WITH_OC" -eq 1 ]]; then
   render "${BASE_DIR}/scripts/macos/com.andrea.openclaw-gateway-refresh.plist.template" \
-    "${AGENT_DIR}/com.andrea.openclaw-gateway-refresh.plist"
-  echo "Installed one-shot openclaw gateway refresh at login (not a full gateway daemon)."
+    "${AGENT_DIR}/${ANDREA_OPENCLAW_REFRESH_LABEL}.plist"
+  echo "Installed one-shot openclaw gateway refresh at login (legacy helper; post-login bootstrap already restarts the gateway unless ANDREA_OPENCLAW_GATEWAY_REFRESH_ON_LOGIN=0)."
 fi
 
 load_agent() {
-  local plist="$1"
-  launchctl bootout "gui/$(id -u)" "$plist" >/dev/null 2>&1 || true
-  launchctl bootstrap "gui/$(id -u)" "$plist"
+  local label="$1"
+  andrea_bootout_agent "$label"
+  andrea_load_agent "$label"
 }
 
 if [[ "$LOAD_AFTER_INSTALL" -eq 1 ]]; then
-  load_agent "${AGENT_DIR}/com.andrea.andrea-sync.plist"
-  load_agent "${AGENT_DIR}/com.andrea.andrea-post-login-bootstrap.plist"
+  load_agent "${ANDREA_SYNC_LABEL}"
+  load_agent "${ANDREA_BOOTSTRAP_LABEL}"
   if [[ "$WITH_CF" -eq 1 ]]; then
-    load_agent "${AGENT_DIR}/com.andrea.andrea-cloudflared.plist"
+    load_agent "${ANDREA_CLOUDFLARED_LABEL}"
   fi
   if [[ "$WITH_LT" -eq 1 ]]; then
-    load_agent "${AGENT_DIR}/com.andrea.andrea-localtunnel.plist"
+    load_agent "${ANDREA_LOCALTUNNEL_LABEL}"
   fi
   if [[ "$WITH_OC" -eq 1 ]]; then
-    load_agent "${AGENT_DIR}/com.andrea.openclaw-gateway-refresh.plist"
+    load_agent "${ANDREA_OPENCLAW_REFRESH_LABEL}"
   fi
   echo "LaunchAgents loaded into gui/$(id -u)."
 fi

@@ -57,6 +57,7 @@ Never commit `.env` or paste keys into chat logs.
 export CURSOR_API_KEY="..."   # use read -s in real use
 python3 scripts/cursor_openclaw.py --json diagnose
 python3 scripts/cursor_openclaw.py --json whoami
+bash scripts/andrea_services.sh status all
 python3 scripts/andrea_capabilities.py        # Andrea readiness snapshot
 bash scripts/andrea_reliability_probes.sh       # deterministic probes (+ optional RUN_LIVE_PROBES=1)
 bash scripts/test_integration.sh
@@ -100,7 +101,7 @@ Example:
 ```bash
 cd /path/to/Cursor-OpenClaw-Integration
 export CLOUDFLARED_TUNNEL_TOKEN='...'
-bash scripts/macos/install_andrea_launchagents.sh --with-cloudflared --load
+bash scripts/andrea_services.sh install-launchagents --with-cloudflared --load
 ```
 
 Fallback when `cloudflared` is not available on the host:
@@ -108,7 +109,15 @@ Fallback when `cloudflared` is not available on the host:
 ```bash
 cd /path/to/Cursor-OpenClaw-Integration
 export ANDREA_LOCALTUNNEL_SUBDOMAIN='fine-monkeys-shake'
-bash scripts/macos/install_andrea_launchagents.sh --with-localtunnel --load
+bash scripts/andrea_services.sh install-launchagents --with-localtunnel --load
+```
+
+Operator controls after install:
+
+```bash
+bash scripts/andrea_services.sh status all
+bash scripts/andrea_services.sh restart all
+bash scripts/andrea_services.sh bootstrap
 ```
 
 Recommended env location for persistent secrets/runtime:
@@ -124,6 +133,8 @@ Key reboot-ready variables:
 - `CLOUDFLARED_TUNNEL_TOKEN`
 - `CURSOR_API_KEY`
 - `OPENAI_API_KEY` with `OPENAI_API_ENABLED=1` when you want memory-aware direct replies to use OpenAI
+
+The optional `--with-openclaw-refresh` LaunchAgent is now treated as legacy compatibility only. The normal login path is `andrea_sync` + tunnel + post-login bootstrap, and duplicate gateway restarts are debounced automatically if both paths exist.
 
 ## GitHub authentication (push / CI)
 

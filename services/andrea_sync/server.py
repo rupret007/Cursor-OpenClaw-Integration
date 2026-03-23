@@ -124,6 +124,13 @@ def _sanitize_user_surface_text(text: Any, *, fallback: str = "") -> str:
     return sanitized or "I ran into an internal limitation while working on that."
 
 
+def _is_generic_openclaw_summary(text: Any) -> bool:
+    return str(text or "").strip() in {
+        "",
+        "OpenClaw completed the delegated task.",
+    }
+
+
 REMIND_ME_RE = re.compile(r"^\s*(?:please\s+)?remind me(?:\s+to)?\s+(?P<body>.+?)\s*$", re.I)
 REMEMBER_NOTE_RE = re.compile(
     r"^\s*(?:please\s+)?remember(?:\s+that|\s+this)?\s+(?P<body>.+?)\s*$",
@@ -840,13 +847,9 @@ class SyncServer:
         openclaw_meta = self._projection_meta(projection, "openclaw")
         user_summary = str(openclaw_meta.get("user_summary") or "").strip()
         blocked_reason = str(openclaw_meta.get("blocked_reason") or "").strip()
-        generic_openclaw_summaries = {
-            "",
-            "OpenClaw completed the delegated task.",
-        }
-        if user_summary and user_summary not in generic_openclaw_summaries:
+        if user_summary and not _is_generic_openclaw_summary(user_summary):
             return _sanitize_user_surface_text(user_summary, fallback=summary or blocked_reason)
-        if summary and summary not in generic_openclaw_summaries:
+        if summary and not _is_generic_openclaw_summary(summary):
             return _sanitize_user_surface_text(summary, fallback=user_summary or blocked_reason)
         if blocked_reason:
             return _sanitize_user_surface_text(blocked_reason, fallback=summary or user_summary)
@@ -1880,13 +1883,22 @@ class SyncServer:
             )
         except Exception:  # noqa: BLE001
             return failure_reply, failure_reason
-        summary = _sanitize_user_surface_text(
-            result.get("user_summary")
-            or result.get("summary")
-            or result.get("blocked_reason")
-            or result.get("error"),
-            fallback="",
-        ).strip()
+        summary = ""
+        for candidate in (
+            result.get("user_summary"),
+            result.get("summary"),
+            result.get("raw_text"),
+            result.get("blocked_reason"),
+            result.get("error"),
+        ):
+            sanitized = shared_sanitize_user_surface_text(
+                candidate,
+                fallback="",
+                limit=500,
+            ).strip()
+            if sanitized and not _is_generic_openclaw_summary(sanitized):
+                summary = sanitized
+                break
         if result.get("ok"):
             return summary or success_fallback, success_reason
         if summary:

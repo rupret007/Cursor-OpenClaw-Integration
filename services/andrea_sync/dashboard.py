@@ -16,6 +16,7 @@ from .store import (
     count_due_reminders,
     count_pending_reminders,
     count_principals,
+    list_incidents,
     list_tasks,
     load_events_for_task,
     task_exists,
@@ -153,6 +154,8 @@ def _build_optimization_summary(conn: Any) -> Dict[str, Any]:
             "recent_proposals": [],
             "latest_regression": {},
             "recent_auto_heal": [],
+            "latest_incident": {},
+            "recent_incidents": [],
         }
     events = load_events_for_task(conn, SYSTEM_TASK_ID)
     runs: Dict[str, Dict[str, Any]] = {}
@@ -291,6 +294,7 @@ def _build_optimization_summary(conn: Any) -> Dict[str, Any]:
     recent_proposals = sorted(
         proposals, key=lambda row: float(row.get("ts") or 0.0), reverse=True
     )[:8]
+    recent_incidents = list_incidents(conn, limit=6)
     return {
         "latest_run": recent_runs[0] if recent_runs else {},
         "recent_runs": recent_runs,
@@ -302,6 +306,8 @@ def _build_optimization_summary(conn: Any) -> Dict[str, Any]:
             key=lambda row: float(row.get("ts") or 0.0),
             reverse=True,
         )[:8],
+        "latest_incident": recent_incidents[0] if recent_incidents else {},
+        "recent_incidents": recent_incidents,
     }
 
 
@@ -390,6 +396,10 @@ def build_dashboard_summary(
             "delegated_execution_enabled": bool(server.delegated_execution_enabled),
             "telegram_delegate_lane": server.telegram_delegate_lane,
             "openclaw_agent_id": server.openclaw_agent_id,
+            "background_optimizer_enabled": bool(server.background_optimizer_enabled),
+            "background_incident_repair_enabled": bool(
+                getattr(server, "background_incident_repair_enabled", False)
+            ),
         },
         "webhook": webhook_snapshot if isinstance(webhook_snapshot, dict) else {},
         "capabilities": {
@@ -607,6 +617,7 @@ def render_dashboard_html() -> str:
       const categories = opt.dominant_categories || [];
       const recentRuns = opt.recent_runs || [];
       const proposals = opt.recent_proposals || [];
+      const incidents = opt.recent_incidents || [];
 
       const loopItems = [];
       if (latest.run_id) {
@@ -615,6 +626,15 @@ def render_dashboard_html() -> str:
           note: `Status ${latest.status || "unknown"}${latest.analysis_mode ? ` · ${latest.analysis_mode}` : ""}`,
           extra: `Findings ${latest.finding_count || 0} · Proposals ${latest.proposal_count || 0} · Gate ${latest.gate_allowed === true ? "open" : latest.gate_allowed === false ? "gated" : "n/a"}`,
           status: latest.status || "warn"
+        });
+      }
+      if (incidents.length) {
+        const latestIncident = incidents[0] || {};
+        loopItems.push({
+          title: `Latest incident: ${latestIncident.error_type || latestIncident.incident_id || "incident"}`,
+          note: latestIncident.summary || "No incident summary",
+          extra: `Status ${latestIncident.status || "open"}${latestIncident.confidence !== undefined ? ` · confidence ${latestIncident.confidence}` : ""}`,
+          status: latestIncident.status === "resolved" ? "ready" : latestIncident.status === "escalated" ? "warn" : "bad"
         });
       }
       for (const row of categories.slice(0, 4)) {

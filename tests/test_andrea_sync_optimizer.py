@@ -19,6 +19,7 @@ from services.andrea_sync.optimizer import (  # noqa: E402
     collect_recent_task_outcomes,
     detect_failure_categories,
     evaluate_autonomy_gate,
+    heal_runtime_capability,
     record_regression_report,
     run_optimization_cycle,
 )
@@ -171,6 +172,53 @@ class AndreaSyncOptimizerTests(unittest.TestCase):
         outcomes = collect_recent_task_outcomes(self.conn, limit=10)
         self.assertEqual(outcomes[0]["outcome"]["route_mode"], "delegate")
 
+    def test_run_optimization_cycle_background_skips_when_not_idle(self) -> None:
+        self._make_overdelegated_task()
+        result = run_optimization_cycle(
+            self.conn,
+            limit=10,
+            regression_report={"passed": True, "total": 8},
+            required_skills=[],
+            emit_proposals=True,
+            analysis_mode="gemini_background",
+            repo_path=REPO_ROOT,
+            idle_seconds=9999,
+        )
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["skipped"])
+        self.assertEqual(result["skip_reason"], "background_not_idle")
+
+    def test_run_optimization_cycle_background_runs_lane_bundle(self) -> None:
+        self._make_overdelegated_task()
+        with mock.patch(
+            "services.andrea_sync.optimizer.evaluate_background_readiness",
+            return_value={"ready": True, "active_task_ids": [], "idle_ok": True},
+        ), mock.patch(
+            "services.andrea_sync.optimizer._run_background_analysis_lanes",
+            return_value={
+                "planner": {"ok": True, "summary": "Gemini planned the next move."},
+                "critiques": [{"ok": True, "summary": "MiniMax challenged the draft."}],
+                "budget_usage": {"gemini_runs": 1, "minimax_runs": 1, "openai_runs": 1, "cursor_execution_runs": 1},
+                "auto_heal": {"applied": [{"proposal_id": "prop_auto"}], "failed": []},
+            },
+        ):
+            result = run_optimization_cycle(
+                self.conn,
+                limit=10,
+                regression_report={"passed": True, "total": 8},
+                required_skills=[],
+                emit_proposals=True,
+                analysis_mode="gemini_background",
+                repo_path=REPO_ROOT,
+                auto_apply_ready=True,
+                idle_seconds=1,
+            )
+        self.assertTrue(result["ok"])
+        self.assertIn("analysis_lanes", result)
+        self.assertEqual(result["analysis_lanes"]["planner"]["summary"], "Gemini planned the next move.")
+        self.assertEqual(result["budget_usage"]["gemini_runs"], 1)
+        self.assertEqual(len(result["auto_heal"]["applied"]), 1)
+
     def test_detect_failure_categories_maps_orchestration_and_proactive_failures(self) -> None:
         categories = detect_failure_categories(
             [
@@ -252,3 +300,107 @@ class AndreaSyncOptimizerTests(unittest.TestCase):
             )
         self.assertTrue(result["ok"])
         self.assertEqual(result["proposal_id"], "prop_ready")
+
+    def test_heal_runtime_capability_installs_missing_dependency(self) -> None:
+        before = {
+            "ok": True,
+            "skill_key": "apple-notes",
+            "eligible": False,
+            "source": "openclaw-bundled",
+            "missing": {"bins": ["memo"], "env": [], "config": [], "os": []},
+        }
+        after = {
+            "ok": True,
+            "skill_key": "apple-notes",
+            "eligible": True,
+            "source": "openclaw-bundled",
+            "missing": {"bins": [], "env": [], "config": [], "os": []},
+        }
+        with mock.patch(
+            "services.andrea_sync.optimizer._openclaw_skill_info",
+            side_effect=[before, after],
+        ), mock.patch(
+            "services.andrea_sync.optimizer._install_commands_for_skill",
+            return_value=[["brew", "install", "memo"]],
+        ), mock.patch(
+            "services.andrea_sync.optimizer._repair_missing_config",
+            return_value={"ok": True, "changed": False, "actions": [], "unsupported": []},
+        ), mock.patch(
+            "services.andrea_sync.optimizer._publish_capability_snapshot_direct",
+            return_value={"ok": True, "summary": {"ready": 1}},
+        ), mock.patch(
+            "services.andrea_sync.optimizer._run_subprocess",
+            return_value={"ok": True, "argv": ["brew", "install", "memo"], "returncode": 0, "stdout": "", "stderr": ""},
+        ):
+            result = heal_runtime_capability(self.conn, skill_key="apple-notes", actor="test")
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["refresh_required"])
+        self.assertTrue(any(action.get("kind") == "dependency_install" for action in result["actions"]))
+
+    def test_heal_runtime_capability_repairs_supported_config(self) -> None:
+        before = {
+            "ok": True,
+            "skill_key": "voice-call",
+            "eligible": False,
+            "source": "openclaw-bundled",
+            "missing": {
+                "bins": [],
+                "env": [],
+                "config": ["plugins.entries.voice-call.enabled"],
+                "os": [],
+            },
+        }
+        after = {
+            "ok": True,
+            "skill_key": "voice-call",
+            "eligible": True,
+            "source": "openclaw-bundled",
+            "missing": {"bins": [], "env": [], "config": [], "os": []},
+        }
+        with mock.patch(
+            "services.andrea_sync.optimizer._openclaw_skill_info",
+            side_effect=[before, after],
+        ), mock.patch(
+            "services.andrea_sync.optimizer._repair_missing_config",
+            return_value={
+                "ok": True,
+                "changed": True,
+                "actions": [{"kind": "config_repair", "path": "plugins.entries.voice-call.enabled"}],
+                "unsupported": [],
+            },
+        ), mock.patch(
+            "services.andrea_sync.optimizer._install_commands_for_skill",
+            return_value=[],
+        ), mock.patch(
+            "services.andrea_sync.optimizer._publish_capability_snapshot_direct",
+            return_value={"ok": True, "summary": {"ready": 1}},
+        ):
+            result = heal_runtime_capability(self.conn, skill_key="voice-call", actor="test")
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["refresh_required"])
+        self.assertTrue(any(action.get("kind") == "config_repair" for action in result["actions"]))
+
+    def test_heal_runtime_capability_command_is_internal_only(self) -> None:
+        denied = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.HEAL_RUNTIME_CAPABILITY.value,
+                "channel": "cli",
+                "payload": {"skill_key": "bluebubbles"},
+            },
+        )
+        self.assertFalse(denied["ok"])
+        with mock.patch(
+            "services.andrea_sync.optimizer.heal_runtime_capability",
+            return_value={"ok": True, "skill_key": "bluebubbles"},
+        ):
+            allowed = handle_command(
+                self.conn,
+                {
+                    "command_type": CommandType.HEAL_RUNTIME_CAPABILITY.value,
+                    "channel": "internal",
+                    "payload": {"skill_key": "bluebubbles"},
+                },
+            )
+        self.assertTrue(allowed["ok"])
+        self.assertEqual(allowed["skill_key"], "bluebubbles")

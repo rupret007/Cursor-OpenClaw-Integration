@@ -9,6 +9,7 @@
 #   bash scripts/andrea_openclaw_enforce.sh
 #   bash scripts/andrea_openclaw_enforce.sh --dry-run
 #   bash scripts/andrea_openclaw_enforce.sh --required-skills "cursor_handoff,github,gh-issues,telegram"
+#   bash scripts/andrea_openclaw_enforce.sh --heal-skill apple-notes --heal-skill voice-call
 set -euo pipefail
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -26,6 +27,7 @@ RESTART_GATEWAY=1
 PROBE_MODELS=1
 MODEL_GUARD_ON_FAIL=1
 DRY_RUN=0
+HEAL_SKILLS="${ANDREA_OPENCLAW_HEAL_SKILLS:-}"
 
 die() { echo "FAIL: $*" >&2; exit 1; }
 warn() { echo "WARN: $*" >&2; }
@@ -42,6 +44,7 @@ Options:
   --no-restart                 Skip openclaw gateway restart
   --no-probe                   Skip openclaw model probe
   --no-model-guard             Skip model guard remediation when probe fails
+  --heal-skill NAME           Run runtime capability self-heal for a skill before validation
   --dry-run                    Print actions only; no mutations
   -h, --help                   Show help
 
@@ -49,6 +52,7 @@ Environment:
   ANDREA_REQUIRED_OPENCLAW_SKILLS   CSV of skills that must appear in \`openclaw skills list\`
   ANDREA_OPENCLAW_ELIGIBLE_SKILLS   CSV; when non-empty, require each skill \`eligible: true\` (needs jq)
   ANDREA_OPENCLAW_SKILLS_CHECK      Set to 1 to print \`openclaw skills check\` (non-fatal)
+  ANDREA_OPENCLAW_HEAL_SKILLS       CSV of skills to auto-heal before validation
 EOF
 }
 
@@ -60,6 +64,10 @@ while [[ $# -gt 0 ]]; do
     --no-restart) RESTART_GATEWAY=0; shift ;;
     --no-probe) PROBE_MODELS=0; shift ;;
     --no-model-guard) MODEL_GUARD_ON_FAIL=0; shift ;;
+    --heal-skill)
+      HEAL_SKILLS="${HEAL_SKILLS:+${HEAL_SKILLS},}${2:-}"
+      shift 2
+      ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown argument: $1" ;;
@@ -88,6 +96,40 @@ restart_gateway() {
     return 0
   fi
   openclaw gateway restart
+}
+
+heal_skills() {
+  [[ -n "$HEAL_SKILLS" ]] || return 0
+  note "run runtime capability self-heal for: $HEAL_SKILLS"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    return 0
+  fi
+  python3 - "$BASE_DIR" "$HEAL_SKILLS" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+repo_root = Path(sys.argv[1]).resolve()
+skills = [part.strip() for part in sys.argv[2].split(",") if part.strip()]
+if str(repo_root) not in sys.path:
+    sys.path.insert(0, str(repo_root))
+
+from services.andrea_sync.optimizer import heal_runtime_capability
+from services.andrea_sync.store import connect, migrate
+
+db = Path(os.environ.get("ANDREA_SYNC_DB", str(repo_root / "data/andrea_sync.db"))).expanduser()
+conn = connect(db)
+try:
+    migrate(conn)
+    results = [heal_runtime_capability(conn, skill_key=skill, actor="script") for skill in skills]
+    payload = {"ok": all(result.get("ok") for result in results), "results": results}
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    if not payload["ok"]:
+        raise SystemExit(1)
+finally:
+    conn.close()
+PY
 }
 
 check_required_skills() {
@@ -186,6 +228,7 @@ main() {
   if [[ "$SYNC_SKILL" -eq 1 ]]; then
     sync_skill
   fi
+  heal_skills
   if [[ "$RESTART_GATEWAY" -eq 1 ]]; then
     restart_gateway
   fi

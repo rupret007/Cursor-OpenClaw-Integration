@@ -107,6 +107,48 @@ def migrate(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_reminders_due
             ON reminders(status, due_at ASC);
+        CREATE TABLE IF NOT EXISTS incidents (
+            incident_id TEXT PRIMARY KEY,
+            source_task_id TEXT NOT NULL DEFAULT '',
+            source TEXT NOT NULL,
+            error_type TEXT NOT NULL,
+            status TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            fingerprint TEXT NOT NULL DEFAULT '',
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            incident_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_incidents_status_updated
+            ON incidents(status, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_incidents_fingerprint
+            ON incidents(fingerprint, updated_at DESC);
+        CREATE TABLE IF NOT EXISTS repair_attempts (
+            attempt_id TEXT PRIMARY KEY,
+            incident_id TEXT NOT NULL REFERENCES incidents(incident_id) ON DELETE CASCADE,
+            attempt_no INTEGER NOT NULL,
+            stage TEXT NOT NULL,
+            model_used TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL,
+            branch TEXT NOT NULL DEFAULT '',
+            worktree_path TEXT NOT NULL DEFAULT '',
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            attempt_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_repair_attempts_incident
+            ON repair_attempts(incident_id, attempt_no ASC, updated_at ASC);
+        CREATE TABLE IF NOT EXISTS repair_plans (
+            plan_id TEXT PRIMARY KEY,
+            incident_id TEXT NOT NULL REFERENCES incidents(incident_id) ON DELETE CASCADE,
+            status TEXT NOT NULL,
+            model_used TEXT NOT NULL DEFAULT '',
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            plan_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_repair_plans_incident
+            ON repair_plans(incident_id, updated_at DESC);
         """
     )
     conn.execute(
@@ -302,6 +344,18 @@ def new_memory_id() -> str:
 
 def new_reminder_id() -> str:
     return f"rem_{uuid.uuid4().hex[:16]}"
+
+
+def new_incident_id() -> str:
+    return f"inc_{uuid.uuid4().hex[:16]}"
+
+
+def new_repair_attempt_id() -> str:
+    return f"att_{uuid.uuid4().hex[:16]}"
+
+
+def new_repair_plan_id() -> str:
+    return f"rpl_{uuid.uuid4().hex[:16]}"
 
 
 def principal_exists(conn: sqlite3.Connection, principal_id: str) -> bool:
@@ -815,6 +869,210 @@ def update_reminder(
         ),
     )
     conn.commit()
+
+
+def save_incident(conn: sqlite3.Connection, incident: Dict[str, Any]) -> str:
+    payload = dict(incident)
+    incident_id = str(payload.get("incident_id") or "").strip() or new_incident_id()
+    ts = time.time()
+    created_at = float(payload.get("timestamp") or payload.get("created_at") or ts)
+    conn.execute(
+        """
+        INSERT INTO incidents(
+            incident_id, source_task_id, source, error_type, status, summary, fingerprint,
+            created_at, updated_at, incident_json
+        ) VALUES (?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(incident_id) DO UPDATE SET
+            source_task_id = excluded.source_task_id,
+            source = excluded.source,
+            error_type = excluded.error_type,
+            status = excluded.status,
+            summary = excluded.summary,
+            fingerprint = excluded.fingerprint,
+            updated_at = excluded.updated_at,
+            incident_json = excluded.incident_json
+        """,
+        (
+            incident_id,
+            str(payload.get("source_task_id") or "").strip(),
+            str(payload.get("source") or "unknown").strip(),
+            str(payload.get("error_type") or "unclear_or_unsafe").strip(),
+            str(payload.get("status") or "open").strip(),
+            _clip_text(payload.get("summary") or "", 500),
+            str(payload.get("fingerprint") or "").strip(),
+            created_at,
+            ts,
+            json.dumps({**payload, "incident_id": incident_id}, ensure_ascii=False, default=str),
+        ),
+    )
+    conn.commit()
+    return incident_id
+
+
+def get_incident(conn: sqlite3.Connection, incident_id: str) -> Dict[str, Any]:
+    row = conn.execute(
+        """
+        SELECT incident_id, source_task_id, source, error_type, status, summary, fingerprint,
+               created_at, updated_at, incident_json
+        FROM incidents
+        WHERE incident_id = ?
+        """,
+        (str(incident_id or "").strip(),),
+    ).fetchone()
+    if not row:
+        return {}
+    payload: Dict[str, Any]
+    try:
+        payload = json.loads(row["incident_json"] or "{}")
+    except Exception:
+        payload = {}
+    return {
+        **payload,
+        "incident_id": str(row["incident_id"] or ""),
+        "source_task_id": str(row["source_task_id"] or ""),
+        "source": str(row["source"] or ""),
+        "error_type": str(row["error_type"] or ""),
+        "status": str(row["status"] or ""),
+        "summary": str(row["summary"] or ""),
+        "fingerprint": str(row["fingerprint"] or ""),
+        "created_at": float(row["created_at"] or 0.0),
+        "updated_at": float(row["updated_at"] or 0.0),
+    }
+
+
+def list_incidents(
+    conn: sqlite3.Connection,
+    *,
+    status: str = "",
+    limit: int = 20,
+) -> List[Dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT incident_id FROM incidents
+        WHERE (? = '' OR status = ?)
+        ORDER BY updated_at DESC
+        LIMIT ?
+        """,
+        (str(status or "").strip(), str(status or "").strip(), max(1, int(limit))),
+    ).fetchall()
+    return [get_incident(conn, str(row["incident_id"])) for row in rows]
+
+
+def save_repair_attempt(conn: sqlite3.Connection, attempt: Dict[str, Any]) -> str:
+    payload = dict(attempt)
+    attempt_id = str(payload.get("attempt_id") or "").strip() or new_repair_attempt_id()
+    ts = time.time()
+    created_at = float(payload.get("created_at") or ts)
+    conn.execute(
+        """
+        INSERT INTO repair_attempts(
+            attempt_id, incident_id, attempt_no, stage, model_used, status, branch,
+            worktree_path, created_at, updated_at, attempt_json
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(attempt_id) DO UPDATE SET
+            incident_id = excluded.incident_id,
+            attempt_no = excluded.attempt_no,
+            stage = excluded.stage,
+            model_used = excluded.model_used,
+            status = excluded.status,
+            branch = excluded.branch,
+            worktree_path = excluded.worktree_path,
+            updated_at = excluded.updated_at,
+            attempt_json = excluded.attempt_json
+        """,
+        (
+            attempt_id,
+            str(payload.get("incident_id") or "").strip(),
+            int(payload.get("attempt_number") or payload.get("attempt_no") or 0),
+            str(payload.get("stage") or "").strip(),
+            str(payload.get("model_used") or "").strip(),
+            str(payload.get("status") or "pending").strip(),
+            str(payload.get("branch") or "").strip(),
+            str(payload.get("worktree_path") or "").strip(),
+            created_at,
+            ts,
+            json.dumps({**payload, "attempt_id": attempt_id}, ensure_ascii=False, default=str),
+        ),
+    )
+    conn.commit()
+    return attempt_id
+
+
+def list_repair_attempts(conn: sqlite3.Connection, incident_id: str) -> List[Dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT attempt_id, created_at, updated_at, attempt_json
+        FROM repair_attempts
+        WHERE incident_id = ?
+        ORDER BY attempt_no ASC, updated_at ASC
+        """,
+        (str(incident_id or "").strip(),),
+    ).fetchall()
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        try:
+            payload = json.loads(row["attempt_json"] or "{}")
+        except Exception:
+            payload = {}
+        payload["attempt_id"] = str(row["attempt_id"] or "")
+        payload["created_at"] = float(row["created_at"] or 0.0)
+        payload["updated_at"] = float(row["updated_at"] or 0.0)
+        out.append(payload)
+    return out
+
+
+def save_repair_plan(conn: sqlite3.Connection, plan: Dict[str, Any]) -> str:
+    payload = dict(plan)
+    plan_id = str(payload.get("plan_id") or "").strip() or new_repair_plan_id()
+    ts = time.time()
+    created_at = float(payload.get("created_at") or ts)
+    conn.execute(
+        """
+        INSERT INTO repair_plans(
+            plan_id, incident_id, status, model_used, created_at, updated_at, plan_json
+        ) VALUES (?,?,?,?,?,?,?)
+        ON CONFLICT(plan_id) DO UPDATE SET
+            incident_id = excluded.incident_id,
+            status = excluded.status,
+            model_used = excluded.model_used,
+            updated_at = excluded.updated_at,
+            plan_json = excluded.plan_json
+        """,
+        (
+            plan_id,
+            str(payload.get("incident_id") or "").strip(),
+            str(payload.get("status") or "planned").strip(),
+            str(payload.get("model_used") or "").strip(),
+            created_at,
+            ts,
+            json.dumps({**payload, "plan_id": plan_id}, ensure_ascii=False, default=str),
+        ),
+    )
+    conn.commit()
+    return plan_id
+
+
+def get_latest_repair_plan(conn: sqlite3.Connection, incident_id: str) -> Dict[str, Any]:
+    row = conn.execute(
+        """
+        SELECT plan_id, created_at, updated_at, plan_json
+        FROM repair_plans
+        WHERE incident_id = ?
+        ORDER BY updated_at DESC
+        LIMIT 1
+        """,
+        (str(incident_id or "").strip(),),
+    ).fetchone()
+    if not row:
+        return {}
+    try:
+        payload = json.loads(row["plan_json"] or "{}")
+    except Exception:
+        payload = {}
+    payload["plan_id"] = str(row["plan_id"] or "")
+    payload["created_at"] = float(row["created_at"] or 0.0)
+    payload["updated_at"] = float(row["updated_at"] or 0.0)
+    return payload
 
 
 def count_principals(conn: sqlite3.Connection) -> int:

@@ -107,6 +107,40 @@ SECRET_KEYS = (
     "ANDREA_SYNC_TELEGRAM_SECRET",
 )
 
+SKILL_ALIAS_OVERRIDES: Dict[str, Tuple[str, ...]] = {
+    "bluebubbles": (
+        "blue bubbles",
+        "bluebubbles",
+        "imessage",
+        "imessages",
+        "text messages",
+        "text messaging",
+        "send text messages",
+    ),
+    "wacli": ("whatsapp", "whatsapp messages", "send whatsapp"),
+    "telegram": ("telegram messages", "telegram messaging"),
+    "slack": ("slack messages", "slack messaging"),
+    "discord": ("discord messages", "discord messaging"),
+}
+
+SOURCE_PROVENANCE: Dict[str, str] = {
+    "openclaw-bundled": "bundled",
+    "openclaw-workspace": "workspace",
+    "openclaw-extra": "extra",
+    "openclaw-local": "managed",
+    "openclaw-managed": "managed",
+}
+
+
+@dataclass
+class SkillCatalogEntry:
+    key: str
+    status: str
+    description: str = ""
+    source: str = ""
+    display_name: str = ""
+
+
 @dataclass
 class Row:
     id: str
@@ -115,6 +149,9 @@ class Row:
     status: str
     notes: str = ""
     critical: bool = False
+    source: str = ""
+    aliases: List[str] = field(default_factory=list)
+    availability: str = ""
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -124,6 +161,9 @@ class Row:
             "status": self.status,
             "notes": self.notes,
             "critical": self.critical,
+            "source": self.source,
+            "aliases": list(self.aliases),
+            "availability": self.availability,
         }
 
 
@@ -144,6 +184,10 @@ def _read_dotenv_keys(path: Path) -> Dict[str, str]:
 
 def _which(name: str) -> bool:
     return shutil.which(name) is not None
+
+
+def _normalize_whitespace(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip())
 
 
 def _run_capture(
@@ -220,24 +264,135 @@ def _openclaw_skills() -> Tuple[str, str, str]:
     return "ready", out + err, ""
 
 
+def _source_provenance(source: str) -> str:
+    return SOURCE_PROVENANCE.get(str(source or "").strip(), "runtime")
+
+
+def _extract_skill_key(skill_cell: str) -> str:
+    clean = _normalize_whitespace(skill_cell)
+    if not clean:
+        return ""
+    parts = clean.split()
+    return parts[-1] if parts else ""
+
+
+def _skill_aliases_for(name: str, description: str = "") -> List[str]:
+    aliases: List[str] = []
+
+    def add(value: str) -> None:
+        alias = _normalize_whitespace(value).lower()
+        if alias and alias not in aliases:
+            aliases.append(alias)
+
+    add(name)
+    add(name.replace("-", " "))
+    add(name.replace("_", " "))
+    for raw in SKILL_ALIAS_OVERRIDES.get(name, ()):
+        add(raw)
+    desc = str(description or "").lower()
+    if "imessage" in desc or "imessages" in desc:
+        add("imessage")
+        add("imessages")
+    if "text messages" in desc or "text messaging" in desc:
+        add("text messages")
+        add("text messaging")
+    if "whatsapp" in desc:
+        add("whatsapp")
+    if "telegram" in desc:
+        add("telegram")
+    if "slack" in desc:
+        add("slack")
+    if "discord" in desc:
+        add("discord")
+    return aliases
+
+
+def _availability_from_status(status: str, *, discovered: bool) -> str:
+    st = str(status or "").strip().lower()
+    if st == "ready":
+        return "verified_available"
+    if st == "ready_with_limits":
+        return "installed_but_not_eligible" if discovered else "verified_unavailable"
+    if st == "blocked":
+        return "verified_unavailable"
+    return ""
+
+
+def _note_for_skill(status: str, *, tier: str, source: str = "", listed: bool = True) -> str:
+    provenance = _source_provenance(source)
+    suffix = f" (source: {source or provenance})" if source or provenance != "runtime" else ""
+    st = str(status or "").strip().lower()
+    if st == "ready":
+        return f"openclaw skills list: ✓ ready{suffix}"
+    if st == "missing":
+        if tier == "core":
+            return f"openclaw skills list: ✗ missing (requirements not satisfied{'; source: ' + source if source else ''})"
+        return (
+            "openclaw skills list: ✗ missing (install CLI / config per docs/ANDREA_OPENCLAW_HYBRID_SKILLS.md"
+            + (f"; source: {source}" if source else "")
+            + ")"
+        )
+    if listed:
+        return f"skill not parsed from table; substring match only — check openclaw output format{suffix}"
+    if tier == "core":
+        return "not detected in openclaw skills list output"
+    return f"skill not listed in this openclaw install{suffix}"
+
+
+def _parse_openclaw_skill_catalog(skills_blob: str) -> Dict[str, SkillCatalogEntry]:
+    """
+    Parse the OpenClaw skills table into keyed catalog entries, including source and
+    multi-line description continuations when present.
+    """
+    catalog: Dict[str, SkillCatalogEntry] = {}
+    current_key = ""
+    row_re = re.compile(
+        r"^\s*│\s*(?P<status>✓ ready|✗ missing)?\s*│\s*(?P<skill>[^│]*)│\s*(?P<desc>[^│]*)│\s*(?P<source>[^│]*)│"
+    )
+    for line in skills_blob.splitlines():
+        match = row_re.match(line)
+        if not match:
+            continue
+        status_cell = _normalize_whitespace(match.group("status") or "")
+        skill_cell = _normalize_whitespace(match.group("skill") or "")
+        desc_cell = _normalize_whitespace(match.group("desc") or "")
+        source_cell = _normalize_whitespace(match.group("source") or "")
+        if status_cell and skill_cell:
+            key = _extract_skill_key(skill_cell)
+            if not key:
+                current_key = ""
+                continue
+            current_key = key
+            catalog[key] = SkillCatalogEntry(
+                key=key,
+                status="ready" if status_cell.startswith("✓") else "missing",
+                description=desc_cell,
+                source=source_cell,
+                display_name=skill_cell,
+            )
+            continue
+        if current_key and desc_cell:
+            existing = catalog.get(current_key)
+            if existing is None:
+                continue
+            if desc_cell not in existing.description:
+                existing.description = _normalize_whitespace(
+                    f"{existing.description} {desc_cell}"
+                )
+            if source_cell and not existing.source:
+                existing.source = source_cell
+    return catalog
+
+
 def _parse_openclaw_skill_states(skills_blob: str) -> Dict[str, str]:
     """
     Parse `openclaw skills list` table rows into {skill_key: ready|missing}.
     Only rows whose first cell is ✓ ready / ✗ missing are recorded (skips continuations).
     """
-    states: Dict[str, str] = {}
-    for line in skills_blob.splitlines():
-        m = re.match(r"^\s*│\s*(✓ ready|✗ missing)\s*│\s*([^│]+)│", line)
-        if not m:
-            continue
-        raw_status, skill_cell = m.group(1), m.group(2)
-        flag = "ready" if raw_status.startswith("✓") else "missing"
-        parts = skill_cell.split()
-        if not parts:
-            continue
-        key = parts[-1]
-        states[key] = flag
-    return states
+    return {
+        key: entry.status
+        for key, entry in _parse_openclaw_skill_catalog(skills_blob).items()
+    }
 
 
 def _skill_listed_fallback(skills_blob: str, name: str) -> bool:
@@ -250,33 +405,40 @@ def _skill_row_for(
     name: str,
     tier: str,
     skills_blob: str,
-    states: Dict[str, str],
+    catalog: Dict[str, SkillCatalogEntry],
 ) -> Row:
-    st = states.get(name)
+    entry = catalog.get(name)
+    st = entry.status if entry else None
     listed = _skill_listed_fallback(skills_blob, name)
     if st == "ready":
         status = "ready"
-        note = "openclaw skills list: ✓ ready"
+        note = _note_for_skill(st, tier=tier, source=entry.source if entry else "", listed=True)
     elif st == "missing":
         if tier == "core":
             status = "blocked"
-            note = "openclaw skills list: ✗ missing (requirements not satisfied)"
+            note = _note_for_skill(st, tier=tier, source=entry.source if entry else "", listed=True)
         else:
             status = "ready_with_limits"
-            note = "openclaw skills list: ✗ missing (install CLI / config per docs/ANDREA_OPENCLAW_HYBRID_SKILLS.md)"
-    elif not states and listed:
+            note = _note_for_skill(st, tier=tier, source=entry.source if entry else "", listed=True)
+    elif not catalog and listed:
         # Tests / non-table captures: preserve legacy substring behavior.
         status = "ready"
         note = "substring match in skills list (table parse unavailable)"
     elif listed:
         status = "ready_with_limits"
-        note = "skill not parsed from table; substring match only — check openclaw output format"
+        note = _note_for_skill(
+            "",
+            tier=tier,
+            source=entry.source if entry else "",
+            listed=True,
+        )
     else:
         status = "blocked" if tier == "core" else "ready_with_limits"
-        note = (
-            "not detected in openclaw skills list output"
-            if tier == "core"
-            else "skill not listed in this openclaw install"
+        note = _note_for_skill(
+            "",
+            tier=tier,
+            source=entry.source if entry else "",
+            listed=False,
         )
     critical = tier == "core" and status == "blocked"
     return Row(
@@ -286,23 +448,51 @@ def _skill_row_for(
         status=status,
         notes=note,
         critical=critical,
+        source=entry.source if entry else "",
+        aliases=_skill_aliases_for(name, entry.description if entry else ""),
+        availability=_availability_from_status(status, discovered=entry is not None),
     )
 
 
 def _skill_rows(skills_blob: str) -> List[Row]:
     rows: List[Row] = []
-    states = _parse_openclaw_skill_states(skills_blob)
+    catalog = _parse_openclaw_skill_catalog(skills_blob)
     for name in CORE_OPENCLAW_SKILLS:
-        rows.append(_skill_row_for(name, "core", skills_blob, states))
+        rows.append(_skill_row_for(name, "core", skills_blob, catalog))
     for name in OPENCLAW_SKILLS_OPTIONAL_MISSING:
-        rows.append(_skill_row_for(name, "optional", skills_blob, states))
+        rows.append(_skill_row_for(name, "optional", skills_blob, catalog))
     for name in HYBRID_OPENCLAW_SKILLS:
-        rows.append(_skill_row_for(name, "hybrid", skills_blob, states))
+        rows.append(_skill_row_for(name, "hybrid", skills_blob, catalog))
+    return rows
+
+
+def _runtime_skill_rows(skills_blob: str) -> List[Row]:
+    catalog = _parse_openclaw_skill_catalog(skills_blob)
+    tracked = set(EXPECTED_OPENCLAW_SKILLS) | {"acp-router"}
+    rows: List[Row] = []
+    for key in sorted(catalog):
+        if key in tracked:
+            continue
+        entry = catalog[key]
+        status = "ready" if entry.status == "ready" else "ready_with_limits"
+        rows.append(
+            Row(
+                id=f"skill:{key}",
+                category="openclaw_skill",
+                detail=key,
+                status=status,
+                notes=_note_for_skill(entry.status, tier="runtime", source=entry.source, listed=True),
+                critical=False,
+                source=entry.source,
+                aliases=_skill_aliases_for(key, entry.description),
+                availability=_availability_from_status(status, discovered=True),
+            )
+        )
     return rows
 
 
 def _acp_support_rows(skills_blob: str, *, skills_probe_ok: bool) -> List[Row]:
-    states = _parse_openclaw_skill_states(skills_blob)
+    catalog = _parse_openclaw_skill_catalog(skills_blob)
     if not skills_probe_ok:
         return [
             Row(
@@ -322,7 +512,7 @@ def _acp_support_rows(skills_blob: str, *, skills_probe_ok: bool) -> List[Row]:
                 critical=False,
             ),
         ]
-    skill = _skill_row_for("acp-router", "optional", skills_blob, states)
+    skill = _skill_row_for("acp-router", "optional", skills_blob, catalog)
     skill.notes = (
         skill.notes
         or "optional ACP router lane for structured coding-agent sessions"
@@ -460,6 +650,7 @@ def build_matrix() -> List[Row]:
         "✓ ready" in oc_out or "✗ missing" in oc_out
     ):
         rows.extend(_skill_rows(oc_out))
+        rows.extend(_runtime_skill_rows(oc_out))
     rows.extend(_acp_support_rows(oc_out, skills_probe_ok=oc_status == "ready"))
     for name in HYBRID_OPTIONAL_BINARIES:
         present = _which(name)
@@ -600,6 +791,11 @@ def main() -> int:
             "ready": sum(1 for r in rows if r.status == "ready"),
             "ready_with_limits": sum(1 for r in rows if r.status == "ready_with_limits"),
             "blocked": sum(1 for r in rows if r.status == "blocked"),
+            "runtime_skill_rows": sum(
+                1
+                for r in rows
+                if r.category == "openclaw_skill" and r.detail not in EXPECTED_OPENCLAW_SKILLS
+            ),
         },
         "meta": {
             "model_policy_doc": "docs/ANDREA_MODEL_POLICY.md",

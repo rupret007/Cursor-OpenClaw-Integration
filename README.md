@@ -32,6 +32,7 @@ Hardened **Cursor Cloud Agents** integration toolkit for **OpenClaw**, shell wor
 - **Planner/critic/executor trace:** machine-derived orchestration steps and user-safe collaboration summaries instead of raw runtime chatter.
 - **Principal memory + reminders:** durable identity, memory notes, preferences, and scheduled follow-through across Telegram and Alexa.
 - **Closed-loop local self-heal:** regression-backed optimization proposals and gated Cursor branch prep via `services/andrea_sync/optimizer.py` and `scripts/andrea_optimize.py`.
+- **Incident-driven repair loop:** Gemini triage, GPT mini patching, MiniMax challenge, GPT deep-debug planning, isolated verification, rollback, and optional Cursor escalation via `services/andrea_sync/repair_orchestrator.py` and `scripts/andrea_repair_cycle.py`.
 - **Voice + chat coordination**: direct Andrea replies stay concise, delegated work runs through OpenClaw/Cursor, and Alexa sessions can mirror a single compact summary back to Telegram.
 
 ## Repository layout
@@ -68,6 +69,7 @@ Hardened **Cursor Cloud Agents** integration toolkit for **OpenClaw**, shell wor
 │   ├── andrea_model_guard.sh       # automatic profile failover + reprobe loop
 │   ├── andrea_openclaw_enforce.sh  # sync skill + required skills + probe/guard
 │   ├── andrea_optimize.py          # optimization cycle + optional auto-heal branch prep
+│   ├── andrea_repair_cycle.py      # incident-driven repair loop + optional Cursor escalation
 │   ├── andrea_release_gate.sh      # STRICT security + grade not C + test_integration
 │   ├── andrea_slo_telegram.sh      # timed Telegram getMe SLO (token from env only)
 │   ├── handoff_context.py          # shared intent templates + repo triage text
@@ -303,7 +305,7 @@ bash scripts/andrea_reliability_probes.sh
 # optional: RUN_LIVE_PROBES=1 for gh + openclaw
 ```
 
-**Closed-loop autonomy cycle** (health + regressions + optimization proposals + gated local auto-heal + proactive sweep):
+**Closed-loop autonomy cycle** (health + regressions + optimization proposals + incident-driven repair + gated local auto-heal + proactive sweep):
 
 ```bash
 export ANDREA_SYNC_URL='http://127.0.0.1:8765'
@@ -311,6 +313,16 @@ export ANDREA_SYNC_INTERNAL_TOKEN='…'
 bash scripts/andrea_autonomy_cycle.sh
 # proposal generation only:
 # ANDREA_AUTONOMY_AUTO_APPLY_READY=0 bash scripts/andrea_autonomy_cycle.sh
+# skip the incident repair lane:
+# ANDREA_AUTONOMY_INCIDENT_REPAIR=0 bash scripts/andrea_autonomy_cycle.sh
+```
+
+**Direct incident-driven repair cycle** (verification, minimal patch attempts, optional Cursor escalation):
+
+```bash
+python3 scripts/andrea_repair_cycle.py --repo "$PWD"
+# allow deep Cursor execution after the lightweight attempts fail:
+# python3 scripts/andrea_repair_cycle.py --repo "$PWD" --cursor-execute
 ```
 
 ## Documentation
@@ -396,6 +408,9 @@ See [.env.example](.env.example) and [skills/cursor_handoff/.env.example](skills
 | `ANDREA_CURSOR_REPO` / `ANDREA_CURSOR_HANDOFF_MODE` | No | Default repo path and Cursor handoff mode for Telegram-triggered execution. |
 | `ANDREA_SYNC_CURSOR_REPO` | No | Override repo path used by admin/autonomy helpers such as the local self-heal runner. |
 | `ANDREA_SELF_HEAL_CURSOR_MODE` | No | Cursor backend override for auto-heal branch-prep proposals (`auto`, `api`, `cli`). |
+| `ANDREA_AUTONOMY_INCIDENT_REPAIR` / `ANDREA_AUTONOMY_INCIDENT_CURSOR_EXECUTE` | No | Controls whether `andrea_autonomy_cycle.sh` runs the incident repair loop and whether deep repair plans may auto-escalate into Cursor. |
+| `ANDREA_SYNC_BACKGROUND_INCIDENT_REPAIR_ENABLED` / `ANDREA_SYNC_BACKGROUND_INCIDENT_CURSOR_EXECUTE` | No | Lets the idle background optimizer optionally run the incident repair loop and, if desired, allow Cursor escalation. |
+| `ANDREA_REPAIR_CURSOR_MODE` / `ANDREA_REPAIR_MAX_PATCH_ATTEMPTS` | No | Controls the deep Cursor handoff backend and the number of lightweight patch attempts before escalation. |
 | `BRAVE_SEARCH_API_KEY` / `BRAVE_ANSWERS_API_KEY` | No | Optional Brave Search skill keys (`brave-api-search` expects both names; answers key may reuse search key). |
 | `MINIMAX_API_KEY` | No | Optional MiniMax provider key for MiniMax integrations. |
 | `SSL_CERT_FILE` | No | Optional path to CA bundle for Python TLS (macOS `CERTIFICATE_VERIFY_FAILED`); see README troubleshooting. |

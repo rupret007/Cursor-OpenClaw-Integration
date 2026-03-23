@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sqlite3
+import subprocess
 import sys
 import time
 import uuid
@@ -13,8 +13,13 @@ from typing import Any, Dict, List
 
 from .kill_switch import kill_switch_status
 from .observability import metric_log, structured_log
-from .policy import evaluate_skill_absence_claim
+from .policy import (
+    META_DIGEST_KEY,
+    META_DIGEST_TS_KEY,
+    evaluate_skill_absence_claim,
+)
 from .projector import project_task_dict
+from .repair_policy import SAFE_REPAIR_ROOTS
 from .schema import EventType
 from .store import (
     SYSTEM_TASK_ID,
@@ -22,17 +27,32 @@ from .store import (
     ensure_system_task,
     load_events_for_task,
     list_tasks,
+    set_meta,
     task_exists,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CURSOR_HANDOFF_SCRIPT = REPO_ROOT / "skills" / "cursor_handoff" / "scripts" / "cursor_handoff.py"
+CAPABILITY_SCRIPT = REPO_ROOT / "scripts" / "andrea_capabilities.py"
+DEFAULT_OPENCLAW_CONFIG = Path.home() / ".openclaw" / "openclaw.json"
 SAFE_AUTO_HEAL_ROOTS = (
-    "services/andrea_sync/",
-    "tests/",
-    "scripts/",
-    "skills/",
+    *SAFE_REPAIR_ROOTS,
 )
+OPENCLAW_HYBRID_SCRIPT = REPO_ROOT / "scripts" / "andrea_sync_openclaw_hybrid.py"
+
+BREW_FORMULA_OVERRIDES: Dict[str, str] = {
+    "apple-notes": "memo",
+    "apple-reminders": "steipete/tap/remindctl",
+    "memo": "memo",
+    "remindctl": "steipete/tap/remindctl",
+    "rg": "ripgrep",
+    "session-logs": "jq",
+    "tmux": "tmux",
+}
+
+CONFIG_VALUE_REPAIRS: Dict[str, Any] = {
+    "plugins.entries.voice-call.enabled": True,
+}
 
 
 CATEGORY_TEMPLATES: Dict[str, Dict[str, Any]] = {
@@ -175,6 +195,492 @@ def _clip(value: Any, limit: int = 400) -> str:
     if len(text) <= limit:
         return text
     return text[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _run_subprocess(argv: List[str], *, cwd: Path | None = None) -> Dict[str, Any]:
+    proc = subprocess.run(
+        argv,
+        cwd=str(cwd or REPO_ROOT),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return {
+        "argv": list(argv),
+        "returncode": int(proc.returncode),
+        "stdout": proc.stdout or "",
+        "stderr": proc.stderr or "",
+        "ok": proc.returncode == 0,
+    }
+
+
+def _run_json_command(argv: List[str], *, cwd: Path | None = None) -> Dict[str, Any]:
+    result = _run_subprocess(argv, cwd=cwd)
+    blob = (result.get("stdout") or "").strip()
+    if not result["ok"]:
+        return {
+            "ok": False,
+            "error": _clip(result.get("stderr") or blob or "command failed", 500),
+            "command": result,
+        }
+    if not blob:
+        return {"ok": False, "error": "command returned no JSON", "command": result}
+    try:
+        payload = json.loads(blob)
+    except json.JSONDecodeError:
+        return {
+            "ok": False,
+            "error": f"command returned invalid JSON: {_clip(blob, 300)}",
+            "command": result,
+        }
+    if not isinstance(payload, dict):
+        return {"ok": False, "error": "command returned non-object JSON", "command": result}
+    return {"ok": True, "payload": payload, "command": result}
+
+
+def _openclaw_skill_info(skill_key: str) -> Dict[str, Any]:
+    result = _run_json_command(["openclaw", "skills", "info", skill_key, "--json"])
+    if not result.get("ok"):
+        return {
+            "ok": False,
+            "skill_key": skill_key,
+            "error": str(result.get("error") or "skills info failed"),
+            "command": result.get("command"),
+        }
+    payload = dict(result.get("payload") or {})
+    payload["ok"] = True
+    payload["skill_key"] = str(payload.get("skillKey") or payload.get("name") or skill_key)
+    payload["command"] = result.get("command")
+    return payload
+
+
+def _openclaw_config_path() -> Path:
+    raw = os.environ.get("OPENCLAW_CONFIG_PATH") or str(DEFAULT_OPENCLAW_CONFIG)
+    return Path(raw).expanduser()
+
+
+def _load_openclaw_config() -> Dict[str, Any]:
+    path = _openclaw_config_path()
+    if not path.is_file():
+        return {"ok": True, "path": str(path), "data": {}, "format": "json"}
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return {"ok": False, "path": str(path), "error": str(exc)}
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+            return {"ok": True, "path": str(path), "data": data, "format": "json"}
+    except json.JSONDecodeError:
+        pass
+    try:
+        import json5  # type: ignore
+
+        data = json5.loads(text)
+        if isinstance(data, dict):
+            return {"ok": True, "path": str(path), "data": data, "format": "json5"}
+    except Exception:  # noqa: BLE001
+        pass
+    return {
+        "ok": False,
+        "path": str(path),
+        "error": "openclaw config is not parseable as JSON/JSON5",
+    }
+
+
+def _set_dotted_path(root: Dict[str, Any], dotted_path: str, value: Any) -> bool:
+    parts = [str(part).strip() for part in str(dotted_path or "").split(".") if str(part).strip()]
+    if not parts:
+        return False
+    node: Dict[str, Any] = root
+    for part in parts[:-1]:
+        existing = node.get(part)
+        if not isinstance(existing, dict):
+            existing = {}
+            node[part] = existing
+        node = existing
+    changed = node.get(parts[-1]) != value
+    node[parts[-1]] = value
+    return changed
+
+
+def _save_openclaw_config(data: Dict[str, Any]) -> Dict[str, Any]:
+    path = _openclaw_config_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return {"ok": True, "path": str(path)}
+    except OSError as exc:
+        return {"ok": False, "path": str(path), "error": str(exc)}
+
+
+def _repair_missing_config(skill_info: Dict[str, Any]) -> Dict[str, Any]:
+    missing = skill_info.get("missing") if isinstance(skill_info.get("missing"), dict) else {}
+    config_paths = missing.get("config") if isinstance(missing.get("config"), list) else []
+    if not config_paths:
+        return {"ok": True, "changed": False, "actions": [], "unsupported": []}
+    loaded = _load_openclaw_config()
+    if not loaded.get("ok"):
+        return {
+            "ok": False,
+            "changed": False,
+            "actions": [],
+            "unsupported": list(config_paths),
+            "error": str(loaded.get("error") or "config load failed"),
+        }
+    data = dict(loaded.get("data") or {})
+    actions: List[Dict[str, Any]] = []
+    unsupported: List[str] = []
+    changed = False
+    for config_path in config_paths:
+        key = str(config_path or "").strip()
+        if key not in CONFIG_VALUE_REPAIRS:
+            unsupported.append(key)
+            continue
+        if _set_dotted_path(data, key, CONFIG_VALUE_REPAIRS[key]):
+            changed = True
+            actions.append(
+                {
+                    "kind": "config_repair",
+                    "path": key,
+                    "value": CONFIG_VALUE_REPAIRS[key],
+                }
+            )
+    if changed:
+        saved = _save_openclaw_config(data)
+        if not saved.get("ok"):
+            return {
+                "ok": False,
+                "changed": False,
+                "actions": actions,
+                "unsupported": unsupported,
+                "error": str(saved.get("error") or "config save failed"),
+            }
+    return {"ok": True, "changed": changed, "actions": actions, "unsupported": unsupported}
+
+
+def _install_command_from_spec(skill_key: str, spec: Dict[str, Any]) -> List[str]:
+    kind = str(spec.get("kind") or "").strip().lower()
+    bins = [str(v).strip() for v in (spec.get("bins") or []) if str(v).strip()]
+    if kind == "brew":
+        formula = str(spec.get("formula") or "").strip()
+        if not formula:
+            formula = BREW_FORMULA_OVERRIDES.get(skill_key) or ""
+        if not formula and len(bins) == 1:
+            formula = BREW_FORMULA_OVERRIDES.get(bins[0]) or bins[0]
+        return ["brew", "install", formula] if formula else []
+    if kind in {"node", "npm"}:
+        package = str(spec.get("package") or "").strip()
+        if not package and len(bins) == 1:
+            package = bins[0]
+        manager = str(os.environ.get("ANDREA_RUNTIME_SKILL_NODE_MANAGER") or "npm").strip().lower()
+        if not package:
+            return []
+        if manager == "pnpm":
+            return ["pnpm", "add", "-g", package]
+        if manager == "yarn":
+            return ["yarn", "global", "add", package]
+        return ["npm", "install", "-g", package]
+    return []
+
+
+def _install_commands_for_skill(skill_key: str, skill_info: Dict[str, Any]) -> List[List[str]]:
+    commands: List[List[str]] = []
+    install_specs = skill_info.get("install") if isinstance(skill_info.get("install"), list) else []
+    for raw in install_specs:
+        if not isinstance(raw, dict):
+            continue
+        command = _install_command_from_spec(skill_key, raw)
+        if command and command not in commands:
+            commands.append(command)
+    missing = skill_info.get("missing") if isinstance(skill_info.get("missing"), dict) else {}
+    bins = missing.get("bins") if isinstance(missing.get("bins"), list) else []
+    for raw in bins:
+        bin_name = str(raw or "").strip()
+        if not bin_name:
+            continue
+        command = ["brew", "install", BREW_FORMULA_OVERRIDES.get(bin_name) or bin_name]
+        if command not in commands:
+            commands.append(command)
+    return commands
+
+
+def _publish_capability_snapshot_direct(conn: sqlite3.Connection, *, actor: str) -> Dict[str, Any]:
+    result = _run_json_command([sys.executable, str(CAPABILITY_SCRIPT), "--json"], cwd=REPO_ROOT)
+    if not result.get("ok"):
+        return {"ok": False, "error": str(result.get("error") or "capability publish failed")}
+    payload = dict(result.get("payload") or {})
+    payload["published_ts"] = time.time()
+    set_meta(conn, META_DIGEST_KEY, json.dumps(payload, ensure_ascii=False))
+    set_meta(conn, META_DIGEST_TS_KEY, str(payload["published_ts"]))
+    rows = payload.get("rows") if isinstance(payload.get("rows"), list) else []
+    excerpt = json.dumps({"summary": payload.get("summary"), "row_count": len(rows)})[:480]
+    append_event(
+        conn,
+        SYSTEM_TASK_ID,
+        EventType.CAPABILITY_SNAPSHOT,
+        {"summary_json_excerpt": excerpt, "channel": actor},
+    )
+    return {
+        "ok": True,
+        "published_ts": payload["published_ts"],
+        "summary": payload.get("summary"),
+        "rows": rows,
+    }
+
+
+def evaluate_background_readiness(
+    conn: sqlite3.Connection,
+    *,
+    idle_seconds: float = 120.0,
+    task_limit: int = 40,
+) -> Dict[str, Any]:
+    now = time.time()
+    active_statuses = {"created", "queued", "running", "awaiting_approval"}
+    active_task_ids: List[str] = []
+    latest_user_work_age: float | None = None
+    for row in list_tasks(conn, limit=max(1, int(task_limit))):
+        task_id = str(row.get("task_id") or "")
+        channel = str(row.get("channel") or "")
+        if not task_id or task_id == SYSTEM_TASK_ID or channel == "internal":
+            continue
+        updated_at = row.get("updated_at")
+        try:
+            age = max(0.0, now - float(updated_at))
+        except (TypeError, ValueError):
+            age = None
+        if age is not None:
+            if latest_user_work_age is None or age < latest_user_work_age:
+                latest_user_work_age = age
+        status = str(row.get("status") or "").strip().lower()
+        if status in active_statuses:
+            active_task_ids.append(task_id)
+    idle_ok = latest_user_work_age is None or latest_user_work_age >= float(idle_seconds)
+    return {
+        "ready": not active_task_ids and idle_ok,
+        "active_task_ids": active_task_ids,
+        "latest_user_work_age_seconds": latest_user_work_age,
+        "idle_seconds_required": float(idle_seconds),
+        "idle_ok": idle_ok,
+    }
+
+
+def _build_background_planner_prompt(
+    findings: List[Dict[str, Any]], proposals: List[Dict[str, Any]]
+) -> str:
+    return (
+        build_openclaw_optimization_prompt(findings, proposals)
+        + "\nYou are the Gemini-first background planner.\n"
+        "Produce a calm operator-grade plan that prioritizes trust, correctness, and self-healing opportunities.\n"
+        "Call out the highest-leverage proposal first and keep the summary concise.\n"
+    )
+
+
+def _build_background_critique_prompt(
+    planner_summary: str,
+    proposals: List[Dict[str, Any]],
+    *,
+    lane_label: str,
+) -> str:
+    proposal_lines = "\n".join(
+        f"- {row.get('proposal_id')}: {row.get('title')}" for row in proposals[:8]
+    ) or "- no proposals generated"
+    return (
+        f"You are the {lane_label} critique lane for Andrea's background optimizer.\n"
+        "Challenge the draft plan, point out hidden risk, and highlight anything that should be rejected or refined.\n\n"
+        f"Planner summary:\n{planner_summary or '- no planner summary'}\n\n"
+        f"Candidate proposals:\n{proposal_lines}\n"
+    )
+
+
+def _run_background_lane(
+    *,
+    prompt: str,
+    preferred_model_family: str,
+    preferred_model_label: str,
+    repo_path: Path,
+    task_id: str,
+) -> Dict[str, Any]:
+    cmd = [
+        sys.executable,
+        str(OPENCLAW_HYBRID_SCRIPT),
+        "--task-id",
+        task_id,
+        "--prompt",
+        prompt,
+        "--repo",
+        str(repo_path),
+        "--agent-id",
+        (os.environ.get("ANDREA_OPENCLAW_AGENT_ID") or "main").strip() or "main",
+        "--session-id",
+        f"andrea-opt-{preferred_model_family}-{uuid.uuid4().hex[:10]}",
+        "--route-reason",
+        "background_optimization",
+        "--collaboration-mode",
+        "collaborative",
+        "--preferred-model-family",
+        preferred_model_family,
+        "--preferred-model-label",
+        preferred_model_label,
+        "--timeout-seconds",
+        str(max(60, int(os.environ.get("ANDREA_OPENCLAW_TIMEOUT_SECONDS") or "900"))),
+        "--thinking",
+        str(os.environ.get("ANDREA_OPENCLAW_THINKING") or "medium"),
+    ]
+    result = _run_subprocess(cmd, cwd=repo_path)
+    stdout = str(result.get("stdout") or "").strip()
+    if not result.get("ok"):
+        return {
+            "ok": False,
+            "requested_family": preferred_model_family,
+            "requested_label": preferred_model_label,
+            "error": _clip(result.get("stderr") or stdout or "lane failed", 500),
+        }
+    try:
+        payload = json.loads(stdout) if stdout else {}
+    except json.JSONDecodeError:
+        return {
+            "ok": False,
+            "requested_family": preferred_model_family,
+            "requested_label": preferred_model_label,
+            "error": f"invalid lane JSON: {_clip(stdout, 300)}",
+        }
+    if not isinstance(payload, dict):
+        return {
+            "ok": False,
+            "requested_family": preferred_model_family,
+            "requested_label": preferred_model_label,
+            "error": "lane returned non-object JSON",
+        }
+    return {
+        "ok": bool(payload.get("ok")),
+        "requested_family": preferred_model_family,
+        "requested_label": preferred_model_label,
+        "summary": _clip(payload.get("summary") or payload.get("user_summary") or "", 800),
+        "provider": str(payload.get("provider") or "").strip(),
+        "model": str(payload.get("model") or "").strip(),
+        "blocked_reason": _clip(payload.get("blocked_reason") or "", 400),
+        "error": _clip(payload.get("error") or "", 400),
+    }
+
+
+def _run_background_analysis_lanes(
+    conn: sqlite3.Connection,
+    *,
+    findings: List[Dict[str, Any]],
+    proposals: List[Dict[str, Any]],
+    repo_path: Path,
+    actor: str,
+    auto_apply_ready: bool,
+) -> Dict[str, Any]:
+    planner = _run_background_lane(
+        prompt=_build_background_planner_prompt(findings, proposals),
+        preferred_model_family="gemini",
+        preferred_model_label="Gemini",
+        repo_path=repo_path,
+        task_id=SYSTEM_TASK_ID,
+    )
+    append_event(
+        conn,
+        SYSTEM_TASK_ID,
+        EventType.ORCHESTRATION_STEP,
+        {
+            "phase": "plan",
+            "status": "completed" if planner.get("ok") else "failed",
+            "lane": "openclaw",
+            "summary": str(planner.get("summary") or planner.get("error") or ""),
+            "provider": str(planner.get("provider") or ""),
+            "model": str(planner.get("model") or planner.get("requested_label") or ""),
+        },
+    )
+    critiques: List[Dict[str, Any]] = []
+    for family, label in (("minimax", "MiniMax"), ("openai", "OpenAI")):
+        critique = _run_background_lane(
+            prompt=_build_background_critique_prompt(
+                str(planner.get("summary") or ""),
+                proposals,
+                lane_label=label,
+            ),
+            preferred_model_family=family,
+            preferred_model_label=label,
+            repo_path=repo_path,
+            task_id=SYSTEM_TASK_ID,
+        )
+        critiques.append(critique)
+        append_event(
+            conn,
+            SYSTEM_TASK_ID,
+            EventType.ORCHESTRATION_STEP,
+            {
+                "phase": "critique",
+                "status": "completed" if critique.get("ok") else "failed",
+                "lane": "openclaw",
+                "summary": str(critique.get("summary") or critique.get("error") or ""),
+                "provider": str(critique.get("provider") or ""),
+                "model": str(critique.get("model") or critique.get("requested_label") or ""),
+            },
+        )
+    auto_heal: Dict[str, Any] = {"applied": [], "failed": []}
+    if auto_apply_ready and proposals:
+        auto_heal = apply_ready_proposals(
+            conn,
+            proposals=proposals,
+            repo_path=repo_path,
+            actor=actor,
+            max_apply=1,
+        )
+    append_event(
+        conn,
+        SYSTEM_TASK_ID,
+        EventType.ORCHESTRATION_STEP,
+        {
+            "phase": "execution",
+            "status": "completed"
+            if not auto_apply_ready or bool(auto_heal.get("applied"))
+            else ("failed" if auto_heal.get("failed") else "completed"),
+            "lane": "cursor" if auto_apply_ready else "openclaw",
+            "summary": (
+                f"Auto-applied {len(auto_heal.get('applied') or [])} proposal(s)."
+                if auto_apply_ready
+                else "Background execution lane was left in planning-only mode."
+            ),
+            "provider": "",
+            "model": "Cursor" if auto_apply_ready else "",
+        },
+    )
+    synthesis_summary = (
+        str(planner.get("summary") or "")
+        or "; ".join(
+            str(item.get("summary") or "")
+            for item in critiques
+            if str(item.get("summary") or "").strip()
+        )
+        or "Background optimization cycle completed."
+    )
+    append_event(
+        conn,
+        SYSTEM_TASK_ID,
+        EventType.ORCHESTRATION_STEP,
+        {
+            "phase": "synthesis",
+            "status": "completed",
+            "lane": "openclaw",
+            "summary": synthesis_summary,
+            "provider": str(planner.get("provider") or ""),
+            "model": str(planner.get("model") or planner.get("requested_label") or ""),
+        },
+    )
+    return {
+        "planner": planner,
+        "critiques": critiques,
+        "auto_heal": auto_heal,
+        "budget_usage": {
+            "gemini_runs": 1,
+            "minimax_runs": 1,
+            "openai_runs": 1,
+            "cursor_execution_runs": 1 if auto_apply_ready else 0,
+        },
+    }
 
 
 def collect_recent_task_outcomes(
@@ -369,6 +875,164 @@ def record_regression_report(
     }
     append_event(conn, SYSTEM_TASK_ID, EventType.REGRESSION_RECORDED, payload)
     return payload
+
+
+def heal_runtime_capability(
+    conn: sqlite3.Connection,
+    *,
+    skill_key: str,
+    install_slug: str = "",
+    actor: str = "internal",
+    allow_install: bool = True,
+    allow_update_all: bool = True,
+    allow_config_repair: bool = True,
+) -> Dict[str, Any]:
+    ensure_system_task(conn)
+    target = str(skill_key or "").strip()
+    if not target:
+        return {"ok": False, "error": "skill_key required"}
+    append_event(
+        conn,
+        SYSTEM_TASK_ID,
+        EventType.CAPABILITY_HEAL_STARTED,
+        {
+            "skill_key": target,
+            "install_slug": str(install_slug or target),
+            "actor": actor,
+        },
+    )
+    structured_log("capability_heal_started", skill_key=target, actor=actor)
+    actions: List[Dict[str, Any]] = []
+    blockers: List[str] = []
+    info_before = _openclaw_skill_info(target)
+    current = dict(info_before)
+
+    def record_action(kind: str, result: Dict[str, Any], *, argv: List[str] | None = None) -> None:
+        action = {"kind": kind, "ok": bool(result.get("ok"))}
+        if argv:
+            action["argv"] = list(argv)
+        if result.get("returncode") is not None:
+            action["returncode"] = int(result.get("returncode"))
+        stderr = str(result.get("stderr") or "").strip()
+        stdout = str(result.get("stdout") or "").strip()
+        if stderr:
+            action["stderr"] = _clip(stderr, 240)
+        elif stdout:
+            action["stdout"] = _clip(stdout, 240)
+        actions.append(action)
+        if not result.get("ok"):
+            blockers.append(_clip(stderr or stdout or f"{kind} failed", 240))
+
+    if not current.get("ok") and allow_install:
+        install_target = str(install_slug or target)
+        install_result = _run_subprocess(["openclaw", "skills", "install", install_target])
+        record_action("openclaw_install", install_result, argv=install_result["argv"])
+        current = _openclaw_skill_info(target)
+
+    source = str(current.get("source") or "").strip().lower()
+    if (
+        current.get("ok")
+        and not bool(current.get("eligible"))
+        and allow_update_all
+        and source
+        and source != "openclaw-bundled"
+    ):
+        update_result = _run_subprocess(["openclaw", "skills", "update", "--all"])
+        record_action("openclaw_update_all", update_result, argv=update_result["argv"])
+        current = _openclaw_skill_info(target)
+
+    if current.get("ok") and not bool(current.get("eligible")) and allow_config_repair:
+        config_result = _repair_missing_config(current)
+        if config_result.get("actions"):
+            actions.extend(list(config_result.get("actions") or []))
+        for path in config_result.get("unsupported") or []:
+            blockers.append(f"unsupported_config:{path}")
+        if not config_result.get("ok"):
+            blockers.append(str(config_result.get("error") or "config repair failed"))
+        if config_result.get("changed"):
+            current = _openclaw_skill_info(target)
+
+    if current.get("ok") and not bool(current.get("eligible")):
+        commands = _install_commands_for_skill(target, current)
+        for command in commands:
+            install_result = _run_subprocess(command)
+            record_action("dependency_install", install_result, argv=command)
+        if commands:
+            current = _openclaw_skill_info(target)
+
+    snapshot = _publish_capability_snapshot_direct(conn, actor=actor)
+    refresh_required = bool(actions)
+    missing = current.get("missing") if isinstance(current.get("missing"), dict) else {}
+    unresolved = {
+        "bins": list(missing.get("bins") or []),
+        "env": list(missing.get("env") or []),
+        "config": list(missing.get("config") or []),
+        "os": list(missing.get("os") or []),
+    }
+    result = {
+        "ok": bool(current.get("ok")) and bool(current.get("eligible")),
+        "skill_key": target,
+        "install_slug": str(install_slug or target),
+        "before": info_before,
+        "after": current,
+        "actions": actions,
+        "blockers": blockers,
+        "refresh_required": refresh_required,
+        "snapshot": snapshot,
+        "unresolved": unresolved,
+    }
+    if result["ok"]:
+        append_event(
+            conn,
+            SYSTEM_TASK_ID,
+            EventType.CAPABILITY_HEAL_COMPLETED,
+            {
+                "skill_key": target,
+                "actor": actor,
+                "action_count": len(actions),
+                "refresh_required": refresh_required,
+            },
+        )
+        metric_log(
+            "capability_heal_completed",
+            skill_key=target,
+            actor=actor,
+            action_count=len(actions),
+            refresh_required=refresh_required,
+        )
+        structured_log(
+            "capability_heal_completed",
+            skill_key=target,
+            actor=actor,
+            action_count=len(actions),
+            refresh_required=refresh_required,
+        )
+        return result
+    error = "; ".join(
+        item
+        for item in blockers
+        + [f"missing_bins:{','.join(unresolved['bins'])}" if unresolved["bins"] else ""]
+        + [f"missing_env:{','.join(unresolved['env'])}" if unresolved["env"] else ""]
+        + [f"missing_config:{','.join(unresolved['config'])}" if unresolved["config"] else ""]
+        + [f"missing_os:{','.join(unresolved['os'])}" if unresolved["os"] else ""]
+        if item
+    ) or str(current.get("error") or "capability repair incomplete")
+    append_event(
+        conn,
+        SYSTEM_TASK_ID,
+        EventType.CAPABILITY_HEAL_FAILED,
+        {
+            "skill_key": target,
+            "actor": actor,
+            "action_count": len(actions),
+            "refresh_required": refresh_required,
+            "error": error,
+        },
+    )
+    metric_log("capability_heal_failed", skill_key=target, actor=actor)
+    structured_log("capability_heal_failed", skill_key=target, actor=actor, error=error)
+    result["error"] = error
+    return result
 
 
 def get_optimization_proposal(
@@ -639,6 +1303,9 @@ def run_optimization_cycle(
     emit_proposals: bool = True,
     actor: str = "internal",
     analysis_mode: str = "heuristic",
+    repo_path: Path | None = None,
+    auto_apply_ready: bool = False,
+    idle_seconds: float = 120.0,
 ) -> Dict[str, Any]:
     ensure_system_task(conn)
     run_id = f"opt_{uuid.uuid4().hex[:12]}"
@@ -662,6 +1329,37 @@ def run_optimization_cycle(
         analysis_mode=analysis_mode,
     )
     try:
+        readiness: Dict[str, Any] = {}
+        if analysis_mode == "gemini_background":
+            readiness = evaluate_background_readiness(conn, idle_seconds=idle_seconds)
+            if not readiness.get("ready"):
+                append_event(
+                    conn,
+                    SYSTEM_TASK_ID,
+                    EventType.OPTIMIZATION_RUN_COMPLETED,
+                    {
+                        "run_id": run_id,
+                        "actor": actor,
+                        "analysis_mode": analysis_mode,
+                        "outcome_count": 0,
+                        "finding_count": 0,
+                        "proposal_count": 0,
+                        "gate_allowed": False,
+                        "gate_reasons": ["background_not_idle"],
+                        "background_ready": False,
+                    },
+                )
+                return {
+                    "ok": True,
+                    "task_id": SYSTEM_TASK_ID,
+                    "run_id": run_id,
+                    "skipped": True,
+                    "skip_reason": "background_not_idle",
+                    "readiness": readiness,
+                    "findings": [],
+                    "proposals": [],
+                    "gate": {"allowed": False, "reasons": ["background_not_idle"]},
+                }
         if isinstance(regression_report, dict) and regression_report:
             record_regression_report(conn, regression_report, actor=actor)
         outcomes = collect_recent_task_outcomes(conn, limit=limit)
@@ -711,6 +1409,16 @@ def run_optimization_cycle(
                 branch_prep_allowed=proposal["branch_prep_allowed"],
             )
 
+        lane_bundle: Dict[str, Any] = {}
+        if analysis_mode == "gemini_background":
+            lane_bundle = _run_background_analysis_lanes(
+                conn,
+                findings=findings,
+                proposals=proposals,
+                repo_path=Path(repo_path or REPO_ROOT).expanduser(),
+                actor=actor,
+                auto_apply_ready=auto_apply_ready,
+            )
         append_event(
             conn,
             SYSTEM_TASK_ID,
@@ -724,6 +1432,11 @@ def run_optimization_cycle(
                 "proposal_count": len(proposals),
                 "gate_allowed": bool(gate.get("allowed")),
                 "gate_reasons": list(gate.get("reasons") or []),
+                "background_ready": readiness.get("ready") if readiness else None,
+                "background_budget_usage": lane_bundle.get("budget_usage") if lane_bundle else {},
+                "background_auto_applied": len(lane_bundle.get("auto_heal", {}).get("applied") or [])
+                if lane_bundle
+                else 0,
             },
         )
         metric_log(
@@ -751,6 +1464,15 @@ def run_optimization_cycle(
             "proposals": proposals,
             "gate": gate,
         }
+        if readiness:
+            result["readiness"] = readiness
+        if lane_bundle:
+            result["analysis_lanes"] = {
+                "planner": lane_bundle.get("planner"),
+                "critiques": lane_bundle.get("critiques"),
+            }
+            result["budget_usage"] = lane_bundle.get("budget_usage")
+            result["auto_heal"] = lane_bundle.get("auto_heal")
         if analysis_mode != "heuristic":
             result["openclaw_analysis_prompt"] = openclaw_prompt
         return result

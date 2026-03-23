@@ -60,6 +60,7 @@ class TestAndreaSync(unittest.TestCase):
         self._prev_openai_enabled = os.environ.get("OPENAI_API_ENABLED")
         self._prev_openai_key = os.environ.get("OPENAI_API_KEY")
         self._prev_delegate_lane = os.environ.get("ANDREA_TELEGRAM_DELEGATE_LANE")
+        self._prev_openclaw_refresh_mode = os.environ.get("ANDREA_OPENCLAW_REFRESH_MODE")
         os.environ["ANDREA_SYNC_DB"] = str(self.db_path)
         os.environ["ANDREA_SYNC_PUBLIC_BASE"] = ""
         os.environ["ANDREA_SYNC_TELEGRAM_WEBHOOK_AUTOFIX"] = "0"
@@ -116,6 +117,10 @@ class TestAndreaSync(unittest.TestCase):
             os.environ.pop("ANDREA_TELEGRAM_DELEGATE_LANE", None)
         else:
             os.environ["ANDREA_TELEGRAM_DELEGATE_LANE"] = self._prev_delegate_lane
+        if self._prev_openclaw_refresh_mode is None:
+            os.environ.pop("ANDREA_OPENCLAW_REFRESH_MODE", None)
+        else:
+            os.environ["ANDREA_OPENCLAW_REFRESH_MODE"] = self._prev_openclaw_refresh_mode
         self.db_path.unlink(missing_ok=True)
         for suf in ("-wal", "-shm"):
             p = Path(str(self.db_path) + suf)
@@ -1703,6 +1708,219 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(proj["status"], TaskStatus.QUEUED.value)
         self.assertEqual(proj["meta"]["cursor"]["kind"], "openclaw")
         self.assertEqual(proj["meta"]["execution"]["lane"], "openclaw_hybrid")
+
+    def test_create_openclaw_job_passes_explicit_session_id(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        with mock.patch.object(server, "_run_json_subprocess", return_value={"ok": True}) as run_mock:
+            server._create_openclaw_job(
+                "tsk_demo",
+                "do thing",
+                "technical_or_repo_request",
+                "auto",
+                "",
+                "",
+                session_id="sess-demo-1",
+            )
+        argv = run_mock.call_args.args[0]
+        self.assertIn("--session-id", argv)
+        self.assertIn("sess-demo-1", argv)
+
+    def test_refresh_openclaw_runtime_falls_back_to_session_rotation(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        os.environ["ANDREA_OPENCLAW_REFRESH_MODE"] = "auto"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        with mock.patch.object(
+            server,
+            "_run_text_subprocess",
+            side_effect=RuntimeError("restart failed"),
+        ):
+            refresh = server._refresh_openclaw_runtime(
+                "tsk_demo",
+                skill_key="voice-call",
+                heal_result={
+                    "refresh_required": True,
+                    "actions": [{"kind": "config_repair"}],
+                },
+            )
+        self.assertTrue(refresh["ok"])
+        self.assertEqual(refresh["mode"], "session_rotation")
+        self.assertIn("andrea-sync", refresh["session_id"])
+
+    def test_server_answers_messaging_capability_from_runtime_truth(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        result = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-text-capability",
+                "payload": {
+                    "text": "You can send text messages right?",
+                    "chat_id": 9001,
+                    "message_id": 44,
+                },
+            },
+        )
+        with mock.patch.object(
+            server,
+            "_resolve_messaging_capability",
+            return_value={"label": "text messaging", "truth": {"status": "verified_available"}},
+        ):
+            server._handle_task_followups(result["task_id"])
+        proj = project_task_dict(server.conn, result["task_id"], "telegram")
+        reply = proj["meta"]["assistant"]["last_reply"]
+        self.assertIn("verified text messaging lane", reply.lower())
+        self.assertNotIn("session", reply.lower())
+
+    def test_server_drafts_outbound_message_before_send(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        result = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-draft-message",
+                "payload": {
+                    "text": "Tell Candace hi from you",
+                    "chat_id": 9002,
+                    "message_id": 45,
+                },
+            },
+        )
+        with mock.patch.object(
+            server,
+            "_resolve_messaging_capability",
+            return_value={
+                "skill_key": "bluebubbles",
+                "label": "text messaging",
+                "truth": {"status": "verified_available"},
+            },
+        ):
+            server._handle_task_followups(result["task_id"])
+        proj = project_task_dict(server.conn, result["task_id"], "telegram")
+        reply = proj["meta"]["assistant"]["last_reply"]
+        self.assertIn("Draft for Candace", reply)
+        pending = server._load_pending_outbound_draft(result["task_id"])
+        self.assertEqual(pending.get("target"), "Candace")
+        self.assertEqual(pending.get("message"), "hi from you")
+
+    def test_server_confirmation_sends_pending_outbound_message(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        first = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-draft-message-1",
+                "payload": {
+                    "text": "Tell Candace hi from you",
+                    "chat_id": 9003,
+                    "message_id": 46,
+                },
+            },
+        )
+        with mock.patch.object(
+            server,
+            "_resolve_messaging_capability",
+            return_value={
+                "skill_key": "bluebubbles",
+                "label": "text messaging",
+                "truth": {"status": "verified_available"},
+            },
+        ):
+            server._handle_task_followups(first["task_id"])
+        second = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-draft-message-2",
+                "payload": {
+                    "text": "send it",
+                    "chat_id": 9003,
+                    "message_id": 47,
+                },
+            },
+        )
+
+        def _fake_send(task_id: str, draft: dict[str, Any]) -> tuple[str, str]:
+            server._clear_pending_outbound_draft(task_id)
+            return "I sent it to Candace.", "outbound_message_sent"
+
+        with mock.patch.object(
+            server,
+            "_send_pending_outbound_message",
+            side_effect=_fake_send,
+        ):
+            server._handle_task_followups(second["task_id"])
+        proj = project_task_dict(server.conn, second["task_id"], "telegram")
+        reply = proj["meta"]["assistant"]["last_reply"]
+        self.assertEqual(reply, "I sent it to Candace.")
+        self.assertFalse(server._load_pending_outbound_draft(second["task_id"]))
+
+    def test_server_outbound_phone_number_only_stays_product_safe(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        result = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-phone-only-message",
+                "payload": {
+                    "text": "Send a message to +15555550123 saying hi",
+                    "chat_id": 9004,
+                    "message_id": 48,
+                },
+            },
+        )
+        server._handle_task_followups(result["task_id"])
+        proj = project_task_dict(server.conn, result["task_id"], "telegram")
+        reply = proj["meta"]["assistant"]["last_reply"]
+        self.assertIn("resolvable contact or thread", reply)
+        self.assertNotIn("session", reply.lower())
+
+    def test_telegram_final_summary_sanitizes_install_and_config_jargon(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        text = server._telegram_final_summary_text(
+            {
+                "summary": "openclaw skills install bluebubbles failed",
+                "meta": {
+                    "openclaw": {
+                        "blocked_reason": "plugins.entries.voice-call.enabled is still missing",
+                    }
+                },
+            }
+        )
+        self.assertNotIn("openclaw skills install", text.lower())
+        self.assertNotIn("plugins.entries", text.lower())
+        self.assertIn("internal limitation", text.lower())
 
     def test_server_followups_explicit_andrea_mention_stays_direct(self) -> None:
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"

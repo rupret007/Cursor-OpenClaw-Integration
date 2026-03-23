@@ -12,6 +12,7 @@ Strict two-way sync between **user channels** (Telegram, Alexa, CLI), **OpenClaw
 | Projector | `services/andrea_sync/projector.py` | Derive task JSON from events |
 | HTTP API | `services/andrea_sync/server.py` | REST ingress for commands, Telegram webhook, Alexa skill |
 | Optimizer | `services/andrea_sync/optimizer.py` + `scripts/andrea_optimize.py` | Detect regressions, emit proposals, and gate local self-heal |
+| Incident repair | `services/andrea_sync/repair_orchestrator.py` + `scripts/andrea_repair_cycle.py` | Detect concrete failures, triage them, try the smallest safe repair, verify, rollback, and escalate to Cursor when needed |
 | Dashboard | `services/andrea_sync/dashboard.py` | Operator summary for orchestration, memory, reminders, and autonomy health |
 | Policy | `services/andrea_sync/policy.py` | Verify-before-deny using published capability digest + TTL |
 | Kill switch | `services/andrea_sync/kill_switch.py` | Env + flag file + meta; halts ingress when engaged |
@@ -39,6 +40,7 @@ Strict two-way sync between **user channels** (Telegram, Alexa, CLI), **OpenClaw
 - `PublishCapabilitySnapshot` — body is typically `scripts/andrea_capabilities.py --json` output; sets canonical digest for policy.
 - `KillSwitchEngage` / `KillSwitchRelease` — emergency halt / resume (see `scripts/andrea_kill_switch.sh`).
 - `RunOptimizationCycle` / `CreateOptimizationProposal` / `ApplyOptimizationProposal` — autonomy loop entrypoints for recurring UX/runtime failures.
+- `RunIncidentRepair` — incident-driven repair loop entrypoint: verification-backed detection, multi-model triage/patch planning, isolated attempts, rollback, and optional Cursor escalation.
 - `SavePrincipalMemory` / `SetPrincipalPreference` / `LinkPrincipalIdentity` — durable identity and memory controls.
 - `CreateReminder` / `RunProactiveSweep` — quiet follow-through and reminder delivery primitives.
 
@@ -71,6 +73,10 @@ When the kill switch is engaged, Telegram/Alexa ingress and normal commands retu
 | `ANDREA_SYNC_PROACTIVE_SWEEP_INTERVAL_SECONDS` | How often the reminder sweep checks for due reminders (default `60`) |
 | `ANDREA_SYNC_CURSOR_REPO` | Repo override for admin/autonomy helpers such as local self-heal |
 | `ANDREA_SELF_HEAL_CURSOR_MODE` | Cursor backend override for auto-heal branch prep (`auto`, `api`, `cli`) |
+| `ANDREA_SYNC_BACKGROUND_INCIDENT_REPAIR_ENABLED` | If `1`, the idle background optimizer also runs the incident repair loop |
+| `ANDREA_SYNC_BACKGROUND_INCIDENT_CURSOR_EXECUTE` | If `1`, deep repair plans created by the background repair loop may auto-escalate into Cursor |
+| `ANDREA_REPAIR_CURSOR_MODE` | Cursor backend override for deep repair escalation (`auto`, `api`, `cli`) |
+| `ANDREA_REPAIR_MAX_PATCH_ATTEMPTS` | Lightweight patch attempts before deep escalation (default `2`) |
 
 ## Idempotency
 
@@ -122,8 +128,10 @@ Commands without `idempotency_key` use a deterministic hash of `channel`, `exter
 
 1. `services/andrea_sync/optimizer.py` scans recent outcomes, derives recurring UX/runtime failure categories, and emits structured optimization proposals.
 2. `scripts/andrea_optimize.py` runs one optimization cycle, optionally records regression results, and can auto-apply ready proposals through Cursor branch prep.
-3. `scripts/andrea_autonomy_cycle.sh` is the operator-facing wrapper for a disciplined local autonomy pass: health check, regressions, optimization, gated auto-heal, and proactive sweep.
-4. Auto-heal is intentionally gated by regression success, kill-switch state, capability freshness, and safe file roots so the system improves itself without silently rewriting arbitrary parts of the repo.
+3. `services/andrea_sync/repair_orchestrator.py` adds a first-class incident pipeline: detect from failing verification, triage with the Gemini lane, try a small GPT patch, challenge it with MiniMax if needed, then create a deep GPT repair plan and optional Cursor handoff only after the lightweight paths fail.
+4. `scripts/andrea_repair_cycle.py` runs that pipeline directly, while `RunIncidentRepair` exposes the same flow on the internal admin command surface.
+5. `scripts/andrea_autonomy_cycle.sh` is the operator-facing wrapper for a disciplined local autonomy pass: health check, regressions, optimization, incident-driven repair, gated auto-heal, and proactive sweep.
+6. Auto-heal and repair are intentionally gated by regression success, kill-switch state, capability freshness, safe file roots, isolated worktrees, verification, and rollback so the system improves itself without silently rewriting arbitrary parts of the repo.
 
 ## Security
 

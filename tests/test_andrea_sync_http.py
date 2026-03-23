@@ -97,6 +97,46 @@ class TestAndreaSyncHTTP(unittest.TestCase):
         self.assertIn("kill_switch", data)
         self.assertIn("capabilities", data)
 
+    def test_skill_absence_policy_alias_matches_bluebubbles(self) -> None:
+        publish_body = json.dumps(
+            {
+                "command_type": "PublishCapabilitySnapshot",
+                "channel": "internal",
+                "payload": {
+                    "rows": [
+                        {
+                            "id": "skill:bluebubbles",
+                            "detail": "bluebubbles",
+                            "status": "ready",
+                            "aliases": ["blue bubbles", "imessage", "text messages"],
+                            "availability": "verified_available",
+                        }
+                    ],
+                    "summary": {"ready": 1, "ready_with_limits": 0, "blocked": 0},
+                },
+            }
+        ).encode("utf-8")
+        publish_req = urllib.request.Request(
+            self._url("/v1/commands"),
+            data=publish_body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": "Bearer internal-test-token",
+            },
+        )
+        with urllib.request.urlopen(publish_req, timeout=5) as resp:
+            self.assertEqual(resp.status, 200)
+        req = urllib.request.Request(
+            self._url("/v1/policy/skill-absence?skill=blue%20bubbles"),
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            self.assertEqual(resp.status, 200)
+            data = json.loads(resp.read().decode("utf-8"))
+        self.assertFalse(data["may_claim_absent"])
+        self.assertEqual(data["reason"], "verify_before_deny:skill_ready")
+
     def test_dashboard_html_route(self) -> None:
         req = urllib.request.Request(self._url("/dashboard"), method="GET")
         with urllib.request.urlopen(req, timeout=5) as resp:
@@ -218,6 +258,43 @@ class TestAndreaSyncHTTP(unittest.TestCase):
             )
         )
         self.assertEqual(data["optimization"]["latest_regression"]["total"], 8)
+
+    def test_run_incident_repair_internal_command_requires_auth_and_executes(self) -> None:
+        body = json.dumps(
+            {
+                "command_type": "RunIncidentRepair",
+                "channel": "internal",
+                "payload": {},
+            }
+        ).encode("utf-8")
+        unauthorized = urllib.request.Request(
+            self._url("/v1/commands"),
+            data=body,
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(unauthorized, timeout=5)
+        self.assertEqual(ctx.exception.code, 401)
+
+        authorized = urllib.request.Request(
+            self._url("/v1/commands"),
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": "Bearer internal-test-token",
+            },
+        )
+        with mock.patch(
+            "services.andrea_sync.repair_orchestrator.run_incident_repair_cycle",
+            return_value={"ok": True, "resolved": False, "incident": {"incident_id": "inc_http"}},
+        ):
+            with urllib.request.urlopen(authorized, timeout=5) as resp:
+                self.assertEqual(resp.status, 200)
+                payload = json.loads(resp.read().decode("utf-8"))
+        self.assertTrue(payload.get("ok"))
+        self.assertEqual(payload["incident"]["incident_id"], "inc_http")
 
     def test_run_proactive_sweep_internal_command_delivers_due_reminder(self) -> None:
         create_body = json.dumps(

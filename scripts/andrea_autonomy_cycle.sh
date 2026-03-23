@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Closed-loop local autonomy pass: health, regression-backed optimization,
-# optional safe auto-heal branch prep, and an optional proactive reminder sweep.
+# incident-driven repair, optional safe auto-heal branch prep, and an optional
+# proactive reminder sweep.
 #
 # Usage:
 #   export ANDREA_SYNC_URL='http://127.0.0.1:8765'   # optional but recommended
@@ -9,12 +10,15 @@
 #
 # Optional environment:
 #   ANDREA_AUTONOMY_LIMIT=60
-#   ANDREA_AUTONOMY_ANALYSIS_MODE=heuristic|openclaw_prompt
+#   ANDREA_AUTONOMY_ANALYSIS_MODE=heuristic|openclaw_prompt|gemini_background
 #   ANDREA_AUTONOMY_REGRESSION_COMMAND="python3 -m unittest discover -p 'test_*.py'"
 #   ANDREA_AUTONOMY_REGRESSION_CWD="/path/to/repo/tests"
 #   ANDREA_AUTONOMY_REQUIRE_SKILLS="cursor_handoff"
 #   ANDREA_AUTONOMY_AUTO_APPLY_READY=1
 #   ANDREA_AUTONOMY_AUTO_APPLY_LIMIT=1
+#   ANDREA_AUTONOMY_BACKGROUND_IDLE_SECONDS=120
+#   ANDREA_AUTONOMY_INCIDENT_REPAIR=1
+#   ANDREA_AUTONOMY_INCIDENT_CURSOR_EXECUTE=0
 #   ANDREA_AUTONOMY_ALLOW_DIRTY=0
 #   SKIP_HEALTH=0
 #   SKIP_PROACTIVE_SWEEP=0
@@ -40,6 +44,9 @@ ANALYSIS_MODE="${ANDREA_AUTONOMY_ANALYSIS_MODE:-heuristic}"
 REQUIRE_SKILLS="${ANDREA_AUTONOMY_REQUIRE_SKILLS:-cursor_handoff}"
 AUTO_APPLY_READY="${ANDREA_AUTONOMY_AUTO_APPLY_READY:-1}"
 AUTO_APPLY_LIMIT="${ANDREA_AUTONOMY_AUTO_APPLY_LIMIT:-1}"
+BACKGROUND_IDLE_SECONDS="${ANDREA_AUTONOMY_BACKGROUND_IDLE_SECONDS:-120}"
+INCIDENT_REPAIR="${ANDREA_AUTONOMY_INCIDENT_REPAIR:-1}"
+INCIDENT_CURSOR_EXECUTE="${ANDREA_AUTONOMY_INCIDENT_CURSOR_EXECUTE:-0}"
 ALLOW_DIRTY="${ANDREA_AUTONOMY_ALLOW_DIRTY:-0}"
 
 if [[ "${AUTO_APPLY_READY}" == "1" ]] && [[ "${ALLOW_DIRTY}" != "1" ]]; then
@@ -59,6 +66,7 @@ cmd=(
   --repo "$REPO_PATH"
   --limit "$LIMIT"
   --analysis-mode "$ANALYSIS_MODE"
+  --background-idle-seconds "$BACKGROUND_IDLE_SECONDS"
   --regression-command "$REGRESSION_COMMAND"
   --regression-cwd "$REGRESSION_CWD"
 )
@@ -78,6 +86,21 @@ fi
 
 say "run regression-backed optimization cycle"
 "${cmd[@]}" || die "optimization cycle failed"
+
+if [[ "${INCIDENT_REPAIR}" == "1" ]]; then
+  say "run incident-driven repair cycle"
+  repair_cmd=(
+    python3 scripts/andrea_repair_cycle.py
+    --db "$DB_PATH"
+    --repo "$REPO_PATH"
+  )
+  if [[ "${INCIDENT_CURSOR_EXECUTE}" == "1" ]]; then
+    repair_cmd+=(--cursor-execute)
+  fi
+  "${repair_cmd[@]}" || die "incident-driven repair cycle failed"
+else
+  say "skip incident-driven repair cycle (ANDREA_AUTONOMY_INCIDENT_REPAIR=0)"
+fi
 
 if [[ "${SKIP_PROACTIVE_SWEEP:-0}" != "1" ]]; then
   if [[ -n "${ANDREA_SYNC_INTERNAL_TOKEN:-}" ]]; then

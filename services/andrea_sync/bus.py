@@ -45,10 +45,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 _ADMIN_COMMAND_TYPES: Set[CommandType] = {
     CommandType.PUBLISH_CAPABILITY_SNAPSHOT,
+    CommandType.HEAL_RUNTIME_CAPABILITY,
     CommandType.RECORD_EVALUATION_FINDING,
     CommandType.CREATE_OPTIMIZATION_PROPOSAL,
     CommandType.RUN_OPTIMIZATION_CYCLE,
     CommandType.APPLY_OPTIMIZATION_PROPOSAL,
+    CommandType.RUN_INCIDENT_REPAIR,
     CommandType.LINK_PRINCIPAL_IDENTITY,
     CommandType.RUN_PROACTIVE_SWEEP,
     CommandType.KILL_SWITCH_ENGAGE,
@@ -107,6 +109,8 @@ def handle_command(conn: sqlite3.Connection, body: Dict[str, Any]) -> Dict[str, 
         return _handle_alexa(conn, env, idem)
     if ctype == CommandType.PUBLISH_CAPABILITY_SNAPSHOT:
         return _handle_publish_capability_snapshot(conn, env)
+    if ctype == CommandType.HEAL_RUNTIME_CAPABILITY:
+        return _handle_heal_runtime_capability(conn, env)
     if ctype == CommandType.RECORD_EVALUATION_FINDING:
         return _handle_record_evaluation_finding(conn, env)
     if ctype == CommandType.CREATE_OPTIMIZATION_PROPOSAL:
@@ -115,6 +119,8 @@ def handle_command(conn: sqlite3.Connection, body: Dict[str, Any]) -> Dict[str, 
         return _handle_run_optimization_cycle(conn, env)
     if ctype == CommandType.APPLY_OPTIMIZATION_PROPOSAL:
         return _handle_apply_optimization_proposal(conn, env)
+    if ctype == CommandType.RUN_INCIDENT_REPAIR:
+        return _handle_run_incident_repair(conn, env)
     if ctype == CommandType.SAVE_PRINCIPAL_MEMORY:
         return _handle_save_principal_memory(conn, env)
     if ctype == CommandType.SET_PRINCIPAL_PREFERENCE:
@@ -709,6 +715,26 @@ def _handle_publish_capability_snapshot(
     return {"ok": True, "published_ts": blob["published_ts"]}
 
 
+def _handle_heal_runtime_capability(
+    conn: sqlite3.Connection, env: CommandEnvelope
+) -> Dict[str, Any]:
+    from .optimizer import heal_runtime_capability
+
+    ensure_system_task(conn)
+    skill_key = str(env.payload.get("skill_key") or env.payload.get("skill") or "").strip()
+    if not skill_key:
+        return {"ok": False, "error": "skill_key required"}
+    return heal_runtime_capability(
+        conn,
+        skill_key=skill_key,
+        install_slug=str(env.payload.get("install_slug") or "").strip(),
+        actor=str(env.payload.get("actor") or env.channel.value),
+        allow_install=bool(env.payload.get("allow_install", True)),
+        allow_update_all=bool(env.payload.get("allow_update_all", True)),
+        allow_config_repair=bool(env.payload.get("allow_config_repair", True)),
+    )
+
+
 def _resolve_audit_task_id(conn: sqlite3.Connection, env: CommandEnvelope) -> str:
     if env.task_id:
         tid = str(env.task_id)
@@ -800,6 +826,15 @@ def _handle_run_optimization_cycle(
         emit_proposals=bool(env.payload.get("emit_proposals", True)),
         actor=str(env.payload.get("actor") or env.channel.value),
         analysis_mode=str(env.payload.get("analysis_mode") or "heuristic"),
+        repo_path=Path(
+            str(
+                env.payload.get("repo_path")
+                or os.environ.get("ANDREA_SYNC_CURSOR_REPO")
+                or REPO_ROOT
+            )
+        ),
+        auto_apply_ready=bool(env.payload.get("auto_apply_ready", False)),
+        idle_seconds=float(env.payload.get("idle_seconds") or 120.0),
     )
 
 
@@ -822,6 +857,40 @@ def _handle_apply_optimization_proposal(
         proposal_payload=payload,
         repo_path=repo_path,
         actor=str(env.payload.get("actor") or env.channel.value),
+    )
+
+
+def _handle_run_incident_repair(
+    conn: sqlite3.Connection, env: CommandEnvelope
+) -> Dict[str, Any]:
+    from .repair_orchestrator import run_incident_repair_cycle
+
+    ensure_system_task(conn)
+    incident_payload = (
+        dict(env.payload.get("incident"))
+        if isinstance(env.payload.get("incident"), dict)
+        else {}
+    )
+    verification_report = (
+        dict(env.payload.get("verification_report"))
+        if isinstance(env.payload.get("verification_report"), dict)
+        else {}
+    )
+    return run_incident_repair_cycle(
+        conn,
+        repo_path=Path(
+            str(
+                env.payload.get("repo_path")
+                or os.environ.get("ANDREA_SYNC_CURSOR_REPO")
+                or REPO_ROOT
+            )
+        ),
+        actor=str(env.payload.get("actor") or env.channel.value),
+        incident_payload=incident_payload,
+        verification_report=verification_report,
+        source_task_id=str(env.payload.get("source_task_id") or ""),
+        cursor_execute=bool(env.payload.get("cursor_execute", False)),
+        write_report=bool(env.payload.get("write_report", True)),
     )
 
 

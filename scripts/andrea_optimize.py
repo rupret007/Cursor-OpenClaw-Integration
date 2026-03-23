@@ -49,8 +49,17 @@ def main() -> int:
     parser.add_argument("--db", default=os.environ.get("ANDREA_SYNC_DB", str(REPO_ROOT / "data/andrea_sync.db")))
     parser.add_argument("--limit", type=int, default=60)
     parser.add_argument("--require-skill", action="append", default=[])
-    parser.add_argument("--analysis-mode", default="heuristic", choices=["heuristic", "openclaw_prompt"])
+    parser.add_argument(
+        "--analysis-mode",
+        default="heuristic",
+        choices=["heuristic", "openclaw_prompt", "gemini_background"],
+    )
     parser.add_argument("--repo", default=os.environ.get("ANDREA_SYNC_CURSOR_REPO", str(REPO_ROOT)))
+    parser.add_argument(
+        "--background-idle-seconds",
+        type=float,
+        default=float(os.environ.get("ANDREA_SYNC_BACKGROUND_OPTIMIZER_IDLE_SECONDS", "120")),
+    )
     parser.add_argument(
         "--regression-command",
         default="python3 -m unittest discover -p 'test_*.py'",
@@ -96,9 +105,12 @@ def main() -> int:
             emit_proposals=bool(args.emit_proposals),
             actor="script",
             analysis_mode=str(args.analysis_mode),
+            repo_path=Path(args.repo).expanduser(),
+            auto_apply_ready=bool(args.auto_apply_ready and args.analysis_mode == "gemini_background"),
+            idle_seconds=float(args.background_idle_seconds),
         )
         payload["regression_report"] = regression_report
-        if args.auto_apply_ready and payload.get("ok"):
+        if args.auto_apply_ready and payload.get("ok") and args.analysis_mode != "gemini_background":
             payload["auto_heal"] = apply_ready_proposals(
                 conn,
                 proposals=payload.get("proposals") if isinstance(payload.get("proposals"), list) else [],

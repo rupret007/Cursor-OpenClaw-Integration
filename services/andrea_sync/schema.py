@@ -39,10 +39,12 @@ class CommandType(str, Enum):
     REPORT_CURSOR_EVENT = "ReportCursorEvent"  # lifecycle from cursor_openclaw / handoff
     ALEXA_UTTERANCE = "AlexaUtterance"
     PUBLISH_CAPABILITY_SNAPSHOT = "PublishCapabilitySnapshot"
+    HEAL_RUNTIME_CAPABILITY = "HealRuntimeCapability"
     RECORD_EVALUATION_FINDING = "RecordEvaluationFinding"
     CREATE_OPTIMIZATION_PROPOSAL = "CreateOptimizationProposal"
     RUN_OPTIMIZATION_CYCLE = "RunOptimizationCycle"
     APPLY_OPTIMIZATION_PROPOSAL = "ApplyOptimizationProposal"
+    RUN_INCIDENT_REPAIR = "RunIncidentRepair"
     SAVE_PRINCIPAL_MEMORY = "SavePrincipalMemory"
     SET_PRINCIPAL_PREFERENCE = "SetPrincipalPreference"
     LINK_PRINCIPAL_IDENTITY = "LinkPrincipalIdentity"
@@ -76,6 +78,9 @@ class EventType(str, Enum):
     REMINDER_TRIGGERED = "ReminderTriggered"
     REMINDER_DELIVERED = "ReminderDelivered"
     REMINDER_FAILED = "ReminderFailed"
+    CAPABILITY_HEAL_STARTED = "CapabilityHealStarted"
+    CAPABILITY_HEAL_COMPLETED = "CapabilityHealCompleted"
+    CAPABILITY_HEAL_FAILED = "CapabilityHealFailed"
     EVALUATION_RECORDED = "EvaluationRecorded"
     OPTIMIZATION_PROPOSAL = "OptimizationProposal"
     OPTIMIZATION_RUN_STARTED = "OptimizationRunStarted"
@@ -85,6 +90,16 @@ class EventType(str, Enum):
     LOCAL_AUTO_HEAL_STARTED = "LocalAutoHealStarted"
     LOCAL_AUTO_HEAL_COMPLETED = "LocalAutoHealCompleted"
     LOCAL_AUTO_HEAL_FAILED = "LocalAutoHealFailed"
+    INCIDENT_RECORDED = "IncidentRecorded"
+    INCIDENT_TRIAGED = "IncidentTriaged"
+    REPAIR_ATTEMPT_STARTED = "RepairAttemptStarted"
+    REPAIR_ATTEMPT_COMPLETED = "RepairAttemptCompleted"
+    REPAIR_ATTEMPT_FAILED = "RepairAttemptFailed"
+    REPAIR_PLAN_CREATED = "RepairPlanCreated"
+    REPAIR_ROLLBACK_COMPLETED = "RepairRollbackCompleted"
+    REPAIR_HANDOFF_RECORDED = "RepairHandoffRecorded"
+    INCIDENT_RESOLVED = "IncidentResolved"
+    INCIDENT_ESCALATED = "IncidentEscalated"
     EXTERNAL_REF = "ExternalRef"  # telegram update_id, alexa request id, etc.
     CAPABILITY_SNAPSHOT = "CapabilitySnapshot"
     KILL_SWITCH_ENGAGED = "KillSwitchEngaged"
@@ -398,6 +413,91 @@ def _fold_openclaw_contract_meta(proj: "TaskProjection", payload: Dict[str, Any]
     phase_outputs = _normalize_phase_outputs(payload.get("phase_outputs"))
     if phase_outputs:
         openclaw_meta["phase_outputs"] = phase_outputs
+
+
+def _fold_repair_event_meta(
+    proj: "TaskProjection", event_type: EventType, payload: Dict[str, Any]
+) -> None:
+    repair_meta = _ensure_meta_dict(proj.meta, "repair")
+    incident_id = str(payload.get("incident_id") or "").strip()
+    if incident_id:
+        repair_meta["last_incident_id"] = incident_id
+    if payload.get("source_task_id"):
+        repair_meta["last_source_task_id"] = str(payload.get("source_task_id"))
+    if payload.get("error_type"):
+        repair_meta["last_error_type"] = str(payload.get("error_type"))
+    if payload.get("summary"):
+        repair_meta["last_summary"] = _clip_meta_text(payload.get("summary"), 600)
+    if payload.get("classification"):
+        repair_meta["last_classification"] = str(payload.get("classification"))
+    if payload.get("confidence") is not None:
+        try:
+            repair_meta["last_confidence"] = float(payload.get("confidence"))
+        except (TypeError, ValueError):
+            pass
+    if payload.get("plan_id"):
+        repair_meta["last_plan_id"] = str(payload.get("plan_id"))
+    if payload.get("attempt_id"):
+        repair_meta["last_attempt_id"] = str(payload.get("attempt_id"))
+    if payload.get("attempt_number") is not None:
+        try:
+            repair_meta["last_attempt_number"] = int(payload.get("attempt_number") or 0)
+        except (TypeError, ValueError):
+            pass
+    if payload.get("model_used"):
+        repair_meta["last_model_used"] = str(payload.get("model_used"))
+    if payload.get("report_path"):
+        repair_meta["last_report_path"] = str(payload.get("report_path"))
+    if payload.get("branch"):
+        repair_meta["last_branch"] = str(payload.get("branch"))
+
+    if event_type == EventType.INCIDENT_RECORDED:
+        repair_meta["incident_count"] = int(repair_meta.get("incident_count") or 0) + 1
+        repair_meta["last_status"] = "open"
+    elif event_type == EventType.INCIDENT_TRIAGED:
+        repair_meta["triaged_count"] = int(repair_meta.get("triaged_count") or 0) + 1
+        repair_meta["last_status"] = "triaged"
+        repair_meta["last_safe_to_attempt"] = bool(payload.get("safe_to_auto_attempt"))
+    elif event_type == EventType.REPAIR_ATTEMPT_STARTED:
+        repair_meta["attempt_count"] = int(repair_meta.get("attempt_count") or 0) + 1
+        repair_meta["last_status"] = "attempt_running"
+    elif event_type == EventType.REPAIR_ATTEMPT_COMPLETED:
+        repair_meta["successful_attempt_count"] = int(
+            repair_meta.get("successful_attempt_count") or 0
+        ) + 1
+        repair_meta["last_status"] = "attempt_completed"
+    elif event_type == EventType.REPAIR_ATTEMPT_FAILED:
+        repair_meta["failed_attempt_count"] = int(
+            repair_meta.get("failed_attempt_count") or 0
+        ) + 1
+        repair_meta["last_status"] = "attempt_failed"
+        if payload.get("error"):
+            repair_meta["last_error"] = _clip_meta_text(payload.get("error"), 800)
+    elif event_type == EventType.REPAIR_PLAN_CREATED:
+        repair_meta["plan_count"] = int(repair_meta.get("plan_count") or 0) + 1
+        repair_meta["last_status"] = "planned"
+        if payload.get("root_cause"):
+            repair_meta["last_root_cause"] = _clip_meta_text(payload.get("root_cause"), 800)
+    elif event_type == EventType.REPAIR_ROLLBACK_COMPLETED:
+        repair_meta["rollback_count"] = int(repair_meta.get("rollback_count") or 0) + 1
+        repair_meta["last_status"] = "rolled_back"
+    elif event_type == EventType.REPAIR_HANDOFF_RECORDED:
+        repair_meta["handoff_count"] = int(repair_meta.get("handoff_count") or 0) + 1
+        repair_meta["last_status"] = "handoff_recorded"
+        if payload.get("agent_url"):
+            repair_meta["last_agent_url"] = str(payload.get("agent_url"))
+        if payload.get("pr_url"):
+            repair_meta["last_pr_url"] = str(payload.get("pr_url"))
+    elif event_type == EventType.INCIDENT_RESOLVED:
+        repair_meta["resolved_count"] = int(repair_meta.get("resolved_count") or 0) + 1
+        repair_meta["last_status"] = "resolved"
+        if payload.get("commit_sha"):
+            repair_meta["last_commit_sha"] = str(payload.get("commit_sha"))
+    elif event_type == EventType.INCIDENT_ESCALATED:
+        repair_meta["escalated_count"] = int(repair_meta.get("escalated_count") or 0) + 1
+        repair_meta["last_status"] = "escalated"
+        if payload.get("error"):
+            repair_meta["last_error"] = _clip_meta_text(payload.get("error"), 800)
 
 
 def _derive_result_kind(
@@ -730,6 +830,9 @@ def legal_task_transition(
         EventType.REMINDER_TRIGGERED,
         EventType.REMINDER_DELIVERED,
         EventType.REMINDER_FAILED,
+        EventType.CAPABILITY_HEAL_STARTED,
+        EventType.CAPABILITY_HEAL_COMPLETED,
+        EventType.CAPABILITY_HEAL_FAILED,
         EventType.EVALUATION_RECORDED,
         EventType.OPTIMIZATION_PROPOSAL,
         EventType.OPTIMIZATION_RUN_STARTED,
@@ -739,6 +842,16 @@ def legal_task_transition(
         EventType.LOCAL_AUTO_HEAL_STARTED,
         EventType.LOCAL_AUTO_HEAL_COMPLETED,
         EventType.LOCAL_AUTO_HEAL_FAILED,
+        EventType.INCIDENT_RECORDED,
+        EventType.INCIDENT_TRIAGED,
+        EventType.REPAIR_ATTEMPT_STARTED,
+        EventType.REPAIR_ATTEMPT_COMPLETED,
+        EventType.REPAIR_ATTEMPT_FAILED,
+        EventType.REPAIR_PLAN_CREATED,
+        EventType.REPAIR_ROLLBACK_COMPLETED,
+        EventType.REPAIR_HANDOFF_RECORDED,
+        EventType.INCIDENT_RESOLVED,
+        EventType.INCIDENT_ESCALATED,
     ):
         return True, None
     if event == EventType.JOB_PROGRESS:
@@ -1275,8 +1388,42 @@ def fold_projection(
             optimization_meta["last_auto_heal_proposal_id"] = str(payload.get("proposal_id"))
         if payload.get("error"):
             optimization_meta["last_auto_heal_error"] = _clip_meta_text(payload.get("error"), 800)
+    if event_type == EventType.CAPABILITY_HEAL_STARTED:
+        capability_meta = _ensure_meta_dict(proj.meta, "capability_heal")
+        capability_meta["last_status"] = "running"
+        capability_meta["run_count"] = int(capability_meta.get("run_count") or 0) + 1
+        if payload.get("skill_key"):
+            capability_meta["last_skill_key"] = str(payload.get("skill_key"))
+    if event_type == EventType.CAPABILITY_HEAL_COMPLETED:
+        capability_meta = _ensure_meta_dict(proj.meta, "capability_heal")
+        capability_meta["last_status"] = "completed"
+        capability_meta["success_count"] = int(capability_meta.get("success_count") or 0) + 1
+        if payload.get("skill_key"):
+            capability_meta["last_skill_key"] = str(payload.get("skill_key"))
+        capability_meta["refresh_required"] = bool(payload.get("refresh_required"))
+    if event_type == EventType.CAPABILITY_HEAL_FAILED:
+        capability_meta = _ensure_meta_dict(proj.meta, "capability_heal")
+        capability_meta["last_status"] = "failed"
+        capability_meta["failure_count"] = int(capability_meta.get("failure_count") or 0) + 1
+        if payload.get("skill_key"):
+            capability_meta["last_skill_key"] = str(payload.get("skill_key"))
+        if payload.get("error"):
+            capability_meta["last_error"] = _clip_meta_text(payload.get("error"), 800)
     if event_type == EventType.CAPABILITY_SNAPSHOT:
         proj.meta["last_capability_excerpt"] = str(payload.get("summary_json_excerpt", ""))[:500]
     if event_type in (EventType.KILL_SWITCH_ENGAGED, EventType.KILL_SWITCH_RELEASED):
         proj.meta["kill_switch_last"] = event_type.value
+    if event_type in (
+        EventType.INCIDENT_RECORDED,
+        EventType.INCIDENT_TRIAGED,
+        EventType.REPAIR_ATTEMPT_STARTED,
+        EventType.REPAIR_ATTEMPT_COMPLETED,
+        EventType.REPAIR_ATTEMPT_FAILED,
+        EventType.REPAIR_PLAN_CREATED,
+        EventType.REPAIR_ROLLBACK_COMPLETED,
+        EventType.REPAIR_HANDOFF_RECORDED,
+        EventType.INCIDENT_RESOLVED,
+        EventType.INCIDENT_ESCALATED,
+    ):
+        _fold_repair_event_meta(proj, event_type, payload)
     _refresh_outcome_meta(proj)

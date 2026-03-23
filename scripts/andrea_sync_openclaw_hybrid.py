@@ -18,7 +18,10 @@ INTERNAL_RUNTIME_RE = re.compile(
     r"\b("
     r"sessionkey|session key|sessionid|session id|session label|runtime id|"
     r"sessions_send|sessions_spawn|attachments\.enabled|tool chatter|tool call|"
-    r"internal runtime|cursor session|label that identifies|session identifier"
+    r"internal runtime|cursor session|label that identifies|session identifier|"
+    r"openclaw skills install|openclaw skills update|skills info|gateway restart|"
+    r"blockedbyallowlist|missing_bins|missing_env|missing_config|missing_os|"
+    r"eligible(?::|=)\s*(?:true|false)"
     r")\b",
     re.I,
 )
@@ -37,6 +40,7 @@ SESSION_ROUTING_RE = re.compile(
     r")\b",
     re.I,
 )
+CONFIG_PATH_RE = re.compile(r"(?:plugins\.entries|channels\.)[\w.-]+", re.I)
 
 
 def _clip(value: Any, limit: int) -> str:
@@ -55,6 +59,8 @@ def _is_internal_runtime_text(text: str) -> bool:
     if not normalized:
         return False
     if INTERNAL_RUNTIME_RE.search(normalized):
+        return True
+    if CONFIG_PATH_RE.search(normalized):
         return True
     return bool(
         re.search(r"\b(tool|runtime|config|setting|session)\b", normalized, re.I)
@@ -541,6 +547,7 @@ def run_openclaw_hybrid(
     prompt: str,
     repo_path: str,
     agent_id: str,
+    session_id: str,
     route_reason: str,
     collaboration_mode: str,
     preferred_model_family: str,
@@ -568,6 +575,8 @@ def run_openclaw_hybrid(
         "--timeout",
         str(max(1, timeout_seconds)),
     ]
+    if session_id:
+        cmd.extend(["--session-id", session_id])
     if thinking:
         cmd.extend(["--thinking", thinking])
     proc = subprocess.run(
@@ -662,6 +671,7 @@ def run_openclaw_hybrid(
         "collaboration_mode": collaboration_mode,
         "preferred_model_family": preferred_model_family,
         "preferred_model_label": preferred_model_label,
+        "requested_session_id": session_id,
     }
 
 
@@ -671,6 +681,7 @@ def main() -> int:
     ap.add_argument("--prompt", required=True)
     ap.add_argument("--repo", default=str(REPO_ROOT))
     ap.add_argument("--agent-id", default="main")
+    ap.add_argument("--session-id", default="")
     ap.add_argument("--route-reason", default="")
     ap.add_argument("--collaboration-mode", default="auto")
     ap.add_argument("--preferred-model-family", default="")
@@ -684,6 +695,7 @@ def main() -> int:
             prompt=args.prompt,
             repo_path=args.repo,
             agent_id=args.agent_id,
+            session_id=str(args.session_id or "").strip(),
             route_reason=args.route_reason,
             collaboration_mode=str(args.collaboration_mode or "").strip() or "auto",
             preferred_model_family=str(args.preferred_model_family or "").strip(),

@@ -162,6 +162,7 @@ class AndreaSyncOpenClawHybridTests(unittest.TestCase):
                 prompt="do thing",
                 repo_path="/tmp/r",
                 agent_id="main",
+                session_id="sess-task-x",
                 route_reason="test",
                 collaboration_mode="auto",
                 preferred_model_family="",
@@ -204,6 +205,7 @@ class AndreaSyncOpenClawHybridTests(unittest.TestCase):
                 prompt="do thing",
                 repo_path="/tmp/r",
                 agent_id="main",
+                session_id="sess-task-y",
                 route_reason="test",
                 collaboration_mode="auto",
                 preferred_model_family="",
@@ -247,6 +249,7 @@ class AndreaSyncOpenClawHybridTests(unittest.TestCase):
                 prompt="do thing",
                 repo_path="/tmp/r",
                 agent_id="main",
+                session_id="sess-task-blocked",
                 route_reason="test",
                 collaboration_mode="cursor_primary",
                 preferred_model_family="",
@@ -258,6 +261,52 @@ class AndreaSyncOpenClawHybridTests(unittest.TestCase):
         self.assertIn("internal collaboration limitation", out["summary"])
         self.assertIn("sessionKey", out["internal_trace"])
         self.assertIn("internal collaboration limitation", out["blocked_reason"])
+
+    def test_derive_contract_sanitizes_install_and_config_runtime_jargon(self) -> None:
+        contract = MODULE._derive_openclaw_contract(
+            {},
+            "Run openclaw skills install bluebubbles and set plugins.entries.voice-call.enabled before retrying.",
+            {},
+        )
+        self.assertNotIn("openclaw skills install", contract["summary"].lower())
+        self.assertNotIn("plugins.entries", contract["summary"].lower())
+        self.assertIn("openclaw skills install", contract["internal_trace"].lower())
+
+    def test_run_openclaw_hybrid_passes_explicit_session_id(self) -> None:
+        stdout_obj = {
+            "runId": "run-session",
+            "status": "completed",
+            "result": {"payloads": [{"text": "LOCKSTEP_JSON: {\"summary\":\"done\",\"status\":\"completed\"}"}]},
+        }
+        seen_argv = []
+
+        def fake_run(argv, *_a, **_k):
+            seen_argv.extend(argv)
+
+            class R:
+                returncode = 0
+                stdout = json.dumps(stdout_obj)
+                stderr = ""
+
+            return R()
+
+        with mock.patch.object(MODULE.subprocess, "run", side_effect=fake_run):
+            out = MODULE.run_openclaw_hybrid(
+                task_id="tsk_session",
+                prompt="do thing",
+                repo_path="/tmp/r",
+                agent_id="main",
+                session_id="sess-explicit-1",
+                route_reason="test",
+                collaboration_mode="auto",
+                preferred_model_family="",
+                preferred_model_label="",
+                timeout_seconds=60,
+                thinking="",
+            )
+        self.assertIn("--session-id", seen_argv)
+        self.assertIn("sess-explicit-1", seen_argv)
+        self.assertEqual(out["requested_session_id"], "sess-explicit-1")
         self.assertIn("machine_collaboration_trace", out)
 
 

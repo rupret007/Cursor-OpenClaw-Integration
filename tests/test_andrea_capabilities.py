@@ -65,6 +65,36 @@ class TestAndreaCapabilities(unittest.TestCase):
         self.assertEqual(states.get("cursor_handoff"), "ready")
         self.assertEqual(states.get("apple-notes"), "missing")
 
+    def test_parse_openclaw_skill_catalog_tracks_source_and_continuations(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "scripts"))
+        import andrea_capabilities as ac  # noqa: E402
+
+        snippet = (
+            "│ ✓ ready   │ 🫧 bluebubbles          │ Use when you need to send or manage iMessages via │ openclaw-bundled   │\n"
+            "│           │                         │ BlueBubbles and send text messages safely.        │                    │\n"
+        )
+        catalog = ac._parse_openclaw_skill_catalog(snippet)
+        self.assertIn("bluebubbles", catalog)
+        self.assertEqual(catalog["bluebubbles"].status, "ready")
+        self.assertEqual(catalog["bluebubbles"].source, "openclaw-bundled")
+        self.assertIn("BlueBubbles", catalog["bluebubbles"].description)
+
+    def test_runtime_skill_rows_include_dynamic_bluebubbles_aliases(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "scripts"))
+        import andrea_capabilities as ac  # noqa: E402
+
+        snippet = (
+            "│ ✓ ready   │ 🫧 bluebubbles          │ Use when you need to send or manage iMessages via │ openclaw-bundled   │\n"
+            "│           │                         │ BlueBubbles. Calls go through text messages.      │                    │\n"
+        )
+        rows = ac._runtime_skill_rows(snippet)
+        by_id = {r.id: r for r in rows}
+        self.assertIn("skill:bluebubbles", by_id)
+        self.assertEqual(by_id["skill:bluebubbles"].status, "ready")
+        self.assertEqual(by_id["skill:bluebubbles"].source, "openclaw-bundled")
+        self.assertIn("blue bubbles", by_id["skill:bluebubbles"].aliases)
+        self.assertIn("imessage", by_id["skill:bluebubbles"].aliases)
+
     def test_expected_skills_include_hybrid_wave1(self) -> None:
         sys.path.insert(0, str(REPO_ROOT / "scripts"))
         import andrea_capabilities as ac  # noqa: E402

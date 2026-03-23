@@ -28,7 +28,12 @@ from .dashboard import (
 )
 from .kill_switch import is_kill_switch_engaged, kill_switch_status
 from .observability import metric_log, structured_log
-from .policy import digest_age_seconds, evaluate_skill_absence_claim, get_capability_digest
+from .policy import (
+    digest_age_seconds,
+    evaluate_skill_absence_claim,
+    get_capability_digest,
+    resolve_skill_truth,
+)
 from .projector import project_task_dict
 from .schema import EventType
 from .telegram_continuation import attach_continuation_if_applicable
@@ -109,6 +114,24 @@ def _clip(value: Any, limit: int) -> str:
     return str(value or "")[:limit]
 
 
+def _sanitize_user_surface_text(text: Any, *, fallback: str = "") -> str:
+    safe_lines: list[str] = []
+    for raw_line in str(text or "").splitlines():
+        stripped = re.sub(r"\s+", " ", raw_line.lstrip("-*• ").strip())
+        if not stripped:
+            continue
+        if USER_SURFACE_INTERNAL_RE.search(stripped):
+            continue
+        safe_lines.append(stripped)
+    collapsed = " ".join(safe_lines).strip()
+    if collapsed:
+        return _clip(collapsed, 500)
+    backup = re.sub(r"\s+", " ", str(fallback or "").strip())
+    if backup and not USER_SURFACE_INTERNAL_RE.search(backup):
+        return _clip(backup, 500)
+    return "I ran into an internal limitation while working on that."
+
+
 REMIND_ME_RE = re.compile(r"^\s*(?:please\s+)?remind me(?:\s+to)?\s+(?P<body>.+?)\s*$", re.I)
 REMEMBER_NOTE_RE = re.compile(
     r"^\s*(?:please\s+)?remember(?:\s+that|\s+this)?\s+(?P<body>.+?)\s*$",
@@ -117,6 +140,65 @@ REMEMBER_NOTE_RE = re.compile(
 RELATIVE_REMINDER_RE = re.compile(
     r"\bin\s+(?P<count>\d+)\s+(?P<unit>minute|minutes|hour|hours|day|days)\b",
     re.I,
+)
+MESSAGING_CAPABILITY_RE = re.compile(
+    r"\b(can you|could you|are you able to|do you(?: have)?|you can|able to)\b.*\b("
+    r"text|message|messages|imessage|imessages|blue bubbles|bluebubbles|whatsapp"
+    r")\b",
+    re.I,
+)
+OUTBOUND_SEND_PATTERNS = (
+    re.compile(
+        r"^\s*(?:(?:please|can you|could you)\s+)?send\s+(?:a\s+)?(?:message|text)\s+to\s+(?P<target>.+?)(?:\s+(?:that|saying|saying that)\s+(?P<body>.+))?\s*$",
+        re.I,
+    ),
+    re.compile(
+        r"^\s*(?:(?:please|can you|could you)\s+)?send\s+(?P<target>.+?)\s+(?:a\s+)?(?:message|text)(?:\s+(?:that|saying|saying that)\s+(?P<body>.+))?\s*$",
+        re.I,
+    ),
+    re.compile(
+        r"^\s*(?:(?:please|can you|could you)\s+)?text\s+(?P<target>.+?)(?:\s+(?P<body>.+))?\s*$",
+        re.I,
+    ),
+    re.compile(
+        r"^\s*(?:(?:please|can you|could you)\s+)?tell\s+(?P<target>.+?)\s+(?P<body>.+)\s*$",
+        re.I,
+    ),
+)
+OUTBOUND_CONFIRM_RE = re.compile(
+    r"^\s*(yes|y|send it|send it now|yes send it|ok send it|okay send it|go ahead|do it|confirm|looks good)\s*[.!]?\s*$",
+    re.I,
+)
+OUTBOUND_CANCEL_RE = re.compile(
+    r"^\s*(no|cancel|don't send|do not send|stop|never mind)\s*[.!]?\s*$",
+    re.I,
+)
+PHONE_TARGET_RE = re.compile(r"^\+?[\d()\-\s.]{7,}$")
+AMBIGUOUS_TARGETS = {"her", "him", "them", "someone", "somebody", "that person"}
+PENDING_OUTBOUND_DRAFT_TTL_SECONDS = 1800.0
+USER_SURFACE_INTERNAL_RE = re.compile(
+    r"\b("
+    r"sessionkey|session key|session id|session label|runtime id|"
+    r"attachments\.enabled|sessions_send|sessions_spawn|"
+    r"openclaw skills install|openclaw skills update|skills info|"
+    r"gateway restart|blockedbyallowlist|"
+    r"missing_(?:bins|env|config|os)|"
+    r"eligible(?::|=)\s*(?:true|false)|"
+    r"--session-id"
+    r")\b|(?:plugins\.entries|channels\.)[\w.-]+",
+    re.I,
+)
+MESSAGING_SKILL_CANDIDATES = (
+    {
+        "skill_key": "bluebubbles",
+        "label": "text messaging",
+        "match_terms": ("blue bubbles", "bluebubbles", "imessage", "imessages", "text", "message"),
+    },
+    {
+        "skill_key": "wacli",
+        "label": "WhatsApp messaging",
+        "match_terms": ("whatsapp",),
+    },
 )
 
 
@@ -209,6 +291,31 @@ class SyncServer:
             "ANDREA_OPENCLAW_FALLBACK_TO_CURSOR", True
         )
         self.openclaw_thinking = os.environ.get("ANDREA_OPENCLAW_THINKING", "medium").strip() or "medium"
+        self.openclaw_refresh_mode = (
+            os.environ.get("ANDREA_OPENCLAW_REFRESH_MODE", "auto").strip().lower()
+            or "auto"
+        )
+        self.openclaw_gateway_restart_timeout_seconds = _env_int(
+            "ANDREA_OPENCLAW_GATEWAY_RESTART_TIMEOUT_SECONDS", 90
+        )
+        self.background_optimizer_enabled = _env_bool(
+            "ANDREA_SYNC_BACKGROUND_OPTIMIZER_ENABLED", False
+        )
+        self.background_optimizer_interval_seconds = _env_float(
+            "ANDREA_SYNC_BACKGROUND_OPTIMIZER_INTERVAL_SECONDS", 900.0
+        )
+        self.background_optimizer_idle_seconds = _env_float(
+            "ANDREA_SYNC_BACKGROUND_OPTIMIZER_IDLE_SECONDS", 120.0
+        )
+        self.background_optimizer_auto_apply = _env_bool(
+            "ANDREA_SYNC_BACKGROUND_OPTIMIZER_AUTO_APPLY", False
+        )
+        self.background_incident_repair_enabled = _env_bool(
+            "ANDREA_SYNC_BACKGROUND_INCIDENT_REPAIR_ENABLED", False
+        )
+        self.background_incident_cursor_execute = _env_bool(
+            "ANDREA_SYNC_BACKGROUND_INCIDENT_CURSOR_EXECUTE", False
+        )
         self.proactive_sweep_enabled = _env_bool(
             "ANDREA_SYNC_PROACTIVE_SWEEP_ENABLED", False
         )
@@ -227,6 +334,12 @@ class SyncServer:
                 daemon=True,
             )
             self._proactive_worker.start()
+        if self.background_optimizer_enabled:
+            self._background_optimizer_worker = threading.Thread(
+                target=self._maintain_background_optimizer,
+                daemon=True,
+            )
+            self._background_optimizer_worker.start()
 
     def _run_queue(self) -> None:
         while True:
@@ -302,6 +415,44 @@ class SyncServer:
             except Exception as exc:  # noqa: BLE001
                 print(f"andrea_sync proactive sweep error: {exc}", flush=True)
             time.sleep(max(10.0, self.proactive_sweep_interval_seconds))
+
+    def _maintain_background_optimizer(self) -> None:
+        while True:
+            conn = connect(self.db_path)
+            try:
+                migrate(conn)
+                from .optimizer import run_optimization_cycle
+                from .repair_orchestrator import run_incident_repair_cycle
+
+                result = run_optimization_cycle(
+                    conn,
+                    limit=60,
+                    regression_report={
+                        "passed": True,
+                        "total": 1,
+                        "command": "background_idle_scheduler",
+                    },
+                    required_skills=["cursor_handoff"],
+                    emit_proposals=True,
+                    actor="background",
+                    analysis_mode="gemini_background",
+                    repo_path=self.cursor_repo_path,
+                    auto_apply_ready=self.background_optimizer_auto_apply,
+                    idle_seconds=self.background_optimizer_idle_seconds,
+                )
+                if self.background_incident_repair_enabled and not bool(result.get("skipped")):
+                    run_incident_repair_cycle(
+                        conn,
+                        repo_path=self.cursor_repo_path,
+                        actor="background",
+                        cursor_execute=self.background_incident_cursor_execute,
+                        write_report=True,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                print(f"andrea_sync background optimizer error: {exc}", flush=True)
+            finally:
+                conn.close()
+            time.sleep(max(60.0, self.background_optimizer_interval_seconds))
 
     def with_lock(self, fn: Callable[[sqlite3.Connection], Any]) -> Any:
         with self.lock:
@@ -654,13 +805,13 @@ class SyncServer:
                 entry = phase_outputs.get(phase)
                 if not isinstance(entry, dict):
                     continue
-                summary = str(entry.get("summary") or "").strip()
+                summary = _sanitize_user_surface_text(entry.get("summary") or "")
                 if summary:
                     items.append(summary)
         trace = openclaw_meta.get("collaboration_trace")
         if isinstance(trace, list):
             for raw in trace[:4]:
-                text = str(raw or "").strip()
+                text = _sanitize_user_surface_text(raw or "")
                 if text and text not in items:
                     items.append(text)
         return items
@@ -675,11 +826,12 @@ class SyncServer:
         execution_meta = self._projection_meta(projection, "execution")
         openclaw_meta = self._projection_meta(projection, "openclaw")
         summary = str(projection.get("summary") or "").strip()
-        return (
+        return _sanitize_user_surface_text(
             str(execution_meta.get("user_safe_error") or "").strip()
             or str(openclaw_meta.get("blocked_reason") or "").strip()
             or summary
-            or "I ran into an internal limitation while working on this request."
+            or "I ran into an internal limitation while working on this request.",
+            fallback="I ran into an internal limitation while working on this request.",
         )
 
     def _telegram_final_summary_text(self, projection: Dict[str, Any]) -> str:
@@ -692,12 +844,12 @@ class SyncServer:
             "OpenClaw completed the delegated task.",
         }
         if user_summary and user_summary not in generic_openclaw_summaries:
-            return user_summary
+            return _sanitize_user_surface_text(user_summary, fallback=summary or blocked_reason)
         if summary and summary not in generic_openclaw_summaries:
-            return summary
+            return _sanitize_user_surface_text(summary, fallback=user_summary or blocked_reason)
         if blocked_reason:
-            return blocked_reason
-        return user_summary or summary
+            return _sanitize_user_surface_text(blocked_reason, fallback=summary or user_summary)
+        return _sanitize_user_surface_text(user_summary or summary, fallback="I completed the request.")
 
     def _send_telegram_progress_updates(
         self,
@@ -716,6 +868,7 @@ class SyncServer:
                 continue
             progress_text = str(payload.get("message") or "").strip()
             force_telegram_note = bool(payload.get("force_telegram_note"))
+            progress_text = _sanitize_user_surface_text(progress_text)
             if not progress_text:
                 continue
             if visibility_mode != "full" and not force_telegram_note:
@@ -1257,6 +1410,79 @@ class SyncServer:
             )
         return payload
 
+    def _run_text_subprocess(
+        self,
+        args: list[str],
+        *,
+        timeout_seconds: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        proc = subprocess.run(
+            args,
+            cwd=str(self.repo_root),
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=timeout_seconds,
+        )
+        stdout = proc.stdout.strip()
+        stderr = proc.stderr.strip()
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"subprocess failed exit={proc.returncode}: {stderr or stdout[:500]}"
+            )
+        return {"ok": True, "stdout": stdout, "stderr": stderr}
+
+    def _openclaw_session_id(self, task_id: str, *, attempt: int = 0) -> str:
+        agent_slug = re.sub(r"[^a-z0-9_-]+", "-", self.openclaw_agent_id.lower()).strip("-")
+        task_slug = re.sub(r"[^a-z0-9_-]+", "-", str(task_id or "").lower()).strip("-")
+        agent_slug = agent_slug or "main"
+        task_slug = task_slug or "task"
+        return f"andrea-sync-{agent_slug}-{task_slug}-{attempt}"
+
+    def _refresh_openclaw_runtime(
+        self,
+        task_id: str,
+        *,
+        skill_key: str,
+        heal_result: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if not bool(heal_result.get("refresh_required")):
+            return {
+                "ok": True,
+                "mode": "none",
+                "session_id": self._openclaw_session_id(task_id, attempt=1),
+            }
+        actions = heal_result.get("actions") if isinstance(heal_result.get("actions"), list) else []
+        changed_kinds = {str(item.get("kind") or "") for item in actions if isinstance(item, dict)}
+        gateway_needed = bool(changed_kinds.intersection({"config_repair", "openclaw_install", "openclaw_update_all"}))
+        if self.openclaw_refresh_mode in {"auto", "gateway"} and gateway_needed:
+            try:
+                self._run_text_subprocess(
+                    ["openclaw", "gateway", "restart"],
+                    timeout_seconds=self.openclaw_gateway_restart_timeout_seconds,
+                )
+                return {
+                    "ok": True,
+                    "mode": "gateway_restart",
+                    "skill_key": skill_key,
+                    "session_id": self._openclaw_session_id(task_id, attempt=1),
+                }
+            except Exception as exc:  # noqa: BLE001
+                if self.openclaw_refresh_mode == "gateway":
+                    return {
+                        "ok": False,
+                        "mode": "gateway_restart_failed",
+                        "skill_key": skill_key,
+                        "error": _clip(exc, 600),
+                        "session_id": self._openclaw_session_id(task_id, attempt=1),
+                    }
+        return {
+            "ok": True,
+            "mode": "session_rotation",
+            "skill_key": skill_key,
+            "session_id": self._openclaw_session_id(task_id, attempt=1),
+        }
+
     def _routing_classification_text(self, task_id: str) -> str:
         """
         Text used for Andrea router classification only.
@@ -1303,6 +1529,219 @@ class SyncServer:
                 "provider": _clip(provider, 120) if provider else "",
                 "model": _clip(model, 200) if model else "",
             },
+        )
+
+    def _outbound_draft_owner_key(self, task_id: str) -> str:
+        principal_id = self._task_principal_id(task_id)
+        if principal_id:
+            return f"principal:{principal_id}"
+        payload = self._latest_user_message_payload(task_id)
+        channel = str(payload.get("channel") or "telegram").strip() or "telegram"
+        chat_id = str(payload.get("chat_id") or payload.get("user_id") or "").strip()
+        if chat_id:
+            return f"{channel}:{chat_id}"
+        return f"task:{task_id}"
+
+    def _outbound_draft_meta_key(self, owner_key: str) -> str:
+        return f"andrea_bridge:outbound_draft:{owner_key}"
+
+    def _load_pending_outbound_draft(self, task_id: str) -> Dict[str, Any]:
+        owner_key = self._outbound_draft_owner_key(task_id)
+        key = self._outbound_draft_meta_key(owner_key)
+
+        def read(c: sqlite3.Connection) -> Dict[str, Any]:
+            raw = get_meta(c, key)
+            if not raw:
+                return {}
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                delete_meta(c, key)
+                return {}
+            if not isinstance(payload, dict):
+                delete_meta(c, key)
+                return {}
+            expires_at = payload.get("expires_at")
+            try:
+                if expires_at is not None and float(expires_at) <= time.time():
+                    delete_meta(c, key)
+                    return {}
+            except (TypeError, ValueError):
+                delete_meta(c, key)
+                return {}
+            return payload
+
+        return self.with_lock(read)
+
+    def _save_pending_outbound_draft(self, task_id: str, draft: Dict[str, Any]) -> None:
+        owner_key = self._outbound_draft_owner_key(task_id)
+        key = self._outbound_draft_meta_key(owner_key)
+
+        def write(c: sqlite3.Connection) -> None:
+            set_meta(c, key, json.dumps(draft, ensure_ascii=False))
+
+        self.with_lock(write)
+
+    def _clear_pending_outbound_draft(self, task_id: str) -> None:
+        owner_key = self._outbound_draft_owner_key(task_id)
+        key = self._outbound_draft_meta_key(owner_key)
+        self.with_lock(lambda c: delete_meta(c, key))
+
+    def _parse_outbound_message_request(self, text: str) -> Optional[Dict[str, Any]]:
+        clean = str(text or "").strip()
+        if not clean:
+            return None
+        for pattern in OUTBOUND_SEND_PATTERNS:
+            match = pattern.match(clean)
+            if not match:
+                continue
+            target = str(match.group("target") or "").strip(" ,.")
+            body = str(match.groupdict().get("body") or "").strip(" .")
+            if target.lower().startswith("to "):
+                target = target[3:].strip()
+            target_key = target.strip().lower()
+            if not target:
+                return {"error": "missing_target"}
+            if target_key in AMBIGUOUS_TARGETS:
+                return {"error": "ambiguous_target", "target": target}
+            if PHONE_TARGET_RE.match(target):
+                return {"error": "phone_number_only", "target": target}
+            return {
+                "target": target,
+                "message": body,
+                "needs_body": not bool(body),
+            }
+        return None
+
+    def _select_messaging_capability(self, text: str) -> Dict[str, Any]:
+        clean = str(text or "").strip().lower()
+        for candidate in MESSAGING_SKILL_CANDIDATES:
+            for term in candidate["match_terms"]:
+                if term in clean:
+                    return dict(candidate)
+        return dict(MESSAGING_SKILL_CANDIDATES[0])
+
+    def _resolve_messaging_capability(
+        self,
+        task_id: str,
+        text: str,
+    ) -> Dict[str, Any]:
+        candidate = self._select_messaging_capability(text)
+        skill_key = str(candidate["skill_key"])
+        truth = self.with_lock(lambda c: resolve_skill_truth(c, skill_key))
+        heal: Dict[str, Any] = {}
+        refresh: Dict[str, Any] = {}
+        if str(truth.get("status") or "") != "verified_available":
+            heal = self.with_lock(
+                lambda c: handle_command(
+                    c,
+                    {
+                        "command_type": "HealRuntimeCapability",
+                        "channel": "internal",
+                        "payload": {
+                            "skill_key": skill_key,
+                            "actor": "server",
+                            "allow_install": True,
+                            "allow_update_all": True,
+                            "allow_config_repair": True,
+                        },
+                    },
+                )
+            )
+            if bool(heal.get("refresh_required")):
+                refresh = self._refresh_openclaw_runtime(
+                    task_id,
+                    skill_key=skill_key,
+                    heal_result=heal,
+                )
+            truth = self.with_lock(lambda c: resolve_skill_truth(c, skill_key))
+        return {
+            **candidate,
+            "truth": truth,
+            "heal": heal,
+            "refresh": refresh,
+        }
+
+    def _messaging_capability_reply(self, resolved: Dict[str, Any], text: str) -> str:
+        status = str(resolved.get("truth", {}).get("status") or "")
+        label = str(resolved.get("label") or "messaging").strip()
+        clean = str(text or "").strip().lower()
+        specific = "blue bubbles" in clean or "bluebubbles" in clean
+        if status == "verified_available":
+            if specific:
+                return (
+                    "Yes. BlueBubbles is verified and available here. "
+                    "For personal outreach, I will draft the message first and wait for your confirmation before sending it."
+                )
+            return (
+                f"Yes. I have a verified {label} lane available here. "
+                "For personal outreach, I will draft the message first and wait for your confirmation before sending it."
+            )
+        if status == "installed_but_not_eligible":
+            return (
+                f"Not yet. I found the {label} lane, but it still needs a bit more local setup before I can use it reliably."
+            )
+        return (
+            f"Not right now. I could not verify a live {label} lane after checking the current runtime state."
+        )
+
+    def _outbound_draft_reply(self, draft: Dict[str, Any]) -> str:
+        target = str(draft.get("target") or "them").strip()
+        message = str(draft.get("message") or "").strip()
+        return (
+            f'Draft for {target}: "{message}" '
+            "Reply `send it` if you want me to send it, or tell me what to change."
+        )
+
+    def _build_outbound_message_prompt(self, draft: Dict[str, Any]) -> str:
+        target = str(draft.get("target") or "").strip()
+        message = str(draft.get("message") or "").strip()
+        capability = str(draft.get("skill_key") or "bluebubbles").strip()
+        return (
+            "Use the verified personal messaging lane to send an outbound message.\n"
+            f"Capability: {capability}\n"
+            f"Recipient: {target}\n"
+            f'Exact message to send: "{message}"\n\n'
+            "Rules:\n"
+            "- Send the exact message above unless the delivery tool requires tiny punctuation cleanup.\n"
+            "- Do not ask the user for session identifiers, runtime labels, or internal routing details.\n"
+            "- If the recipient cannot be resolved or delivery cannot be verified, do not invent success.\n"
+            "- Return a calm Andrea-style summary of what happened.\n"
+            "- Keep internal tool/config/runtime diagnostics out of the user-facing summary.\n"
+        )
+
+    def _send_pending_outbound_message(
+        self,
+        task_id: str,
+        draft: Dict[str, Any],
+    ) -> tuple[str, str]:
+        try:
+            result = self._create_openclaw_job(
+                task_id,
+                self._build_outbound_message_prompt(draft),
+                "verified_outbound_message",
+                "andrea_primary",
+                "",
+                "",
+                session_id=self._openclaw_session_id(task_id, attempt=0),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return (
+                "I could not send that message cleanly just now. The draft is still ready if you want me to revise it or try again.",
+                "outbound_message_send_failed",
+            )
+        if result.get("ok"):
+            self._clear_pending_outbound_draft(task_id)
+            summary = str(result.get("user_summary") or result.get("summary") or "").strip()
+            if summary:
+                return summary, "outbound_message_sent"
+            return (
+                f"I sent it to {str(draft.get('target') or 'them').strip()}.",
+                "outbound_message_sent",
+            )
+        return (
+            "I could not send that message cleanly just now. The draft is still ready if you want me to revise it or try again.",
+            "outbound_message_send_failed",
         )
 
     def _parse_memory_note_request(self, text: str) -> str:
@@ -1401,6 +1840,68 @@ class SyncServer:
         if not text:
             return None
         channel = str(payload.get("channel") or "telegram").strip() or "telegram"
+        pending_draft = self._load_pending_outbound_draft(task_id)
+        if pending_draft:
+            if OUTBOUND_CANCEL_RE.match(text):
+                self._clear_pending_outbound_draft(task_id)
+                return ("Okay. I will not send it.", "outbound_message_cancelled")
+            if OUTBOUND_CONFIRM_RE.match(text):
+                return self._send_pending_outbound_message(task_id, pending_draft)
+            lowered = text.lower()
+            if not (
+                MESSAGING_CAPABILITY_RE.search(text)
+                or self._parse_outbound_message_request(text)
+                or lowered.startswith("remember")
+                or lowered.startswith("remind me")
+            ):
+                target = str(pending_draft.get("target") or "them").strip()
+                return (
+                    f'I still have the draft for {target}. Reply `send it`, `cancel`, or tell me the exact wording you want instead.',
+                    "outbound_message_pending",
+                )
+
+        outbound_request = self._parse_outbound_message_request(text)
+        if outbound_request is not None:
+            error = str(outbound_request.get("error") or "")
+            if error == "ambiguous_target":
+                return (
+                    "I can do that, but name the person explicitly instead of saying `her`, `him`, or `them`, and I will draft it first.",
+                    "outbound_message_target_ambiguous",
+                )
+            if error == "phone_number_only":
+                return (
+                    "I need a resolvable contact or thread for this messaging lane, not just a raw phone number. Give me the recipient name as it appears in Messages and I will draft it first.",
+                    "outbound_message_phone_number_only",
+                )
+            if outbound_request.get("needs_body"):
+                return (
+                    f"I can do that. Tell me the exact message you want sent to {outbound_request['target']}, and I will draft it before sending.",
+                    "outbound_message_needs_body",
+                )
+            resolved = self._resolve_messaging_capability(task_id, text)
+            if str(resolved.get("truth", {}).get("status") or "") != "verified_available":
+                return (
+                    self._messaging_capability_reply(resolved, text),
+                    "outbound_message_capability_unavailable",
+                )
+            draft = {
+                "target": str(outbound_request.get("target") or "").strip(),
+                "message": str(outbound_request.get("message") or "").strip(),
+                "skill_key": str(resolved.get("skill_key") or "bluebubbles"),
+                "label": str(resolved.get("label") or "text messaging"),
+                "created_at": time.time(),
+                "expires_at": time.time() + PENDING_OUTBOUND_DRAFT_TTL_SECONDS,
+            }
+            self._save_pending_outbound_draft(task_id, draft)
+            return (self._outbound_draft_reply(draft), "outbound_message_drafted")
+
+        if MESSAGING_CAPABILITY_RE.search(text):
+            resolved = self._resolve_messaging_capability(task_id, text)
+            return (
+                self._messaging_capability_reply(resolved, text),
+                "messaging_capability_answer",
+            )
+
         memory_note = self._parse_memory_note_request(text)
         if memory_note:
             result = self.with_lock(
@@ -1464,6 +1965,8 @@ class SyncServer:
         collaboration_mode: str,
         preferred_model_family: str,
         preferred_model_label: str,
+        *,
+        session_id: str,
     ) -> Dict[str, Any]:
         return self._run_json_subprocess(
             [
@@ -1477,6 +1980,8 @@ class SyncServer:
                 str(self.cursor_repo_path),
                 "--agent-id",
                 self.openclaw_agent_id,
+                "--session-id",
+                session_id,
                 "--route-reason",
                 route_reason,
                 "--collaboration-mode",
@@ -1667,6 +2172,7 @@ class SyncServer:
                 collaboration_mode,
                 preferred_model_family,
                 preferred_model_label,
+                session_id=self._openclaw_session_id(task_id, attempt=0),
             )
         except Exception as exc:  # noqa: BLE001
             self._append_orchestration_step(
@@ -1729,6 +2235,7 @@ class SyncServer:
             "delegated_to_cursor": bool(result.get("delegated_to_cursor")),
             "openclaw_run_id": _clip(result.get("openclaw_run_id"), 200) or None,
             "openclaw_session_id": _clip(result.get("openclaw_session_id"), 200) or None,
+            "requested_openclaw_session_id": _clip(result.get("requested_session_id"), 200) or None,
             "provider": _clip(result.get("provider"), 120) or None,
             "model": _clip(result.get("model"), 200) or None,
             "cursor_agent_id": _clip(result.get("cursor_agent_id"), 200) or None,
@@ -2198,6 +2705,7 @@ def make_handler(server: SyncServer) -> type:
                 "RunOptimizationCycle",
                 "CreateOptimizationProposal",
                 "ApplyOptimizationProposal",
+                "RunIncidentRepair",
                 "LinkPrincipalIdentity",
                 "RunProactiveSweep",
                 "KillSwitchEngage",

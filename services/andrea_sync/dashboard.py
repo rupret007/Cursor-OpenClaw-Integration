@@ -57,6 +57,7 @@ def build_dashboard_webhook_snapshot(server: Any) -> Dict[str, Any]:
         "header_secret_configured": bool(server.telegram_header_secret),
         "query_secret_configured": bool(server.telegram_secret),
         "use_query_secret": bool(server.telegram_use_query_secret),
+        "required": bool(server.telegram_bot_token or server.telegram_public_base),
     }
     if not server.telegram_bot_token:
         return {
@@ -64,6 +65,7 @@ def build_dashboard_webhook_snapshot(server: Any) -> Dict[str, Any]:
             "configured": False,
             "status": "unconfigured",
             "reason": "TELEGRAM_BOT_TOKEN missing",
+            "healthy": False,
         }
     if not server.telegram_public_base:
         return {
@@ -71,6 +73,7 @@ def build_dashboard_webhook_snapshot(server: Any) -> Dict[str, Any]:
             "configured": False,
             "status": "missing_public_base",
             "reason": "ANDREA_SYNC_PUBLIC_BASE missing",
+            "healthy": False,
         }
     try:
         info = tg_adapt.get_webhook_info(server.telegram_bot_token)
@@ -80,6 +83,7 @@ def build_dashboard_webhook_snapshot(server: Any) -> Dict[str, Any]:
             "configured": True,
             "status": "error",
             "reason": str(exc),
+            "healthy": False,
         }
     result = info.get("result") if isinstance(info.get("result"), dict) else {}
     current_url = str(result.get("url") or "").strip()
@@ -97,12 +101,66 @@ def build_dashboard_webhook_snapshot(server: Any) -> Dict[str, Any]:
         "configured": True,
         "status": status,
         "reason": reason,
+        "healthy": status == "healthy",
         "current_url": _redact_webhook_url(current_url),
         "pending_update_count": int(result.get("pending_update_count") or 0),
         "last_error_date": result.get("last_error_date"),
         "last_error_message": result.get("last_error_message"),
         "max_connections": result.get("max_connections"),
         "ip_address": result.get("ip_address"),
+    }
+
+
+def _capability_digest_status(conn: Any) -> tuple[float | None, bool, str]:
+    capability_digest = get_capability_digest(conn)
+    present = capability_digest.get("present") is True
+    age = digest_age_seconds(conn)
+    if not present:
+        return age, False, "missing"
+    if age is None:
+        return age, True, "unknown"
+    if age > 900.0:
+        return age, True, "stale"
+    return age, True, "fresh"
+
+
+def build_runtime_truth_snapshot(
+    conn: Any,
+    server: Any,
+    *,
+    webhook_snapshot: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    age, present, digest_status = _capability_digest_status(conn)
+    webhook = dict(webhook_snapshot or {})
+    return {
+        "source": "process",
+        "pid": os.getpid(),
+        "telegram": {
+            "public_base": str(server.telegram_public_base or ""),
+            "bot_token_configured": bool(server.telegram_bot_token),
+            "header_secret_configured": bool(server.telegram_header_secret),
+            "query_secret_configured": bool(server.telegram_secret),
+            "use_query_secret": bool(server.telegram_use_query_secret),
+            "notifier_enabled": bool(getattr(server, "telegram_notifier_enabled", False)),
+            "quiet_lifecycle": bool(getattr(server, "telegram_quiet_lifecycle", False)),
+            "auto_cursor": bool(getattr(server, "telegram_auto_cursor", False)),
+            "delegate_lane": str(getattr(server, "telegram_delegate_lane", "") or ""),
+        },
+        "background_enabled": bool(getattr(server, "background_enabled", False)),
+        "delegated_execution_enabled": bool(
+            getattr(server, "delegated_execution_enabled", False)
+        ),
+        "background_optimizer_enabled": bool(
+            getattr(server, "background_optimizer_enabled", False)
+        ),
+        "background_incident_repair_enabled": bool(
+            getattr(server, "background_incident_repair_enabled", False)
+        ),
+        "openclaw_agent_id": str(getattr(server, "openclaw_agent_id", "") or ""),
+        "capability_digest_present": present,
+        "capability_digest_age_seconds": age,
+        "capability_digest_status": digest_status,
+        "webhook": webhook,
     }
 
 
@@ -332,10 +390,31 @@ def _build_experience_assurance_summary(conn: Any) -> Dict[str, Any]:
             "latest_run": {},
             "recent_runs": [],
             "failing_scenarios": [],
+            "delegated_summary": {},
+            "delegated_regressions": [],
             "score_counts": {},
             "category_counts": [],
             "pass_rate": None,
         }
+    latest_checks = latest.get("checks") if isinstance(latest.get("checks"), list) else []
+    delegated_checks = []
+    delegated_failures = []
+    for row in latest_checks:
+        if not isinstance(row, dict):
+            continue
+        tags = [str(tag or "").strip().lower() for tag in row.get("tags") or []]
+        if "delegated" not in tags:
+            continue
+        delegated_checks.append(row)
+        if not row.get("passed"):
+            delegated_failures.append(row)
+    delegated_average = 0.0
+    if delegated_checks:
+        delegated_average = round(
+            sum(float(row.get("score") or 0.0) for row in delegated_checks)
+            / float(len(delegated_checks)),
+            2,
+        )
     recent_rows: List[Dict[str, Any]] = []
     passing = 0
     for row in recent:
@@ -366,6 +445,13 @@ def _build_experience_assurance_summary(conn: Any) -> Dict[str, Any]:
         },
         "recent_runs": recent_rows,
         "failing_scenarios": list(latest.get("failed_scenarios") or [])[:8],
+        "delegated_summary": {
+            "total": len(delegated_checks),
+            "failed": len(delegated_failures),
+            "passed": max(0, len(delegated_checks) - len(delegated_failures)),
+            "average_score": delegated_average,
+        },
+        "delegated_regressions": delegated_failures[:6],
         "score_counts": latest.get("score_counts") if isinstance(latest.get("score_counts"), dict) else {},
         "category_counts": list(latest.get("category_counts") or [])[:6],
         "pass_rate": round(float(passing) / float(len(recent_rows)), 2) if recent_rows else None,
@@ -397,6 +483,11 @@ def build_dashboard_summary(
         by_channel[ch] = by_channel.get(ch, 0) + 1
 
     capability_digest = get_capability_digest(conn)
+    runtime_snapshot = build_runtime_truth_snapshot(
+        conn,
+        server,
+        webhook_snapshot=webhook_snapshot,
+    )
     digest = capability_digest.get("digest") if isinstance(capability_digest.get("digest"), dict) else {}
     cap_rows = digest.get("rows") if isinstance(digest.get("rows"), list) else []
     digest_valid = capability_digest.get("present") is True and bool(cap_rows)
@@ -456,7 +547,8 @@ def build_dashboard_summary(
             "repair_cursor_mode": str(os.environ.get("ANDREA_REPAIR_CURSOR_MODE") or "auto"),
             "repair_safe_roots": list(configured_safe_repair_roots()),
         },
-        "webhook": webhook_snapshot if isinstance(webhook_snapshot, dict) else {},
+        "runtime": runtime_snapshot,
+        "webhook": runtime_snapshot.get("webhook") if isinstance(runtime_snapshot.get("webhook"), dict) else {},
         "capabilities": {
             "summary": digest.get("summary") if isinstance(digest.get("summary"), dict) else {},
             "blocked_critical": blocked_critical[:10],
@@ -624,12 +716,15 @@ def render_dashboard_html() -> str:
     function renderCards(data) {
       const latestRun = (data.optimization || {}).latest_run || {};
       const latestExperience = (data.experience_assurance || {}).latest_run || {};
+      const runtime = data.runtime || {};
+      const runtimeTelegram = runtime.telegram || {};
       const experienceStatus = !latestExperience.run_id
         ? "warn"
         : (latestExperience.passed ? "healthy" : "failed");
       const cards = [
         { label: "Kill Switch", value: data.service.kill_switch.engaged ? "ENGAGED" : "Released", status: data.service.kill_switch.engaged ? "blocked" : "ready", note: "Server safety state" },
         { label: "Webhook", value: data.webhook.status, status: data.webhook.status, note: data.webhook.reason || "Telegram webhook state" },
+        { label: "Public Base", value: runtimeTelegram.public_base || "unset", status: runtimeTelegram.public_base ? "ready" : "warn", note: `Process-authoritative Telegram base · pid ${runtime.pid || "n/a"}` },
         { label: "Recent Tasks", value: String(data.tasks.count), status: "ready", note: `Limit ${data.tasks.limit}` },
         { label: "Blocked Caps", value: String((data.capabilities.summary || {}).blocked || 0), status: ((data.capabilities.summary || {}).blocked || 0) > 0 ? "blocked" : "ready", note: "Published capability digest" },
         { label: "ACPX", value: data.capabilities.acpx ? data.capabilities.acpx.status : "digest-missing", status: data.capabilities.acpx ? data.capabilities.acpx.status : "blocked", note: data.capabilities.acpx ? data.capabilities.acpx.notes : "No published acpx row is available yet" },
@@ -650,11 +745,19 @@ def render_dashboard_html() -> str:
 
     function renderAttention(data) {
       const items = [];
+      const runtime = data.runtime || {};
+      const runtimeTelegram = runtime.telegram || {};
       items.push({
         title: `Webhook: ${data.webhook.status}`,
         note: data.webhook.reason || "No webhook note",
         extra: data.webhook.current_url ? `Current: ${data.webhook.current_url}` : (data.webhook.expected_url ? `Expected: ${data.webhook.expected_url}` : ""),
         status: data.webhook.status
+      });
+      items.push({
+        title: "Runtime truth",
+        note: `Process pid ${runtime.pid || "n/a"} · public base ${runtimeTelegram.public_base || "unset"}`,
+        extra: `Digest ${runtime.capability_digest_status || "unknown"}${runtime.capability_digest_age_seconds !== undefined && runtime.capability_digest_age_seconds !== null ? ` · age ${Math.round(Number(runtime.capability_digest_age_seconds || 0))}s` : ""}`,
+        status: runtime.capability_digest_status === "stale" ? "warn" : (runtime.capability_digest_status === "missing" ? "blocked" : "ready")
       });
       for (const row of data.capabilities.blocked_critical || []) {
         items.push({
@@ -755,6 +858,8 @@ def render_dashboard_html() -> str:
       const latest = exp.latest_run || {};
       const recentRuns = exp.recent_runs || [];
       const failures = exp.failing_scenarios || [];
+      const delegated = exp.delegated_summary || {};
+      const delegatedFailures = exp.delegated_regressions || [];
       const categories = exp.category_counts || [];
       const scoreCounts = exp.score_counts || {};
 
@@ -773,6 +878,14 @@ def render_dashboard_html() -> str:
           note: `Excellent ${scoreCounts.excellent || 0} · Warn ${scoreCounts.warn || 0} · Failed ${scoreCounts.failed || 0}`,
           extra: "",
           status: (scoreCounts.failed || 0) > 0 ? "failed" : "ready"
+        });
+      }
+      if (delegated.total) {
+        runItems.push({
+          title: "Delegated lane replay",
+          note: `Passed ${delegated.passed || 0}/${delegated.total || 0} delegated scenarios`,
+          extra: `Avg score ${Math.round(Number(delegated.average_score || 0))} · Failed ${delegated.failed || 0}`,
+          status: (delegated.failed || 0) > 0 ? "warn" : "ready"
         });
       }
       for (const row of categories.slice(0, 3)) {
@@ -802,10 +915,11 @@ def render_dashboard_html() -> str:
         </div>
       `).join("") || `<div class="item"><strong>No assurance runs yet</strong><p class="subtle" style="margin-top:8px;">Run the local experience replay to populate deterministic UX checks.</p></div>`;
 
-      document.getElementById("experienceFailures").innerHTML = failures.map((row) => `
+      const failureRows = [...delegatedFailures, ...failures.filter((row) => !delegatedFailures.some((delegatedRow) => delegatedRow.scenario_id === row.scenario_id))];
+      document.getElementById("experienceFailures").innerHTML = failureRows.map((row) => `
         <div class="item">
           <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;">
-            <strong>${escapeHtml(row.title || row.scenario_id || "scenario")}</strong>
+            <strong>${escapeHtml((delegatedFailures.some((delegatedRow) => delegatedRow.scenario_id === row.scenario_id) ? "[delegated] " : "") + (row.title || row.scenario_id || "scenario"))}</strong>
             <span class="pill ${pillClass(Number(row.score || 0) >= 70 ? "warn" : "failed")}">${escapeHtml(String(row.score || 0))}</span>
           </div>
           <p class="subtle" style="margin-top:8px;">${escapeHtml(row.summary || "No failure summary")}</p>

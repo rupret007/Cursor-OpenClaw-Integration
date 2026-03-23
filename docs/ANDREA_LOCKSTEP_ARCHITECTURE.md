@@ -12,7 +12,7 @@ Strict two-way sync between **user channels** (Telegram, Alexa, CLI), **OpenClaw
 | Projector | `services/andrea_sync/projector.py` | Derive task JSON from events |
 | HTTP API | `services/andrea_sync/server.py` | REST ingress for commands, Telegram webhook, Alexa skill |
 | Optimizer | `services/andrea_sync/optimizer.py` + `scripts/andrea_optimize.py` | Detect regressions, emit proposals, and gate local self-heal |
-| Experience assurance | `services/andrea_sync/experience_assurance.py` + `scripts/andrea_experience_cycle.py` | Replay deterministic Andrea scenarios, score UX/routing/capability honesty, persist runs, and optionally bridge failures into repair |
+| Experience assurance | `services/andrea_sync/experience_assurance.py` + `scripts/andrea_experience_cycle.py` | Replay deterministic Andrea scenarios across direct and delegated OpenClaw/Cursor lanes, score UX/routing/capability honesty/calmness, persist runs, and optionally bridge failures into repair |
 | Incident repair | `services/andrea_sync/repair_orchestrator.py` + `scripts/andrea_repair_cycle.py` | Detect concrete failures, triage them, try the smallest safe repair, verify, rollback, and escalate to Cursor when needed |
 | Dashboard | `services/andrea_sync/dashboard.py` | Operator summary for orchestration, memory, reminders, and autonomy health |
 | Policy | `services/andrea_sync/policy.py` | Verify-before-deny using published capability digest + TTL |
@@ -26,7 +26,8 @@ Strict two-way sync between **user channels** (Telegram, Alexa, CLI), **OpenClaw
 | Method | Path | Notes |
 |--------|------|--------|
 | GET | `/v1/health` | Liveness + db path + `kill_switch` summary + capability digest age |
-| GET | `/v1/status` | Extended JSON: kill switch + full capability digest payload |
+| GET | `/v1/status` | Extended JSON: kill switch + full capability digest payload + process-authoritative runtime snapshot |
+| GET | `/v1/runtime-snapshot` | Redacted daemon runtime truth: Telegram public base, webhook health/drift, digest freshness, and execution-lane settings as seen by the running process |
 | GET | `/v1/capabilities` | Cached capability snapshot (from last `PublishCapabilitySnapshot`) |
 | GET | `/v1/dashboard/summary` | Operator JSON summary for service health, optimization, experience assurance, and projected task state |
 | GET | `/v1/policy/skill-absence?skill=...` | Verify-before-deny: may a channel claim this skill is absent? (`max_age_seconds` optional) |
@@ -162,7 +163,7 @@ This keeps the same assistant persona available across text-first Telegram now a
 
 ## Operator full cycle
 
-`bash scripts/andrea_full_cycle.sh` — git pull, `/v1/health` + `/v1/status`, capability publish, policy probe, optional `openclaw gateway restart`, communication smoke, kill-switch drill, optional Telegram `webhook-info`. Requires `ANDREA_SYNC_INTERNAL_TOKEN` and a running `andrea_sync` server at `ANDREA_SYNC_URL`.
+`bash scripts/andrea_full_cycle.sh` — git pull, `/v1/health` + `/v1/status` + `/v1/runtime-snapshot`, capability publish, policy probe, optional `openclaw gateway restart`, communication smoke, kill-switch drill, optional Telegram `webhook-info`. Requires `ANDREA_SYNC_INTERNAL_TOKEN` and a running `andrea_sync` server at `ANDREA_SYNC_URL`.
 
 ## Operations
 

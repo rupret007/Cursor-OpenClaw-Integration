@@ -119,14 +119,38 @@ status_sync_health() {
     || { warn "Andrea sync health reported ok=false"; return 1; }
 }
 
-status_webhook() {
-  if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${ANDREA_SYNC_PUBLIC_BASE:-}" ]]; then
-    say "Telegram webhook check skipped (set TELEGRAM_BOT_TOKEN and ANDREA_SYNC_PUBLIC_BASE to enable)"
-    return 0
+runtime_snapshot_body() {
+  if ! command -v curl >/dev/null 2>&1; then
+    warn "curl not found on PATH"
+    return 1
   fi
-  say "Telegram webhook health"
-  python3 "${BASE_DIR}/scripts/andrea_lockstep_telegram_e2e.py" webhook-info --require-match --attempts 2 --retry-delay-sec 1 \
-    || { warn "Telegram webhook check failed"; return 1; }
+  curl -sS -m 20 "${ANDREA_SYNC_URL}/v1/runtime-snapshot"
+}
+
+status_runtime_truth() {
+  local body
+  if ! body="$(runtime_snapshot_body 2>/dev/null)"; then
+    warn "Andrea sync runtime snapshot unavailable at ${ANDREA_SYNC_URL}"
+    return 1
+  fi
+  say "Andrea sync runtime truth"
+  printf '%s' "${body}" | python3 -c 'import json,sys; d=json.load(sys.stdin); r=d.get("runtime") or {}; t=r.get("telegram") or {}; w=r.get("webhook") or {}; print("pid={} public_base={} delegate_lane={} webhook_status={} digest_status={} capability_digest_age_seconds={}".format(r.get("pid"), t.get("public_base") or "-", t.get("delegate_lane") or "-", w.get("status") or "-", r.get("capability_digest_status") or "-", r.get("capability_digest_age_seconds")))' \
+    || { warn "Andrea sync runtime snapshot response was invalid"; return 1; }
+  printf '%s' "${body}" | python3 -c 'import json,sys; d=json.load(sys.stdin); raise SystemExit(0 if d.get("ok") else 1)' \
+    || { warn "Andrea sync runtime snapshot reported ok=false"; return 1; }
+}
+
+status_webhook() {
+  local body
+  if ! body="$(runtime_snapshot_body 2>/dev/null)"; then
+    warn "Andrea sync runtime snapshot unavailable at ${ANDREA_SYNC_URL}"
+    return 1
+  fi
+  say "Telegram webhook truth from running daemon"
+  printf '%s' "${body}" | python3 -c 'import json,sys; d=json.load(sys.stdin); r=d.get("runtime") or {}; t=r.get("telegram") or {}; w=r.get("webhook") or {}; print("status={} required={} public_base={} reason={}".format(w.get("status") or "-", w.get("required"), t.get("public_base") or "-", w.get("reason") or "")); current=w.get("current_url") or ""; expected=w.get("expected_url") or ""; print("current_url={}".format(current or "-")); print("expected_url={}".format(expected or "-"))' \
+    || { warn "Telegram webhook runtime snapshot response was invalid"; return 1; }
+  printf '%s' "${body}" | python3 -c 'import json,sys; d=json.load(sys.stdin); r=d.get("runtime") or {}; t=r.get("telegram") or {}; w=r.get("webhook") or {}; needs=bool(w.get("required") or t.get("bot_token_configured") or t.get("public_base")); status=str(w.get("status") or ""); ok=bool(d.get("ok")); raise SystemExit(0 if ok and ((not needs and status in {"", "unconfigured"}) or status == "healthy") else 1)' \
+    || { warn "Telegram webhook truth from running daemon is unhealthy"; return 1; }
 }
 
 status_all() {
@@ -276,6 +300,7 @@ case "${command}" in
       sync)
         describe_launchagent "${ANDREA_SYNC_LABEL}" "andrea_sync"
         status_sync_health
+        status_runtime_truth
         ;;
       tunnel)
         describe_launchagent "${ANDREA_CLOUDFLARED_LABEL}" "cloudflared"

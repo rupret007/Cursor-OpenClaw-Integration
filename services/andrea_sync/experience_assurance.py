@@ -33,9 +33,33 @@ from .store import (
     migrate,
     save_experience_run,
 )
+from .telegram_format import format_final_message
 from .user_surface import is_internal_runtime_text, sanitize_user_surface_text
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+DELEGATED_FINAL_LEAK_TERMS = (
+    "lockstep_json",
+    "sessionkey",
+    "session key",
+    "session id",
+    "runtime id",
+    "session label",
+    "sessions_spawn",
+    "sessions_send",
+    "attachments.enabled",
+    "delegated_to_cursor",
+    "cursor_agent_id",
+    "plugins.entries",
+    "channels.",
+)
+DELEGATED_FINAL_LIFECYCLE_TERMS = (
+    "what happens next:",
+    "queued it for cursor",
+    "queued for cursor",
+    "queued for manual start",
+    "actively working on your request now",
+    "moved from queued to running",
+)
 
 
 def _clip(value: Any, limit: int = 1200) -> str:
@@ -235,6 +259,336 @@ def _task_event_types(detail: Dict[str, Any]) -> List[str]:
         if isinstance(row, dict):
             out.append(str(row.get("event_type") or ""))
     return out
+
+
+def _task_event_payloads(detail: Dict[str, Any], event_type: str) -> List[Dict[str, Any]]:
+    rows = detail.get("events") if isinstance(detail.get("events"), list) else []
+    out: List[Dict[str, Any]] = []
+    expected = str(event_type or "")
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("event_type") or "") != expected:
+            continue
+        payload = row.get("payload")
+        if isinstance(payload, dict):
+            out.append(payload)
+    return out
+
+
+def _queue_telegram_task(
+    harness: ExperienceHarness,
+    *,
+    text: str,
+    update_id: int,
+    message_id: int,
+) -> Dict[str, Any]:
+    harness.submit_telegram_update(
+        {
+            "update_id": update_id,
+            "message": {
+                "text": text,
+                "message_id": message_id,
+                "chat": {"id": update_id + 100},
+                "from": {"id": update_id + 200},
+            },
+        }
+    )
+    return harness.wait_for_telegram_task(
+        message_id=message_id,
+        statuses=(TaskStatus.QUEUED.value, TaskStatus.RUNNING.value),
+    )
+
+
+def _render_telegram_final_message(
+    harness: ExperienceHarness,
+    detail: Dict[str, Any],
+) -> str:
+    task = detail.get("task") if isinstance(detail.get("task"), dict) else {}
+    meta = task.get("meta") if isinstance(task.get("meta"), dict) else {}
+    cursor = meta.get("cursor") if isinstance(meta.get("cursor"), dict) else {}
+    execution = meta.get("execution") if isinstance(meta.get("execution"), dict) else {}
+    openclaw = meta.get("openclaw") if isinstance(meta.get("openclaw"), dict) else {}
+    server = harness.server
+    assert server is not None
+    task_id = str(task.get("task_id") or "")
+    status = str(task.get("status") or "")
+    return format_final_message(
+        task_id,
+        status=status,
+        summary=server._telegram_final_summary_text(task),
+        pr_url=str(cursor.get("pr_url") or ""),
+        agent_url=str(cursor.get("agent_url") or ""),
+        last_error=server._telegram_user_safe_error_text(task) if status == "failed" else "",
+        worker_label=server._telegram_worker_label(task),
+        delegated_to_cursor=bool(execution.get("delegated_to_cursor")),
+        backend=str(execution.get("backend") or ""),
+        openclaw_session_id=str(openclaw.get("session_id") or ""),
+        visibility_mode=server._task_visibility_mode(task_id),
+        collaboration_trace=server._telegram_collaboration_trace(task),
+        provider=str(openclaw.get("provider") or ""),
+        model=str(openclaw.get("model") or ""),
+        preferred_model_label=str(execution.get("preferred_model_label") or ""),
+    )
+
+
+def _delegated_calmness_observations(
+    final_text: str,
+    *,
+    expect_cursor: bool,
+    expect_trace: bool,
+) -> List[ExperienceObservation]:
+    lowered = str(final_text or "").lower()
+    observations = [
+        _obs(
+            "rendered delegated final copy is non-empty",
+            expected="non-empty telegram final message",
+            observed=final_text,
+            passed=bool(str(final_text or "").strip()),
+            issue_code="delegated_calmness_regression",
+        ),
+        _obs(
+            "rendered delegated final copy stays free of runtime jargon",
+            expected="no internal runtime text",
+            observed=final_text,
+            passed=bool(final_text) and not is_internal_runtime_text(final_text),
+            issue_code="runtime_jargon_leaked",
+        ),
+        _obs(
+            "rendered delegated final copy avoids raw runtime markers",
+            expected="no raw runtime or tool-routing markers",
+            observed=final_text,
+            passed=all(term not in lowered for term in DELEGATED_FINAL_LEAK_TERMS),
+            issue_code="runtime_jargon_leaked",
+        ),
+        _obs(
+            "rendered delegated final copy avoids queue and running boilerplate",
+            expected="no queued/running lifecycle boilerplate in final copy",
+            observed=final_text,
+            passed=all(term not in lowered for term in DELEGATED_FINAL_LIFECYCLE_TERMS),
+            issue_code="delegated_calmness_regression",
+        ),
+    ]
+    if expect_cursor:
+        observations.append(
+            _obs(
+                "rendered delegated final copy acknowledges cursor execution",
+                expected="mentions Cursor or the PR outcome",
+                observed=final_text,
+                passed=(
+                    "cursor" in lowered
+                    or "pr is available" in lowered
+                    or "pr ready" in lowered
+                    or "pr:" in lowered
+                ),
+                issue_code="delegated_lane_copy_regression",
+            )
+        )
+    else:
+        observations.append(
+            _obs(
+                "rendered delegated final copy stays OpenClaw-only when Cursor was not needed",
+                expected="omits Cursor handoff language and Cursor links",
+                observed=final_text,
+                passed="cursor" not in lowered and "pr:" not in lowered and "agent:" not in lowered,
+                issue_code="unnecessary_cursor_escalation",
+            )
+        )
+    if expect_trace:
+        observations.append(
+            _obs(
+                "rendered delegated final copy exposes the curated collaboration trace",
+                expected="Collaboration trace block is present",
+                observed=final_text,
+                passed="collaboration trace:" in lowered,
+                issue_code="delegated_visibility_regression",
+            )
+        )
+    else:
+        observations.append(
+            _obs(
+                "summary-mode delegated final copy stays concise",
+                expected="Collaboration trace block omitted in summary mode",
+                observed=final_text,
+                passed="collaboration trace:" not in lowered,
+                issue_code="delegated_calmness_regression",
+            )
+        )
+    return observations
+
+
+def _run_stubbed_delegated_scenario(
+    harness: ExperienceHarness,
+    scenario: ExperienceScenario,
+    *,
+    text: str,
+    update_id: int,
+    message_id: int,
+    openclaw_result: Dict[str, Any],
+    expect_cursor: bool,
+    expect_trace: bool,
+    expected_collaboration_mode: str,
+    expected_visibility_mode: str,
+    expected_progress_events: int,
+    max_orchestration_steps: int,
+    expected_phase_counts: Dict[str, int],
+) -> ExperienceCheckResult:
+    started = time.time()
+    initial_detail = _queue_telegram_task(
+        harness,
+        text=text,
+        update_id=update_id,
+        message_id=message_id,
+    )
+    task_id = str(initial_detail.get("task", {}).get("task_id") or "")
+    assert task_id
+    server = harness.server
+    assert server is not None
+    with mock.patch.object(server, "_create_openclaw_job", return_value=openclaw_result):
+        server._run_delegated_job(task_id)
+    detail = harness.load_task_detail(task_id)
+    task = detail.get("task") if isinstance(detail.get("task"), dict) else {}
+    meta = task.get("meta") if isinstance(task.get("meta"), dict) else {}
+    execution = meta.get("execution") if isinstance(meta.get("execution"), dict) else {}
+    cursor = meta.get("cursor") if isinstance(meta.get("cursor"), dict) else {}
+    outcome = meta.get("outcome") if isinstance(meta.get("outcome"), dict) else {}
+    rendered_final = _render_telegram_final_message(harness, detail)
+    progress_events = _task_event_payloads(detail, EventType.JOB_PROGRESS.value)
+    observations = [
+        _obs(
+            "delegated task completes successfully",
+            expected=TaskStatus.COMPLETED.value,
+            observed=task.get("status"),
+            passed=str(task.get("status") or "") == TaskStatus.COMPLETED.value,
+            issue_code="delegated_lane_copy_regression",
+            severity="high",
+        ),
+        _obs(
+            "task first entered the delegated queue",
+            expected="queued or running before completion",
+            observed=initial_detail.get("task", {}).get("status"),
+            passed=str(initial_detail.get("task", {}).get("status") or "") in {
+                TaskStatus.QUEUED.value,
+                TaskStatus.RUNNING.value,
+            },
+            issue_code="delegation_regression",
+        ),
+        _obs(
+            "execution lane stays on the OpenClaw hybrid path",
+            expected="openclaw_hybrid",
+            observed=outcome.get("execution_lane") or execution.get("execution_lane"),
+            passed=str(outcome.get("execution_lane") or execution.get("execution_lane") or "") == "openclaw_hybrid",
+            issue_code="delegation_regression",
+        ),
+        _obs(
+            "execution collaboration mode matches the delegated request",
+            expected=expected_collaboration_mode,
+            observed=execution.get("collaboration_mode"),
+            passed=str(execution.get("collaboration_mode") or "") == expected_collaboration_mode,
+            issue_code="delegation_regression",
+        ),
+        _obs(
+            "execution visibility mode matches the delegated request",
+            expected=expected_visibility_mode,
+            observed=execution.get("visibility_mode"),
+            passed=str(execution.get("visibility_mode") or "") == expected_visibility_mode,
+            issue_code="delegated_visibility_regression",
+        ),
+        _obs(
+            "delegated progress events stay bounded",
+            expected=f"{expected_progress_events} job progress event(s)",
+            observed=len(progress_events),
+            passed=len(progress_events) == expected_progress_events,
+            issue_code="delegated_calmness_regression",
+        ),
+        _obs(
+            "orchestration step count stays bounded for the scenario",
+            expected=f"<= {max_orchestration_steps}",
+            observed=outcome.get("orchestration_step_count"),
+            passed=int(outcome.get("orchestration_step_count") or 0) <= max_orchestration_steps,
+            issue_code="delegated_calmness_regression",
+        ),
+    ]
+    for phase, count in expected_phase_counts.items():
+        phase_key = {
+            "plan": "planner_steps",
+            "critique": "critic_steps",
+            "execution": "executor_steps",
+            "synthesis": "synthesis_steps",
+        }.get(phase, "")
+        observations.append(
+            _obs(
+                "delegated orchestration records the expected completed phase count",
+                expected=f"{phase_key} == {count}",
+                observed=outcome.get(phase_key),
+                passed=int(outcome.get(phase_key) or 0) == int(count),
+                issue_code="delegation_regression",
+            )
+        )
+    if expect_cursor:
+        observations.extend(
+            [
+                _obs(
+                    "Cursor metadata is present after delegated execution",
+                    expected="cursor agent metadata present",
+                    observed={
+                        "agent_url": cursor.get("agent_url"),
+                        "pr_url": cursor.get("pr_url"),
+                    },
+                    passed=bool(cursor.get("agent_url") or cursor.get("pr_url")),
+                    issue_code="cursor_primary_regression",
+                ),
+                _obs(
+                    "projection records delegated_to_cursor",
+                    expected=True,
+                    observed=execution.get("delegated_to_cursor"),
+                    passed=bool(execution.get("delegated_to_cursor")) is True,
+                    issue_code="cursor_primary_regression",
+                ),
+            ]
+        )
+    else:
+        observations.extend(
+            [
+                _obs(
+                    "Cursor metadata stays absent when OpenClaw finishes alone",
+                    expected="no Cursor agent metadata",
+                    observed=cursor,
+                    passed=not bool(
+                        cursor.get("agent_url")
+                        or cursor.get("pr_url")
+                        or cursor.get("cursor_agent_id")
+                    ),
+                    issue_code="unnecessary_cursor_escalation",
+                ),
+                _obs(
+                    "projection records delegated_to_cursor as false",
+                    expected=False,
+                    observed=execution.get("delegated_to_cursor"),
+                    passed=bool(execution.get("delegated_to_cursor")) is False,
+                    issue_code="unnecessary_cursor_escalation",
+                ),
+            ]
+        )
+    observations.extend(
+        _delegated_calmness_observations(
+            rendered_final,
+            expect_cursor=expect_cursor,
+            expect_trace=expect_trace,
+        )
+    )
+    return ExperienceCheckResult.from_observations(
+        scenario,
+        observations,
+        output_excerpt=rendered_final,
+        metadata={
+            "task_id": task_id,
+            "progress_events": len(progress_events),
+            "event_types": _task_event_types(detail),
+        },
+        started_at=started,
+        completed_at=time.time(),
+    )
 
 
 def _run_direct_meta_scenario(
@@ -438,6 +792,199 @@ def _scenario_cursor_primary(harness: ExperienceHarness, scenario: ExperienceSce
         metadata={"task_id": detail.get("task", {}).get("task_id")},
         started_at=started,
         completed_at=time.time(),
+    )
+
+
+def _scenario_cursor_primary_calm_completion(
+    harness: ExperienceHarness,
+    scenario: ExperienceScenario,
+) -> ExperienceCheckResult:
+    return _run_stubbed_delegated_scenario(
+        harness,
+        scenario,
+        text="@Cursor fix the failing tests in the repo and open a PR.",
+        update_id=511,
+        message_id=911,
+        openclaw_result={
+            "ok": True,
+            "summary": "I fixed the failing tests and prepared a PR for review.",
+            "user_summary": "I fixed the failing tests and prepared a PR for review.",
+            "backend": "openclaw",
+            "execution_lane": "openclaw_hybrid",
+            "delegated_to_cursor": True,
+            "openclaw_run_id": "run-exp-cursor",
+            "openclaw_session_id": "sess-exp-cursor",
+            "provider": "google",
+            "model": "gemini-2.5-flash",
+            "cursor_agent_id": "bc-exp-cursor",
+            "agent_url": "https://cursor.com/agents/exp-cursor",
+            "pr_url": "https://github.com/example/repo/pull/77",
+            "collaboration_trace": [
+                "OpenClaw isolated the failure and framed the smallest safe fix.",
+                "Cursor applied the repo change and reran the focused tests.",
+            ],
+            "phase_outputs": {
+                "plan": {
+                    "lane": "openclaw",
+                    "status": "completed",
+                    "summary": "OpenClaw isolated the failing test and picked the smallest repair scope.",
+                },
+                "critique": {
+                    "lane": "openclaw",
+                    "status": "completed",
+                    "summary": "OpenClaw ran one critique pass before execution.",
+                },
+                "execution": {
+                    "lane": "cursor",
+                    "status": "completed",
+                    "summary": "Cursor applied the patch and reran the focused tests.",
+                },
+                "synthesis": {
+                    "lane": "openclaw",
+                    "status": "completed",
+                    "summary": "I fixed the failing tests and prepared a PR for review.",
+                },
+            },
+        },
+        expect_cursor=True,
+        expect_trace=False,
+        expected_collaboration_mode="cursor_primary",
+        expected_visibility_mode="summary",
+        expected_progress_events=0,
+        max_orchestration_steps=5,
+        expected_phase_counts={"plan": 1, "critique": 1, "execution": 1, "synthesis": 1},
+    )
+
+
+def _scenario_collaborative_full_visibility(
+    harness: ExperienceHarness,
+    scenario: ExperienceScenario,
+) -> ExperienceCheckResult:
+    started = time.time()
+    result = _run_stubbed_delegated_scenario(
+        harness,
+        scenario,
+        text="@Andrea @Cursor work together on the repo fix and show the full dialogue.",
+        update_id=512,
+        message_id=912,
+        openclaw_result={
+            "ok": True,
+            "summary": "I finished the repo fix, kept the collaboration trace tidy, and prepared the result for review.",
+            "user_summary": "I finished the repo fix, kept the collaboration trace tidy, and prepared the result for review.",
+            "backend": "openclaw",
+            "execution_lane": "openclaw_hybrid",
+            "delegated_to_cursor": True,
+            "openclaw_run_id": "run-exp-collab",
+            "openclaw_session_id": "sess-exp-collab",
+            "provider": "google",
+            "model": "gemini-2.5-flash",
+            "cursor_agent_id": "bc-exp-collab",
+            "agent_url": "https://cursor.com/agents/exp-collab",
+            "collaboration_trace": [
+                "OpenClaw framed the repair plan and narrowed the scope.",
+                "OpenClaw ran one critique pass before execution.",
+                "Cursor handled the repo-heavy execution and validation.",
+            ],
+            "machine_collaboration_trace": [
+                {
+                    "phase": "plan",
+                    "lane": "openclaw",
+                    "provider": "google",
+                    "model": "gemini-2.5-flash",
+                    "summary": "OpenClaw framed the repair plan and narrowed the scope.",
+                },
+                {
+                    "phase": "execution",
+                    "lane": "cursor",
+                    "provider": "openai",
+                    "model": "gpt-5.4",
+                    "summary": "Cursor handled the repo-heavy execution and validation.",
+                },
+            ],
+            "phase_outputs": {
+                "plan": {
+                    "lane": "openclaw",
+                    "status": "completed",
+                    "summary": "OpenClaw framed the repair plan and narrowed the scope.",
+                },
+                "critique": {
+                    "lane": "openclaw",
+                    "status": "completed",
+                    "summary": "OpenClaw ran one critique pass before execution.",
+                },
+                "execution": {
+                    "lane": "cursor",
+                    "status": "completed",
+                    "summary": "Cursor handled the repo-heavy execution and validation.",
+                },
+                "synthesis": {
+                    "lane": "openclaw",
+                    "status": "completed",
+                    "summary": "I finished the repo fix, kept the collaboration trace tidy, and prepared the result for review.",
+                },
+            },
+        },
+        expect_cursor=True,
+        expect_trace=True,
+        expected_collaboration_mode="collaborative",
+        expected_visibility_mode="full",
+        expected_progress_events=2,
+        max_orchestration_steps=5,
+        expected_phase_counts={"plan": 1, "critique": 1, "execution": 1, "synthesis": 1},
+    )
+    result.metadata["started_at"] = started
+    return result
+
+
+def _scenario_openclaw_repo_triage_stays_bounded(
+    harness: ExperienceHarness,
+    scenario: ExperienceScenario,
+) -> ExperienceCheckResult:
+    return _run_stubbed_delegated_scenario(
+        harness,
+        scenario,
+        text="Please inspect the repo and summarize the likely failing tests.",
+        update_id=513,
+        message_id=913,
+        openclaw_result={
+            "ok": True,
+            "summary": "I reviewed the repo and the likely failures are in the Telegram routing tests.",
+            "user_summary": "I reviewed the repo and the likely failures are in the Telegram routing tests.",
+            "backend": "openclaw",
+            "execution_lane": "openclaw_hybrid",
+            "delegated_to_cursor": False,
+            "openclaw_run_id": "run-exp-triage",
+            "openclaw_session_id": "sess-exp-triage",
+            "provider": "google",
+            "model": "gemini-2.5-flash",
+            "collaboration_trace": [
+                "OpenClaw scanned the repo and isolated the likely failing area.",
+            ],
+            "phase_outputs": {
+                "plan": {
+                    "lane": "openclaw",
+                    "status": "completed",
+                    "summary": "OpenClaw isolated the likely failing area in the Telegram routing tests.",
+                },
+                "execution": {
+                    "lane": "openclaw",
+                    "status": "completed",
+                    "summary": "OpenClaw inspected the relevant files without escalating to Cursor.",
+                },
+                "synthesis": {
+                    "lane": "openclaw",
+                    "status": "completed",
+                    "summary": "I reviewed the repo and the likely failures are in the Telegram routing tests.",
+                },
+            },
+        },
+        expect_cursor=False,
+        expect_trace=False,
+        expected_collaboration_mode="auto",
+        expected_visibility_mode="summary",
+        expected_progress_events=0,
+        max_orchestration_steps=4,
+        expected_phase_counts={"plan": 1, "critique": 0, "execution": 1, "synthesis": 1},
     )
 
 
@@ -731,13 +1278,52 @@ def default_experience_scenarios() -> List[ExperienceScenario]:
             title="@Cursor heavy-lift request becomes cursor_primary",
             description="Explicit heavy repo asks should queue into Cursor-primary collaboration instead of direct answer mode.",
             category="delegation",
-            tags=["telegram", "cursor", "delegation"],
+            tags=["telegram", "cursor", "delegation", "delegated"],
             suspected_files=[
                 "services/andrea_sync/andrea_router.py",
                 "services/andrea_sync/server.py",
                 "services/andrea_sync/telegram_format.py",
             ],
             runner=_scenario_cursor_primary,
+        ),
+        ExperienceScenario(
+            scenario_id="cursor_primary_calm_completion",
+            title="Cursor-primary completion stays calm and specific",
+            description="Explicit Cursor heavy-lift requests should finish with calm final copy, bounded orchestration, and no runtime leakage.",
+            category="delegation",
+            tags=["telegram", "cursor", "delegation", "delegated", "calmness"],
+            suspected_files=[
+                "services/andrea_sync/server.py",
+                "services/andrea_sync/telegram_format.py",
+                "scripts/andrea_sync_openclaw_hybrid.py",
+            ],
+            runner=_scenario_cursor_primary_calm_completion,
+        ),
+        ExperienceScenario(
+            scenario_id="collaborative_full_visibility_curated",
+            title="Collaborative full-dialogue replay stays curated",
+            description="Full-visibility OpenClaw and Cursor collaboration should expose a meaningful trace without runtime junk or excess chatter.",
+            category="calmness",
+            tags=["telegram", "collaboration", "delegated", "visibility", "calmness"],
+            suspected_files=[
+                "services/andrea_sync/server.py",
+                "services/andrea_sync/telegram_format.py",
+                "scripts/andrea_sync_openclaw_hybrid.py",
+            ],
+            runner=_scenario_collaborative_full_visibility,
+        ),
+        ExperienceScenario(
+            scenario_id="openclaw_repo_triage_stays_bounded",
+            title="OpenClaw repo triage avoids unnecessary Cursor escalation",
+            description="Delegated repo triage should stay inside OpenClaw when Cursor is not actually needed, and the orchestration should remain bounded.",
+            category="delegation",
+            tags=["telegram", "delegation", "delegated", "openclaw"],
+            suspected_files=[
+                "services/andrea_sync/server.py",
+                "services/andrea_sync/telegram_format.py",
+                "scripts/andrea_sync_openclaw_hybrid.py",
+            ],
+            runner=_scenario_openclaw_repo_triage_stays_bounded,
         ),
         ExperienceScenario(
             scenario_id="bluebubbles_truth_ready",

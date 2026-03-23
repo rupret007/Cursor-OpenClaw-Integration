@@ -23,6 +23,7 @@ from .andrea_router import AndreaRouteDecision, route_message
 from .bus import handle_command
 from .dashboard import (
     build_dashboard_summary,
+    build_runtime_truth_snapshot,
     build_dashboard_webhook_snapshot,
     render_dashboard_html,
 )
@@ -2817,10 +2818,31 @@ def make_handler(server: SyncServer) -> type:
 
                 self._send(200, server.with_lock(health_body))
                 return
+            if path == "/v1/runtime-snapshot":
+                if not self._allow_sensitive_get():
+                    self._send(401, b'{"error":"unauthorized"}')
+                    return
+                webhook_snapshot = build_dashboard_webhook_snapshot(server)
+
+                def runtime_body(c: sqlite3.Connection) -> bytes:
+                    payload = {
+                        "ok": True,
+                        "service": "andrea_sync",
+                        "runtime": build_runtime_truth_snapshot(
+                            c,
+                            server,
+                            webhook_snapshot=webhook_snapshot,
+                        ),
+                    }
+                    return json.dumps(payload, indent=2).encode("utf-8")
+
+                self._send(200, server.with_lock(runtime_body))
+                return
             if path == "/v1/status":
                 if not self._allow_sensitive_get():
                     self._send(401, b'{"error":"unauthorized"}')
                     return
+                webhook_snapshot = build_dashboard_webhook_snapshot(server)
                 def status_body(c: sqlite3.Connection) -> bytes:
                     cap = get_capability_digest(c)
                     ks = kill_switch_status(c)
@@ -2831,6 +2853,11 @@ def make_handler(server: SyncServer) -> type:
                             "db": str(server.db_path),
                             "kill_switch": ks,
                             "capabilities": cap,
+                            "runtime": build_runtime_truth_snapshot(
+                                c,
+                                server,
+                                webhook_snapshot=webhook_snapshot,
+                            ),
                         },
                         indent=2,
                     ).encode("utf-8")

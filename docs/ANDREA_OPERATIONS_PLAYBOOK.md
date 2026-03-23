@@ -114,11 +114,11 @@ bash scripts/andrea_slo_check.sh
 | Unit + integration | `bash scripts/test_integration.sh` |
 | Live comm smoke (optional) | `RUN_COMM_SMOKE=1 ANDREA_SYNC_URL=http://127.0.0.1:8765 bash scripts/test_integration.sh` or `bash scripts/andrea_communication_smoke.sh` |
 | Local monitor dashboard | Open `http://127.0.0.1:8765/dashboard` for live health, webhook, recent tasks, experience assurance, and task timelines |
-| Admin service control | `bash scripts/andrea_services.sh status all` for the current runtime, `bash scripts/andrea_services.sh restart all` to bounce sync+tunnel+gateway, `bash scripts/andrea_services.sh bootstrap` to rerun the login heal chain on demand |
-| Full operator cycle (local) | From repo: `export ANDREA_SYNC_INTERNAL_TOKEN=…` then `bash scripts/andrea_full_cycle.sh` (pull, health, publish digest, policy, gateway restart, smoke, kill-switch drill). Skips: `SKIP_GIT=1`, `SKIP_GATEWAY_RESTART=1`, `SKIP_COMM_SMOKE=1`, `SKIP_KILL_DRILL=1`, `SKIP_TELEGRAM_E2E=1`. |
+| Admin service control | `bash scripts/andrea_services.sh status all` for the current runtime, `bash scripts/andrea_services.sh status sync` for the daemon's process-authoritative runtime/webhook truth, `bash scripts/andrea_services.sh restart all` to bounce sync+tunnel+gateway, and `bash scripts/andrea_services.sh bootstrap` to rerun the login heal chain on demand |
+| Full operator cycle (local) | From repo: `export ANDREA_SYNC_INTERNAL_TOKEN=…` then `bash scripts/andrea_full_cycle.sh` (pull, health, status, runtime snapshot, publish digest, policy, gateway restart, smoke, kill-switch drill). Skips: `SKIP_GIT=1`, `SKIP_GATEWAY_RESTART=1`, `SKIP_COMM_SMOKE=1`, `SKIP_KILL_DRILL=1`, `SKIP_TELEGRAM_E2E=1`. |
 | Masterclass doctor | `bash scripts/andrea_doctor.sh` |
 | Closed-loop autonomy pass | `export ANDREA_SYNC_URL=… ANDREA_SYNC_INTERNAL_TOKEN=… && bash scripts/andrea_autonomy_cycle.sh` |
-| Experience assurance replay | `python3 scripts/andrea_experience_cycle.py --repo "$PWD"` for deterministic Andrea UX/routing replay; add `--repair-on-fail` to feed failing scenarios into the existing repair loop |
+| Experience assurance replay | `python3 scripts/andrea_experience_cycle.py --repo "$PWD"` for deterministic Andrea UX/routing replay across both direct and delegated OpenClaw/Cursor lanes; add `--repair-on-fail` to feed failing scenarios into the existing repair loop |
 | Security sanity (repo) | `bash scripts/andrea_security_sanity.sh` |
 | Readiness grade (A/B/C) | `python3 scripts/andrea_readiness_grade.py` |
 | SLO check (grade + probe) | `bash scripts/andrea_slo_check.sh` |

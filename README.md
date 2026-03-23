@@ -173,11 +173,14 @@ Use the canonical runtime control surface for everyday operator tasks:
 
 ```bash
 bash scripts/andrea_services.sh status all
+bash scripts/andrea_services.sh status sync
 bash scripts/andrea_services.sh start all
 bash scripts/andrea_services.sh restart all
 bash scripts/andrea_services.sh stop all
 bash scripts/andrea_services.sh bootstrap
 ```
+
+`status sync` and `status webhook` now read the running daemon's own `/v1/runtime-snapshot` view of `ANDREA_SYNC_PUBLIC_BASE`, Telegram webhook health/drift, and capability-digest freshness instead of trusting the current shell environment.
 
 For reboot-ready auto-start after login, install the LaunchAgents through the same surface:
 
@@ -350,7 +353,7 @@ python3 scripts/andrea_experience_cycle.py --repo "$PWD"
 # python3 scripts/andrea_experience_cycle.py --repo "$PWD" --no-save
 ```
 
-The dashboard now includes an `Experience` card plus `Experience Assurance` / `Experience Regressions` sections backed by the latest persisted replay run.
+The replay now covers both the direct lane and delegated OpenClaw/Cursor Telegram flows, including calm final-copy scoring, bounded orchestration checks, and unnecessary-Cursor-escalation regressions. The dashboard includes an `Experience` card plus `Experience Assurance` / `Experience Regressions` sections backed by the latest persisted replay run.
 
 **Direct incident-driven repair cycle** (verification, minimal patch attempts, optional Cursor escalation):
 

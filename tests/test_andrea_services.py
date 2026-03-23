@@ -11,6 +11,7 @@ SERVICES = REPO_ROOT / "scripts" / "andrea_services.sh"
 LAUNCH_LIB = REPO_ROOT / "scripts" / "macos" / "andrea_launchagent_lib.sh"
 GATEWAY_REFRESH = REPO_ROOT / "scripts" / "macos" / "andrea_openclaw_gateway_refresh.sh"
 KILL_SWITCH = REPO_ROOT / "scripts" / "andrea_kill_switch.sh"
+FULL_CYCLE = REPO_ROOT / "scripts" / "andrea_full_cycle.sh"
 INSTALLER = REPO_ROOT / "scripts" / "macos" / "install_andrea_launchagents.sh"
 REFRESH_PLIST = REPO_ROOT / "scripts" / "macos" / "com.andrea.openclaw-gateway-refresh.plist.template"
 
@@ -45,6 +46,8 @@ class TestAndreaServicesScript(unittest.TestCase):
         self.assertIn("andrea_post_login_bootstrap.sh", text)
         self.assertIn("status_webhook", text)
         self.assertIn("openclaw gateway", text)
+        self.assertIn("/v1/runtime-snapshot", text)
+        self.assertIn("Telegram webhook truth from running daemon", text)
 
 
 class TestAndreaLaunchagentLibrary(unittest.TestCase):
@@ -90,6 +93,12 @@ class TestAndreaGatewayRefreshIntegration(unittest.TestCase):
         self.assertIn("--with-openclaw-refresh", installer)
         self.assertIn("legacy helper", installer)
         self.assertIn("andrea_default_stop_labels_csv", kill_switch)
+
+    def test_full_cycle_prefers_runtime_snapshot_checks(self) -> None:
+        text = FULL_CYCLE.read_text(encoding="utf-8")
+        self.assertIn("/v1/runtime-snapshot", text)
+        self.assertIn("status sync", text)
+        self.assertIn("process-authoritative runtime truth check failed", text)
 
 
 if __name__ == "__main__":

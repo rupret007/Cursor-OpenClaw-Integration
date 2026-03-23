@@ -97,6 +97,36 @@ class TestAndreaSyncHTTP(unittest.TestCase):
         self.assertTrue(data.get("ok"))
         self.assertIn("kill_switch", data)
         self.assertIn("capabilities", data)
+        self.assertIn("runtime", data)
+
+    def test_runtime_snapshot_reports_process_authoritative_truth(self) -> None:
+        prev_public = self._srv.telegram_public_base
+        prev_token = self._srv.telegram_bot_token
+        prev_use_query = self._srv.telegram_use_query_secret
+        self._srv.telegram_public_base = "https://runtime.example.test"
+        self._srv.telegram_bot_token = "bot-token"
+        self._srv.telegram_use_query_secret = True
+        try:
+            expected_url = self._srv._expected_webhook_url()
+            with mock.patch.object(
+                tg_adapt,
+                "get_webhook_info",
+                return_value={"result": {"url": expected_url, "pending_update_count": 0}},
+            ):
+                req = urllib.request.Request(self._url("/v1/runtime-snapshot"), method="GET")
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    self.assertEqual(resp.status, 200)
+                    data = json.loads(resp.read().decode("utf-8"))
+        finally:
+            self._srv.telegram_public_base = prev_public
+            self._srv.telegram_bot_token = prev_token
+            self._srv.telegram_use_query_secret = prev_use_query
+        runtime = data["runtime"]
+        self.assertEqual(runtime["source"], "process")
+        self.assertEqual(runtime["telegram"]["public_base"], "https://runtime.example.test")
+        self.assertEqual(runtime["webhook"]["status"], "healthy")
+        self.assertTrue(runtime["webhook"]["required"])
+        self.assertIn("capability_digest_status", runtime)
 
     def test_skill_absence_policy_alias_matches_bluebubbles(self) -> None:
         publish_body = json.dumps(
@@ -276,7 +306,16 @@ class TestAndreaSyncHTTP(unittest.TestCase):
             data = json.loads(resp.read().decode("utf-8"))
         latest = data["experience_assurance"]["latest_run"]
         self.assertEqual(latest["run_id"], result["run"]["run_id"])
-        self.assertGreaterEqual(latest["total_checks"], 6)
+        self.assertGreaterEqual(latest["total_checks"], 11)
+        self.assertIn("runtime", data)
+        self.assertGreaterEqual(
+            data["experience_assurance"]["delegated_summary"]["total"],
+            3,
+        )
+        self.assertEqual(
+            data["experience_assurance"]["delegated_summary"]["failed"],
+            0,
+        )
 
     def test_run_incident_repair_internal_command_requires_auth_and_executes(self) -> None:
         body = json.dumps(

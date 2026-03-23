@@ -66,6 +66,10 @@ say "GET /v1/status (validate JSON)"
 st_out="$(curl -sS -m 20 "${ANDREA_SYNC_URL}/v1/status")" || die "curl status failed"
 echo "$st_out" | python3 -c "import json,sys; d=json.load(sys.stdin); assert d.get('ok') is True, d" || die "/v1/status not ok"
 
+say "GET /v1/runtime-snapshot (validate JSON)"
+rt_out="$(curl -sS -m 20 "${ANDREA_SYNC_URL}/v1/runtime-snapshot")" || die "curl runtime-snapshot failed"
+echo "$rt_out" | python3 -c "import json,sys; d=json.load(sys.stdin); assert d.get('ok') is True, d; assert isinstance((d.get('runtime') or {}).get('webhook'), dict), d" || die "/v1/runtime-snapshot not ok"
+
 say "PublishCapabilitySnapshot via andrea_sync_publish_capabilities.py"
 python3 scripts/andrea_sync_publish_capabilities.py || die "publish capabilities failed"
 
@@ -85,6 +89,9 @@ elif [[ "${SKIP_GATEWAY_RESTART:-0}" == "1" ]]; then
 else
   warn "openclaw not on PATH; skip gateway restart"
 fi
+
+say "andrea_services.sh status sync"
+bash scripts/andrea_services.sh status sync || die "process-authoritative runtime truth check failed"
 
 if [[ "${SKIP_COMM_SMOKE:-0}" != "1" ]]; then
   say "andrea_communication_smoke.sh"

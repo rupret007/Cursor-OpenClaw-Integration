@@ -14,6 +14,7 @@ import argparse
 import base64
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -35,6 +36,60 @@ VERSION = "1.2.0"
 TERMINAL_STATUSES = {"FINISHED", "FAILED", "CANCELLED", "STOPPED", "EXPIRED"}
 
 _DOTENV_FILES_LOADED: list[Path] = []
+
+
+def _coerce_artifact_paths(payload: Any) -> list[str]:
+    """Extract artifact path strings from varied API response envelopes."""
+    if isinstance(payload, list):
+        items = payload
+    elif isinstance(payload, dict):
+        for key in ("artifacts", "items", "data"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                items = value
+                break
+        else:
+            items = [payload]
+    else:
+        return []
+
+    paths: list[str] = []
+    for item in items:
+        if isinstance(item, str):
+            path = item.strip()
+        elif isinstance(item, dict):
+            candidate = item.get("path") or item.get("artifactPath") or item.get("name") or item.get("id")
+            path = str(candidate).strip() if candidate is not None else ""
+        else:
+            path = ""
+        if path:
+            paths.append(path)
+    return paths
+
+
+def _safe_index_name(agent_id: str) -> str:
+    clean = re.sub(r"[^A-Za-z0-9._-]+", "-", agent_id).strip("-")
+    return clean or "agent"
+
+
+def _build_artifact_index_markdown(agent_id: str, paths: list[str], download_urls: Dict[str, str]) -> str:
+    lines = [
+        "# Cursor Artifact Index",
+        "",
+        f"- Agent ID: `{agent_id}`",
+        f"- Artifacts discovered: **{len(paths)}**",
+        "",
+        "| Artifact Path | Download URL |",
+        "|---|---|",
+    ]
+    for path in paths:
+        url = download_urls.get(path, "")
+        if url:
+            lines.append(f"| `{path}` | [link]({url}) |")
+        else:
+            lines.append(f"| `{path}` | _(unavailable)_ |")
+    lines.append("")
+    return "\n".join(lines)
 
 
 def _load_repo_dotenv() -> None:
@@ -247,6 +302,20 @@ def parse_args() -> argparse.Namespace:
     p_art_dl.add_argument("--id", required=True)
     p_art_dl.add_argument("--path", required=True)
 
+    p_art_idx = sub.add_parser("artifact-index")
+    p_art_idx.add_argument("--id", required=True)
+    p_art_idx.add_argument(
+        "--index-file",
+        default="",
+        help="Optional markdown file path for artifact index output.",
+    )
+    p_art_idx.add_argument(
+        "--include-download-urls",
+        type=parse_bool,
+        default=True,
+        help="Include per-artifact download URLs when available (true/false).",
+    )
+
     p_create = sub.add_parser("create-agent")
     p_create.add_argument("--prompt", default="", help="Task text (optional if --intent or --triage-repo)")
     p_create.add_argument(
@@ -356,6 +425,50 @@ def handle(cfg: Config, args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
             query={"path": args.path},
         )
         return status, {"status": status, "auth_mode": auth_mode, "response": data or raw}
+
+    if args.command == "artifact-index":
+        cursor_api_common.validate_agent_id(args.id)
+        status, data, raw, auth_mode = client.request("GET", f"/v0/agents/{args.id}/artifacts")
+        if status >= 400:
+            return status, {"status": status, "auth_mode": auth_mode, "response": data or raw}
+
+        artifact_paths = _coerce_artifact_paths(data or raw)
+        download_urls: Dict[str, str] = {}
+        if args.include_download_urls:
+            for path in artifact_paths:
+                dl_status, dl_data, dl_raw, _ = client.request(
+                    "GET",
+                    f"/v0/agents/{args.id}/artifacts/download",
+                    query={"path": path},
+                )
+                if dl_status >= 400:
+                    continue
+                if isinstance(dl_data, dict):
+                    url_value = dl_data.get("downloadUrl") or dl_data.get("url")
+                    if isinstance(url_value, str) and url_value.strip():
+                        download_urls[path] = url_value.strip()
+                elif isinstance(dl_raw, str) and dl_raw.strip().startswith("http"):
+                    download_urls[path] = dl_raw.strip()
+
+        markdown = _build_artifact_index_markdown(args.id, artifact_paths, download_urls)
+        output_path = (args.index_file or "").strip()
+        if output_path:
+            out_path = Path(output_path).expanduser().resolve()
+        else:
+            out_path = Path.cwd() / f"cursor_artifacts_{_safe_index_name(args.id)}.md"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(markdown, encoding="utf-8")
+        return 0, {
+            "status": 0,
+            "auth_mode": auth_mode,
+            "agent_id": args.id,
+            "artifact_count": len(artifact_paths),
+            "index_file": str(out_path),
+            "response": {
+                "artifacts": artifact_paths,
+                "download_urls": download_urls,
+            },
+        }
 
     if args.command == "create-agent":
         require_one_of(args.repository, args.pr_url)

@@ -78,6 +78,8 @@ echo "$pol_out" | python3 -m json.tool
 if [[ "${SKIP_GATEWAY_RESTART:-0}" != "1" ]] && command -v openclaw >/dev/null 2>&1; then
   say "andrea_services.sh restart gateway"
   bash scripts/andrea_services.sh restart gateway || die "gateway restart failed"
+  say "andrea_services.sh bootstrap"
+  bash scripts/andrea_services.sh bootstrap || die "bootstrap failed after gateway restart"
 elif [[ "${SKIP_GATEWAY_RESTART:-0}" == "1" ]]; then
   say "skip gateway restart (SKIP_GATEWAY_RESTART=1)"
 else

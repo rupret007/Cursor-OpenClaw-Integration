@@ -60,6 +60,12 @@ DELEGATED_FINAL_LIFECYCLE_TERMS = (
     "actively working on your request now",
     "moved from queued to running",
 )
+DIRECT_HISTORY_LEAK_TERMS = (
+    "latest useful thread",
+    "recent context from this chat",
+    "latest useful context",
+    "recent thread:",
+)
 
 
 def _clip(value: Any, limit: int = 1200) -> str:
@@ -245,6 +251,12 @@ def _task_route(detail: Dict[str, Any]) -> str:
     meta = detail.get("task", {}).get("meta", {})
     assistant = meta.get("assistant") if isinstance(meta.get("assistant"), dict) else {}
     return str(assistant.get("route") or "").strip()
+
+
+def _task_assistant_reason(detail: Dict[str, Any]) -> str:
+    meta = detail.get("task", {}).get("meta", {})
+    assistant = meta.get("assistant") if isinstance(meta.get("assistant"), dict) else {}
+    return str(assistant.get("reason") or "").strip()
 
 
 def _task_has_cursor_meta(detail: Dict[str, Any]) -> bool:
@@ -732,6 +744,244 @@ def _scenario_what_llm_is_answering(harness: ExperienceHarness, scenario: Experi
         reply_keyword="andrea",
         required_substrings=("directly",),
         forbidden_substrings=("execution lane",),
+    )
+
+
+def _scenario_direct_followups_avoid_history_leak(
+    harness: ExperienceHarness,
+    scenario: ExperienceScenario,
+) -> ExperienceCheckResult:
+    started = time.time()
+    server = harness.server
+    assert server is not None
+
+    def submit(message_id: int, update_id: int, text: str) -> Dict[str, Any]:
+        harness.submit_telegram_update(
+            {
+                "update_id": update_id,
+                "message": {
+                    "text": text,
+                    "message_id": message_id,
+                    "chat": {"id": 1901},
+                    "from": {"id": 2901},
+                },
+            }
+        )
+        return harness.wait_for_telegram_task(
+            message_id=message_id,
+            statuses=(TaskStatus.COMPLETED.value,),
+        )
+
+    with (
+        mock.patch.object(
+            server,
+            "_resolve_runtime_skill",
+            return_value={"skill_key": "brave-api-search", "truth": {"status": "verified_available"}},
+        ),
+        mock.patch.object(
+            server,
+            "_create_openclaw_job",
+            return_value={
+                "ok": True,
+                "user_summary": "Live news: AI and market headlines led the day, with policy updates still moving.",
+            },
+        ),
+    ):
+        first = submit(906, 506, "Hi @andrea what's the news today?")
+        second = submit(907, 507, "What's the news today?")
+        third = submit(908, 508, "OpenClaw are you there?")
+    first_reply = _task_last_reply(first)
+    second_reply = _task_last_reply(second)
+    third_reply = _task_last_reply(third)
+    observations = [
+        _obs(
+            "greeting plus request stays on the actual request",
+            expected="reply mentions news instead of only greeting back",
+            observed=first_reply,
+            passed="news" in first_reply.lower() and "what would you like to do" not in first_reply.lower(),
+            issue_code="direct_reply_regression",
+        ),
+        _obs(
+            "news followups stay on the direct route",
+            expected="assistant.route == direct",
+            observed=f"{_task_route(first)} / {_task_route(second)}",
+            passed=_task_route(first) == "direct" and _task_route(second) == "direct",
+            issue_code="delegation_regression",
+        ),
+        _obs(
+            "news followups use the capability-backed direct reason",
+            expected="news_summary_ready",
+            observed=f"{_task_assistant_reason(first)} / {_task_assistant_reason(second)}",
+            passed=(
+                _task_assistant_reason(first) == "news_summary_ready"
+                and _task_assistant_reason(second) == "news_summary_ready"
+            ),
+            issue_code="direct_reply_regression",
+        ),
+        _obs(
+            "capability-backed news turns avoid the delegated queue",
+            expected="no JobQueued events",
+            observed={
+                "first": _task_event_types(first),
+                "second": _task_event_types(second),
+            },
+            passed=(
+                EventType.JOB_QUEUED.value not in _task_event_types(first)
+                and EventType.JOB_QUEUED.value not in _task_event_types(second)
+            ),
+            issue_code="delegation_regression",
+        ),
+        _obs(
+            "unrelated followup question avoids recent-thread boilerplate",
+            expected="no recycled context boilerplate",
+            observed=second_reply,
+            passed=all(term not in second_reply.lower() for term in DIRECT_HISTORY_LEAK_TERMS),
+            issue_code="history_leak_regression",
+        ),
+        _obs(
+            "unrelated followup question still answers the topic directly",
+            expected="reply mentions news",
+            observed=second_reply,
+            passed="news" in second_reply.lower(),
+            issue_code="direct_reply_regression",
+        ),
+        _obs(
+            "OpenClaw presence question avoids history leakage",
+            expected="no recycled context boilerplate",
+            observed=third_reply,
+            passed=all(term not in third_reply.lower() for term in DIRECT_HISTORY_LEAK_TERMS),
+            issue_code="history_leak_regression",
+        ),
+        _obs(
+            "OpenClaw presence question stays specific",
+            expected="reply mentions Andrea and OpenClaw",
+            observed=third_reply,
+            passed="andrea" in third_reply.lower() and "openclaw" in third_reply.lower(),
+            issue_code="direct_reply_regression",
+        ),
+        _obs(
+            "OpenClaw presence question stays direct and unqueued",
+            expected="assistant.route == direct and no JobQueued",
+            observed={
+                "route": _task_route(third),
+                "events": _task_event_types(third),
+            },
+            passed=(
+                _task_route(third) == "direct"
+                and EventType.JOB_QUEUED.value not in _task_event_types(third)
+            ),
+            issue_code="delegation_regression",
+        ),
+    ]
+    return ExperienceCheckResult.from_observations(
+        scenario,
+        observations,
+        output_excerpt="\n\n".join([first_reply, second_reply, third_reply]),
+        metadata={
+            "task_ids": [
+                first.get("task", {}).get("task_id"),
+                second.get("task", {}).get("task_id"),
+                third.get("task", {}).get("task_id"),
+            ],
+        },
+        started_at=started,
+        completed_at=time.time(),
+    )
+
+
+def _scenario_recent_text_messages_via_bluebubbles(
+    harness: ExperienceHarness,
+    scenario: ExperienceScenario,
+) -> ExperienceCheckResult:
+    started = time.time()
+    server = harness.server
+    assert server is not None
+    with (
+        mock.patch.object(
+            server,
+            "_resolve_messaging_capability",
+            return_value={
+                "skill_key": "bluebubbles",
+                "label": "text messaging",
+                "truth": {"status": "verified_available"},
+            },
+        ),
+        mock.patch.object(
+            server,
+            "_create_openclaw_job",
+            return_value={
+                "ok": True,
+                "user_summary": "Recent texts: Candace said she's on her way, and Michael asked whether tomorrow still works.",
+            },
+        ),
+    ):
+        harness.submit_telegram_update(
+            {
+                "update_id": 509,
+                "message": {
+                    "text": "@andrea what are my recent text messages?",
+                    "message_id": 909,
+                    "chat": {"id": 1902},
+                    "from": {"id": 2902},
+                },
+            }
+        )
+        detail = harness.wait_for_telegram_task(
+            message_id=909,
+            statuses=(TaskStatus.COMPLETED.value,),
+        )
+    reply = _task_last_reply(detail)
+    observations = [
+        _obs(
+            "recent text-message ask stays direct",
+            expected="assistant.route == direct",
+            observed=_task_route(detail),
+            passed=_task_route(detail) == "direct",
+            issue_code="direct_reply_regression",
+        ),
+        _obs(
+            "recent text-message ask uses the BlueBubbles-backed reason",
+            expected="recent_text_messages_ready",
+            observed=_task_assistant_reason(detail),
+            passed=_task_assistant_reason(detail) == "recent_text_messages_ready",
+            issue_code="bluebubbles_recent_texts_regression",
+        ),
+        _obs(
+            "recent text-message ask returns a recent-text summary",
+            expected="reply mentions recent texts",
+            observed=reply,
+            passed="recent texts" in reply.lower() or "recent text" in reply.lower(),
+            issue_code="bluebubbles_recent_texts_regression",
+        ),
+        _obs(
+            "recent text-message ask avoids delegated queue noise",
+            expected="no JobQueued events",
+            observed=_task_event_types(detail),
+            passed=EventType.JOB_QUEUED.value not in _task_event_types(detail),
+            issue_code="delegation_regression",
+        ),
+        _obs(
+            "recent text-message ask avoids cursor metadata",
+            expected="no cursor metadata",
+            observed=detail.get("task", {}).get("meta", {}).get("cursor"),
+            passed=not _task_has_cursor_meta(detail),
+            issue_code="unnecessary_cursor_escalation",
+        ),
+        _obs(
+            "recent text-message summary stays user-safe",
+            expected="no runtime jargon",
+            observed=reply,
+            passed=bool(reply) and not is_internal_runtime_text(reply),
+            issue_code="runtime_jargon_leaked",
+        ),
+    ]
+    return ExperienceCheckResult.from_observations(
+        scenario,
+        observations,
+        output_excerpt=reply,
+        metadata={"task_id": detail.get("task", {}).get("task_id")},
+        started_at=started,
+        completed_at=time.time(),
     )
 
 
@@ -1274,6 +1524,19 @@ def default_experience_scenarios() -> List[ExperienceScenario]:
             runner=_scenario_what_is_cursor,
         ),
         ExperienceScenario(
+            scenario_id="direct_followups_avoid_history_leak",
+            title="Direct followups stay specific instead of recycling chat context",
+            description="A lightweight new question in the same Telegram chat should answer directly instead of replaying the latest useful thread.",
+            category="routing",
+            tags=["telegram", "direct", "history"],
+            suspected_files=[
+                "services/andrea_sync/andrea_router.py",
+                "services/andrea_sync/server.py",
+                "services/andrea_sync/telegram_continuation.py",
+            ],
+            runner=_scenario_direct_followups_avoid_history_leak,
+        ),
+        ExperienceScenario(
             scenario_id="cursor_primary_explicit_mention",
             title="@Cursor heavy-lift request becomes cursor_primary",
             description="Explicit heavy repo asks should queue into Cursor-primary collaboration instead of direct answer mode.",
@@ -1337,6 +1600,19 @@ def default_experience_scenarios() -> List[ExperienceScenario]:
                 "scripts/andrea_capabilities.py",
             ],
             runner=_scenario_bluebubbles_truth,
+        ),
+        ExperienceScenario(
+            scenario_id="recent_text_messages_via_bluebubbles",
+            title="Recent text-message asks use the BlueBubbles lane",
+            description="Inbox-style text-message requests should stay direct, use the verified BlueBubbles lane, and avoid delegated lifecycle noise.",
+            category="capability_truth",
+            tags=["telegram", "bluebubbles", "direct", "messages"],
+            suspected_files=[
+                "services/andrea_sync/server.py",
+                "services/andrea_sync/andrea_router.py",
+                "services/andrea_sync/user_surface.py",
+            ],
+            runner=_scenario_recent_text_messages_via_bluebubbles,
         ),
         ExperienceScenario(
             scenario_id="apple_notes_verified_followup",

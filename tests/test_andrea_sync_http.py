@@ -306,7 +306,7 @@ class TestAndreaSyncHTTP(unittest.TestCase):
             data = json.loads(resp.read().decode("utf-8"))
         latest = data["experience_assurance"]["latest_run"]
         self.assertEqual(latest["run_id"], result["run"]["run_id"])
-        self.assertGreaterEqual(latest["total_checks"], 11)
+        self.assertGreaterEqual(latest["total_checks"], 13)
         self.assertIn("runtime", data)
         self.assertGreaterEqual(
             data["experience_assurance"]["delegated_summary"]["total"],
@@ -1007,6 +1007,191 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
         self.assertEqual(detail["task"]["status"], "completed")
         self.assertEqual(detail["task"]["meta"]["assistant"]["route"], "direct")
         self.assertNotIn("cursor", detail["task"]["meta"])
+
+    def test_telegram_history_followups_do_not_recycle_latest_useful_thread(self) -> None:
+        prev_enabled = os.environ.get("OPENAI_API_ENABLED")
+        prev_key = os.environ.get("OPENAI_API_KEY")
+        os.environ["OPENAI_API_ENABLED"] = "0"
+        os.environ.pop("OPENAI_API_KEY", None)
+
+        def submit(update_id: int, message_id: int, text: str) -> None:
+            body = json.dumps(
+                {
+                    "update_id": update_id,
+                    "message": {
+                        "text": text,
+                        "message_id": message_id,
+                        "chat": {"id": 21},
+                        "from": {"id": 22},
+                    },
+                }
+            ).encode("utf-8")
+            req = urllib.request.Request(
+                self._url("/v1/telegram/webhook"),
+                data=body,
+                method="POST",
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Telegram-Bot-Api-Secret-Token": "hdrsecret",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                self.assertEqual(resp.status, 200)
+
+        def wait_for_detail(message_id: int) -> dict:
+            detail = None
+            for _ in range(40):
+                req_tasks = urllib.request.Request(self._url("/v1/tasks?limit=20"), method="GET")
+                with urllib.request.urlopen(req_tasks, timeout=5) as resp_tasks:
+                    tasks = json.loads(resp_tasks.read().decode("utf-8"))["tasks"]
+                telegram_tasks = [t for t in tasks if t["channel"] == "telegram"]
+                for task in telegram_tasks:
+                    req_task = urllib.request.Request(self._url(f"/v1/tasks/{task['task_id']}"), method="GET")
+                    with urllib.request.urlopen(req_task, timeout=5) as resp_task:
+                        candidate = json.loads(resp_task.read().decode("utf-8"))
+                    meta = candidate["task"].get("meta", {})
+                    if meta.get("telegram", {}).get("message_id") == message_id:
+                        detail = candidate
+                        break
+                if detail and detail["task"]["status"] == "completed":
+                    return detail
+                time.sleep(0.05)
+            self.assertIsNotNone(detail)
+            assert detail is not None
+            return detail
+
+        try:
+            with (
+                mock.patch.object(
+                    self._srv,
+                    "_resolve_runtime_skill",
+                    return_value={"skill_key": "brave-api-search", "truth": {"status": "verified_available"}},
+                ) as resolve_mock,
+                mock.patch.object(
+                    self._srv,
+                    "_create_openclaw_job",
+                    return_value={
+                        "ok": True,
+                        "user_summary": "Live news: AI and market headlines led the day, with policy updates still moving.",
+                    },
+                ) as job_mock,
+            ):
+                submit(60, 60, "Hi @andrea what's the news today?")
+                first = wait_for_detail(60)
+                submit(61, 61, "What's the news today?")
+                second = wait_for_detail(61)
+                submit(62, 62, "OpenClaw are you there?")
+                third = wait_for_detail(62)
+            self.assertEqual(resolve_mock.call_count, 2)
+            self.assertEqual(job_mock.call_count, 2)
+        finally:
+            if prev_enabled is None:
+                os.environ.pop("OPENAI_API_ENABLED", None)
+            else:
+                os.environ["OPENAI_API_ENABLED"] = prev_enabled
+            if prev_key is None:
+                os.environ.pop("OPENAI_API_KEY", None)
+            else:
+                os.environ["OPENAI_API_KEY"] = prev_key
+
+        first_reply = first["task"]["meta"]["assistant"]["last_reply"].lower()
+        second_reply = second["task"]["meta"]["assistant"]["last_reply"].lower()
+        third_reply = third["task"]["meta"]["assistant"]["last_reply"].lower()
+        recycled_terms = (
+            "latest useful thread",
+            "recent context from this chat",
+            "latest useful context",
+            "recent thread:",
+        )
+        self.assertIn("news", first_reply)
+        self.assertNotIn("what would you like to do", first_reply)
+        self.assertEqual(first["task"]["meta"]["assistant"]["route"], "direct")
+        self.assertEqual(first["task"]["meta"]["assistant"]["reason"], "news_summary_ready")
+        self.assertNotIn("cursor", first["task"]["meta"])
+        self.assertNotIn("JobQueued", [row["event_type"] for row in first["events"]])
+        self.assertIn("news", second_reply)
+        self.assertEqual(second["task"]["meta"]["assistant"]["route"], "direct")
+        self.assertEqual(second["task"]["meta"]["assistant"]["reason"], "news_summary_ready")
+        for term in recycled_terms:
+            self.assertNotIn(term, second_reply)
+        self.assertNotIn("JobQueued", [row["event_type"] for row in second["events"]])
+        self.assertIn("openclaw", third_reply)
+        self.assertIn("andrea", third_reply)
+        self.assertEqual(third["task"]["meta"]["assistant"]["route"], "direct")
+        for term in recycled_terms:
+            self.assertNotIn(term, third_reply)
+        self.assertNotIn("JobQueued", [row["event_type"] for row in third["events"]])
+
+    def test_telegram_recent_text_messages_use_bluebubbles_lane(self) -> None:
+        body = json.dumps(
+            {
+                "update_id": 63,
+                "message": {
+                    "text": "@andrea what are my recent text messages?",
+                    "message_id": 63,
+                    "chat": {"id": 31},
+                    "from": {"id": 32},
+                },
+            }
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            self._url("/v1/telegram/webhook"),
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "X-Telegram-Bot-Api-Secret-Token": "hdrsecret",
+            },
+        )
+        with (
+            mock.patch.object(
+                self._srv,
+                "_resolve_messaging_capability",
+                return_value={
+                    "skill_key": "bluebubbles",
+                    "label": "text messaging",
+                    "truth": {"status": "verified_available"},
+                },
+            ) as resolve_mock,
+            mock.patch.object(
+                self._srv,
+                "_create_openclaw_job",
+                return_value={
+                    "ok": True,
+                    "user_summary": "Recent texts: Candace said she's on her way, and Michael asked whether tomorrow still works.",
+                },
+            ) as job_mock,
+        ):
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                self.assertEqual(resp.status, 200)
+            detail = None
+            for _ in range(40):
+                req_tasks = urllib.request.Request(self._url("/v1/tasks?limit=20"), method="GET")
+                with urllib.request.urlopen(req_tasks, timeout=5) as resp_tasks:
+                    tasks = json.loads(resp_tasks.read().decode("utf-8"))["tasks"]
+                telegram_tasks = [t for t in tasks if t["channel"] == "telegram"]
+                for task in telegram_tasks:
+                    req_task = urllib.request.Request(self._url(f"/v1/tasks/{task['task_id']}"), method="GET")
+                    with urllib.request.urlopen(req_task, timeout=5) as resp_task:
+                        candidate = json.loads(resp_task.read().decode("utf-8"))
+                    meta = candidate["task"].get("meta", {})
+                    if meta.get("telegram", {}).get("message_id") == 63:
+                        detail = candidate
+                        break
+                if detail and detail["task"]["status"] == "completed":
+                    break
+                time.sleep(0.05)
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        reply = detail["task"]["meta"]["assistant"]["last_reply"].lower()
+        self.assertEqual(detail["task"]["meta"]["assistant"]["route"], "direct")
+        self.assertEqual(detail["task"]["meta"]["assistant"]["reason"], "recent_text_messages_ready")
+        self.assertIn("recent texts", reply)
+        self.assertNotIn("session", reply)
+        self.assertNotIn("cursor", detail["task"]["meta"])
+        self.assertNotIn("JobQueued", [row["event_type"] for row in detail["events"]])
+        resolve_mock.assert_called_once()
+        job_mock.assert_called_once()
 
     def test_telegram_is_this_openclaw_routes_direct(self) -> None:
         """Success gate: Is this OpenClaw? stays direct, no delegation lifecycle."""

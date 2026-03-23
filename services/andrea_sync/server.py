@@ -139,6 +139,14 @@ MESSAGING_CAPABILITY_RE = re.compile(
     r")\b",
     re.I,
 )
+LIVE_NEWS_RE = re.compile(r"\b(news|headline|headlines)\b", re.I)
+RECENT_TEXT_MESSAGES_RE = re.compile(
+    r"(?:"
+    r"\b(?:recent|latest|last)\b.*\b(?:text(?:s| messages?)?|imessages?|messages?|threads?)\b|"
+    r"\b(?:text(?:s| messages?)?|imessages?|threads?)\b.*\b(?:recent|latest|last)\b"
+    r")",
+    re.I,
+)
 OUTBOUND_SEND_PATTERNS = (
     re.compile(
         r"^\s*(?:(?:please|can you|could you)\s+)?send\s+(?:a\s+)?(?:message|text)\s+to\s+(?P<target>.+?)(?:\s+(?:that|saying|saying that)\s+(?P<body>.+))?\s*$",
@@ -1598,6 +1606,72 @@ class SyncServer:
             }
         return None
 
+    def _parse_live_news_request(self, text: str) -> Optional[str]:
+        clean = str(text or "").strip()
+        if not clean:
+            return None
+        lowered = clean.lower()
+        if not LIVE_NEWS_RE.search(lowered):
+            return None
+        if re.search(r"\b(good news|bad news|fake news)\b", lowered):
+            return None
+        if not (
+            "?" in clean
+            or lowered.startswith(
+                (
+                    "what",
+                    "what's",
+                    "whats",
+                    "show",
+                    "give",
+                    "tell me",
+                    "summarize",
+                    "summarise",
+                    "latest",
+                    "current",
+                    "news",
+                    "headlines",
+                    "any",
+                )
+            )
+        ):
+            return None
+        return clean
+
+    def _parse_recent_text_messages_request(self, text: str) -> Optional[str]:
+        clean = str(text or "").strip()
+        if not clean:
+            return None
+        lowered = clean.lower()
+        if not RECENT_TEXT_MESSAGES_RE.search(lowered):
+            return None
+        if any(marker in lowered for marker in ("telegram", "this chat", "our chat")):
+            return None
+        if self._parse_outbound_message_request(clean) is not None:
+            return None
+        if not (
+            "?" in clean
+            or lowered.startswith(
+                (
+                    "what",
+                    "what's",
+                    "whats",
+                    "show",
+                    "list",
+                    "read",
+                    "check",
+                    "pull",
+                    "give",
+                    "summarize",
+                    "summarise",
+                    "latest",
+                    "recent",
+                )
+            )
+        ):
+            return None
+        return clean
+
     def _select_messaging_capability(self, text: str) -> Dict[str, Any]:
         clean = str(text or "").strip().lower()
         for candidate in MESSAGING_SKILL_CANDIDATES:
@@ -1682,6 +1756,30 @@ class SyncServer:
             f"Not right now. I could not verify a live {label} lane after checking the current runtime state."
         )
 
+    def _live_news_unavailable_reply(self, resolved: Dict[str, Any]) -> str:
+        status = str(resolved.get("truth", {}).get("status") or "")
+        if status == "installed_but_not_eligible":
+            return (
+                "I found the live news lane, but it still needs a bit more local setup before I can rely on it."
+            )
+        return (
+            "I couldn't verify the live news lane just now, so I can't give you a grounded news update yet."
+        )
+
+    def _recent_text_messages_unavailable_reply(self, resolved: Dict[str, Any]) -> str:
+        status = str(resolved.get("truth", {}).get("status") or "")
+        skill_key = str(resolved.get("skill_key") or "").strip().lower()
+        lane = "BlueBubbles" if skill_key == "bluebubbles" else str(
+            resolved.get("label") or "messaging"
+        ).strip()
+        if status == "installed_but_not_eligible":
+            return (
+                f"I found the {lane} lane, but it still needs a bit more local setup before I can read recent messages reliably."
+            )
+        return (
+            f"I couldn't verify the {lane} lane just now, so I can't retrieve your recent text messages yet."
+        )
+
     def _runtime_skill_grounding_note(
         self,
         resolved: Dict[str, Any],
@@ -1731,6 +1829,114 @@ class SyncServer:
             "- If the recipient cannot be resolved or delivery cannot be verified, do not invent success.\n"
             "- Return a calm Andrea-style summary of what happened.\n"
             "- Keep internal tool/config/runtime diagnostics out of the user-facing summary.\n"
+        )
+
+    def _build_live_news_prompt(self, text: str) -> str:
+        return (
+            "Use the verified live web/news lane to answer Andrea's request for current news.\n"
+            f"User request: {text.strip()}\n\n"
+            "Rules:\n"
+            "- Use Brave or another grounded live-web/news skill that is already available in OpenClaw.\n"
+            "- Infer any requested topic or place from the user request. If none is given, provide a compact general roundup.\n"
+            "- Keep the final user-facing summary to 1-2 short sentences with the most important current items.\n"
+            "- Only include grounded live information.\n"
+            "- If live retrieval is blocked or uncertain, say so plainly and do not invent details.\n"
+            "- Keep internal tool/config/runtime details out of the user-facing answer.\n"
+        )
+
+    def _build_recent_text_messages_prompt(self, text: str, *, skill_key: str) -> str:
+        return (
+            "Use the verified personal messaging lane to retrieve recent phone/iMessage activity.\n"
+            f"Capability: {skill_key or 'bluebubbles'}\n"
+            f"User request: {text.strip()}\n\n"
+            "Rules:\n"
+            "- Prefer recent real text or iMessage threads and summarize only what the tool can verify.\n"
+            "- Keep the user-facing summary concise and privacy-respecting.\n"
+            "- If the lane cannot list recent messages or cannot verify their contents, say so plainly and do not invent anything.\n"
+            "- Keep internal tool/config/runtime details out of the user-facing answer.\n"
+            "- Put the final answer in the summary field as 1-2 short sentences.\n"
+        )
+
+    def _run_direct_openclaw_lookup(
+        self,
+        task_id: str,
+        *,
+        prompt: str,
+        route_reason: str,
+        success_reason: str,
+        success_fallback: str,
+        failure_reason: str,
+        failure_reply: str,
+    ) -> tuple[str, str]:
+        try:
+            result = self._create_openclaw_job(
+                task_id,
+                prompt,
+                route_reason,
+                "andrea_primary",
+                "",
+                "",
+                session_id=self._openclaw_session_id(task_id, attempt=0),
+            )
+        except Exception:  # noqa: BLE001
+            return failure_reply, failure_reason
+        summary = _sanitize_user_surface_text(
+            result.get("user_summary")
+            or result.get("summary")
+            or result.get("blocked_reason")
+            or result.get("error"),
+            fallback="",
+        ).strip()
+        if result.get("ok"):
+            return summary or success_fallback, success_reason
+        if summary:
+            return summary, failure_reason
+        return failure_reply, failure_reason
+
+    def _fetch_live_news_summary(
+        self,
+        task_id: str,
+        text: str,
+    ) -> tuple[str, str]:
+        resolved = self._resolve_runtime_skill(
+            task_id,
+            skill_key="brave-api-search",
+            actor="server_news",
+        )
+        if str(resolved.get("truth", {}).get("status") or "") != "verified_available":
+            return self._live_news_unavailable_reply(resolved), "news_summary_unavailable"
+        return self._run_direct_openclaw_lookup(
+            task_id,
+            prompt=self._build_live_news_prompt(text),
+            route_reason="structured_live_news",
+            success_reason="news_summary_ready",
+            success_fallback="I pulled a live news summary for you.",
+            failure_reason="news_summary_failed",
+            failure_reply="I couldn't pull a grounded live news summary cleanly just now.",
+        )
+
+    def _fetch_recent_text_messages(
+        self,
+        task_id: str,
+        text: str,
+    ) -> tuple[str, str]:
+        resolved = self._resolve_messaging_capability(task_id, text)
+        if str(resolved.get("truth", {}).get("status") or "") != "verified_available":
+            return (
+                self._recent_text_messages_unavailable_reply(resolved),
+                "recent_text_messages_unavailable",
+            )
+        return self._run_direct_openclaw_lookup(
+            task_id,
+            prompt=self._build_recent_text_messages_prompt(
+                text,
+                skill_key=str(resolved.get("skill_key") or "bluebubbles"),
+            ),
+            route_reason="structured_recent_text_messages",
+            success_reason="recent_text_messages_ready",
+            success_fallback="I pulled your recent text-message summary.",
+            failure_reason="recent_text_messages_failed",
+            failure_reply="I couldn't retrieve your recent text messages cleanly just now.",
         )
 
     def _send_pending_outbound_message(
@@ -1917,6 +2123,14 @@ class SyncServer:
             }
             self._save_pending_outbound_draft(task_id, draft)
             return (self._outbound_draft_reply(draft), "outbound_message_drafted")
+
+        news_request = self._parse_live_news_request(text)
+        if news_request is not None:
+            return self._fetch_live_news_summary(task_id, news_request)
+
+        recent_text_messages = self._parse_recent_text_messages_request(text)
+        if recent_text_messages is not None:
+            return self._fetch_recent_text_messages(task_id, recent_text_messages)
 
         if MESSAGING_CAPABILITY_RE.search(text):
             resolved = self._resolve_messaging_capability(task_id, text)

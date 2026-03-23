@@ -37,6 +37,7 @@ GREETING_RE = re.compile(
 THANKS_RE = re.compile(r"\b(thanks|thank you|appreciate it)\b", re.I)
 IDENTITY_RE = re.compile(r"\b(who are you|what can you do|what do you do)\b", re.I)
 HELP_RE = re.compile(r"^(help|help me|help please|i need help)\b", re.I)
+NEWS_RE = re.compile(r"\b(news|headline|headlines)\b", re.I)
 MEMORY_RE = re.compile(
     r"\b(remember|before|earlier|last time|previous|our chat|our conversation|we talked|continue|resume|pick up)\b",
     re.I,
@@ -74,6 +75,8 @@ META_STACK_STANDALONE_RE = re.compile(
             r"who(?:'s| is) answering\??",
             r"who answered\??",
             r"is (?:this|that) (?:the )?openclaw\??",
+            r"is openclaw (?:in there|there)\??",
+            r"openclaw are you there\??",
             r"is this (?:really )?andrea\??",
         ]
     )
@@ -88,7 +91,12 @@ META_STACK_INLINE_RE = re.compile(
     re.I,
 )
 META_OPENCLAW_RE = re.compile(
-    r"^(?:what (?:is|'s) openclaw|is (?:this|that) (?:the )?openclaw)$",
+    r"^(?:"
+    r"what (?:is|'s) openclaw|"
+    r"is (?:this|that) (?:the )?openclaw|"
+    r"is openclaw (?:in there|there)|"
+    r"openclaw are you there"
+    r")$",
     re.I,
 )
 META_CURSOR_REPLIES_RE = re.compile(
@@ -133,6 +141,37 @@ def _meta_stack_question(clean: str, original: str) -> bool:
     return bool(META_STACK_STANDALONE_RE.match(trimmed))
 
 
+def _strip_social_prefix(text: str) -> str:
+    trimmed = _normalize(text)
+    patterns = (
+        r"^(?:hi|hello|hey)\b[\s,!.:-]*",
+        r"^(?:good morning|good afternoon|good evening)\b[\s,!.:-]*",
+    )
+    for _ in range(3):
+        original = trimmed
+        for pattern in patterns:
+            trimmed = re.sub(pattern, "", trimmed, count=1).strip(" ,.!?:;-")
+        trimmed = re.sub(r"^(?:@?andrea)\b[\s,!.:-]*", "", trimmed, count=1).strip(" ,.!?:;-")
+        if trimmed == original:
+            break
+    return trimmed
+
+
+def _is_greeting_only(text: str) -> bool:
+    clean = _normalize(text)
+    if not GREETING_RE.search(clean) or MEMORY_RE.search(clean):
+        return False
+    remainder = _strip_social_prefix(clean)
+    if remainder in {"", "andrea", "how are you", "how're you"}:
+        return True
+    if (
+        (remainder.startswith("how are you") or remainder.startswith("how're you"))
+        and len(remainder.split()) <= 4
+    ):
+        return True
+    return False
+
+
 @dataclass
 class AndreaRouteDecision:
     mode: str
@@ -165,7 +204,7 @@ def classify_route(
         return "delegate", "explicit_collaboration_mention", "openclaw_hybrid", "collaborative"
     if not clean:
         return "direct", "explicit_andrea_mention" if andrea_preferred else "empty_or_whitespace", "", "andrea_primary" if andrea_preferred else collab
-    if GREETING_RE.search(clean) and not MEMORY_RE.search(clean) and word_count <= 6:
+    if _is_greeting_only(clean) and word_count <= 6:
         return "direct", "explicit_andrea_mention" if andrea_preferred else "greeting_or_social", "", "andrea_primary" if andrea_preferred else collab
     if CURSOR_EXPLICIT_ACTION_RE.search(clean):
         if collab == "auto" and COLLABORATE_RE.search(clean):
@@ -292,23 +331,13 @@ def _contextual_fallback(
                 f"the most relevant recent context is: {hint}"
             )
         return "Yes. Tell me what direction you want to go next, and I'll expand from there."
-    if hint and ("?" in text or len(clean.split()) > 8):
-        return (
-            "I can answer that using the recent context from this chat. "
-            f"The latest useful thread I have is: {hint}"
-        )
-    if memory_hint and ("?" in text or len(clean.split()) > 8):
-        return (
-            "I can answer that using the durable context I have for this principal. "
-            f"The strongest saved note I have is: {memory_hint}"
-        )
     return _heuristic_reply(text)
 
 
 def _heuristic_reply(text: str) -> str:
     clean = _normalize(text)
     trimmed = clean.rstrip("?.! ").strip()
-    if GREETING_RE.search(clean):
+    if _is_greeting_only(clean):
         if "how are you" in clean or "how're you" in clean:
             return "Hi! I'm doing well, and I'm ready to help. What would you like me to work on?"
         return "Hi! I'm here and ready to help. What would you like to do?"
@@ -335,6 +364,11 @@ def _heuristic_reply(text: str) -> str:
         return (
             "Right now, Andrea is answering you directly. "
             "I only bring OpenClaw or Cursor in when the task needs deeper reasoning or heavier repo execution."
+        )
+    if NEWS_RE.search(clean):
+        return (
+            "I can help with current news. Tell me the topic or place you want, "
+            "and I'll focus the update there."
         )
     if _meta_stack_question(clean, text):
         return (
@@ -447,10 +481,11 @@ def build_direct_reply(
 ) -> str:
     clean = _normalize(text)
     if (
-        (GREETING_RE.search(clean) and not MEMORY_RE.search(clean) and len(clean.split()) <= 6)
+        (_is_greeting_only(clean) and len(clean.split()) <= 6)
         or THANKS_RE.search(clean)
         or IDENTITY_RE.search(clean)
         or META_CURSOR_RE.search(clean)
+        or NEWS_RE.search(clean)
         or _meta_stack_question(clean, text)
         or (HELP_RE.search(clean) and len(clean.split()) <= 6)
     ):

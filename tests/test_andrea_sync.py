@@ -1139,6 +1139,14 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(decision.mode, "direct")
         self.assertIn("ready to help", decision.reply_text.lower())
 
+    def test_router_greeting_plus_news_request_stays_on_request(self) -> None:
+        os.environ["OPENAI_API_ENABLED"] = "0"
+        os.environ.pop("OPENAI_API_KEY", None)
+        decision = route_message("Hi Andrea what's the news today?")
+        self.assertEqual(decision.mode, "direct")
+        self.assertIn("news", decision.reply_text.lower())
+        self.assertNotIn("what would you like to do", decision.reply_text.lower())
+
     def test_router_coding_request_delegates(self) -> None:
         decision = route_message("Please inspect the repo, fix the failing tests, and open a PR.")
         self.assertEqual(decision.mode, "delegate")
@@ -1250,6 +1258,45 @@ class TestAndreaSync(unittest.TestCase):
         self.assertNotEqual(openclaw.reply_text, cursor.reply_text)
         self.assertNotEqual(cursor.reply_text, llm.reply_text)
         self.assertNotEqual(openclaw.reply_text, llm.reply_text)
+
+    def test_router_news_question_does_not_reuse_recent_context_hint(self) -> None:
+        os.environ["OPENAI_API_ENABLED"] = "0"
+        os.environ.pop("OPENAI_API_KEY", None)
+        decision = route_message(
+            "What's the news today?",
+            history=[
+                {
+                    "role": "assistant",
+                    "content": "You're talking with Andrea. OpenClaw is a collaboration layer I can use when deeper reasoning helps.",
+                }
+            ],
+        )
+        self.assertEqual(decision.mode, "direct")
+        self.assertIn("news", decision.reply_text.lower())
+        self.assertNotIn("latest useful thread", decision.reply_text.lower())
+        self.assertNotIn("recent context from this chat", decision.reply_text.lower())
+        self.assertNotIn("latest useful context", decision.reply_text.lower())
+        self.assertNotIn("recent thread:", decision.reply_text.lower())
+
+    def test_router_openclaw_presence_question_stays_specific_with_history(self) -> None:
+        os.environ["OPENAI_API_ENABLED"] = "0"
+        os.environ.pop("OPENAI_API_KEY", None)
+        decision = route_message(
+            "OpenClaw are you there?",
+            history=[
+                {
+                    "role": "assistant",
+                    "content": "I can help with current news. Tell me the topic or place you want, and I'll focus the update there.",
+                }
+            ],
+        )
+        self.assertEqual(decision.mode, "direct")
+        self.assertIn("andrea", decision.reply_text.lower())
+        self.assertIn("openclaw", decision.reply_text.lower())
+        self.assertNotIn("latest useful thread", decision.reply_text.lower())
+        self.assertNotIn("recent context from this chat", decision.reply_text.lower())
+        self.assertNotIn("latest useful context", decision.reply_text.lower())
+        self.assertNotIn("recent thread:", decision.reply_text.lower())
 
     def test_server_routes_latest_message_not_accumulated_thread(self) -> None:
         """Regression: router must classify the latest user turn, not merged accumulated_prompt."""
@@ -1806,6 +1853,178 @@ class TestAndreaSync(unittest.TestCase):
         reply = proj["meta"]["assistant"]["last_reply"]
         self.assertIn("verified text messaging lane", reply.lower())
         self.assertNotIn("session", reply.lower())
+
+    def test_server_live_news_request_uses_capability_backed_summary(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        result = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-live-news",
+                "payload": {
+                    "text": "What's the news today?",
+                    "chat_id": 90011,
+                    "message_id": 441,
+                },
+            },
+        )
+        with (
+            mock.patch.object(
+                server,
+                "_resolve_runtime_skill",
+                return_value={"skill_key": "brave-api-search", "truth": {"status": "verified_available"}},
+            ) as resolve_mock,
+            mock.patch.object(
+                server,
+                "_create_openclaw_job",
+                return_value={
+                    "ok": True,
+                    "user_summary": "Live news: AI funding and market headlines led the day, with major policy updates still developing.",
+                },
+            ) as job_mock,
+        ):
+            server._handle_task_followups(result["task_id"])
+        proj = project_task_dict(server.conn, result["task_id"], "telegram")
+        reply = proj["meta"]["assistant"]["last_reply"]
+        self.assertEqual(proj["meta"]["assistant"]["route"], "direct")
+        self.assertEqual(proj["meta"]["assistant"]["reason"], "news_summary_ready")
+        self.assertIn("live news", reply.lower())
+        self.assertNotIn("session", reply.lower())
+        self.assertNotIn("what would you like to do", reply.lower())
+        resolve_mock.assert_called_once()
+        self.assertEqual(resolve_mock.call_args.kwargs["skill_key"], "brave-api-search")
+        job_mock.assert_called_once()
+        event_types = [event_type for _seq, _ts, event_type, _payload in load_events_for_task(server.conn, result["task_id"])]
+        self.assertNotIn(EventType.JOB_QUEUED.value, event_types)
+
+    def test_server_live_news_request_stays_truthful_when_lane_unavailable(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        result = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-live-news-unavailable",
+                "payload": {
+                    "text": "What's the latest news?",
+                    "chat_id": 90012,
+                    "message_id": 442,
+                },
+            },
+        )
+        with mock.patch.object(
+            server,
+            "_resolve_runtime_skill",
+            return_value={"skill_key": "brave-api-search", "truth": {"status": "installed_but_not_eligible"}},
+        ):
+            server._handle_task_followups(result["task_id"])
+        proj = project_task_dict(server.conn, result["task_id"], "telegram")
+        reply = proj["meta"]["assistant"]["last_reply"]
+        self.assertEqual(proj["meta"]["assistant"]["route"], "direct")
+        self.assertEqual(proj["meta"]["assistant"]["reason"], "news_summary_unavailable")
+        self.assertIn("live news lane", reply.lower())
+        self.assertIn("local setup", reply.lower())
+        event_types = [event_type for _seq, _ts, event_type, _payload in load_events_for_task(server.conn, result["task_id"])]
+        self.assertNotIn(EventType.JOB_QUEUED.value, event_types)
+
+    def test_server_recent_text_messages_use_bluebubbles_summary(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        result = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-recent-texts",
+                "payload": {
+                    "text": "What are my recent text messages?",
+                    "chat_id": 90013,
+                    "message_id": 443,
+                },
+            },
+        )
+        with (
+            mock.patch.object(
+                server,
+                "_resolve_messaging_capability",
+                return_value={
+                    "skill_key": "bluebubbles",
+                    "label": "text messaging",
+                    "truth": {"status": "verified_available"},
+                },
+            ) as resolve_mock,
+            mock.patch.object(
+                server,
+                "_create_openclaw_job",
+                return_value={
+                    "ok": True,
+                    "user_summary": "Recent texts: Candace said she's on her way, and Michael asked whether tomorrow still works.",
+                },
+            ) as job_mock,
+        ):
+            server._handle_task_followups(result["task_id"])
+        proj = project_task_dict(server.conn, result["task_id"], "telegram")
+        reply = proj["meta"]["assistant"]["last_reply"]
+        self.assertEqual(proj["meta"]["assistant"]["route"], "direct")
+        self.assertEqual(proj["meta"]["assistant"]["reason"], "recent_text_messages_ready")
+        self.assertIn("recent texts", reply.lower())
+        self.assertNotIn("session", reply.lower())
+        resolve_mock.assert_called_once()
+        self.assertEqual(resolve_mock.call_args.args[0], result["task_id"])
+        job_mock.assert_called_once()
+        event_types = [event_type for _seq, _ts, event_type, _payload in load_events_for_task(server.conn, result["task_id"])]
+        self.assertNotIn(EventType.JOB_QUEUED.value, event_types)
+
+    def test_server_recent_text_messages_stay_truthful_when_lane_unavailable(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        result = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-recent-texts-unavailable",
+                "payload": {
+                    "text": "What are my recent text messages?",
+                    "chat_id": 90014,
+                    "message_id": 444,
+                },
+            },
+        )
+        with mock.patch.object(
+            server,
+            "_resolve_messaging_capability",
+            return_value={
+                "skill_key": "bluebubbles",
+                "label": "text messaging",
+                "truth": {"status": "installed_but_not_eligible"},
+            },
+        ):
+            server._handle_task_followups(result["task_id"])
+        proj = project_task_dict(server.conn, result["task_id"], "telegram")
+        reply = proj["meta"]["assistant"]["last_reply"]
+        self.assertEqual(proj["meta"]["assistant"]["route"], "direct")
+        self.assertEqual(proj["meta"]["assistant"]["reason"], "recent_text_messages_unavailable")
+        self.assertIn("bluebubbles", reply.lower())
+        self.assertIn("recent messages", reply.lower())
+        self.assertNotIn("session", reply.lower())
+        event_types = [event_type for _seq, _ts, event_type, _payload in load_events_for_task(server.conn, result["task_id"])]
+        self.assertNotIn(EventType.JOB_QUEUED.value, event_types)
 
     def test_server_drafts_outbound_message_before_send(self) -> None:
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"

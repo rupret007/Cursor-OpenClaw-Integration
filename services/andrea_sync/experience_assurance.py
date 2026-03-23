@@ -245,6 +245,8 @@ def _run_direct_meta_scenario(
     update_id: int,
     message_id: int,
     reply_keyword: str = "",
+    required_substrings: Sequence[str] | None = None,
+    forbidden_substrings: Sequence[str] | None = None,
 ) -> ExperienceCheckResult:
     started = time.time()
     harness.submit_telegram_update(
@@ -312,6 +314,26 @@ def _run_direct_meta_scenario(
                 issue_code="direct_reply_regression",
             )
         )
+    for phrase in required_substrings or ():
+        observations.append(
+            _obs(
+                "reply includes the specific expected wording",
+                expected=f"reply mentions {phrase}",
+                observed=reply,
+                passed=str(phrase or "").lower() in reply.lower(),
+                issue_code="direct_reply_regression",
+            )
+        )
+    for phrase in forbidden_substrings or ():
+        observations.append(
+            _obs(
+                "reply avoids wording from a different meta answer",
+                expected=f"reply omits {phrase}",
+                observed=reply,
+                passed=str(phrase or "").lower() not in reply.lower(),
+                issue_code="direct_reply_regression",
+            )
+        )
     return ExperienceCheckResult.from_observations(
         scenario,
         observations,
@@ -330,6 +352,19 @@ def _scenario_is_this_openclaw(harness: ExperienceHarness, scenario: ExperienceS
         update_id=501,
         message_id=901,
         reply_keyword="openclaw",
+        required_substrings=("andrea", "collaboration layer"),
+    )
+
+
+def _scenario_what_is_cursor(harness: ExperienceHarness, scenario: ExperienceScenario) -> ExperienceCheckResult:
+    return _run_direct_meta_scenario(
+        harness,
+        scenario,
+        text="What is Cursor?",
+        update_id=502,
+        message_id=902,
+        reply_keyword="cursor",
+        required_substrings=("andrea", "execution lane"),
     )
 
 
@@ -338,9 +373,11 @@ def _scenario_what_llm_is_answering(harness: ExperienceHarness, scenario: Experi
         harness,
         scenario,
         text="What LLM is answering?",
-        update_id=502,
-        message_id=902,
+        update_id=503,
+        message_id=903,
         reply_keyword="andrea",
+        required_substrings=("directly",),
+        forbidden_substrings=("execution lane",),
     )
 
 
@@ -348,17 +385,17 @@ def _scenario_cursor_primary(harness: ExperienceHarness, scenario: ExperienceSce
     started = time.time()
     harness.submit_telegram_update(
         {
-            "update_id": 503,
+            "update_id": 504,
             "message": {
                 "text": "@Cursor please fix the failing tests",
-                "message_id": 903,
-                "chat": {"id": 603},
-                "from": {"id": 703},
+                "message_id": 904,
+                "chat": {"id": 604},
+                "from": {"id": 704},
             },
         }
     )
     detail = harness.wait_for_telegram_task(
-        message_id=903,
+        message_id=904,
         statuses=(TaskStatus.QUEUED.value, TaskStatus.RUNNING.value),
     )
     meta = detail.get("task", {}).get("meta", {})
@@ -675,6 +712,19 @@ def default_experience_scenarios() -> List[ExperienceScenario]:
                 "services/andrea_sync/telegram_format.py",
             ],
             runner=_scenario_what_llm_is_answering,
+        ),
+        ExperienceScenario(
+            scenario_id="what_is_cursor_direct",
+            title="What is Cursor stays specific",
+            description="Cursor definition questions should stay direct and answer the Cursor-specific concept.",
+            category="routing",
+            tags=["telegram", "meta", "direct"],
+            suspected_files=[
+                "services/andrea_sync/andrea_router.py",
+                "services/andrea_sync/server.py",
+                "services/andrea_sync/telegram_format.py",
+            ],
+            runner=_scenario_what_is_cursor,
         ),
         ExperienceScenario(
             scenario_id="cursor_primary_explicit_mention",

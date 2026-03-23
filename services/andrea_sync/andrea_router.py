@@ -87,6 +87,23 @@ META_STACK_INLINE_RE = re.compile(
     r")\b",
     re.I,
 )
+META_OPENCLAW_RE = re.compile(
+    r"^(?:what (?:is|'s) openclaw|is (?:this|that) (?:the )?openclaw)$",
+    re.I,
+)
+META_CURSOR_REPLIES_RE = re.compile(
+    r"^what (?:is|'s) cursor$",
+    re.I,
+)
+META_ANSWERING_RE = re.compile(
+    r"^(?:"
+    r"who(?:'s| is) answering|"
+    r"who answered|"
+    r"is this (?:really )?andrea|"
+    r"(?:which|what) (?:llm|model) (?:is )?(?:this|answering|replying)"
+    r")$",
+    re.I,
+)
 HYBRID_SKILL_RE = re.compile(
     r"\b(remind me|reminder|note|notes|calendar|schedule|todo|to-do|task list|message someone|"
     r"send a message|draft a message|email|inbox|search the web|search online|weather|"
@@ -290,6 +307,7 @@ def _contextual_fallback(
 
 def _heuristic_reply(text: str) -> str:
     clean = _normalize(text)
+    trimmed = clean.rstrip("?.! ").strip()
     if GREETING_RE.search(clean):
         if "how are you" in clean or "how're you" in clean:
             return "Hi! I'm doing well, and I'm ready to help. What would you like me to work on?"
@@ -301,6 +319,22 @@ def _heuristic_reply(text: str) -> str:
             "Yes. I can bring Cursor in when the work needs heavier repo or coding help. "
             "If you use @Cursor, I handle that routing for you behind the scenes, and you do not need "
             "to manage session keys, labels, or other runtime details."
+        )
+    if META_CURSOR_REPLIES_RE.match(trimmed):
+        return (
+            "Cursor is the execution lane I use for heavier repo and coding work. "
+            "I keep lightweight questions with Andrea directly, and I only bring Cursor in when the task "
+            "needs deeper technical changes."
+        )
+    if META_OPENCLAW_RE.match(trimmed):
+        return (
+            "You're talking with Andrea. OpenClaw is the collaboration layer I can use when deeper "
+            "reasoning helps, but lightweight questions like this stay direct with me."
+        )
+    if META_ANSWERING_RE.match(trimmed):
+        return (
+            "Right now, Andrea is answering you directly. "
+            "I only bring OpenClaw or Cursor in when the task needs deeper reasoning or heavier repo execution."
         )
     if _meta_stack_question(clean, text):
         return (

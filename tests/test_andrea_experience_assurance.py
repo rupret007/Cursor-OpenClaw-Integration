@@ -51,9 +51,12 @@ class AndreaExperienceAssuranceTests(unittest.TestCase):
         latest = get_latest_experience_run(self.conn)
         self.assertEqual(latest["run_id"], result["run"]["run_id"])
         self.assertEqual(latest["failed_checks"], 0)
-        self.assertGreaterEqual(latest["total_checks"], 6)
+        self.assertGreaterEqual(latest["total_checks"], 7)
         self.assertEqual(len(latest["checks"]), latest["total_checks"])
         self.assertIn("score_counts", latest)
+        check_ids = {row["check_id"] for row in latest["checks"]}
+        self.assertIn("experience_what_is_cursor_direct", check_ids)
+        self.assertIn("experience_what_llm_is_answering_direct", check_ids)
 
     def test_run_experience_assurance_bridges_failure_into_repair_cycle(self) -> None:
         def failing_runner(_harness: object, scenario: ExperienceScenario) -> ExperienceCheckResult:

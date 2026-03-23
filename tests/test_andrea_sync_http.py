@@ -1015,7 +1015,10 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
         self.assertEqual(detail["task"]["status"], "completed")
         self.assertEqual(detail["task"]["meta"]["assistant"]["route"], "direct")
         self.assertNotIn("cursor", detail["task"]["meta"])
-        self.assertIn("openclaw", detail["task"]["meta"]["assistant"]["last_reply"].lower())
+        reply = detail["task"]["meta"]["assistant"]["last_reply"].lower()
+        self.assertIn("openclaw", reply)
+        self.assertIn("andrea", reply)
+        self.assertIn("collaboration layer", reply)
 
     def test_telegram_what_is_cursor_routes_direct(self) -> None:
         """Success gate: What is Cursor? stays direct, no delegation lifecycle."""
@@ -1063,7 +1066,10 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
         self.assertEqual(detail["task"]["status"], "completed")
         self.assertEqual(detail["task"]["meta"]["assistant"]["route"], "direct")
         self.assertNotIn("cursor", detail["task"]["meta"])
-        self.assertIn("cursor", detail["task"]["meta"]["assistant"]["last_reply"].lower())
+        reply = detail["task"]["meta"]["assistant"]["last_reply"].lower()
+        self.assertIn("cursor", reply)
+        self.assertIn("andrea", reply)
+        self.assertIn("execution lane", reply)
 
     def test_telegram_what_llm_is_answering_routes_direct(self) -> None:
         """Success gate: What LLM is answering? stays direct, no delegation lifecycle."""
@@ -1111,6 +1117,10 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
         self.assertEqual(detail["task"]["status"], "completed")
         self.assertEqual(detail["task"]["meta"]["assistant"]["route"], "direct")
         self.assertNotIn("cursor", detail["task"]["meta"])
+        reply = detail["task"]["meta"]["assistant"]["last_reply"].lower()
+        self.assertIn("andrea", reply)
+        self.assertIn("directly", reply)
+        self.assertNotIn("execution lane", reply)
 
     def test_telegram_memory_question_uses_prior_chat_context(self) -> None:
         prev_enabled = os.environ.get("OPENAI_API_ENABLED")

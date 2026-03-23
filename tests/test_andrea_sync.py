@@ -1215,11 +1215,14 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(decision.reason, "stack_or_tooling_question")
         self.assertIn("andrea", decision.reply_text.lower())
         self.assertIn("openclaw", decision.reply_text.lower())
+        self.assertIn("collaboration layer", decision.reply_text.lower())
 
     def test_router_what_is_cursor_stays_direct(self) -> None:
         decision = route_message("What is Cursor?")
         self.assertEqual(decision.mode, "direct")
         self.assertIn("cursor", decision.reply_text.lower())
+        self.assertIn("execution lane", decision.reply_text.lower())
+        self.assertIn("andrea", decision.reply_text.lower())
 
     def test_router_have_cursor_fix_delegates(self) -> None:
         decision = route_message("Have Cursor fix the failing tests in the repo.")
@@ -1236,6 +1239,17 @@ class TestAndreaSync(unittest.TestCase):
         decision = route_message("What LLM is answering?")
         self.assertEqual(decision.mode, "direct")
         self.assertEqual(decision.reason, "stack_or_tooling_question")
+        self.assertIn("andrea", decision.reply_text.lower())
+        self.assertIn("directly", decision.reply_text.lower())
+        self.assertNotIn("execution lane", decision.reply_text.lower())
+
+    def test_router_meta_stack_questions_use_distinct_direct_replies(self) -> None:
+        openclaw = route_message("Is this OpenClaw?")
+        cursor = route_message("What is Cursor?")
+        llm = route_message("What LLM is answering?")
+        self.assertNotEqual(openclaw.reply_text, cursor.reply_text)
+        self.assertNotEqual(cursor.reply_text, llm.reply_text)
+        self.assertNotEqual(openclaw.reply_text, llm.reply_text)
 
     def test_server_routes_latest_message_not_accumulated_thread(self) -> None:
         """Regression: router must classify the latest user turn, not merged accumulated_prompt."""

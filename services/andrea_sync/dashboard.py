@@ -16,8 +16,10 @@ from .store import (
     SYSTEM_TASK_ID,
     count_active_memories,
     count_due_reminders,
+    get_latest_experience_run,
     count_pending_reminders,
     count_principals,
+    list_experience_runs,
     list_incidents,
     list_tasks,
     load_events_for_task,
@@ -322,6 +324,54 @@ def _build_memory_summary(conn: Any) -> Dict[str, Any]:
     }
 
 
+def _build_experience_assurance_summary(conn: Any) -> Dict[str, Any]:
+    latest = get_latest_experience_run(conn)
+    recent = list_experience_runs(conn, limit=6)
+    if not recent:
+        return {
+            "latest_run": {},
+            "recent_runs": [],
+            "failing_scenarios": [],
+            "score_counts": {},
+            "category_counts": [],
+            "pass_rate": None,
+        }
+    recent_rows: List[Dict[str, Any]] = []
+    passing = 0
+    for row in recent:
+        if row.get("passed"):
+            passing += 1
+        recent_rows.append(
+            {
+                "run_id": str(row.get("run_id") or ""),
+                "status": str(row.get("status") or "completed"),
+                "passed": bool(row.get("passed")),
+                "summary": str(row.get("summary") or ""),
+                "average_score": float(row.get("average_score") or 0.0),
+                "failed_checks": int(row.get("failed_checks") or 0),
+                "total_checks": int(row.get("total_checks") or 0),
+                "completed_at": float(row.get("completed_at") or row.get("updated_at") or 0.0),
+            }
+        )
+    return {
+        "latest_run": {
+            "run_id": str(latest.get("run_id") or ""),
+            "status": str(latest.get("status") or "completed"),
+            "passed": bool(latest.get("passed")),
+            "summary": str(latest.get("summary") or ""),
+            "average_score": float(latest.get("average_score") or 0.0),
+            "failed_checks": int(latest.get("failed_checks") or 0),
+            "total_checks": int(latest.get("total_checks") or 0),
+            "completed_at": float(latest.get("completed_at") or latest.get("updated_at") or 0.0),
+        },
+        "recent_runs": recent_rows,
+        "failing_scenarios": list(latest.get("failed_scenarios") or [])[:8],
+        "score_counts": latest.get("score_counts") if isinstance(latest.get("score_counts"), dict) else {},
+        "category_counts": list(latest.get("category_counts") or [])[:6],
+        "pass_rate": round(float(passing) / float(len(recent_rows)), 2) if recent_rows else None,
+    }
+
+
 def build_dashboard_summary(
     conn: Any,
     server: Any,
@@ -424,6 +474,7 @@ def build_dashboard_summary(
         },
         "memory": _build_memory_summary(conn),
         "optimization": _build_optimization_summary(conn),
+        "experience_assurance": _build_experience_assurance_summary(conn),
     }
 
 
@@ -500,6 +551,20 @@ def render_dashboard_html() -> str:
       </section>
     </div>
 
+    <div class="grid twoCol" style="margin-bottom:16px;">
+      <section class="panel">
+        <h2>Experience Assurance</h2>
+        <p class="subtle">Deterministic scenario replay for calmness, routing selectivity, and capability honesty.</p>
+        <div class="list" id="experienceAssurance"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Experience Regressions</h2>
+        <p class="subtle">Latest failing scenarios, score drops, and likely files if the experience slips.</p>
+        <div class="list" id="experienceFailures"></div>
+      </section>
+    </div>
+
     <div class="grid twoCol">
       <section class="panel">
         <h2>Recent Tasks</h2>
@@ -558,6 +623,10 @@ def render_dashboard_html() -> str:
 
     function renderCards(data) {
       const latestRun = (data.optimization || {}).latest_run || {};
+      const latestExperience = (data.experience_assurance || {}).latest_run || {};
+      const experienceStatus = !latestExperience.run_id
+        ? "warn"
+        : (latestExperience.passed ? "healthy" : "failed");
       const cards = [
         { label: "Kill Switch", value: data.service.kill_switch.engaged ? "ENGAGED" : "Released", status: data.service.kill_switch.engaged ? "blocked" : "ready", note: "Server safety state" },
         { label: "Webhook", value: data.webhook.status, status: data.webhook.status, note: data.webhook.reason || "Telegram webhook state" },
@@ -566,7 +635,8 @@ def render_dashboard_html() -> str:
         { label: "ACPX", value: data.capabilities.acpx ? data.capabilities.acpx.status : "digest-missing", status: data.capabilities.acpx ? data.capabilities.acpx.status : "blocked", note: data.capabilities.acpx ? data.capabilities.acpx.notes : "No published acpx row is available yet" },
         { label: "Digest Age", value: `${Math.round(Number(data.service.capability_digest_age_seconds || 0))}s`, status: Number(data.service.capability_digest_age_seconds || 0) > 1800 ? "warn" : "ready", note: "Capability snapshot freshness" },
         { label: "Repair Loop", value: data.service.repair_enabled ? "enabled" : "disabled", status: data.service.repair_enabled ? "ready" : "warn", note: `Cursor ${data.service.repair_cursor_mode || "auto"} · safe roots ${(data.service.repair_safe_roots || []).join(", ") || "default"}` },
-        { label: "Optimizer", value: latestRun.status || "idle", status: latestRun.status || "warn", note: latestRun.run_id ? `Latest run ${latestRun.run_id}` : "No optimization run recorded yet" }
+        { label: "Optimizer", value: latestRun.status || "idle", status: latestRun.status || "warn", note: latestRun.run_id ? `Latest run ${latestRun.run_id}` : "No optimization run recorded yet" },
+        { label: "Experience", value: latestExperience.run_id ? `${Math.round(Number(latestExperience.average_score || 0))}` : "idle", status: experienceStatus, note: latestExperience.run_id ? `${latestExperience.failed_checks || 0}/${latestExperience.total_checks || 0} failed in ${latestExperience.run_id}` : "No experience replay has been recorded yet" }
       ];
       document.getElementById("cards").innerHTML = cards.map((card) => `
         <div class="card">
@@ -680,6 +750,71 @@ def render_dashboard_html() -> str:
       `).join("") || `<div class="item"><strong>No proposals yet</strong><p class="subtle" style="margin-top:8px;">The optimizer will list branch-prep candidates here once recurring failures are detected.</p></div>`;
     }
 
+    function renderExperience(data) {
+      const exp = data.experience_assurance || {};
+      const latest = exp.latest_run || {};
+      const recentRuns = exp.recent_runs || [];
+      const failures = exp.failing_scenarios || [];
+      const categories = exp.category_counts || [];
+      const scoreCounts = exp.score_counts || {};
+
+      const runItems = [];
+      if (latest.run_id) {
+        runItems.push({
+          title: `Latest run: ${latest.run_id}`,
+          note: latest.summary || "No experience summary",
+          extra: `Avg score ${Math.round(Number(latest.average_score || 0))} · Failed ${latest.failed_checks || 0}/${latest.total_checks || 0}${exp.pass_rate !== null && exp.pass_rate !== undefined ? ` · recent pass rate ${Math.round(Number(exp.pass_rate) * 100)}%` : ""}`,
+          status: latest.passed ? "ready" : "failed"
+        });
+      }
+      if (Object.keys(scoreCounts).length) {
+        runItems.push({
+          title: "Score distribution",
+          note: `Excellent ${scoreCounts.excellent || 0} · Warn ${scoreCounts.warn || 0} · Failed ${scoreCounts.failed || 0}`,
+          extra: "",
+          status: (scoreCounts.failed || 0) > 0 ? "failed" : "ready"
+        });
+      }
+      for (const row of categories.slice(0, 3)) {
+        runItems.push({
+          title: row.category || "experience",
+          note: `Regressed ${row.count || 0} scenario(s)`,
+          extra: (row.issue_codes || []).join(", "),
+          status: "warn"
+        });
+      }
+      for (const row of recentRuns.slice(1, 4)) {
+        runItems.push({
+          title: row.run_id,
+          note: row.summary || "No experience summary",
+          extra: `Avg score ${Math.round(Number(row.average_score || 0))} · Failed ${row.failed_checks || 0}/${row.total_checks || 0} · ${formatTs(row.completed_at)}`,
+          status: row.passed ? "ready" : "warn"
+        });
+      }
+      document.getElementById("experienceAssurance").innerHTML = runItems.map((item) => `
+        <div class="item">
+          <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;">
+            <strong>${escapeHtml(item.title)}</strong>
+            <span class="pill ${pillClass(item.status)}">${escapeHtml(item.status)}</span>
+          </div>
+          <p class="subtle" style="margin-top:8px;">${escapeHtml(item.note)}</p>
+          ${item.extra ? `<p class="subtle" style="margin-top:6px;">${escapeHtml(item.extra)}</p>` : ""}
+        </div>
+      `).join("") || `<div class="item"><strong>No assurance runs yet</strong><p class="subtle" style="margin-top:8px;">Run the local experience replay to populate deterministic UX checks.</p></div>`;
+
+      document.getElementById("experienceFailures").innerHTML = failures.map((row) => `
+        <div class="item">
+          <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;">
+            <strong>${escapeHtml(row.title || row.scenario_id || "scenario")}</strong>
+            <span class="pill ${pillClass(Number(row.score || 0) >= 70 ? "warn" : "failed")}">${escapeHtml(String(row.score || 0))}</span>
+          </div>
+          <p class="subtle" style="margin-top:8px;">${escapeHtml(row.summary || "No failure summary")}</p>
+          <p class="subtle" style="margin-top:6px;">${escapeHtml((row.issue_codes || []).join(", ") || "No issue codes")}</p>
+          ${row.suspected_files && row.suspected_files.length ? `<p class="subtle" style="margin-top:6px;">Likely files: ${escapeHtml((row.suspected_files || []).join(", "))}</p>` : ""}
+        </div>
+      `).join("") || `<div class="item"><strong>No active experience regressions</strong><p class="subtle" style="margin-top:8px;">The latest deterministic replay passed.</p></div>`;
+    }
+
     function renderTasks(data) {
       const rows = data.tasks.items || [];
       const header = `
@@ -770,6 +905,7 @@ def render_dashboard_html() -> str:
       renderCards(latestSummary);
       renderAttention(latestSummary);
       renderOptimization(latestSummary);
+      renderExperience(latestSummary);
       renderTasks(latestSummary);
       document.getElementById("lastUpdated").textContent = `Last updated ${new Date().toLocaleTimeString()} (auto-refresh every 5s)`;
       const tasks = latestSummary.tasks.items || [];

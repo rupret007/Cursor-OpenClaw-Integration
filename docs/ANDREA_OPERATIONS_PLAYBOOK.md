@@ -113,11 +113,12 @@ bash scripts/andrea_slo_check.sh
 | **Daily wrap-up (operator)** | Step-by-step: [ANDREA_WRAP_UP_DAILY.md](ANDREA_WRAP_UP_DAILY.md) — `bash scripts/andrea_wrap_up_prereqs.sh` → `bash scripts/andrea_full_cycle.sh` → `bash scripts/test_integration.sh` |
 | Unit + integration | `bash scripts/test_integration.sh` |
 | Live comm smoke (optional) | `RUN_COMM_SMOKE=1 ANDREA_SYNC_URL=http://127.0.0.1:8765 bash scripts/test_integration.sh` or `bash scripts/andrea_communication_smoke.sh` |
-| Local monitor dashboard | Open `http://127.0.0.1:8765/dashboard` for live health, webhook, recent tasks, and task timelines |
+| Local monitor dashboard | Open `http://127.0.0.1:8765/dashboard` for live health, webhook, recent tasks, experience assurance, and task timelines |
 | Admin service control | `bash scripts/andrea_services.sh status all` for the current runtime, `bash scripts/andrea_services.sh restart all` to bounce sync+tunnel+gateway, `bash scripts/andrea_services.sh bootstrap` to rerun the login heal chain on demand |
 | Full operator cycle (local) | From repo: `export ANDREA_SYNC_INTERNAL_TOKEN=…` then `bash scripts/andrea_full_cycle.sh` (pull, health, publish digest, policy, gateway restart, smoke, kill-switch drill). Skips: `SKIP_GIT=1`, `SKIP_GATEWAY_RESTART=1`, `SKIP_COMM_SMOKE=1`, `SKIP_KILL_DRILL=1`, `SKIP_TELEGRAM_E2E=1`. |
 | Masterclass doctor | `bash scripts/andrea_doctor.sh` |
 | Closed-loop autonomy pass | `export ANDREA_SYNC_URL=… ANDREA_SYNC_INTERNAL_TOKEN=… && bash scripts/andrea_autonomy_cycle.sh` |
+| Experience assurance replay | `python3 scripts/andrea_experience_cycle.py --repo "$PWD"` for deterministic Andrea UX/routing replay; add `--repair-on-fail` to feed failing scenarios into the existing repair loop |
 | Security sanity (repo) | `bash scripts/andrea_security_sanity.sh` |
 | Readiness grade (A/B/C) | `python3 scripts/andrea_readiness_grade.py` |
 | SLO check (grade + probe) | `bash scripts/andrea_slo_check.sh` |
@@ -154,6 +155,7 @@ bash scripts/andrea_slo_check.sh
 | Telegram task queues then fails immediately | Confirm `openclaw agent --agent main --message "READY" --json` succeeds, `openclaw skills info cursor_handoff --json` is eligible, and `CURSOR_API_KEY` + repo `origin` are available for OpenClaw escalations; inspect `/v1/tasks/{id}` `last_error` |
 | `@Cursor` did not seem to involve Cursor | Inspect `/v1/tasks/{id}` `meta.execution.collaboration_mode` and `meta.execution.delegated_to_cursor`; if needed, rerun after confirming `cursor_handoff` is eligible and `CURSOR_API_KEY` is available |
 | `@Gemini` / `@Minimax` / `@OpenAI` did not seem to honor the requested lane | Inspect `/v1/tasks/{id}` `meta.telegram.preferred_model_family`, `meta.execution.preferred_model_label`, and `meta.openclaw.provider` / `meta.openclaw.model`; the preferred lane is a strong routing instruction, but the final active provider/model may differ if OpenClaw falls back for reliability |
+| Experience card is red / failing scenarios keep appearing | Run `python3 scripts/andrea_experience_cycle.py --repo "$PWD"` to reproduce locally, inspect the dashboard `Experience Regressions` files list, then rerun with `--repair-on-fail` if you want the existing incident loop to take the first safe repair pass |
 | Reminder created but never delivered | Confirm `ANDREA_SYNC_PROACTIVE_SWEEP_ENABLED=1` or run `RunProactiveSweep` manually; check `dashboard` memory metrics and recent `ReminderFailed` / `ReminderDelivered` events |
 | Auto-heal proposal refused to run locally | Check regression status, kill-switch state, capability digest freshness, safe target paths, and whether the repo was dirty when `bash scripts/andrea_autonomy_cycle.sh` ran |
 

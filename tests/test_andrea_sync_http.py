@@ -22,6 +22,7 @@ if str(REPO_ROOT) not in sys.path:
 from services.andrea_sync.telegram_format import format_final_message  # noqa: E402
 from services.andrea_sync.adapters import telegram as tg_adapt  # noqa: E402
 from services.andrea_sync.bus import handle_command  # noqa: E402
+from services.andrea_sync.experience_assurance import run_experience_assurance  # noqa: E402
 from services.andrea_sync.schema import EventType  # noqa: E402
 from services.andrea_sync.store import append_event  # noqa: E402
 
@@ -171,6 +172,7 @@ class TestAndreaSyncHTTP(unittest.TestCase):
         self.assertIn("capabilities", data)
         self.assertIn("tasks", data)
         self.assertIn("optimization", data)
+        self.assertIn("experience_assurance", data)
         self.assertIn("memory", data)
         task_ids = [task["task_id"] for task in data["tasks"]["items"]]
         self.assertIn(created["task_id"], task_ids)
@@ -258,6 +260,23 @@ class TestAndreaSyncHTTP(unittest.TestCase):
             )
         )
         self.assertEqual(data["optimization"]["latest_regression"]["total"], 8)
+
+    def test_dashboard_summary_includes_latest_experience_run(self) -> None:
+        result = self._srv.with_lock(
+            lambda c: run_experience_assurance(
+                c,
+                actor="http-test",
+                repo_path=REPO_ROOT,
+            )
+        )
+        self.assertTrue(result["ok"])
+        req = urllib.request.Request(self._url("/v1/dashboard/summary?limit=10"), method="GET")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            self.assertEqual(resp.status, 200)
+            data = json.loads(resp.read().decode("utf-8"))
+        latest = data["experience_assurance"]["latest_run"]
+        self.assertEqual(latest["run_id"], result["run"]["run_id"])
+        self.assertGreaterEqual(latest["total_checks"], 6)
 
     def test_run_incident_repair_internal_command_requires_auth_and_executes(self) -> None:
         body = json.dumps(

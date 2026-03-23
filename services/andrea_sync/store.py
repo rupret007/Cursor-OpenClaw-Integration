@@ -9,6 +9,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple  # noqa: F401 used in list_tasks
 
+from .experience_types import new_experience_run_id
 from .schema import Channel, EventType
 
 
@@ -149,6 +150,33 @@ def migrate(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_repair_plans_incident
             ON repair_plans(incident_id, updated_at DESC);
+        CREATE TABLE IF NOT EXISTS experience_runs (
+            run_id TEXT PRIMARY KEY,
+            actor TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL,
+            passed INTEGER NOT NULL DEFAULT 0,
+            summary TEXT NOT NULL DEFAULT '',
+            total_checks INTEGER NOT NULL DEFAULT 0,
+            failed_checks INTEGER NOT NULL DEFAULT 0,
+            average_score REAL NOT NULL DEFAULT 0,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            run_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_experience_runs_updated
+            ON experience_runs(updated_at DESC);
+        CREATE TABLE IF NOT EXISTS experience_checks (
+            check_key TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL REFERENCES experience_runs(run_id) ON DELETE CASCADE,
+            scenario_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            score REAL NOT NULL DEFAULT 0,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            check_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_experience_checks_run
+            ON experience_checks(run_id, updated_at DESC);
         """
     )
     conn.execute(
@@ -954,6 +982,150 @@ def list_incidents(
         (str(status or "").strip(), str(status or "").strip(), max(1, int(limit))),
     ).fetchall()
     return [get_incident(conn, str(row["incident_id"])) for row in rows]
+
+
+def save_experience_run(conn: sqlite3.Connection, run: Dict[str, Any]) -> str:
+    payload = dict(run)
+    run_id = str(payload.get("run_id") or "").strip() or new_experience_run_id()
+    ts = time.time()
+    created_at = float(payload.get("created_at") or payload.get("started_at") or ts)
+    checks = payload.get("checks") if isinstance(payload.get("checks"), list) else []
+    conn.execute(
+        """
+        INSERT INTO experience_runs(
+            run_id, actor, status, passed, summary, total_checks, failed_checks,
+            average_score, created_at, updated_at, run_json
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(run_id) DO UPDATE SET
+            actor = excluded.actor,
+            status = excluded.status,
+            passed = excluded.passed,
+            summary = excluded.summary,
+            total_checks = excluded.total_checks,
+            failed_checks = excluded.failed_checks,
+            average_score = excluded.average_score,
+            updated_at = excluded.updated_at,
+            run_json = excluded.run_json
+        """,
+        (
+            run_id,
+            str(payload.get("actor") or "").strip(),
+            str(payload.get("status") or "completed").strip(),
+            1 if bool(payload.get("passed")) else 0,
+            str(payload.get("summary") or "").strip(),
+            int(payload.get("total_checks") or len(checks)),
+            int(payload.get("failed_checks") or 0),
+            float(payload.get("average_score") or 0.0),
+            created_at,
+            ts,
+            json.dumps({**payload, "run_id": run_id}, ensure_ascii=False, default=str),
+        ),
+    )
+    conn.execute("DELETE FROM experience_checks WHERE run_id = ?", (run_id,))
+    for idx, raw in enumerate(checks):
+        row = dict(raw) if isinstance(raw, dict) else {"summary": str(raw)}
+        scenario_id = str(row.get("scenario_id") or row.get("check_id") or f"scenario_{idx+1}").strip()
+        check_key = f"{run_id}:{scenario_id or idx + 1}"
+        row_created_at = float(row.get("started_at") or payload.get("started_at") or created_at)
+        conn.execute(
+            """
+            INSERT INTO experience_checks(
+                check_key, run_id, scenario_id, status, score, created_at, updated_at, check_json
+            ) VALUES (?,?,?,?,?,?,?,?)
+            """,
+            (
+                check_key,
+                run_id,
+                scenario_id,
+                "passed" if bool(row.get("passed")) else "failed",
+                float(row.get("score") or 0.0),
+                row_created_at,
+                ts,
+                json.dumps({**row, "check_key": check_key, "run_id": run_id}, ensure_ascii=False, default=str),
+            ),
+        )
+    conn.commit()
+    return run_id
+
+
+def list_experience_checks(conn: sqlite3.Connection, run_id: str) -> List[Dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT check_key, created_at, updated_at, check_json
+        FROM experience_checks
+        WHERE run_id = ?
+        ORDER BY updated_at DESC, scenario_id ASC
+        """,
+        (str(run_id or "").strip(),),
+    ).fetchall()
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        try:
+            payload = json.loads(row["check_json"] or "{}")
+        except Exception:
+            payload = {}
+        payload["check_key"] = str(row["check_key"] or "")
+        payload["created_at"] = float(row["created_at"] or 0.0)
+        payload["updated_at"] = float(row["updated_at"] or 0.0)
+        out.append(payload)
+    return out
+
+
+def get_experience_run(conn: sqlite3.Connection, run_id: str) -> Dict[str, Any]:
+    row = conn.execute(
+        """
+        SELECT run_id, actor, status, passed, summary, total_checks, failed_checks,
+               average_score, created_at, updated_at, run_json
+        FROM experience_runs
+        WHERE run_id = ?
+        LIMIT 1
+        """,
+        (str(run_id or "").strip(),),
+    ).fetchone()
+    if not row:
+        return {}
+    try:
+        payload = json.loads(row["run_json"] or "{}")
+    except Exception:
+        payload = {}
+    return {
+        **payload,
+        "run_id": str(row["run_id"] or ""),
+        "actor": str(row["actor"] or ""),
+        "status": str(row["status"] or ""),
+        "passed": bool(row["passed"]),
+        "summary": str(row["summary"] or ""),
+        "total_checks": int(row["total_checks"] or 0),
+        "failed_checks": int(row["failed_checks"] or 0),
+        "average_score": float(row["average_score"] or 0.0),
+        "created_at": float(row["created_at"] or 0.0),
+        "updated_at": float(row["updated_at"] or 0.0),
+        "checks": list_experience_checks(conn, str(row["run_id"] or "")),
+    }
+
+
+def list_experience_runs(
+    conn: sqlite3.Connection,
+    *,
+    status: str = "",
+    limit: int = 10,
+) -> List[Dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT run_id
+        FROM experience_runs
+        WHERE (? = '' OR status = ?)
+        ORDER BY updated_at DESC
+        LIMIT ?
+        """,
+        (str(status or "").strip(), str(status or "").strip(), max(1, int(limit))),
+    ).fetchall()
+    return [get_experience_run(conn, str(row["run_id"])) for row in rows]
+
+
+def get_latest_experience_run(conn: sqlite3.Connection) -> Dict[str, Any]:
+    rows = list_experience_runs(conn, limit=1)
+    return rows[0] if rows else {}
 
 
 def save_repair_attempt(conn: sqlite3.Connection, attempt: Dict[str, Any]) -> str:

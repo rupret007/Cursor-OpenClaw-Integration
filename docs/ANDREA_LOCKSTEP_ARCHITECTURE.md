@@ -12,6 +12,7 @@ Strict two-way sync between **user channels** (Telegram, Alexa, CLI), **OpenClaw
 | Projector | `services/andrea_sync/projector.py` | Derive task JSON from events |
 | HTTP API | `services/andrea_sync/server.py` | REST ingress for commands, Telegram webhook, Alexa skill |
 | Optimizer | `services/andrea_sync/optimizer.py` + `scripts/andrea_optimize.py` | Detect regressions, emit proposals, and gate local self-heal |
+| Experience assurance | `services/andrea_sync/experience_assurance.py` + `scripts/andrea_experience_cycle.py` | Replay deterministic Andrea scenarios, score UX/routing/capability honesty, persist runs, and optionally bridge failures into repair |
 | Incident repair | `services/andrea_sync/repair_orchestrator.py` + `scripts/andrea_repair_cycle.py` | Detect concrete failures, triage them, try the smallest safe repair, verify, rollback, and escalate to Cursor when needed |
 | Dashboard | `services/andrea_sync/dashboard.py` | Operator summary for orchestration, memory, reminders, and autonomy health |
 | Policy | `services/andrea_sync/policy.py` | Verify-before-deny using published capability digest + TTL |
@@ -27,6 +28,7 @@ Strict two-way sync between **user channels** (Telegram, Alexa, CLI), **OpenClaw
 | GET | `/v1/health` | Liveness + db path + `kill_switch` summary + capability digest age |
 | GET | `/v1/status` | Extended JSON: kill switch + full capability digest payload |
 | GET | `/v1/capabilities` | Cached capability snapshot (from last `PublishCapabilitySnapshot`) |
+| GET | `/v1/dashboard/summary` | Operator JSON summary for service health, optimization, experience assurance, and projected task state |
 | GET | `/v1/policy/skill-absence?skill=...` | Verify-before-deny: may a channel claim this skill is absent? (`max_age_seconds` optional) |
 | POST | `/v1/commands` | JSON command envelope (see schema). Admin commands require `Authorization: Bearer $ANDREA_SYNC_INTERNAL_TOKEN` |
 | GET | `/v1/tasks` | Recent tasks (`?limit=`) |
@@ -133,11 +135,12 @@ Commands without `idempotency_key` use a deterministic hash of `channel`, `exter
 
 1. `services/andrea_sync/optimizer.py` scans recent outcomes, derives recurring UX/runtime failure categories, and emits structured optimization proposals.
 2. `scripts/andrea_optimize.py` runs one optimization cycle, optionally records regression results, and can auto-apply ready proposals through Cursor branch prep.
-3. `services/andrea_sync/repair_orchestrator.py` adds a first-class incident pipeline: detect from failing verification, triage with the Gemini lane, try a small GPT patch, challenge it with MiniMax if needed, then create a deep GPT repair plan and optional Cursor handoff only after the lightweight paths fail.
-4. `scripts/andrea_repair_cycle.py` runs that pipeline directly, while `RunIncidentRepair` exposes the same flow on the internal admin command surface.
-5. `scripts/andrea_autonomy_cycle.sh` is the operator-facing wrapper for a disciplined local autonomy pass: health check, regressions, optimization, incident-driven repair, gated auto-heal, and proactive sweep.
-6. Auto-heal and repair are intentionally gated by regression success, kill-switch state, capability freshness, safe file roots, isolated worktrees, verification, and rollback so the system improves itself without silently rewriting arbitrary parts of the repo.
-7. Runtime skill truth is shared across messaging, Apple Notes, and Apple Reminders: Andrea verifies the current capability digest, attempts the smallest safe heal when a lane is not verified, and keeps user-facing copy calm instead of exposing raw OpenClaw/runtime diagnostics.
+3. `services/andrea_sync/experience_assurance.py` replays deterministic scenarios against a temporary lockstep server, emits a `verification_report`-compatible payload, persists the latest run/checks, and can forward failures into the same incident repair lane without inventing a parallel repair system.
+4. `services/andrea_sync/repair_orchestrator.py` adds a first-class incident pipeline: detect from failing verification, triage with the Gemini lane, try a small GPT patch, challenge it with MiniMax if needed, then create a deep GPT repair plan and optional Cursor handoff only after the lightweight paths fail.
+5. `scripts/andrea_repair_cycle.py` runs that pipeline directly, while `RunIncidentRepair` exposes the same flow on the internal admin command surface.
+6. `scripts/andrea_autonomy_cycle.sh` is the operator-facing wrapper for a disciplined local autonomy pass: health check, regressions, optimization, incident-driven repair, gated auto-heal, and proactive sweep.
+7. Auto-heal, experience replay, and repair are intentionally gated by regression success, kill-switch state, capability freshness, safe file roots, isolated worktrees, verification, and rollback so the system improves itself without silently rewriting arbitrary parts of the repo.
+8. Runtime skill truth is shared across messaging, Apple Notes, and Apple Reminders: Andrea verifies the current capability digest, attempts the smallest safe heal when a lane is not verified, and keeps user-facing copy calm instead of exposing raw OpenClaw/runtime diagnostics.
 
 ## Security
 

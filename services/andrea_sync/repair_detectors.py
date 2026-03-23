@@ -311,6 +311,18 @@ def incident_from_verification_report(
     if not failed:
         return None
     primary = failed[0]
+    hinted_files: List[str] = []
+    for row in failed[:3]:
+        candidates = row.get("suspected_files")
+        if not isinstance(candidates, list):
+            meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            candidates = meta.get("suspected_files")
+        if not isinstance(candidates, list):
+            continue
+        for path in candidates:
+            text = str(path or "").strip()
+            if text:
+                hinted_files.append(text)
     text_blob = "\n\n".join(
         _clip(row.get("output_excerpt") or "", 1200)
         for row in failed[:3]
@@ -319,6 +331,10 @@ def incident_from_verification_report(
     label = str(primary.get("label") or primary.get("check_id") or "verification").strip()
     check_id = str(primary.get("check_id") or "").strip().lower()
     source = "test_failure"
+    error_type_hint = check_id or "verification_failure"
+    if check_id.startswith("experience_") or "experience:" in label.lower():
+        source = "experience_regression"
+        error_type_hint = "experience_regression"
     if check_id == "health" or "health" in label.lower():
         source = "health_check_failure"
     summary = _clip(
@@ -332,14 +348,19 @@ def incident_from_verification_report(
         repo_path=repo_path,
         source_task_id=source_task_id,
         payload={
-            "error_type": check_id or "verification_failure",
+            "error_type": error_type_hint,
             "verification": dict(verification_report),
-            "metadata": {"failed_check": dict(primary)},
+            "metadata": {
+                "failed_check": dict(primary),
+                "failed_check_id": check_id,
+                "suspected_files": hinted_files,
+            },
         },
-        error_type_hint=check_id or "verification_failure",
+        error_type_hint=error_type_hint,
     )
     incident.failing_tests = extract_failing_tests(text_blob) or incident.failing_tests
-    incident.suspected_files = normalize_repo_paths(incident.suspected_files) or extract_suspected_files(
+    hinted_paths = normalize_repo_paths(hinted_files)
+    incident.suspected_files = hinted_paths or normalize_repo_paths(incident.suspected_files) or extract_suspected_files(
         text_blob + "\n" + recent_diff_summary(repo_path),
         repo_path=repo_path,
     )

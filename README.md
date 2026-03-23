@@ -69,6 +69,7 @@ Hardened **Cursor Cloud Agents** integration toolkit for **OpenClaw**, shell wor
 │   ├── andrea_model_guard.sh       # automatic profile failover + reprobe loop
 │   ├── andrea_openclaw_enforce.sh  # sync skill + required skills + probe/guard
 │   ├── andrea_optimize.py          # optimization cycle + optional auto-heal branch prep
+│   ├── andrea_experience_cycle.py  # deterministic UX replay + optional repair bridge
 │   ├── andrea_repair_cycle.py      # incident-driven repair loop + optional Cursor escalation
 │   ├── andrea_release_gate.sh      # STRICT security + grade not C + test_integration
 │   ├── andrea_slo_telegram.sh      # timed Telegram getMe SLO (token from env only)
@@ -338,6 +339,18 @@ bash scripts/andrea_autonomy_cycle.sh
 # skip the incident repair lane:
 # ANDREA_AUTONOMY_INCIDENT_REPAIR=0 bash scripts/andrea_autonomy_cycle.sh
 ```
+
+**Experience assurance replay** (deterministic routing/UX/capability scenarios, persisted in the dashboard, optional repair bridge):
+
+```bash
+python3 scripts/andrea_experience_cycle.py --repo "$PWD"
+# create a repair incident automatically when a scenario regresses:
+# python3 scripts/andrea_experience_cycle.py --repo "$PWD" --repair-on-fail
+# keep it ephemeral:
+# python3 scripts/andrea_experience_cycle.py --repo "$PWD" --no-save
+```
+
+The dashboard now includes an `Experience` card plus `Experience Assurance` / `Experience Regressions` sections backed by the latest persisted replay run.
 
 **Direct incident-driven repair cycle** (verification, minimal patch attempts, optional Cursor escalation):
 

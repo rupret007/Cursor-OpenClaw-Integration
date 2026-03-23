@@ -1199,7 +1199,7 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
             worker_label="OpenClaw",
             openclaw_session_id="sess-demo",
         )
-        self.assertIn("OpenClaw said:", text)
+        self.assertNotIn("OpenClaw said:", text)
         self.assertNotIn("OpenClaw session:", text)
 
     def test_telegram_cursor_mention_sets_cursor_primary_routing(self) -> None:

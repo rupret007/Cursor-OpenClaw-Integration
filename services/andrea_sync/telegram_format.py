@@ -4,6 +4,12 @@ from __future__ import annotations
 import re
 from typing import Any, Dict
 
+from .user_surface import (
+    dedupe_user_surface_items,
+    normalize_whitespace as shared_normalize_whitespace,
+    surface_similarity_key,
+)
+
 
 def _clip(value: Any, limit: int) -> str:
     text = str(value or "").strip()
@@ -14,7 +20,7 @@ def _clip(value: Any, limit: int) -> str:
 
 
 def _normalize_whitespace(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip()
+    return shared_normalize_whitespace(text)
 
 
 def _cursor_excerpt(summary: str, limit: int = 700) -> str:
@@ -123,19 +129,22 @@ def _collaboration_trace_lines(
     collaboration_trace: list[str] | None,
     *,
     visibility_mode: str = "",
+    suppress_against: list[str] | None = None,
 ) -> list[str]:
     if str(visibility_mode or "").strip().lower() != "full":
         return []
     if not isinstance(collaboration_trace, list):
         return []
-    items: list[str] = []
-    for raw in collaboration_trace[:4]:
-        text = _normalize_whitespace(str(raw or ""))
-        if text:
-            items.append(f"- {_clip(text, 240)}")
-    if not items:
+    items = dedupe_user_surface_items(
+        collaboration_trace,
+        limit=4,
+        item_limit=240,
+        suppress_against=suppress_against or [],
+    )
+    rendered = [f"- {_clip(text, 240)}" for text in items]
+    if not rendered:
         return []
-    return ["", "Collaboration trace:", *items]
+    return ["", "Collaboration trace:", *rendered]
 
 
 def format_ack_message(
@@ -369,6 +378,15 @@ def format_final_message(
         worker_label = "OpenClaw"
     summary_excerpt = _cursor_excerpt(summary)
     summary_sentence = _first_sentence(summary_excerpt)
+    summary_key = surface_similarity_key(summary_excerpt)
+    sentence_key = surface_similarity_key(summary_sentence)
+    show_summary_block = bool(summary_excerpt)
+    if summary_key and sentence_key and (
+        summary_key == sentence_key
+        or summary_key.startswith(sentence_key)
+        or sentence_key.startswith(summary_key)
+    ):
+        show_summary_block = len(summary_excerpt) > max(len(summary_sentence) + 80, 240)
     completed = status == "completed"
     result_label = speaker_label = _speaker_section_label(
         worker_label=worker_label,
@@ -418,7 +436,7 @@ def format_final_message(
     ]
     if completed and pr_url:
         lines.append("- A PR is available for review.")
-    elif completed and summary_sentence and not andrea_line.endswith(summary_sentence):
+    elif completed and summary_sentence and not andrea_line.endswith(summary_sentence) and show_summary_block:
         lines.append(f"- Outcome: {summary_sentence}")
     elif not completed and last_error:
         lines.append(f"- Failure: {_clip(last_error, 220)}")
@@ -429,10 +447,11 @@ def format_final_message(
         _collaboration_trace_lines(
             collaboration_trace,
             visibility_mode=visibility_mode,
+            suppress_against=[summary_excerpt, summary_sentence],
         )
     )
 
-    if summary_excerpt:
+    if show_summary_block:
         lines.extend(
             [
                 "",

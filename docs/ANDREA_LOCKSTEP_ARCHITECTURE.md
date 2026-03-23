@@ -75,8 +75,13 @@ When the kill switch is engaged, Telegram/Alexa ingress and normal commands retu
 | `ANDREA_SELF_HEAL_CURSOR_MODE` | Cursor backend override for auto-heal branch prep (`auto`, `api`, `cli`) |
 | `ANDREA_SYNC_BACKGROUND_INCIDENT_REPAIR_ENABLED` | If `1`, the idle background optimizer also runs the incident repair loop |
 | `ANDREA_SYNC_BACKGROUND_INCIDENT_CURSOR_EXECUTE` | If `1`, deep repair plans created by the background repair loop may auto-escalate into Cursor |
+| `ANDREA_REPAIR_ENABLED` | Global enable/disable switch for the incident repair control plane |
+| `ANDREA_REPAIR_PROMPT_VERSION` + per-role `ANDREA_REPAIR_*_PROMPT_VERSION` | Prompt contract version pins for triage, patching, planning, and handoff |
 | `ANDREA_REPAIR_CURSOR_MODE` | Cursor backend override for deep repair escalation (`auto`, `api`, `cli`) |
+| `ANDREA_REPAIR_SAFE_ROOTS` | Colon/comma-separated override for repo-safe auto-repair roots |
 | `ANDREA_REPAIR_MAX_PATCH_ATTEMPTS` | Lightweight patch attempts before deep escalation (default `2`) |
+| `ANDREA_REPAIR_MAX_MODEL_INVOCATIONS` / `ANDREA_REPAIR_MAX_CHANGED_LINES` | Per-incident budget caps for model calls and patch scope |
+| `ANDREA_REPAIR_STRICT_MODEL_MATCH` | If `1`, fail a repair lane when reported provider/model does not match the requested route |
 
 ## Idempotency
 
@@ -132,6 +137,7 @@ Commands without `idempotency_key` use a deterministic hash of `channel`, `exter
 4. `scripts/andrea_repair_cycle.py` runs that pipeline directly, while `RunIncidentRepair` exposes the same flow on the internal admin command surface.
 5. `scripts/andrea_autonomy_cycle.sh` is the operator-facing wrapper for a disciplined local autonomy pass: health check, regressions, optimization, incident-driven repair, gated auto-heal, and proactive sweep.
 6. Auto-heal and repair are intentionally gated by regression success, kill-switch state, capability freshness, safe file roots, isolated worktrees, verification, and rollback so the system improves itself without silently rewriting arbitrary parts of the repo.
+7. Runtime skill truth is shared across messaging, Apple Notes, and Apple Reminders: Andrea verifies the current capability digest, attempts the smallest safe heal when a lane is not verified, and keeps user-facing copy calm instead of exposing raw OpenClaw/runtime diagnostics.
 
 ## Security
 

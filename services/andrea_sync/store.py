@@ -668,25 +668,23 @@ def load_recent_principal_history(
                 backend = str(payload.get("backend") or "").strip()
                 delegated = bool(payload.get("delegated_to_cursor"))
                 if backend == "openclaw" and delegated:
-                    assistant_text = _clip_text(
-                        f"OpenClaw and Cursor completed: {payload.get('summary')}"
-                    )
+                    assistant_text = _clip_text(f"Completed: {payload.get('summary')}")
                     assistant_source = "openclaw_cursor"
                 elif backend == "openclaw":
-                    assistant_text = _clip_text(f"OpenClaw completed: {payload.get('summary')}")
+                    assistant_text = _clip_text(f"Completed: {payload.get('summary')}")
                     assistant_source = "openclaw"
                 else:
-                    assistant_text = _clip_text(f"Cursor completed: {payload.get('summary')}")
+                    assistant_text = _clip_text(f"Completed: {payload.get('summary')}")
                     assistant_source = "cursor"
             elif et_raw == EventType.JOB_FAILED.value:
                 detail = payload.get("user_safe_error") or payload.get("message") or payload.get("error")
                 if detail:
                     backend = str(payload.get("backend") or "").strip()
                     if backend == "openclaw":
-                        assistant_text = _clip_text(f"OpenClaw failed: {detail}")
+                        assistant_text = _clip_text(f"Could not finish: {detail}")
                         assistant_source = "openclaw"
                     else:
-                        assistant_text = _clip_text(f"Cursor failed: {detail}")
+                        assistant_text = _clip_text(f"Could not finish: {detail}")
                         assistant_source = "cursor"
         if user_text:
             history.append(
@@ -1154,23 +1152,23 @@ def load_recent_telegram_history(
                 backend = str(payload.get("backend") or "").strip()
                 delegated = bool(payload.get("delegated_to_cursor"))
                 if backend == "openclaw" and delegated:
-                    assistant_text = _clip_text(f"OpenClaw and Cursor completed: {payload.get('summary')}")
+                    assistant_text = _clip_text(f"Completed: {payload.get('summary')}")
                     assistant_source = "openclaw_cursor"
                 elif backend == "openclaw":
-                    assistant_text = _clip_text(f"OpenClaw completed: {payload.get('summary')}")
+                    assistant_text = _clip_text(f"Completed: {payload.get('summary')}")
                     assistant_source = "openclaw"
                 else:
-                    assistant_text = _clip_text(f"Cursor completed: {payload.get('summary')}")
+                    assistant_text = _clip_text(f"Completed: {payload.get('summary')}")
                     assistant_source = "cursor"
             elif et_raw == EventType.JOB_FAILED.value:
                 detail = payload.get("message") or payload.get("error")
                 if detail:
                     backend = str(payload.get("backend") or "").strip()
                     if backend == "openclaw":
-                        assistant_text = _clip_text(f"OpenClaw failed: {detail}")
+                        assistant_text = _clip_text(f"Could not finish: {detail}")
                         assistant_source = "openclaw"
                     else:
-                        assistant_text = _clip_text(f"Cursor failed: {detail}")
+                        assistant_text = _clip_text(f"Could not finish: {detail}")
                         assistant_source = "cursor"
         if user_text:
             history.append({"role": "user", "content": user_text, "task_id": task_id})

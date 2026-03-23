@@ -876,6 +876,21 @@ def _handle_run_incident_repair(
         if isinstance(env.payload.get("verification_report"), dict)
         else {}
     )
+    runtime_error = (
+        dict(env.payload.get("runtime_error"))
+        if isinstance(env.payload.get("runtime_error"), dict)
+        else {}
+    )
+    health_failure = (
+        dict(env.payload.get("health_failure"))
+        if isinstance(env.payload.get("health_failure"), dict)
+        else {}
+    )
+    log_alert = (
+        dict(env.payload.get("log_alert"))
+        if isinstance(env.payload.get("log_alert"), dict)
+        else {}
+    )
     return run_incident_repair_cycle(
         conn,
         repo_path=Path(
@@ -888,7 +903,11 @@ def _handle_run_incident_repair(
         actor=str(env.payload.get("actor") or env.channel.value),
         incident_payload=incident_payload,
         verification_report=verification_report,
+        runtime_error=runtime_error,
+        health_failure=health_failure,
+        log_alert=log_alert,
         source_task_id=str(env.payload.get("source_task_id") or ""),
+        incident_id=str(env.payload.get("incident_id") or ""),
         cursor_execute=bool(env.payload.get("cursor_execute", False)),
         write_report=bool(env.payload.get("write_report", True)),
     )

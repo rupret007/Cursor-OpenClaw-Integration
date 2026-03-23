@@ -130,7 +130,7 @@ class AndreaSyncOpenClawHybridTests(unittest.TestCase):
         self.assertIn("plan", phases)
         self.assertIn("critique", phases)
         self.assertIn("execution", phases)
-        self.assertIn("synthesis", contract["phase_outputs"])
+        self.assertNotIn("synthesis", contract["phase_outputs"])
 
     def test_run_openclaw_hybrid_uses_generic_when_no_usable_text(self) -> None:
         stdout_obj = {

@@ -34,7 +34,12 @@ def main() -> int:
     )
     parser.add_argument("--incident-json", default="")
     parser.add_argument("--verification-report-json", default="")
+    parser.add_argument("--runtime-error-json", default="")
+    parser.add_argument("--health-failure-json", default="")
+    parser.add_argument("--log-alert-json", default="")
+    parser.add_argument("--incident-id", default="")
     parser.add_argument("--source-task-id", default="")
+    parser.add_argument("--actor", default="script")
     parser.add_argument("--cursor-execute", action="store_true", default=False)
     parser.add_argument("--no-write-report", action="store_true", default=False)
     args = parser.parse_args()
@@ -43,6 +48,9 @@ def main() -> int:
     verification_report = (
         _load_json_file(args.verification_report_json) if args.verification_report_json else {}
     )
+    runtime_error = _load_json_file(args.runtime_error_json) if args.runtime_error_json else {}
+    health_failure = _load_json_file(args.health_failure_json) if args.health_failure_json else {}
+    log_alert = _load_json_file(args.log_alert_json) if args.log_alert_json else {}
 
     conn = connect(Path(args.db))
     try:
@@ -50,10 +58,14 @@ def main() -> int:
         payload = run_incident_repair_cycle(
             conn,
             repo_path=Path(args.repo).expanduser(),
-            actor="script",
+            actor=str(args.actor or "script"),
             incident_payload=incident_payload,
             verification_report=verification_report,
+            runtime_error=runtime_error,
+            health_failure=health_failure,
+            log_alert=log_alert,
             source_task_id=str(args.source_task_id or ""),
+            incident_id=str(args.incident_id or ""),
             cursor_execute=bool(args.cursor_execute),
             write_report=not bool(args.no_write_report),
         )

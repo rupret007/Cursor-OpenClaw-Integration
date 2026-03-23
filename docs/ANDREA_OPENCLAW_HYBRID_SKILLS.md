@@ -23,6 +23,7 @@ Remove the **GitHub Grade‑C blocker** first when possible: `gh auth login` (or
 
 | Skill | Skill key | Typical install / auth |
 |------|-----------|-------------------------|
+| BlueBubbles / iMessage | `bluebubbles` | Install/verify through `openclaw skills info bluebubbles`; keep the BlueBubbles bridge healthy and grant any required local messaging permissions before relying on outbound send flows. |
 | Apple Notes | `apple-notes` | Install **`memo`** CLI (Homebrew: `brew install memo` — confirm with `openclaw skills info apple-notes`). Grant macOS automation/Notes permissions as prompted. |
 | Apple Reminders | `apple-reminders` | Install **`remindctl`** (common tap: `brew install steipete/tap/remindctl`; always verify with `openclaw skills info apple-reminders`). |
 | Things 3 | `things-mac` | Install the **`things`** CLI for Things 3 per upstream instructions (`openclaw skills info things-mac` — may not be in core Homebrew). |

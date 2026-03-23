@@ -54,6 +54,7 @@ OPENCLAW_SKILLS_OPTIONAL_MISSING = ("gemini",)
 
 # Hybrid assistant lane (Waves 1–3). ✗ missing → ready_with_limits (install per hybrid doc).
 HYBRID_OPENCLAW_SKILLS = (
+    "bluebubbles",
     "apple-notes",
     "apple-reminders",
     "things-mac",

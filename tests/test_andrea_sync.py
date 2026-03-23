@@ -1513,7 +1513,7 @@ class TestAndreaSync(unittest.TestCase):
         )
         self.assertIn("Andrea:", text)
         self.assertIn("What happened:", text)
-        self.assertIn("Cursor said:", text)
+        self.assertNotIn("Cursor said:", text)
         self.assertIn("Technical details:", text)
         self.assertIn("PR: https://github.com/example/repo/pull/1", text)
         self.assertNotIn("### What changed", text)
@@ -1527,7 +1527,7 @@ class TestAndreaSync(unittest.TestCase):
             openclaw_session_id="sess_demo",
         )
         self.assertIn("OpenClaw finished processing", text)
-        self.assertIn("OpenClaw said:", text)
+        self.assertNotIn("OpenClaw said:", text)
         self.assertNotIn("OpenClaw session:", text)
 
     def test_telegram_final_message_for_cursor_pr_mentions_cursor(self) -> None:
@@ -1550,7 +1550,7 @@ class TestAndreaSync(unittest.TestCase):
             provider="google",
             model="gemini-2.5-flash",
         )
-        self.assertIn("OpenClaw coordinator (google / gemini-2.5-flash) said:", text)
+        self.assertIn("OpenClaw model used: google / gemini-2.5-flash", text)
 
     def test_telegram_final_message_notes_cursor_primary_request(self) -> None:
         text = format_final_message(
@@ -1580,6 +1580,16 @@ class TestAndreaSync(unittest.TestCase):
         self.assertIn("Collaboration trace:", text)
         self.assertIn("OpenClaw triaged the issue", text)
         self.assertIn("Cursor handled the repo-heavy execution", text)
+
+    def test_telegram_final_message_omits_duplicate_summary_block_when_summary_is_short(self) -> None:
+        text = format_final_message(
+            "tsk_demo",
+            status="completed",
+            summary="Implemented the fix and verified the result.",
+            worker_label="OpenClaw",
+        )
+        self.assertNotIn("said:", text)
+        self.assertEqual(text.count("Implemented the fix and verified the result."), 1)
 
     def test_telegram_final_message_failed_uses_error_footer(self) -> None:
         text = format_final_message(
@@ -2000,10 +2010,16 @@ class TestAndreaSync(unittest.TestCase):
                 },
             },
         )
-        server._handle_task_followups(result["task_id"])
+        with mock.patch.object(
+            server,
+            "_resolve_runtime_skill",
+            return_value={"truth": {"status": "verified_available"}},
+        ):
+            server._handle_task_followups(result["task_id"])
         proj = project_task_dict(server.conn, result["task_id"], "telegram")
         self.assertEqual(proj["status"], TaskStatus.COMPLETED.value)
         self.assertEqual(proj["meta"]["assistant"]["reason"], "reminder_created")
+        self.assertIn("Apple Reminders lane is verified", proj["meta"]["assistant"]["last_reply"])
         self.assertEqual(proj["meta"]["proactive"]["pending_reminder_count"], 1)
         self.assertEqual(proj["meta"]["outcome"]["pending_reminder_count"], 1)
 
@@ -2028,10 +2044,16 @@ class TestAndreaSync(unittest.TestCase):
                 },
             },
         )
-        server._handle_task_followups(result["task_id"])
+        with mock.patch.object(
+            server,
+            "_resolve_runtime_skill",
+            return_value={"truth": {"status": "verified_available"}},
+        ):
+            server._handle_task_followups(result["task_id"])
         proj = project_task_dict(server.conn, result["task_id"], "telegram")
         self.assertEqual(proj["status"], TaskStatus.COMPLETED.value)
         self.assertEqual(proj["meta"]["assistant"]["reason"], "principal_memory_saved")
+        self.assertIn("Apple Notes lane is verified", proj["meta"]["assistant"]["last_reply"])
         self.assertEqual(proj["meta"]["identity"]["memory_count"], 1)
         self.assertTrue(proj["meta"]["identity"]["principal_id"].startswith("prn_"))
 

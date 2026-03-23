@@ -190,7 +190,7 @@ Use this after Wave 1 skills are installed/auth’d (see **[ANDREA_OPENCLAW_HYBR
 4. **Compress** — URLs/transcripts via `summarize`; trawl prior sessions via `session-logs` (needs `jq` + `rg`).
 5. **Gate** — `bash scripts/andrea_release_gate.sh` before merging infra changes; for live OpenClaw hygiene: `OPENCLAW_ENFORCE=1 MODEL_GUARD_ON_FAIL=1 bash scripts/andrea_doctor.sh`.
 
-**Strict eligibility (optional)** — When hybrid CLIs are meant to be mandatory on a machine, set `ANDREA_OPENCLAW_ELIGIBLE_SKILLS` to a CSV of skill keys and run `bash scripts/andrea_openclaw_enforce.sh` (requires `jq`). Example keys: `apple-notes`, `gog`, `session-logs`.
+**Strict eligibility (optional)** — When hybrid CLIs are meant to be mandatory on a machine, set `ANDREA_OPENCLAW_ELIGIBLE_SKILLS` to a CSV of skill keys and run `bash scripts/andrea_openclaw_enforce.sh` (requires `jq`). Example keys: `bluebubbles`, `apple-notes`, `apple-reminders`, `gog`, `session-logs`.
 
 **Voice (Wave 3, nice-to-have)** — Enable the `voice-call` plugin in OpenClaw config (`plugins.entries.voice-call.enabled`), then confirm `openclaw skills info voice-call --json` shows `"eligible": true`. Re-run doctor + release gate to confirm **no regression** on core grades.
 

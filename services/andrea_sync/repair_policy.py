@@ -28,6 +28,9 @@ SENSITIVE_PATH_FRAGMENTS = (
     "token",
     "auth",
     "billing",
+    "payment",
+    "payments",
+    "database",
     "migration",
     "migrations",
 )
@@ -60,6 +63,16 @@ def estimate_token_usage(text: Any) -> int:
     return max(1, len(blob) // 4)
 
 
+def estimate_changed_lines(diff_text: Any) -> int:
+    total = 0
+    for raw_line in str(diff_text or "").splitlines():
+        if raw_line.startswith(("+++", "---", "@@")):
+            continue
+        if raw_line.startswith("+") or raw_line.startswith("-"):
+            total += 1
+    return total
+
+
 def normalize_repo_paths(value: Any, *, limit: int = 24) -> List[str]:
     if not isinstance(value, list):
         return []
@@ -82,12 +95,36 @@ def is_sensitive_path(path: str) -> bool:
     return any(fragment in lowered for fragment in SENSITIVE_PATH_FRAGMENTS)
 
 
+def repair_enabled() -> bool:
+    raw = os.environ.get("ANDREA_REPAIR_ENABLED")
+    if raw is None:
+        return True
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def configured_safe_repair_roots() -> tuple[str, ...]:
+    raw = str(os.environ.get("ANDREA_REPAIR_SAFE_ROOTS") or "").strip()
+    if not raw:
+        return SAFE_REPAIR_ROOTS
+    roots: List[str] = []
+    for part in re.split(r"[:,]", raw):
+        root = str(part or "").strip().replace("\\", "/")
+        if not root:
+            continue
+        if not root.endswith("/"):
+            root += "/"
+        if root not in roots:
+            roots.append(root)
+    return tuple(roots or SAFE_REPAIR_ROOTS)
+
+
 def default_repair_budget() -> RepairBudget:
     return RepairBudget(
         max_token_budget=int(os.environ.get("ANDREA_REPAIR_MAX_TOKEN_BUDGET", "24000")),
         max_model_invocations=int(os.environ.get("ANDREA_REPAIR_MAX_MODEL_INVOCATIONS", "4")),
         max_elapsed_seconds=float(os.environ.get("ANDREA_REPAIR_MAX_ELAPSED_SECONDS", "1800")),
         max_patch_attempts=int(os.environ.get("ANDREA_REPAIR_MAX_PATCH_ATTEMPTS", "2")),
+        max_changed_lines=int(os.environ.get("ANDREA_REPAIR_MAX_CHANGED_LINES", "240")),
     )
 
 
@@ -100,6 +137,8 @@ def budget_state(budget: RepairBudget) -> Dict[str, Any]:
         exhausted.append("model_invocation_budget_exhausted")
     if budget.patch_attempts_used >= budget.max_patch_attempts:
         exhausted.append("patch_attempt_budget_exhausted")
+    if budget.changed_lines_used >= budget.max_changed_lines:
+        exhausted.append("changed_line_budget_exhausted")
     if elapsed >= budget.max_elapsed_seconds:
         exhausted.append("elapsed_budget_exhausted")
     return {
@@ -109,6 +148,7 @@ def budget_state(budget: RepairBudget) -> Dict[str, Any]:
             0, budget.max_model_invocations - budget.model_invocations_used
         ),
         "remaining_patch_attempts": max(0, budget.max_patch_attempts - budget.patch_attempts_used),
+        "remaining_changed_lines": max(0, budget.max_changed_lines - budget.changed_lines_used),
         "exhausted": exhausted,
     }
 
@@ -124,11 +164,23 @@ def record_patch_attempt(budget: RepairBudget) -> Dict[str, Any]:
     return budget_state(budget)
 
 
+def record_patch_scope(budget: RepairBudget, diff_text: Any) -> Dict[str, Any]:
+    budget.changed_lines_used += estimate_changed_lines(diff_text)
+    return budget_state(budget)
+
+
 def incident_auto_attempt_guard(incident: Incident) -> Dict[str, Any]:
     reasons: List[str] = []
     classification = str(incident.error_type or "").strip().lower()
+    needs_human_review = bool(
+        incident.metadata.get("needs_human_review")
+        if isinstance(incident.metadata, dict)
+        else False
+    )
     if classification in UNSAFE_CLASSIFICATIONS:
         reasons.append(f"classification_blocked:{classification}")
+    if needs_human_review:
+        reasons.append("triage_requires_human_review")
     if incident.confidence < float(os.environ.get("ANDREA_REPAIR_MIN_CONFIDENCE", "0.45")):
         reasons.append("confidence_below_threshold")
     for path in normalize_repo_paths(incident.suspected_files):
@@ -147,18 +199,23 @@ def patch_guardrails(proposal: Dict[str, Any], *, attempt_number: int) -> Dict[s
     files_touched = normalize_repo_paths(proposal.get("files_touched"))
     diff = str(proposal.get("diff") or "").strip()
     max_files = AUTO_ATTEMPT_FILE_LIMITS.get(attempt_number, AUTO_ATTEMPT_FILE_LIMITS[2])
+    changed_lines = estimate_changed_lines(diff)
+    max_changed_lines = int(os.environ.get("ANDREA_REPAIR_MAX_CHANGED_LINES", "240"))
+    safe_roots = configured_safe_repair_roots()
 
     if not files_touched:
         reasons.append("no_files_touched")
     if len(files_touched) > max_files:
         reasons.append(f"too_many_files_for_attempt:{len(files_touched)}>{max_files}")
     for path in files_touched:
-        if not any(path.startswith(root) for root in SAFE_REPAIR_ROOTS):
+        if not any(path.startswith(root) for root in safe_roots):
             reasons.append(f"disallowed_target:{path}")
         if is_sensitive_path(path):
             reasons.append(f"sensitive_target:{path}")
     if not diff:
         reasons.append("missing_unified_diff")
+    elif changed_lines > max_changed_lines:
+        reasons.append(f"too_many_changed_lines:{changed_lines}>{max_changed_lines}")
     for pattern in DANGEROUS_DIFF_PATTERNS:
         if diff and pattern.search(diff):
             reasons.append(f"dangerous_diff:{pattern.pattern}")
@@ -178,11 +235,14 @@ def patch_guardrails(proposal: Dict[str, Any], *, attempt_number: int) -> Dict[s
         "reasons": reasons,
         "files_touched": files_touched,
         "max_files": max_files,
+        "changed_lines": changed_lines,
+        "max_changed_lines": max_changed_lines,
+        "safe_roots": list(safe_roots),
         "tests_only": tests_only,
         "summary": _clip(proposal.get("reasoning_summary") or "", 400),
     }
 
 
 def summarize_safe_roots(repo_path: Path) -> str:
-    roots = ", ".join(SAFE_REPAIR_ROOTS)
+    roots = ", ".join(configured_safe_repair_roots())
     return f"Auto-repair roots for {repo_path}: {roots}"

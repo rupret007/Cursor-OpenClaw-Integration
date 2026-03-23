@@ -323,6 +323,10 @@ bash scripts/andrea_autonomy_cycle.sh
 python3 scripts/andrea_repair_cycle.py --repo "$PWD"
 # allow deep Cursor execution after the lightweight attempts fail:
 # python3 scripts/andrea_repair_cycle.py --repo "$PWD" --cursor-execute
+# retry a saved incident:
+# python3 scripts/andrea_repair_cycle.py --repo "$PWD" --incident-id inc_1234abcd
+# inject a runtime error / health failure / log alert packet:
+# python3 scripts/andrea_repair_cycle.py --repo "$PWD" --runtime-error-json data/sample_runtime_error.json
 ```
 
 ## Documentation
@@ -410,7 +414,11 @@ See [.env.example](.env.example) and [skills/cursor_handoff/.env.example](skills
 | `ANDREA_SELF_HEAL_CURSOR_MODE` | No | Cursor backend override for auto-heal branch-prep proposals (`auto`, `api`, `cli`). |
 | `ANDREA_AUTONOMY_INCIDENT_REPAIR` / `ANDREA_AUTONOMY_INCIDENT_CURSOR_EXECUTE` | No | Controls whether `andrea_autonomy_cycle.sh` runs the incident repair loop and whether deep repair plans may auto-escalate into Cursor. |
 | `ANDREA_SYNC_BACKGROUND_INCIDENT_REPAIR_ENABLED` / `ANDREA_SYNC_BACKGROUND_INCIDENT_CURSOR_EXECUTE` | No | Lets the idle background optimizer optionally run the incident repair loop and, if desired, allow Cursor escalation. |
-| `ANDREA_REPAIR_CURSOR_MODE` / `ANDREA_REPAIR_MAX_PATCH_ATTEMPTS` | No | Controls the deep Cursor handoff backend and the number of lightweight patch attempts before escalation. |
+| `ANDREA_REPAIR_ENABLED` / `ANDREA_REPAIR_CURSOR_MODE` | No | Global on/off switch for the incident repair control plane and the deep Cursor handoff backend (`auto`, `api`, `cli`). |
+| `ANDREA_REPAIR_PROMPT_VERSION` + per-role `ANDREA_REPAIR_*_PROMPT_VERSION` | No | Pins prompt contracts for triage, primary patching, challenger patching, deep planning, and Cursor handoff artifacts. |
+| `ANDREA_REPAIR_SAFE_ROOTS` / `ANDREA_REPAIR_MAX_PATCH_ATTEMPTS` | No | Overrides the repo-safe auto-repair roots and the number of lightweight patch attempts before escalation. |
+| `ANDREA_REPAIR_MAX_MODEL_INVOCATIONS` / `ANDREA_REPAIR_MAX_CHANGED_LINES` | No | Budget controls for per-incident model usage and patch scope. |
+| `ANDREA_REPAIR_STRICT_MODEL_MATCH` | No | When `1`, fail a repair lane if the reported provider/model does not match the requested routing hints. |
 | `BRAVE_SEARCH_API_KEY` / `BRAVE_ANSWERS_API_KEY` | No | Optional Brave Search skill keys (`brave-api-search` expects both names; answers key may reuse search key). |
 | `MINIMAX_API_KEY` | No | Optional MiniMax provider key for MiniMax integrations. |
 | `SSL_CERT_FILE` | No | Optional path to CA bundle for Python TLS (macOS `CERTIFICATE_VERIFY_FAILED`); see README troubleshooting. |

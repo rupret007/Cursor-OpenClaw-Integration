@@ -67,6 +67,10 @@ from .telegram_format import (
     format_progress_message,
     format_running_message,
 )
+from .user_surface import (
+    dedupe_user_surface_items,
+    sanitize_user_surface_text as shared_sanitize_user_surface_text,
+)
 
 
 def _repo_root() -> Path:
@@ -115,21 +119,8 @@ def _clip(value: Any, limit: int) -> str:
 
 
 def _sanitize_user_surface_text(text: Any, *, fallback: str = "") -> str:
-    safe_lines: list[str] = []
-    for raw_line in str(text or "").splitlines():
-        stripped = re.sub(r"\s+", " ", raw_line.lstrip("-*• ").strip())
-        if not stripped:
-            continue
-        if USER_SURFACE_INTERNAL_RE.search(stripped):
-            continue
-        safe_lines.append(stripped)
-    collapsed = " ".join(safe_lines).strip()
-    if collapsed:
-        return _clip(collapsed, 500)
-    backup = re.sub(r"\s+", " ", str(fallback or "").strip())
-    if backup and not USER_SURFACE_INTERNAL_RE.search(backup):
-        return _clip(backup, 500)
-    return "I ran into an internal limitation while working on that."
+    sanitized = shared_sanitize_user_surface_text(text, fallback=fallback, limit=500)
+    return sanitized or "I ran into an internal limitation while working on that."
 
 
 REMIND_ME_RE = re.compile(r"^\s*(?:please\s+)?remind me(?:\s+to)?\s+(?P<body>.+?)\s*$", re.I)
@@ -814,7 +805,8 @@ class SyncServer:
                 text = _sanitize_user_surface_text(raw or "")
                 if text and text not in items:
                     items.append(text)
-        return items
+        summary = self._telegram_final_summary_text(projection)
+        return dedupe_user_surface_items(items, suppress_against=[summary], limit=4, item_limit=240)
 
     def _collaboration_trace_excerpt(self, trace: list[str]) -> str:
         cleaned = [str(item or "").strip() for item in trace if str(item or "").strip()]
@@ -881,19 +873,11 @@ class SyncServer:
                         task_id,
                         progress_text=progress_text,
                         worker_label=self._telegram_worker_label(projection, running=True),
-                        routing_hint=str(execution_meta.get("routing_hint") or telegram_meta.get("routing_hint") or ""),
-                        collaboration_mode=str(
-                            execution_meta.get("collaboration_mode")
-                            or telegram_meta.get("collaboration_mode")
-                            or ""
-                        ),
+                        routing_hint="",
+                        collaboration_mode="",
                         provider=str(payload.get("provider") or openclaw_meta.get("provider") or ""),
                         model=str(payload.get("model") or openclaw_meta.get("model") or ""),
-                        preferred_model_label=str(
-                            execution_meta.get("preferred_model_label")
-                            or telegram_meta.get("preferred_model_label")
-                            or ""
-                        ),
+                        preferred_model_label="",
                     ),
                 )
             except Exception as exc:  # noqa: BLE001
@@ -1068,11 +1052,11 @@ class SyncServer:
                             agent_url=str(agent_url or ""),
                             worker_label=self._telegram_worker_label(projection, running=True),
                             delegated_to_cursor=bool(execution_meta.get("delegated_to_cursor")),
-                            routing_hint=str(execution_meta.get("routing_hint") or ""),
-                            collaboration_mode=str(execution_meta.get("collaboration_mode") or ""),
+                            routing_hint="",
+                            collaboration_mode="",
                             provider=str(openclaw_meta.get("provider") or ""),
                             model=str(openclaw_meta.get("model") or ""),
-                            preferred_model_label=str(execution_meta.get("preferred_model_label") or ""),
+                            preferred_model_label="",
                         ),
                     )
                 except Exception as exc:  # noqa: BLE001
@@ -1104,11 +1088,11 @@ class SyncServer:
                         ),
                         visibility_mode=visibility_mode,
                         collaboration_trace=self._telegram_collaboration_trace(projection),
-                        routing_hint=str(execution_meta.get("routing_hint") or ""),
-                        collaboration_mode=str(execution_meta.get("collaboration_mode") or ""),
+                        routing_hint="",
+                        collaboration_mode="",
                         provider=str(openclaw_meta.get("provider") or ""),
                         model=str(openclaw_meta.get("model") or ""),
-                        preferred_model_label=str(execution_meta.get("preferred_model_label") or ""),
+                        preferred_model_label="",
                     ),
                 )
             except Exception as exc:  # noqa: BLE001
@@ -1621,13 +1605,13 @@ class SyncServer:
                     return dict(candidate)
         return dict(MESSAGING_SKILL_CANDIDATES[0])
 
-    def _resolve_messaging_capability(
+    def _resolve_runtime_skill(
         self,
         task_id: str,
-        text: str,
+        *,
+        skill_key: str,
+        actor: str = "server",
     ) -> Dict[str, Any]:
-        candidate = self._select_messaging_capability(text)
-        skill_key = str(candidate["skill_key"])
         truth = self.with_lock(lambda c: resolve_skill_truth(c, skill_key))
         heal: Dict[str, Any] = {}
         refresh: Dict[str, Any] = {}
@@ -1640,7 +1624,7 @@ class SyncServer:
                         "channel": "internal",
                         "payload": {
                             "skill_key": skill_key,
-                            "actor": "server",
+                            "actor": actor,
                             "allow_install": True,
                             "allow_update_all": True,
                             "allow_config_repair": True,
@@ -1656,10 +1640,22 @@ class SyncServer:
                 )
             truth = self.with_lock(lambda c: resolve_skill_truth(c, skill_key))
         return {
-            **candidate,
+            "skill_key": skill_key,
             "truth": truth,
             "heal": heal,
             "refresh": refresh,
+        }
+
+    def _resolve_messaging_capability(
+        self,
+        task_id: str,
+        text: str,
+    ) -> Dict[str, Any]:
+        candidate = self._select_messaging_capability(text)
+        skill_key = str(candidate["skill_key"])
+        return {
+            **candidate,
+            **self._resolve_runtime_skill(task_id, skill_key=skill_key, actor="server"),
         }
 
     def _messaging_capability_reply(self, resolved: Dict[str, Any], text: str) -> str:
@@ -1683,6 +1679,32 @@ class SyncServer:
             )
         return (
             f"Not right now. I could not verify a live {label} lane after checking the current runtime state."
+        )
+
+    def _runtime_skill_grounding_note(
+        self,
+        resolved: Dict[str, Any],
+        *,
+        label: str,
+        verified_text: str,
+        local_fallback_text: str,
+    ) -> str:
+        status = str(resolved.get("truth", {}).get("status") or "")
+        if status == "verified_available":
+            return verified_text
+        if status == "installed_but_not_eligible":
+            return (
+                f"{local_fallback_text} The native {label} lane still needs a bit more local setup, "
+                "so I kept this in Andrea's local capture for now."
+            )
+        if resolved.get("heal") or resolved.get("refresh"):
+            return (
+                f"{local_fallback_text} I also re-checked the native {label} lane in the background "
+                "so the runtime stays grounded."
+            )
+        return (
+            f"{local_fallback_text} The native {label} lane is not verified yet, "
+            "so I kept this in Andrea's local capture for now."
         )
 
     def _outbound_draft_reply(self, draft: Dict[str, Any]) -> str:
@@ -1920,8 +1942,23 @@ class SyncServer:
                 )
             )
             if result.get("ok"):
+                notes_lane = self._resolve_runtime_skill(
+                    task_id,
+                    skill_key="apple-notes",
+                    actor="server_memory",
+                )
                 return (
-                    "I saved that as a memory note and I can use it across future Telegram and Alexa turns when the same principal is linked.",
+                    self._runtime_skill_grounding_note(
+                        notes_lane,
+                        label="Apple Notes",
+                        verified_text=(
+                            "I saved that as a memory note, and the Apple Notes lane is verified and available too."
+                        ),
+                        local_fallback_text=(
+                            "I saved that as a memory note and I can use it across future Telegram and Alexa turns "
+                            "when the same principal is linked."
+                        ),
+                    ),
                     "principal_memory_saved",
                 )
         reminder = self._parse_reminder_request(text)
@@ -1942,6 +1979,11 @@ class SyncServer:
                 )
             )
             if result.get("ok"):
+                reminders_lane = self._resolve_runtime_skill(
+                    task_id,
+                    skill_key="apple-reminders",
+                    actor="server_reminder",
+                )
                 due_text = _format_due_time_local(float(reminder["due_at"]))
                 if str(result.get("status") or "") == "awaiting_delivery_channel":
                     return (
@@ -1952,7 +1994,17 @@ class SyncServer:
                 if reminder.get("defaulted"):
                     suffix = " If you want a different time, tell me and I will move it."
                 return (
-                    f"I set a reminder for {due_text}: {reminder['message']}.{suffix}",
+                    self._runtime_skill_grounding_note(
+                        reminders_lane,
+                        label="Apple Reminders",
+                        verified_text=(
+                            f"I set a reminder for {due_text}: {reminder['message']}.{suffix} "
+                            "The Apple Reminders lane is verified and available too."
+                        ),
+                        local_fallback_text=(
+                            f"I set a reminder for {due_text}: {reminder['message']}.{suffix}"
+                        ),
+                    ),
                     "reminder_created",
                 )
         return None

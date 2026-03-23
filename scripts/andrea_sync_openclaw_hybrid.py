@@ -11,20 +11,21 @@ from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from services.andrea_sync.user_surface import (  # noqa: E402
+    clip_text as shared_clip_text,
+    dedupe_user_surface_items,
+    is_internal_runtime_text as shared_is_internal_runtime_text,
+    normalize_whitespace as shared_normalize_whitespace,
+    sanitize_user_surface_text as shared_sanitize_user_surface_text,
+    surface_similarity_key,
+)
+
 LOCKSTEP_JSON_PREFIX = "LOCKSTEP_JSON:"
 CURSOR_AGENT_URL_RE = re.compile(r"https://cursor\.com/agents/([A-Za-z0-9._:-]+)")
 PR_URL_RE = re.compile(r"https://github\.com/[^\s]+/pull/\d+")
-INTERNAL_RUNTIME_RE = re.compile(
-    r"\b("
-    r"sessionkey|session key|sessionid|session id|session label|runtime id|"
-    r"sessions_send|sessions_spawn|attachments\.enabled|tool chatter|tool call|"
-    r"internal runtime|cursor session|label that identifies|session identifier|"
-    r"openclaw skills install|openclaw skills update|skills info|gateway restart|"
-    r"blockedbyallowlist|missing_bins|missing_env|missing_config|missing_os|"
-    r"eligible(?::|=)\s*(?:true|false)"
-    r")\b",
-    re.I,
-)
 ATTACHMENT_LIMIT_RE = re.compile(
     r"\b("
     r"attachments\.enabled|attachment[s]? (?:is |are )?(?:currently )?disabled|"
@@ -40,48 +41,30 @@ SESSION_ROUTING_RE = re.compile(
     r")\b",
     re.I,
 )
-CONFIG_PATH_RE = re.compile(r"(?:plugins\.entries|channels\.)[\w.-]+", re.I)
-
-
 def _clip(value: Any, limit: int) -> str:
-    text = str(value or "").strip()
-    if len(text) <= limit:
-        return text
-    return text[: max(0, limit - 3)].rstrip() + "..."
+    return shared_clip_text(value, limit)
 
 
 def _normalize_whitespace(text: str) -> str:
-    return re.sub(r"\s+", " ", str(text or "")).strip()
+    return shared_normalize_whitespace(text)
 
 
 def _is_internal_runtime_text(text: str) -> bool:
-    normalized = _normalize_whitespace(text)
-    if not normalized:
-        return False
-    if INTERNAL_RUNTIME_RE.search(normalized):
-        return True
-    if CONFIG_PATH_RE.search(normalized):
-        return True
-    return bool(
-        re.search(r"\b(tool|runtime|config|setting|session)\b", normalized, re.I)
-        and re.search(r"\b(key|label|id|enabled|disabled|missing|required)\b", normalized, re.I)
-    )
+    return shared_is_internal_runtime_text(text)
 
 
 def _sanitize_user_safe_text(text: Any, limit: int = 500) -> str:
-    safe_lines: list[str] = []
-    for raw_line in str(text or "").splitlines():
-        stripped = _normalize_whitespace(raw_line.lstrip("-*• "))
-        if not stripped or _is_internal_runtime_text(stripped):
-            continue
-        safe_lines.append(stripped)
-    if not safe_lines:
-        collapsed = _normalize_whitespace(str(text or ""))
-        if collapsed and not _is_internal_runtime_text(collapsed):
-            safe_lines.append(collapsed)
-    if not safe_lines:
+    return shared_sanitize_user_surface_text(text, limit=limit)
+
+
+def _first_sentence(text: Any, limit: int = 320) -> str:
+    clean = _normalize_whitespace(text)
+    if not clean:
         return ""
-    return _clip(" ".join(safe_lines), limit)
+    match = re.search(r"(?<=[.!?])\s+", clean)
+    if match:
+        clean = clean[: match.start()].strip()
+    return _clip(clean, limit)
 
 
 def _normalize_trace_item(value: Any) -> str:
@@ -110,42 +93,25 @@ def _normalize_trace_item(value: Any) -> str:
 def _coerce_collaboration_trace(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
-    items: list[str] = []
-    for raw in value:
-        item = _normalize_trace_item(raw)
-        if item and item not in items:
-            items.append(item)
-        if len(items) >= 4:
-            break
-    return items
+    return dedupe_user_surface_items(
+        (_normalize_trace_item(raw) for raw in value),
+        limit=4,
+        item_limit=240,
+    )
 
 
 def _derive_collaboration_trace(lockstep_meta: dict[str, Any], clean_text: str) -> list[str]:
     explicit = _coerce_collaboration_trace(lockstep_meta.get("collaboration_trace"))
     if explicit:
         return explicit
-    items: list[str] = []
-    for raw_line in str(clean_text or "").splitlines():
-        item = _sanitize_user_safe_text(raw_line, 240)
-        if not item:
-            continue
-        items.append(item)
-        if len(items) >= 4:
-            break
+    items = dedupe_user_surface_items(str(clean_text or "").splitlines(), limit=4, item_limit=240)
     if items:
         return items
     safe_text = _sanitize_user_safe_text(clean_text, 800)
     if not safe_text:
         return []
     sentences = re.split(r"(?<=[.!?])\s+", safe_text)
-    trace: list[str] = []
-    for sentence in sentences:
-        clipped = _clip(_normalize_whitespace(sentence), 240)
-        if clipped and clipped not in trace:
-            trace.append(clipped)
-        if len(trace) >= 4:
-            break
-    return trace
+    return dedupe_user_surface_items(sentences, limit=4, item_limit=240)
 
 
 def _derive_blocked_reason(lockstep_meta: dict[str, Any], clean_text: str) -> str:
@@ -349,6 +315,8 @@ def _derive_phase_outputs(
             phase_summary = summary
         if not phase_summary:
             continue
+        if phase == "synthesis" and surface_similarity_key(phase_summary) == surface_similarity_key(summary):
+            continue
         if not phase_lane:
             phase_lane = "cursor" if phase == "execution" and delegated_to_cursor else "openclaw"
         out[phase] = {
@@ -515,6 +483,12 @@ def _derive_openclaw_contract(
     if not summary:
         summary = _sanitize_user_safe_text(clean_text, 2000)
     collaboration_trace = _derive_collaboration_trace(lockstep_meta, clean_text)
+    collaboration_trace = dedupe_user_surface_items(
+        collaboration_trace,
+        suppress_against=[summary],
+        limit=4,
+        item_limit=240,
+    )
     machine_trace = _derive_machine_collaboration_trace(
         payloads,
         lockstep_meta,
@@ -643,6 +617,7 @@ def run_openclaw_hybrid(
     summary = str(contract.get("summary") or "").strip()
     if not summary:
         summary = "OpenClaw completed the delegated task."
+    user_summary = _first_sentence(summary, 320) or _clip(summary, 500)
     status = str(lockstep_meta.get("status") or payload.get("status") or "ok").strip().lower()
     ok = status in {"ok", "completed", "success"}
 
@@ -652,7 +627,7 @@ def run_openclaw_hybrid(
         "execution_lane": "openclaw_hybrid",
         "delegated_to_cursor": delegated_to_cursor,
         "summary": _clip(summary, 2000),
-        "user_summary": _clip(summary, 2000),
+        "user_summary": user_summary,
         "collaboration_trace": contract.get("collaboration_trace") or [],
         "machine_collaboration_trace": contract.get("machine_collaboration_trace") or [],
         "phase_outputs": contract.get("phase_outputs") or {},

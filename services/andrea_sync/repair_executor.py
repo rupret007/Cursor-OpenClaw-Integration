@@ -17,6 +17,7 @@ from .repair_types import Incident, PatchAttempt, RepairPlan, VerificationCheck
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CURSOR_HANDOFF_SCRIPT = REPO_ROOT / "skills" / "cursor_handoff" / "scripts" / "cursor_handoff.py"
+REPAIR_ARTIFACT_VERSION = "v2"
 
 
 def _clip(value: Any, limit: int = 1200) -> str:
@@ -155,6 +156,7 @@ def run_verification_suite(
     for check in checks:
         if not check.enabled or not check.command.strip():
             continue
+        started_at = time.time()
         command_cwd = Path(check.cwd)
         if cwd_override is not None:
             if command_cwd.is_absolute() and repo_path is not None:
@@ -171,6 +173,9 @@ def run_verification_suite(
             shell=True,
             timeout_seconds=check.timeout_seconds,
         )
+        duration_seconds = max(0.0, time.time() - started_at)
+        stdout_summary = _clip(result.get("stdout") or "", 1200)
+        stderr_summary = _clip(result.get("stderr") or "", 1200)
         output_excerpt = _clip(
             "\n".join(
                 part for part in (result.get("stdout"), result.get("stderr")) if str(part).strip()
@@ -185,6 +190,9 @@ def run_verification_suite(
             "passed": bool(result.get("ok")),
             "required": bool(check.required),
             "exit_code": int(result.get("returncode") or 0),
+            "duration_seconds": round(duration_seconds, 3),
+            "stdout_summary": stdout_summary,
+            "stderr_summary": stderr_summary,
             "output_excerpt": output_excerpt,
             "tags": list(check.tags),
         }
@@ -192,16 +200,71 @@ def run_verification_suite(
             failing_required = True
         rows.append(row)
     failed_labels = [row["label"] for row in rows if not row["passed"]]
+    failed_check_ids = [row["check_id"] for row in rows if not row["passed"]]
     return {
         "passed": not failing_required and not any(
             row["required"] and not row["passed"] for row in rows
         ),
         "checks": rows,
         "failed_checks": failed_labels,
+        "failed_check_ids": failed_check_ids,
         "summary": (
             "All enabled required verification checks passed."
             if not failed_labels
             else "Failed checks: " + ", ".join(failed_labels)
+        ),
+    }
+
+
+def compare_verification_reports(
+    *,
+    baseline_report: Dict[str, Any],
+    candidate_report: Dict[str, Any],
+) -> Dict[str, Any]:
+    baseline_checks = (
+        baseline_report.get("checks") if isinstance(baseline_report.get("checks"), list) else []
+    )
+    candidate_checks = (
+        candidate_report.get("checks") if isinstance(candidate_report.get("checks"), list) else []
+    )
+
+    def failed_ids(rows: List[Dict[str, Any]]) -> set[str]:
+        out: set[str] = set()
+        for row in rows:
+            if not isinstance(row, dict) or bool(row.get("passed")):
+                continue
+            check_id = str(row.get("check_id") or row.get("label") or "").strip()
+            if check_id:
+                out.add(check_id)
+        return out
+
+    def failed_required_ids(rows: List[Dict[str, Any]]) -> set[str]:
+        out: set[str] = set()
+        for row in rows:
+            if not isinstance(row, dict) or bool(row.get("passed")) or not bool(row.get("required")):
+                continue
+            check_id = str(row.get("check_id") or row.get("label") or "").strip()
+            if check_id:
+                out.add(check_id)
+        return out
+
+    baseline_failed = failed_ids(baseline_checks)
+    candidate_failed = failed_ids(candidate_checks)
+    baseline_required_failed = failed_required_ids(baseline_checks)
+    candidate_required_failed = failed_required_ids(candidate_checks)
+    new_failures = sorted(candidate_failed - baseline_failed)
+    resolved_failures = sorted(baseline_failed - candidate_failed)
+    worse_than_baseline = bool(new_failures or (candidate_required_failed - baseline_required_failed))
+    return {
+        "baseline_failed": sorted(baseline_failed),
+        "candidate_failed": sorted(candidate_failed),
+        "new_failures": new_failures,
+        "resolved_failures": resolved_failures,
+        "worse_than_baseline": worse_than_baseline,
+        "summary": (
+            "Verification did not regress from baseline."
+            if not worse_than_baseline
+            else "New failing checks after repair attempt: " + ", ".join(new_failures or sorted(candidate_required_failed - baseline_required_failed))
         ),
     }
 
@@ -362,12 +425,121 @@ def write_incident_report(
     verification_report: Dict[str, Any],
     status: str,
 ) -> str:
+    artifacts = write_repair_artifacts(
+        repo_path=repo_path,
+        incident=incident,
+        attempts=attempts,
+        plan=plan,
+        verification_report=verification_report,
+        status=status,
+    )
+    return str(artifacts.get("json_path") or "")
+
+
+def build_cursor_handoff_markdown(
+    *,
+    incident: Incident,
+    attempts: List[PatchAttempt],
+    plan: RepairPlan | None,
+    verification_report: Dict[str, Any],
+    status: str,
+) -> str:
+    lines = [
+        f"# Incident {incident.incident_id}",
+        "",
+        "## Summary",
+        f"- Source: {incident.source}",
+        f"- Service: {incident.service_name or 'andrea_sync'}",
+        f"- Environment: {incident.environment or 'local'}",
+        f"- State: {status}",
+        f"- Error type: {incident.error_type}",
+        f"- Fingerprint: {incident.fingerprint or 'n/a'}",
+        f"- Summary: {incident.summary}",
+        "",
+        "## Root Cause Hypothesis",
+        plan.root_cause if plan and plan.root_cause else (incident.probable_root_cause or "- pending"),
+        "",
+        "## Attempts",
+    ]
+    if attempts:
+        for attempt in attempts:
+            lines.append(
+                (
+                    f"- Attempt {attempt.attempt_number} `{attempt.stage}` via `{attempt.model_used or 'unknown'}`: "
+                    f"{attempt.status}."
+                )
+            )
+            if attempt.prompt_version:
+                lines.append(f"  Prompt version: {attempt.prompt_version}")
+            if attempt.files_touched:
+                lines.append(f"  Files: {', '.join(attempt.files_touched[:6])}")
+            if attempt.reasoning_summary:
+                lines.append(f"  Reasoning: {_clip(attempt.reasoning_summary, 240)}")
+            if attempt.error:
+                lines.append(f"  Error: {_clip(attempt.error, 240)}")
+    else:
+        lines.append("- No lightweight repair attempts were recorded.")
+    lines.extend(["", "## Verification", f"- Summary: {_clip(verification_report.get('summary') or '', 240) or 'n/a'}"])
+    checks = verification_report.get("checks") if isinstance(verification_report.get("checks"), list) else []
+    if checks:
+        for check in checks[:8]:
+            if not isinstance(check, dict):
+                continue
+            label = str(check.get("label") or check.get("check_id") or "check").strip()
+            status_label = "passed" if bool(check.get("passed")) else "failed"
+            excerpt = _clip(check.get("output_excerpt") or "", 240)
+            line = f"- {label}: {status_label}"
+            if excerpt:
+                line += f" :: {excerpt}"
+            lines.append(line)
+    else:
+        lines.append("- No verification checks recorded.")
+    lines.extend(
+        [
+            "",
+            "## Recommended Files",
+            *(f"- {path}" for path in (plan.files_to_modify if plan else incident.suspected_files)[:12]),
+        ]
+    )
+    if plan:
+        lines.extend(
+            [
+                "",
+                "## Repair Plan",
+                f"- Planner model: {plan.model_used or 'unknown'}",
+                f"- Prompt version: {plan.prompt_version or 'n/a'}",
+                *(f"- {step}" for step in plan.steps[:12]),
+                "",
+                "## Risks",
+                *(f"- {risk}" for risk in plan.risks[:10]),
+                "",
+                "## Stop Conditions",
+                *(f"- {item}" for item in plan.stop_conditions[:10]),
+                "",
+                "## Success Criteria",
+                *(f"- {item}" for item in (plan.verification_plan or ["Run the configured verification suite successfully."])[:10]),
+            ]
+        )
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def write_repair_artifacts(
+    *,
+    repo_path: Path,
+    incident: Incident,
+    attempts: List[PatchAttempt],
+    plan: RepairPlan | None,
+    verification_report: Dict[str, Any],
+    status: str,
+) -> Dict[str, str]:
     root = Path(
         os.environ.get("ANDREA_REPAIR_REPORT_DIR", str(repo_path / "data" / "repair_reports"))
     )
     root.mkdir(parents=True, exist_ok=True)
-    path = root / f"{incident.incident_id}.json"
+    json_path = root / f"{incident.incident_id}.json"
+    markdown_path = root / f"{incident.incident_id}.md"
     payload = {
+        "artifact_version": REPAIR_ARTIFACT_VERSION,
         "incident": incident.as_dict(),
         "attempts": [attempt.as_dict() for attempt in attempts],
         "plan": plan.as_dict() if plan else {},
@@ -375,8 +547,23 @@ def write_incident_report(
         "status": status,
         "generated_at": time.time(),
     }
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    return str(path)
+    markdown_body = build_cursor_handoff_markdown(
+        incident=incident,
+        attempts=attempts,
+        plan=plan,
+        verification_report=verification_report,
+        status=status,
+    )
+    payload["markdown_body"] = markdown_body
+    json_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    markdown_path.write_text(
+        markdown_body,
+        encoding="utf-8",
+    )
+    return {
+        "json_path": str(json_path),
+        "markdown_path": str(markdown_path),
+    }
 
 
 def run_cursor_repair_handoff(
@@ -386,14 +573,27 @@ def run_cursor_repair_handoff(
     plan: RepairPlan,
     attempts: List[PatchAttempt],
     verification_checks: List[VerificationCheck],
+    verification_report: Dict[str, Any] | None = None,
     cursor_mode: str,
 ) -> Dict[str, Any]:
     branch = f"repair/{incident.incident_id[:10]}-cursor-{uuid.uuid4().hex[:6]}"
-    prompt = build_cursor_handoff_prompt(
+    handoff_prompt = build_cursor_handoff_prompt(
         incident=incident,
         plan=plan,
         attempts=attempts,
         verification_checks=verification_checks,
+    )
+    artifact_markdown = build_cursor_handoff_markdown(
+        incident=incident,
+        attempts=attempts,
+        plan=plan,
+        verification_report=dict(verification_report or incident.verification or {}),
+        status=incident.current_state,
+    )
+    prompt = (
+        f"{handoff_prompt}\n\n"
+        "Reference incident artifact:\n\n"
+        f"{artifact_markdown}"
     )
     cmd = [
         os.environ.get("PYTHON", "python3"),
@@ -449,4 +649,5 @@ def run_cursor_repair_handoff(
         "pr_url": str(payload.get("pr_url") or ""),
         "status": str(payload.get("status") or ""),
         "prompt": prompt,
+        "artifact_markdown": artifact_markdown,
     }

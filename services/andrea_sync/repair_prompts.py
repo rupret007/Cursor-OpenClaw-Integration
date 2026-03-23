@@ -2,12 +2,25 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any, Dict, Iterable, List
 
 from .repair_types import Incident, PatchAttempt, RepairPlan, VerificationCheck
 
-REPAIR_PROMPT_VERSION = "v1"
+DEFAULT_REPAIR_PROMPT_VERSION = "v1"
+REPAIR_PROMPT_VERSION = DEFAULT_REPAIR_PROMPT_VERSION
 REPAIR_JSON_MARKER = "REPAIR_JSON:"
+
+
+def repair_prompt_version(role: str = "") -> str:
+    normalized = str(role or "").strip().upper()
+    role_specific = (
+        os.environ.get(f"ANDREA_REPAIR_{normalized}_PROMPT_VERSION", "").strip()
+        if normalized
+        else ""
+    )
+    global_default = os.environ.get("ANDREA_REPAIR_PROMPT_VERSION", "").strip()
+    return role_specific or global_default or DEFAULT_REPAIR_PROMPT_VERSION
 
 
 def _clip(value: Any, limit: int = 1200) -> str:
@@ -69,6 +82,7 @@ def build_triage_prompt(
     recent_diff_summary: str,
     budget_state: Dict[str, Any],
 ) -> str:
+    prompt_version = repair_prompt_version("TRIAGE")
     schema = {
         "summary": "",
         "classification": "",
@@ -83,7 +97,7 @@ def build_triage_prompt(
         "needs_human_review": False,
     }
     return (
-        f"You are Andrea's incident triage lane. Prompt version: {REPAIR_PROMPT_VERSION}.\n"
+        f"You are Andrea's incident triage lane. Prompt version: {prompt_version}.\n"
         "Classify the failure, compress it aggressively, and estimate the smallest safe repair scope.\n"
         "Use the smallest relevant context only. If confidence is low or the issue looks unsafe, say so.\n"
         "Valid classifications:\n"
@@ -118,6 +132,7 @@ def build_primary_patch_prompt(
     attempt_number: int,
     budget_state: Dict[str, Any],
 ) -> str:
+    prompt_version = repair_prompt_version("PRIMARY")
     schema = {
         "reasoning_summary": "",
         "files_touched": [],
@@ -128,7 +143,7 @@ def build_primary_patch_prompt(
         "test_change_reason": "",
     }
     return (
-        f"You are Andrea's first-pass surgical patch lane. Prompt version: {REPAIR_PROMPT_VERSION}.\n"
+        f"You are Andrea's first-pass surgical patch lane. Prompt version: {prompt_version}.\n"
         "Generate the smallest viable unified diff that could repair this incident.\n"
         "Prefer surgical edits. Avoid rewrites. Avoid touching unrelated files.\n\n"
         f"{_build_json_contract(schema)}"
@@ -154,6 +169,7 @@ def build_challenger_patch_prompt(
     attempt_number: int,
     budget_state: Dict[str, Any],
 ) -> str:
+    prompt_version = repair_prompt_version("CHALLENGER")
     schema = {
         "reasoning_summary": "",
         "files_touched": [],
@@ -171,7 +187,7 @@ def build_challenger_patch_prompt(
         1200,
     )
     return (
-        f"You are Andrea's challenger patch lane. Prompt version: {REPAIR_PROMPT_VERSION}.\n"
+        f"You are Andrea's challenger patch lane. Prompt version: {prompt_version}.\n"
         "Critique the previous patch attempt and produce a smaller or smarter follow-up diff when safe.\n"
         "If the issue is structural, say so and keep the diff empty.\n\n"
         f"{_build_json_contract(schema)}"
@@ -196,6 +212,7 @@ def build_deep_debug_prompt(
     context_files: List[Dict[str, Any]],
     budget_state: Dict[str, Any],
 ) -> str:
+    prompt_version = repair_prompt_version("DEEP")
     schema = {
         "root_cause": "",
         "steps": [],
@@ -212,7 +229,7 @@ def build_deep_debug_prompt(
             f"status={attempt.status} success={attempt.success} error={_clip(attempt.error, 240)}"
         )
     return (
-        f"You are Andrea's deep debugging lane. Prompt version: {REPAIR_PROMPT_VERSION}.\n"
+        f"You are Andrea's deep debugging lane. Prompt version: {prompt_version}.\n"
         "Both lightweight repair attempts failed or were unsafe. Produce a repair plan for a broader but still controlled execution stage.\n\n"
         f"{_build_json_contract(schema)}"
         "Rules:\n"
@@ -235,6 +252,7 @@ def build_cursor_handoff_prompt(
     attempts: List[PatchAttempt],
     verification_checks: List[VerificationCheck],
 ) -> str:
+    prompt_version = repair_prompt_version("CURSOR_HANDOFF")
     prior_attempts = []
     for attempt in attempts[-2:]:
         prior_attempts.append(
@@ -245,7 +263,7 @@ def build_cursor_handoff_prompt(
         f"- {check.label}: `{check.command}`" for check in verification_checks if check.enabled
     ]
     return (
-        "You are Andrea's heavy-lift Cursor execution lane for a controlled repair plan.\n"
+        f"You are Andrea's heavy-lift Cursor execution lane for a controlled repair plan. Prompt version: {prompt_version}.\n"
         "Implement the plan step by step in the current repo, keep the blast radius constrained, and run verification after meaningful changes.\n"
         "Stop if the plan grows beyond the stated stop conditions.\n\n"
         f"Incident: {incident.summary}\n"

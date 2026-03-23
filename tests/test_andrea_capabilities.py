@@ -79,7 +79,7 @@ class TestAndreaCapabilities(unittest.TestCase):
         self.assertEqual(catalog["bluebubbles"].source, "openclaw-bundled")
         self.assertIn("BlueBubbles", catalog["bluebubbles"].description)
 
-    def test_runtime_skill_rows_include_dynamic_bluebubbles_aliases(self) -> None:
+    def test_tracked_skill_rows_include_bluebubbles_aliases(self) -> None:
         sys.path.insert(0, str(REPO_ROOT / "scripts"))
         import andrea_capabilities as ac  # noqa: E402
 
@@ -87,7 +87,7 @@ class TestAndreaCapabilities(unittest.TestCase):
             "│ ✓ ready   │ 🫧 bluebubbles          │ Use when you need to send or manage iMessages via │ openclaw-bundled   │\n"
             "│           │                         │ BlueBubbles. Calls go through text messages.      │                    │\n"
         )
-        rows = ac._runtime_skill_rows(snippet)
+        rows = ac._skill_rows(snippet)
         by_id = {r.id: r for r in rows}
         self.assertIn("skill:bluebubbles", by_id)
         self.assertEqual(by_id["skill:bluebubbles"].status, "ready")
@@ -100,6 +100,7 @@ class TestAndreaCapabilities(unittest.TestCase):
         import andrea_capabilities as ac  # noqa: E402
 
         for name in (
+            "bluebubbles",
             "apple-notes",
             "apple-reminders",
             "things-mac",

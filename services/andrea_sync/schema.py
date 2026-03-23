@@ -448,42 +448,68 @@ def _fold_repair_event_meta(
         repair_meta["last_model_used"] = str(payload.get("model_used"))
     if payload.get("report_path"):
         repair_meta["last_report_path"] = str(payload.get("report_path"))
+    if payload.get("markdown_path"):
+        repair_meta["last_markdown_path"] = str(payload.get("markdown_path"))
     if payload.get("branch"):
         repair_meta["last_branch"] = str(payload.get("branch"))
+    if payload.get("current_state"):
+        repair_meta["current_state"] = str(payload.get("current_state"))
+    if payload.get("service_name"):
+        repair_meta["service_name"] = str(payload.get("service_name"))
+    if payload.get("environment"):
+        repair_meta["environment"] = str(payload.get("environment"))
+    if payload.get("prompt_version"):
+        repair_meta["last_prompt_version"] = str(payload.get("prompt_version"))
 
     if event_type == EventType.INCIDENT_RECORDED:
         repair_meta["incident_count"] = int(repair_meta.get("incident_count") or 0) + 1
         repair_meta["last_status"] = "open"
+        repair_meta["current_state"] = str(payload.get("current_state") or "detected")
     elif event_type == EventType.INCIDENT_TRIAGED:
         repair_meta["triaged_count"] = int(repair_meta.get("triaged_count") or 0) + 1
         repair_meta["last_status"] = "triaged"
         repair_meta["last_safe_to_attempt"] = bool(payload.get("safe_to_auto_attempt"))
+        repair_meta["current_state"] = str(payload.get("current_state") or "triaged")
     elif event_type == EventType.REPAIR_ATTEMPT_STARTED:
         repair_meta["attempt_count"] = int(repair_meta.get("attempt_count") or 0) + 1
         repair_meta["last_status"] = "attempt_running"
+        repair_meta["current_state"] = str(
+            payload.get("current_state") or repair_meta.get("current_state") or "patching_primary"
+        )
     elif event_type == EventType.REPAIR_ATTEMPT_COMPLETED:
         repair_meta["successful_attempt_count"] = int(
             repair_meta.get("successful_attempt_count") or 0
         ) + 1
         repair_meta["last_status"] = "attempt_completed"
+        repair_meta["current_state"] = str(
+            payload.get("current_state") or repair_meta.get("current_state") or "verifying_primary"
+        )
     elif event_type == EventType.REPAIR_ATTEMPT_FAILED:
         repair_meta["failed_attempt_count"] = int(
             repair_meta.get("failed_attempt_count") or 0
         ) + 1
         repair_meta["last_status"] = "attempt_failed"
+        repair_meta["current_state"] = str(
+            payload.get("current_state") or repair_meta.get("current_state") or "rolled_back"
+        )
         if payload.get("error"):
             repair_meta["last_error"] = _clip_meta_text(payload.get("error"), 800)
     elif event_type == EventType.REPAIR_PLAN_CREATED:
         repair_meta["plan_count"] = int(repair_meta.get("plan_count") or 0) + 1
         repair_meta["last_status"] = "planned"
+        repair_meta["current_state"] = str(
+            payload.get("current_state") or repair_meta.get("current_state") or "planning_escalation"
+        )
         if payload.get("root_cause"):
             repair_meta["last_root_cause"] = _clip_meta_text(payload.get("root_cause"), 800)
     elif event_type == EventType.REPAIR_ROLLBACK_COMPLETED:
         repair_meta["rollback_count"] = int(repair_meta.get("rollback_count") or 0) + 1
         repair_meta["last_status"] = "rolled_back"
+        repair_meta["current_state"] = str(payload.get("current_state") or "rolled_back")
     elif event_type == EventType.REPAIR_HANDOFF_RECORDED:
         repair_meta["handoff_count"] = int(repair_meta.get("handoff_count") or 0) + 1
         repair_meta["last_status"] = "handoff_recorded"
+        repair_meta["current_state"] = str(payload.get("current_state") or "cursor_handoff_ready")
         if payload.get("agent_url"):
             repair_meta["last_agent_url"] = str(payload.get("agent_url"))
         if payload.get("pr_url"):
@@ -491,11 +517,15 @@ def _fold_repair_event_meta(
     elif event_type == EventType.INCIDENT_RESOLVED:
         repair_meta["resolved_count"] = int(repair_meta.get("resolved_count") or 0) + 1
         repair_meta["last_status"] = "resolved"
+        repair_meta["current_state"] = str(payload.get("current_state") or "resolved")
         if payload.get("commit_sha"):
             repair_meta["last_commit_sha"] = str(payload.get("commit_sha"))
     elif event_type == EventType.INCIDENT_ESCALATED:
         repair_meta["escalated_count"] = int(repair_meta.get("escalated_count") or 0) + 1
         repair_meta["last_status"] = "escalated"
+        repair_meta["current_state"] = str(
+            payload.get("current_state") or repair_meta.get("current_state") or "human_review_required"
+        )
         if payload.get("error"):
             repair_meta["last_error"] = _clip_meta_text(payload.get("error"), 800)
 

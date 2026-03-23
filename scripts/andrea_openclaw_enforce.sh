@@ -9,7 +9,7 @@
 #   bash scripts/andrea_openclaw_enforce.sh
 #   bash scripts/andrea_openclaw_enforce.sh --dry-run
 #   bash scripts/andrea_openclaw_enforce.sh --required-skills "cursor_handoff,github,gh-issues,telegram"
-#   bash scripts/andrea_openclaw_enforce.sh --heal-skill apple-notes --heal-skill voice-call
+#   bash scripts/andrea_openclaw_enforce.sh --heal-skill bluebubbles --heal-skill apple-notes --heal-skill voice-call
 set -euo pipefail
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

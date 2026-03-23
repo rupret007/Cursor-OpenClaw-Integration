@@ -1,6 +1,7 @@
 """Operator dashboard helpers for Andrea lockstep."""
 from __future__ import annotations
 
+import os
 import time
 import urllib.parse
 from typing import Any, Dict, List
@@ -9,6 +10,7 @@ from .adapters import telegram as tg_adapt
 from .kill_switch import kill_switch_status
 from .policy import digest_age_seconds, get_capability_digest
 from .projector import project_task_dict
+from .repair_policy import configured_safe_repair_roots, repair_enabled
 from .schema import EventType
 from .store import (
     SYSTEM_TASK_ID,
@@ -400,6 +402,9 @@ def build_dashboard_summary(
             "background_incident_repair_enabled": bool(
                 getattr(server, "background_incident_repair_enabled", False)
             ),
+            "repair_enabled": repair_enabled(),
+            "repair_cursor_mode": str(os.environ.get("ANDREA_REPAIR_CURSOR_MODE") or "auto"),
+            "repair_safe_roots": list(configured_safe_repair_roots()),
         },
         "webhook": webhook_snapshot if isinstance(webhook_snapshot, dict) else {},
         "capabilities": {
@@ -560,6 +565,7 @@ def render_dashboard_html() -> str:
         { label: "Blocked Caps", value: String((data.capabilities.summary || {}).blocked || 0), status: ((data.capabilities.summary || {}).blocked || 0) > 0 ? "blocked" : "ready", note: "Published capability digest" },
         { label: "ACPX", value: data.capabilities.acpx ? data.capabilities.acpx.status : "digest-missing", status: data.capabilities.acpx ? data.capabilities.acpx.status : "blocked", note: data.capabilities.acpx ? data.capabilities.acpx.notes : "No published acpx row is available yet" },
         { label: "Digest Age", value: `${Math.round(Number(data.service.capability_digest_age_seconds || 0))}s`, status: Number(data.service.capability_digest_age_seconds || 0) > 1800 ? "warn" : "ready", note: "Capability snapshot freshness" },
+        { label: "Repair Loop", value: data.service.repair_enabled ? "enabled" : "disabled", status: data.service.repair_enabled ? "ready" : "warn", note: `Cursor ${data.service.repair_cursor_mode || "auto"} · safe roots ${(data.service.repair_safe_roots || []).join(", ") || "default"}` },
         { label: "Optimizer", value: latestRun.status || "idle", status: latestRun.status || "warn", note: latestRun.run_id ? `Latest run ${latestRun.run_id}` : "No optimization run recorded yet" }
       ];
       document.getElementById("cards").innerHTML = cards.map((card) => `
@@ -630,11 +636,17 @@ def render_dashboard_html() -> str:
       }
       if (incidents.length) {
         const latestIncident = incidents[0] || {};
+        const incidentState = latestIncident.current_state || latestIncident.status || "open";
+        const incidentPill = incidentState === "resolved"
+          ? "ready"
+          : (incidentState === "cursor_handoff_ready" || incidentState === "human_review_required" || incidentState === "rolled_back")
+            ? "warn"
+            : "bad";
         loopItems.push({
           title: `Latest incident: ${latestIncident.error_type || latestIncident.incident_id || "incident"}`,
           note: latestIncident.summary || "No incident summary",
-          extra: `Status ${latestIncident.status || "open"}${latestIncident.confidence !== undefined ? ` · confidence ${latestIncident.confidence}` : ""}`,
-          status: latestIncident.status === "resolved" ? "ready" : latestIncident.status === "escalated" ? "warn" : "bad"
+          extra: `State ${incidentState}${latestIncident.confidence !== undefined ? ` · confidence ${latestIncident.confidence}` : ""}`,
+          status: incidentPill
         });
       }
       for (const row of categories.slice(0, 4)) {

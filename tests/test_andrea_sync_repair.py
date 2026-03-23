@@ -162,8 +162,10 @@ class AndreaSyncRepairTests(unittest.TestCase):
         attempts = list_repair_attempts(self.conn, incident["incident_id"])
         self.assertEqual(len(attempts), 1)
         self.assertEqual(attempts[0]["status"], "completed")
+        self.assertEqual(attempts[0]["prompt_version"], "v1")
         stored = get_incident(self.conn, incident["incident_id"])
         self.assertEqual(stored["status"], "resolved")
+        self.assertEqual(stored["metadata"]["triage_prompt_version"], "v1")
         event_types = [et for _seq, _ts, et, _payload in load_events_for_task(self.conn, SYSTEM_TASK_ID)]
         self.assertIn(EventType.INCIDENT_RECORDED.value, event_types)
         self.assertIn(EventType.INCIDENT_RESOLVED.value, event_types)
@@ -297,8 +299,11 @@ class AndreaSyncRepairTests(unittest.TestCase):
             "services.andrea_sync.repair_orchestrator.cleanup_worktree",
             return_value={"ok": True, "actions": ["worktree_removed", "branch_deleted"]},
         ), mock.patch(
-            "services.andrea_sync.repair_orchestrator.write_incident_report",
-            return_value="/tmp/inc-demo.json",
+            "services.andrea_sync.repair_orchestrator.write_repair_artifacts",
+            return_value={
+                "json_path": "/tmp/inc-demo.json",
+                "markdown_path": "/tmp/inc-demo.md",
+            },
         ), mock.patch(
             "services.andrea_sync.repair_orchestrator.run_cursor_repair_handoff",
             return_value={
@@ -322,7 +327,7 @@ class AndreaSyncRepairTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertFalse(result["resolved"])
-        self.assertEqual(result["status"], "escalated")
+        self.assertEqual(result["status"], "cursor_handoff_ready")
         self.assertTrue(result["cursor_handoff"]["ok"])
         self.assertEqual(result["report_path"], "/tmp/inc-demo.json")
         incident_id = result["incident"]["incident_id"]
@@ -331,9 +336,70 @@ class AndreaSyncRepairTests(unittest.TestCase):
         self.assertTrue(all(row["status"] == "failed" for row in attempts))
         plan = get_latest_repair_plan(self.conn, incident_id)
         self.assertEqual(plan["root_cause"], "The direct and delegated orchestration metadata are out of sync.")
+        self.assertEqual(plan["prompt_version"], "v1")
         event_types = [et for _seq, _ts, et, _payload in load_events_for_task(self.conn, SYSTEM_TASK_ID)]
         self.assertIn(EventType.REPAIR_HANDOFF_RECORDED.value, event_types)
         self.assertIn(EventType.INCIDENT_ESCALATED.value, event_types)
+
+    def test_run_incident_repair_cycle_triage_can_require_human_review(self) -> None:
+        with mock.patch(
+            "services.andrea_sync.repair_orchestrator.main_worktree_clean",
+            return_value={"ok": True, "clean": True},
+        ), mock.patch(
+            "services.andrea_sync.repair_orchestrator.run_role_json",
+            side_effect=[
+                {
+                    "ok": True,
+                    "requested_family": "gemini",
+                    "requested_label": "Gemini Flash Lite",
+                    "payload": {
+                        "classification": "code_bug",
+                        "probable_root_cause": "This needs a broader coordinated repair.",
+                        "affected_files": ["services/andrea_sync/server.py"],
+                        "failing_tests": ["FAIL: test_route_direct"],
+                        "recommended_repair_scope": "needs broader review",
+                        "confidence": 0.62,
+                        "safe_to_auto_attempt": True,
+                        "needs_human_review": True,
+                    },
+                },
+                {
+                    "ok": True,
+                    "requested_family": "openai",
+                    "requested_label": "GPT 5.4",
+                    "payload": {
+                        "root_cause": "The repair spans more than one safe lightweight patch.",
+                        "steps": ["Inspect routing metadata precedence."],
+                        "files_to_modify": ["services/andrea_sync/server.py"],
+                        "risks": ["Could affect direct-vs-delegate behavior."],
+                        "verification_plan": ["Unit Tests"],
+                        "stop_conditions": ["Stop if routing rules expand."],
+                        "handoff_summary": "Use a broader coordinated repair path.",
+                    },
+                },
+            ],
+        ), mock.patch(
+            "services.andrea_sync.repair_orchestrator.write_repair_artifacts",
+            return_value={
+                "json_path": "/tmp/inc-human.json",
+                "markdown_path": "/tmp/inc-human.md",
+            },
+        ):
+            result = run_incident_repair_cycle(
+                self.conn,
+                repo_path=REPO_ROOT,
+                actor="test",
+                verification_report=self._failing_verification_report(),
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["resolved"])
+        self.assertEqual(result["status"], "human_review_required")
+        self.assertFalse(result["attempts"])
+        self.assertFalse(result["guard"]["allowed"])
+        self.assertIn("triage_requires_human_review", result["guard"]["reasons"])
+        incident = get_incident(self.conn, result["incident"]["incident_id"])
+        self.assertEqual(incident["status"], "human_review_required")
 
     def test_run_incident_repair_command_is_internal_only(self) -> None:
         denied = handle_command(
@@ -359,3 +425,28 @@ class AndreaSyncRepairTests(unittest.TestCase):
             )
         self.assertTrue(allowed["ok"])
         self.assertEqual(allowed["incident"]["incident_id"], "inc_demo")
+
+    def test_run_incident_repair_command_passes_extended_payloads(self) -> None:
+        with mock.patch(
+            "services.andrea_sync.repair_orchestrator.run_incident_repair_cycle",
+            return_value={"ok": True, "resolved": False, "incident": {"incident_id": "inc_demo"}},
+        ) as repair_cycle:
+            allowed = handle_command(
+                self.conn,
+                {
+                    "command_type": CommandType.RUN_INCIDENT_REPAIR.value,
+                    "channel": "internal",
+                    "payload": {
+                        "incident_id": "inc_saved",
+                        "runtime_error": {"summary": "boom"},
+                        "health_failure": {"service_name": "andrea_sync"},
+                        "log_alert": {"summary": "log spike"},
+                    },
+                },
+            )
+        self.assertTrue(allowed["ok"])
+        _, kwargs = repair_cycle.call_args
+        self.assertEqual(kwargs["incident_id"], "inc_saved")
+        self.assertEqual(kwargs["runtime_error"]["summary"], "boom")
+        self.assertEqual(kwargs["health_failure"]["service_name"], "andrea_sync")
+        self.assertEqual(kwargs["log_alert"]["summary"], "log spike")

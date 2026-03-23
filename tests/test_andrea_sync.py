@@ -218,6 +218,23 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(cmd["payload"]["from_username"], "demo")
         self.assertNotIn("message_thread_id", cmd["payload"])
 
+    def test_telegram_update_to_command_includes_reply_to_message_id(self) -> None:
+        cmd = tg_adapt.update_to_command(
+            {
+                "update_id": 100,
+                "message": {
+                    "text": "follow up",
+                    "message_id": 56,
+                    "reply_to_message": {"message_id": 55},
+                    "chat": {"id": 1},
+                    "from": {"id": 2, "username": "demo"},
+                },
+            }
+        )
+        self.assertIsNotNone(cmd)
+        assert cmd is not None
+        self.assertEqual(cmd["payload"]["reply_to_message_id"], 55)
+
     def test_telegram_continuation_skips_mismatched_forum_thread_id(self) -> None:
         from services.andrea_sync.telegram_continuation import attach_continuation_if_applicable
 
@@ -491,6 +508,57 @@ class TestAndreaSync(unittest.TestCase):
             r2 = handle_command(self.conn, cmd2)
             self.assertTrue(r2.get("ok"))
             self.assertNotEqual(r2["task_id"], tid1)
+        finally:
+            if prev is None:
+                os.environ.pop("ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS", None)
+            else:
+                os.environ["ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS"] = prev
+
+    def test_telegram_continuation_plain_new_message_does_not_merge_active_task(self) -> None:
+        from services.andrea_sync.telegram_continuation import attach_continuation_if_applicable
+
+        prev = os.environ.get("ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS")
+        os.environ["ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS"] = "300"
+        try:
+            cmd1 = tg_adapt.update_to_command(
+                {
+                    "update_id": 611,
+                    "message": {
+                        "text": "@Andrea @Cursor please collaborate on repo cleanup",
+                        "message_id": 2101,
+                        "chat": {"id": 9292, "type": "private"},
+                        "from": {"id": 88, "username": "u3"},
+                    },
+                }
+            )
+            assert cmd1
+            r1 = handle_command(self.conn, cmd1)
+            tid1 = r1["task_id"]
+            append_event(
+                self.conn,
+                tid1,
+                EventType.JOB_QUEUED,
+                {
+                    "kind": "openclaw",
+                    "execution_lane": "openclaw_hybrid",
+                    "runner": "openclaw",
+                },
+            )
+
+            cmd2 = tg_adapt.update_to_command(
+                {
+                    "update_id": 612,
+                    "message": {
+                        "text": "Is this OpenClaw?",
+                        "message_id": 2102,
+                        "chat": {"id": 9292, "type": "private"},
+                        "from": {"id": 88, "username": "u3"},
+                    },
+                }
+            )
+            assert cmd2
+            self.assertFalse(attach_continuation_if_applicable(self.conn, cmd2))
+            self.assertIsNone(cmd2.get("task_id"))
         finally:
             if prev is None:
                 os.environ.pop("ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS", None)
@@ -777,13 +845,20 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(decision.delegate_target, "openclaw_hybrid")
         self.assertEqual(decision.collaboration_mode, "cursor_primary")
 
-    def test_router_model_mention_forces_openclaw_delegate(self) -> None:
+    def test_router_model_mention_meta_question_stays_direct(self) -> None:
         decision = route_message(
-            "how are you?",
+            "What is Cursor?",
+            preferred_model_family="gemini",
+        )
+        self.assertEqual(decision.mode, "direct")
+        self.assertIn("cursor", decision.reply_text.lower())
+
+    def test_router_model_mention_with_repo_work_delegates(self) -> None:
+        decision = route_message(
+            "Please review the repo approach",
             preferred_model_family="gemini",
         )
         self.assertEqual(decision.mode, "delegate")
-        self.assertEqual(decision.reason, "explicit_model_mention")
         self.assertEqual(decision.delegate_target, "openclaw_hybrid")
 
     def test_router_collaboration_phrase_requests_joint_work(self) -> None:
@@ -811,6 +886,16 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(decision.mode, "delegate")
         self.assertEqual(decision.delegate_target, "openclaw_hybrid")
         self.assertEqual(decision.collaboration_mode, "cursor_primary")
+
+    def test_router_thanks_with_repo_work_still_delegates(self) -> None:
+        decision = route_message("Thanks, please inspect the repo and fix the failing tests.")
+        self.assertEqual(decision.mode, "delegate")
+        self.assertEqual(decision.delegate_target, "openclaw_hybrid")
+
+    def test_router_what_llm_is_answering_stays_direct(self) -> None:
+        decision = route_message("What LLM is answering?")
+        self.assertEqual(decision.mode, "direct")
+        self.assertEqual(decision.reason, "stack_or_tooling_question")
 
     def test_server_routes_latest_message_not_accumulated_thread(self) -> None:
         """Regression: router must classify the latest user turn, not merged accumulated_prompt."""

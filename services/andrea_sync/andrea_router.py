@@ -83,7 +83,7 @@ META_STACK_STANDALONE_RE = re.compile(
 META_STACK_INLINE_RE = re.compile(
     r"\b("
     r"are you (?:using|on|in) (?:cursor|openclaw)\b|"
-    r"which (?:llm|model) (?:is )?(?:this|answering|replying)\b"
+    r"(?:which|what) (?:llm|model) (?:is )?(?:this|answering|replying)\b"
     r")\b",
     re.I,
 )
@@ -146,12 +146,8 @@ def classify_route(
         return "delegate", "explicit_cursor_mention", "openclaw_hybrid", "cursor_primary"
     if hint == "collaborate":
         return "delegate", "explicit_collaboration_mention", "openclaw_hybrid", "collaborative"
-    if preferred_model_family:
-        return "delegate", "explicit_model_mention", "openclaw_hybrid", "andrea_primary" if collab == "auto" else collab
     if not clean:
         return "direct", "explicit_andrea_mention" if andrea_preferred else "empty_or_whitespace", "", "andrea_primary" if andrea_preferred else collab
-    if THANKS_RE.search(clean):
-        return "direct", "explicit_andrea_mention" if andrea_preferred else "greeting_or_social", "", "andrea_primary" if andrea_preferred else collab
     if GREETING_RE.search(clean) and not MEMORY_RE.search(clean) and word_count <= 6:
         return "direct", "explicit_andrea_mention" if andrea_preferred else "greeting_or_social", "", "andrea_primary" if andrea_preferred else collab
     if CURSOR_EXPLICIT_ACTION_RE.search(clean):
@@ -189,10 +185,14 @@ def classify_route(
         if andrea_preferred:
             return "delegate", "explicit_andrea_mention_delegate", "openclaw_hybrid", "andrea_primary"
         return "delegate", "path_or_code_reference", _default_delegate_target(), collab
+    if THANKS_RE.search(clean):
+        return "direct", "explicit_andrea_mention" if andrea_preferred else "greeting_or_social", "", "andrea_primary" if andrea_preferred else collab
     if IDENTITY_RE.search(clean):
         return "direct", "explicit_andrea_mention" if andrea_preferred else "assistant_identity", "", "andrea_primary" if andrea_preferred else collab
     if HELP_RE.search(clean) and word_count <= 6:
         return "direct", "explicit_andrea_mention" if andrea_preferred else "short_help_request", "", "andrea_primary" if andrea_preferred else collab
+    if preferred_model_family:
+        return "delegate", "explicit_model_mention", "openclaw_hybrid", "andrea_primary" if collab == "auto" else collab
     if word_count <= 18:
         return "direct", "explicit_andrea_mention" if andrea_preferred else "short_general_request", "", "andrea_primary" if andrea_preferred else collab
     if word_count >= 45:

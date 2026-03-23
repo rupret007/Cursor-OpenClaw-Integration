@@ -233,7 +233,7 @@ def format_progress_message(
     preferred_model_label: str = "",
 ) -> str:
     routing_note = _routing_note(routing_hint, collaboration_mode)
-    headline = "Collaboration update."
+    headline = "Progress update."
     if worker_label == "OpenClaw and Cursor":
         headline = "OpenClaw and Cursor coordination update."
     elif worker_label == "OpenClaw":
@@ -284,6 +284,7 @@ def format_running_message(
     model: str = "",
     preferred_model_label: str = "",
 ) -> str:
+    routing_note = _routing_note(routing_hint, collaboration_mode)
     if delegated_to_cursor and worker_label == "OpenClaw":
         worker_label = "OpenClaw and Cursor"
     if worker_label == "OpenClaw and Cursor":
@@ -310,7 +311,7 @@ def format_running_message(
         "",
         "What happened:",
         *bullets,
-        *([_routing_note(routing_hint, collaboration_mode)] if _routing_note(routing_hint, collaboration_mode) else []),
+        *([routing_note] if routing_note else []),
         "",
     ]
     model_label = _model_label(provider, model)

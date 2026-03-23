@@ -75,12 +75,16 @@ def _parse_status(raw: Any) -> Optional[TaskStatus]:
 def _should_continue_message(new_payload: Dict[str, Any], prev_telegram_meta: Dict[str, Any]) -> bool:
     """Heuristic: continuation chunk vs a brand-new routed request."""
     new_text = str(new_payload.get("text") or "")
+    reply_to_message_id = new_payload.get("reply_to_message_id")
+    anchor_message_id = prev_telegram_meta.get("message_id")
+    if reply_to_message_id is not None and anchor_message_id is not None:
+        return str(reply_to_message_id) == str(anchor_message_id)
     if not MENTION_RE.search(new_text):
         return True
     new_mentions = set(new_payload.get("mention_targets") or [])
     prev_raw = prev_telegram_meta.get("mention_targets")
     prev_mentions = set(prev_raw) if isinstance(prev_raw, list) else set()
-    return new_mentions <= prev_mentions
+    return new_mentions == prev_mentions
 
 
 def _scan_candidates(
@@ -115,6 +119,14 @@ def _scan_candidates(
             continue
         if not _thread_matches(tg, new_payload):
             continue
+        if st is not TaskStatus.CREATED and not MENTION_RE.search(str(new_payload.get("text") or "")):
+            reply_to_message_id = new_payload.get("reply_to_message_id")
+            anchor_message_id = tg.get("message_id")
+            if reply_to_message_id is not None and anchor_message_id is not None:
+                if str(reply_to_message_id) != str(anchor_message_id):
+                    continue
+            elif "?" in str(new_payload.get("text") or ""):
+                continue
         return tid, tg
     return None
 

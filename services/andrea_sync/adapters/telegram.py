@@ -89,6 +89,8 @@ def update_to_command(update: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     chat = msg.get("chat") or {}
     chat_id = chat.get("id")
     message_id = msg.get("message_id")
+    reply_to = msg.get("reply_to_message") or {}
+    reply_to_message_id = reply_to.get("message_id") if isinstance(reply_to, dict) else None
     from_user = (msg.get("from") or {}).get("id")
     thread_id = msg.get("message_thread_id")
     payload: Dict[str, Any] = {
@@ -104,6 +106,7 @@ def update_to_command(update: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "chat_id": chat_id,
         "chat_type": chat.get("type"),
         "message_id": message_id,
+        "reply_to_message_id": reply_to_message_id,
         "from_user": from_user,
         "from_username": (msg.get("from") or {}).get("username"),
         "auto_cursor_job": False,

@@ -1239,8 +1239,8 @@ class SyncServer:
                 EventType.JOB_PROGRESS,
                 {
                     "message": (
-                        "OpenClaw is starting the coordination pass. It should use Gemini 2.5 for broad planning, "
-                        "Minimax 2.7 for alternate critique, OpenAI for precise synthesis, and Cursor for the heavy repo execution."
+                        "OpenClaw is starting the coordination pass and will pull in the best available lanes "
+                        "for planning, critique, synthesis, and repo execution if needed."
                     ),
                     "backend": "openclaw",
                     "execution_lane": "openclaw_hybrid",
@@ -1281,7 +1281,7 @@ class SyncServer:
                         "visibility_mode": visibility_mode,
                         "preferred_model_family": preferred_model_family,
                         "preferred_model_label": preferred_model_label,
-                        "force_telegram_note": True,
+                        "force_telegram_note": visibility_mode == "full",
                     },
                 )
                 self._run_cursor_job(task_id)
@@ -1375,7 +1375,7 @@ class SyncServer:
                     "visibility_mode": visibility_mode,
                     "preferred_model_family": preferred_model_family,
                     "preferred_model_label": preferred_model_label,
-                    "force_telegram_note": True,
+                    "force_telegram_note": visibility_mode == "full",
                 },
             )
             self._run_cursor_job(task_id)

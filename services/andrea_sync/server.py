@@ -843,9 +843,10 @@ class SyncServer:
             return None, False
         try:
             user_payload = self._latest_user_message_payload(task_id)
-            prompt = self._extract_cursor_prompt(task_id)
+            classify_text = self._routing_classification_text(task_id)
+            execution_prompt = self._extract_cursor_prompt(task_id)
             decision = route_message(
-                prompt,
+                classify_text,
                 history=history,
                 routing_hint=str(user_payload.get("routing_hint") or "auto"),
                 collaboration_mode=str(user_payload.get("collaboration_mode") or "auto"),
@@ -859,7 +860,7 @@ class SyncServer:
                     EventType.JOB_QUEUED,
                     {
                         "kind": kind,
-                        "prompt_excerpt": prompt[:300],
+                        "prompt_excerpt": execution_prompt[:300],
                         "source": source,
                         "route_reason": decision.reason,
                         "execution_lane": execution_lane,
@@ -1029,6 +1030,15 @@ class SyncServer:
                 f"subprocess failed exit={proc.returncode}: {detail or stderr or stdout[:500]}"
             )
         return payload
+
+    def _routing_classification_text(self, task_id: str) -> str:
+        """
+        Text used for Andrea router classification only.
+        Must be the latest user turn — not telegram accumulated_prompt, which merges
+        thread history and breaks meta questions after a prior message in the same task.
+        """
+        payload = self._latest_user_message_payload(task_id)
+        return str(payload.get("routing_text") or payload.get("text") or "").strip()
 
     def _extract_cursor_prompt(self, task_id: str) -> str:
         snapshot = self._task_snapshot(task_id)

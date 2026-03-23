@@ -812,6 +812,55 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(decision.delegate_target, "openclaw_hybrid")
         self.assertEqual(decision.collaboration_mode, "cursor_primary")
 
+    def test_server_routes_latest_message_not_accumulated_thread(self) -> None:
+        """Regression: router must classify the latest user turn, not merged accumulated_prompt."""
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        first = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-thread-openclaw-meta",
+                "payload": {
+                    "text": "Please inspect the repo, fix the failing tests, and open a PR.",
+                    "routing_text": "Please inspect the repo, fix the failing tests, and open a PR.",
+                    "chat_id": 88001,
+                    "message_id": 101,
+                },
+            },
+        )
+        tid = first["task_id"]
+        handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "task_id": tid,
+                "external_id": "tg-thread-openclaw-meta-2",
+                "payload": {
+                    "text": "Is this OpenClaw?",
+                    "routing_text": "Is this OpenClaw?",
+                    "chat_id": 88001,
+                    "message_id": 102,
+                },
+            },
+        )
+        acc = server._extract_cursor_prompt(tid)
+        self.assertIn("OpenClaw", acc)
+        self.assertIn("failing tests", acc)
+        self.assertEqual(server._routing_classification_text(tid), "Is this OpenClaw?")
+        decision, _applied = server._route_task_with_decision(
+            tid,
+            history=[],
+            source="test_latest_vs_accumulated",
+        )
+        self.assertEqual(decision.mode, "direct")
+        self.assertEqual(decision.reason, "stack_or_tooling_question")
+
     def test_router_bare_openclaw_mention_stays_direct_when_short(self) -> None:
         decision = route_message("Just checking — openclaw?")
         self.assertEqual(decision.mode, "direct")

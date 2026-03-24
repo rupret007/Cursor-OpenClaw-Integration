@@ -1858,6 +1858,101 @@ def list_recent_closure_decisions(
         return []
 
 
+def list_recent_user_outcome_receipts_for_task(
+    conn: sqlite3.Connection, task_id: str, *, limit: int = 8
+) -> List[sqlite3.Row]:
+    try:
+        return list(
+            conn.execute(
+                """
+                SELECT * FROM user_outcome_receipts
+                WHERE task_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (str(task_id or ""), max(1, int(limit))),
+            ).fetchall()
+        )
+    except sqlite3.OperationalError:
+        return []
+
+
+def list_recent_open_loop_records_for_task(
+    conn: sqlite3.Connection, task_id: str, *, limit: int = 8
+) -> List[sqlite3.Row]:
+    try:
+        return list(
+            conn.execute(
+                """
+                SELECT * FROM open_loop_records
+                WHERE task_id = ?
+                ORDER BY opened_at DESC
+                LIMIT ?
+                """,
+                (str(task_id or ""), max(1, int(limit))),
+            ).fetchall()
+        )
+    except sqlite3.OperationalError:
+        return []
+
+
+def list_recent_closure_decisions_for_task(
+    conn: sqlite3.Connection, task_id: str, *, limit: int = 8
+) -> List[sqlite3.Row]:
+    try:
+        return list(
+            conn.execute(
+                """
+                SELECT * FROM closure_decisions
+                WHERE task_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (str(task_id or ""), max(1, int(limit))),
+            ).fetchall()
+        )
+    except sqlite3.OperationalError:
+        return []
+
+
+def list_recent_followup_recommendations_for_task(
+    conn: sqlite3.Connection, task_id: str, *, limit: int = 8
+) -> List[sqlite3.Row]:
+    try:
+        return list(
+            conn.execute(
+                """
+                SELECT * FROM followup_recommendations
+                WHERE task_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (str(task_id or ""), max(1, int(limit))),
+            ).fetchall()
+        )
+    except sqlite3.OperationalError:
+        return []
+
+
+def list_recent_stale_task_indicators_for_task(
+    conn: sqlite3.Connection, task_id: str, *, limit: int = 8
+) -> List[sqlite3.Row]:
+    try:
+        return list(
+            conn.execute(
+                """
+                SELECT * FROM stale_task_indicators
+                WHERE task_id = ?
+                ORDER BY detected_at DESC
+                LIMIT ?
+                """,
+                (str(task_id or ""), max(1, int(limit))),
+            ).fetchall()
+        )
+    except sqlite3.OperationalError:
+        return []
+
+
 def list_recent_followup_recommendations(
     conn: sqlite3.Connection, *, limit: int = 32
 ) -> List[sqlite3.Row]:
@@ -2573,6 +2668,43 @@ def list_due_reminders(
         """,
         (ts, max(1, int(limit))),
     ).fetchall()
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        raw_meta = item.get("metadata_json")
+        try:
+            item["metadata"] = json.loads(raw_meta) if raw_meta else {}
+        except Exception:
+            item["metadata"] = {}
+        out.append(item)
+    return out
+
+
+def list_upcoming_reminders_for_principal(
+    conn: sqlite3.Connection, principal_id: str, *, limit: int = 20
+) -> List[Dict[str, Any]]:
+    """
+    Upcoming reminders for a principal (scheduled/awaiting), soonest first.
+    Best-effort: returns [] if the reminders table is missing (older DB).
+    """
+    pid = str(principal_id or "").strip()
+    if not pid:
+        return []
+    try:
+        rows = conn.execute(
+            """
+            SELECT reminder_id, principal_id, channel, delivery_target, message, due_at, status,
+                   source_task_id, metadata_json, created_at, updated_at
+            FROM reminders
+            WHERE principal_id = ?
+              AND status IN ('scheduled', 'awaiting_delivery_channel')
+            ORDER BY due_at ASC, created_at ASC
+            LIMIT ?
+            """,
+            (pid, max(1, int(limit))),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return []
     out: List[Dict[str, Any]] = []
     for row in rows:
         item = dict(row)

@@ -77,7 +77,10 @@ done
 [[ "$OPENCLAW_PROBE_MS" =~ ^[0-9]+$ ]] || die "--probe-timeout-ms must be integer milliseconds"
 [[ -n "$REQUIRED_SKILLS" ]] || die "--required-skills cannot be empty"
 
-command -v openclaw >/dev/null 2>&1 || die "openclaw not on PATH"
+# Allow --dry-run in minimal environments where OpenClaw isn't installed.
+if [[ "$DRY_RUN" -ne 1 ]] && ! command -v openclaw >/dev/null 2>&1; then
+  die "openclaw not on PATH"
+fi
 [[ -d "$BASE_DIR" ]] || die "repo base missing: $BASE_DIR"
 
 sync_skill() {
@@ -134,6 +137,9 @@ PY
 
 check_required_skills() {
   note "validate required skills list"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    return 0
+  fi
   local out
   out="$(openclaw skills list)"
   local missing=0
@@ -180,6 +186,9 @@ check_eligible_skills() {
 
 check_acp_router_runtime() {
   note "validate ACP router runtime"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    return 0
+  fi
   local out
   out="$(openclaw skills list)"
   if printf '%s\n' "$out" | grep -E "✓ ready.*acp-router" >/dev/null 2>&1; then

@@ -234,20 +234,30 @@ def _clip(value: Any, limit: int = 400) -> str:
 
 
 def _run_subprocess(argv: List[str], *, cwd: Path | None = None) -> Dict[str, Any]:
-    proc = subprocess.run(
-        argv,
-        cwd=str(cwd or REPO_ROOT),
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    return {
-        "argv": list(argv),
-        "returncode": int(proc.returncode),
-        "stdout": proc.stdout or "",
-        "stderr": proc.stderr or "",
-        "ok": proc.returncode == 0,
-    }
+    try:
+        proc = subprocess.run(
+            argv,
+            cwd=str(cwd or REPO_ROOT),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        return {
+            "argv": list(argv),
+            "returncode": int(proc.returncode),
+            "stdout": proc.stdout or "",
+            "stderr": proc.stderr or "",
+            "ok": proc.returncode == 0,
+        }
+    except FileNotFoundError as exc:
+        return {
+            "argv": list(argv),
+            "returncode": 127,
+            "stdout": "",
+            "stderr": str(exc),
+            "ok": False,
+            "not_found": True,
+        }
 
 
 def _run_json_command(argv: List[str], *, cwd: Path | None = None) -> Dict[str, Any]:

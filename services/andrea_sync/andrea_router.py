@@ -50,6 +50,15 @@ GENERIC_DIRECT_REPLY_RE = re.compile(
     r"bring in cursor when the task needs deeper|deeper technical work\. tell me what you need)",
     re.I,
 )
+GENERIC_DIRECT_REPLY_FALLBACK_RE = re.compile(
+    r"\b("
+    r"say a bit more about what you want|"
+    r"tell me what you need|"
+    r"what would you like to (?:do|work on)|"
+    r"i can help with that directly"
+    r")\b",
+    re.I,
+)
 # Coordination / capability questions — not actionable "have Cursor fix X" instructions.
 META_CURSOR_RE = re.compile(
     r"\b("
@@ -518,6 +527,9 @@ def _openai_direct_reply(
     text: str,
     history: list[dict[str, str]] | None = None,
     memory_notes: list[str] | None = None,
+    *,
+    turn_domain: str = "",
+    context_boundary: str = "",
 ) -> str:
     api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
     if not api_key or not _env_truthy("OPENAI_API_ENABLED", False):
@@ -536,6 +548,24 @@ def _openai_direct_reply(
             "past assistant messages about projects, sprints, or tool handoffs; answer briefly from general "
             "knowledge or ask what topic or region they want."
         )
+    boundary_extra = ""
+    domain = str(turn_domain or "").strip()
+    if domain == "external_information":
+        boundary_extra = (
+            " This turn is external-information domain: avoid project status, approval queue, receipts, "
+            "or personal memory unless the user explicitly asks for those."
+        )
+    elif domain in {"project_status", "approval_state"}:
+        boundary_extra = (
+            " This turn is project continuity domain: prefer concrete status, blockers, and next actions "
+            "over generic assistant fallback language."
+        )
+    elif domain == "casual_conversation":
+        boundary_extra = (
+            " This turn is casual conversation: keep the answer warm, brief, and avoid runtime or repo details."
+        )
+    if context_boundary:
+        boundary_extra += f" Context boundary: {context_boundary}."
     messages = [
         {
             "role": "system",
@@ -551,7 +581,7 @@ def _openai_direct_reply(
                 "but do not claim memories beyond what is provided in this chat context. "
                 "Do not treat unrelated prior assistant turns as the answer to a new question. "
                 "Keep replies short and useful for chat or voice."
-                f"{news_extra}"
+                f"{news_extra}{boundary_extra}"
             ),
         }
     ]
@@ -616,6 +646,9 @@ def build_direct_reply(
     text: str,
     history: list[dict[str, str]] | None = None,
     memory_notes: list[str] | None = None,
+    *,
+    turn_domain: str = "",
+    context_boundary: str = "",
 ) -> str:
     clean = _normalize(text)
     has_memory = bool(memory_notes and any(str(n).strip() for n in memory_notes))
@@ -639,7 +672,13 @@ def build_direct_reply(
         )
     try:
         return _finalize_direct_surface_reply(
-            _openai_direct_reply(text, history=history, memory_notes=memory_notes),
+            _openai_direct_reply(
+                text,
+                history=history,
+                memory_notes=memory_notes,
+                turn_domain=turn_domain,
+                context_boundary=context_boundary,
+            ),
             user_seed=text,
             history=history,
         )
@@ -659,6 +698,8 @@ def route_message(
     collaboration_mode: str = "auto",
     preferred_model_family: str = "",
     memory_notes: list[str] | None = None,
+    turn_domain: str = "",
+    context_boundary: str = "",
 ) -> AndreaRouteDecision:
     mode, reason, delegate_target, resolved_collab = classify_route(
         text,
@@ -676,6 +717,19 @@ def route_message(
     return AndreaRouteDecision(
         mode="direct",
         reason=reason,
-        reply_text=build_direct_reply(text, history=history, memory_notes=memory_notes),
+        reply_text=build_direct_reply(
+            text,
+            history=history,
+            memory_notes=memory_notes,
+            turn_domain=turn_domain,
+            context_boundary=context_boundary,
+        ),
         collaboration_mode=resolved_collab,
     )
+
+
+def is_generic_direct_reply(text: str) -> bool:
+    clean = str(text or "").strip()
+    if not clean:
+        return True
+    return bool(GENERIC_DIRECT_REPLY_FALLBACK_RE.search(clean))

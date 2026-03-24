@@ -20,8 +20,12 @@ from typing import Any, Callable, Dict, Optional
 from .adapters import alexa as alexa_adapt
 from .adapters import telegram as tg_adapt
 from .alexa_request_verify import verify_alexa_http_request
-from .andrea_router import AndreaRouteDecision, route_message
-from .goal_runtime import ensure_delegate_goal_link, try_goal_status_nl_reply
+from .andrea_router import AndreaRouteDecision, is_generic_direct_reply, route_message
+from .goal_runtime import (
+    build_goal_continuity_reply,
+    ensure_delegate_goal_link,
+    try_goal_status_nl_reply,
+)
 from .plan_runtime import (
     bind_step_to_attempt,
     finalize_execute_step_verification,
@@ -67,6 +71,7 @@ from .scenario_runtime import (
 from .scenario_schema import UNSUPPORTED, ScenarioResolution
 from .schema import EventType
 from .telegram_continuation import attach_continuation_if_applicable
+from .turn_intelligence import TurnPlan, build_turn_plan
 from .store import (
     append_event,
     complete_execution_attempt,
@@ -184,6 +189,14 @@ MESSAGING_CAPABILITY_RE = re.compile(
     re.I,
 )
 LIVE_NEWS_RE = re.compile(r"\b(news|headline|headlines)\b", re.I)
+CONTINUITY_HINT_RE = re.compile(
+    r"\b("
+    r"status|progress|update|where are we|what happened|"
+    r"approval|awaiting|pending|waiting on|"
+    r"working on|still needs attention|agenda|today"
+    r")\b",
+    re.I,
+)
 RECENT_TEXT_MESSAGES_RE = re.compile(
     r"(?:"
     r"\b(?:recent|latest|last)\b.*\b(?:text(?:s| messages?)?|imessages?|messages?|threads?)\b|"
@@ -1310,9 +1323,26 @@ class SyncServer:
             execution_prompt = self._extract_cursor_prompt(task_id)
             principal_prefs = self._principal_preferences(task_id)
             effective_history = history if history is not None else self._recent_task_history(task_id)
+            gid_for_scenario = self.with_lock(
+                lambda c: get_goal_id_for_task(c, task_id) or ""
+            )
+            pre_resolution, _pre_contract = resolve_scenario(
+                classify_text,
+                goal_id=gid_for_scenario,
+                route_decision=None,
+            )
+            pre_turn_plan = build_turn_plan(
+                classify_text,
+                scenario_id=pre_resolution.scenario_id,
+                projection_has_continuity_state=self._projection_has_continuity_state(task_id),
+            )
             goal_nl = self.with_lock(
                 lambda c: try_goal_status_nl_reply(c, task_id, classify_text)
             )
+            if not goal_nl and pre_turn_plan.prefer_state_reply:
+                goal_nl = self.with_lock(
+                    lambda c: build_goal_continuity_reply(c, task_id)
+                )
             if goal_nl:
                 gid = self.with_lock(lambda c: get_goal_id_for_task(c, task_id) or "")
                 sc = SCENARIO_CATALOG["statusFollowupContinue"]
@@ -1385,33 +1415,52 @@ class SyncServer:
                         task_id, decision.reply_text, decision.reason
                     )
                 return decision, applied
-            decision = route_message(
-                classify_text,
-                history=effective_history,
-                memory_notes=self._principal_memory_notes(task_id),
-                routing_hint=str(
-                    user_payload.get("routing_hint")
-                    or principal_prefs.get("routing_hint")
-                    or "auto"
-                ),
-                collaboration_mode=str(
-                    user_payload.get("collaboration_mode")
-                    or principal_prefs.get("collaboration_mode")
-                    or "auto"
-                ),
-                preferred_model_family=str(
-                    user_payload.get("preferred_model_family")
-                    or principal_prefs.get("preferred_model_family")
-                    or ""
-                ),
-            )
-            gid_for_scenario = self.with_lock(
-                lambda c: get_goal_id_for_task(c, task_id) or ""
-            )
+            route_memory_notes = self._principal_memory_notes(task_id)
+            if pre_turn_plan.force_delegate:
+                decision = AndreaRouteDecision(
+                    mode="delegate",
+                    reason="turn_plan_technical_execution",
+                    delegate_target="openclaw_hybrid",
+                    collaboration_mode=str(
+                        user_payload.get("collaboration_mode")
+                        or principal_prefs.get("collaboration_mode")
+                        or "auto"
+                    ),
+                )
+            else:
+                decision = route_message(
+                    classify_text,
+                    history=effective_history,
+                    memory_notes=route_memory_notes,
+                    routing_hint=str(
+                        user_payload.get("routing_hint")
+                        or principal_prefs.get("routing_hint")
+                        or "auto"
+                    ),
+                    collaboration_mode=str(
+                        user_payload.get("collaboration_mode")
+                        or principal_prefs.get("collaboration_mode")
+                        or "auto"
+                    ),
+                    preferred_model_family=str(
+                        user_payload.get("preferred_model_family")
+                        or principal_prefs.get("preferred_model_family")
+                        or ""
+                    ),
+                    turn_domain=pre_turn_plan.domain,
+                    context_boundary=pre_turn_plan.context_boundary,
+                )
             resolution, scenario_contract = resolve_scenario(
                 classify_text,
                 goal_id=gid_for_scenario,
                 route_decision=decision,
+            )
+            decision = self._maybe_repair_direct_reply_from_continuity(
+                task_id,
+                classify_text=classify_text,
+                decision=decision,
+                resolution=resolution,
+                turn_plan=pre_turn_plan,
             )
             self._append_task_event(
                 task_id,
@@ -1975,6 +2024,65 @@ class SyncServer:
         """
         payload = self._latest_user_message_payload(task_id)
         return str(payload.get("routing_text") or payload.get("text") or "").strip()
+
+    def _projection_has_continuity_state(self, task_id: str) -> bool:
+        snapshot = self._task_snapshot(task_id)
+        if not snapshot:
+            return False
+        projection = (
+            snapshot.get("projection")
+            if isinstance(snapshot.get("projection"), dict)
+            else {}
+        )
+        meta = projection.get("meta") if isinstance(projection.get("meta"), dict) else {}
+        for key in ("goal", "plan", "approval", "daily_assistant_pack", "followthrough"):
+            section = meta.get(key)
+            if isinstance(section, dict) and section:
+                return True
+        return False
+
+    def _maybe_repair_direct_reply_from_continuity(
+        self,
+        task_id: str,
+        *,
+        classify_text: str,
+        decision: AndreaRouteDecision,
+        resolution: ScenarioResolution,
+        turn_plan: TurnPlan | None = None,
+    ) -> AndreaRouteDecision:
+        if getattr(decision, "mode", "") != "direct":
+            return decision
+        reply_text = str(decision.reply_text or "").strip()
+        if not reply_text:
+            return decision
+        generic = is_generic_direct_reply(reply_text) or str(decision.reason or "") in {
+            "short_general_request",
+            "balanced_default_direct",
+        }
+        continuity_ask = bool(CONTINUITY_HINT_RE.search(str(classify_text or "")))
+        continuity_state = self._projection_has_continuity_state(task_id)
+        scenario_continuity = (
+            str(getattr(resolution, "scenario_id", "") or "") == "statusFollowupContinue"
+        )
+        plan_prefers_state = bool(turn_plan and turn_plan.prefer_state_reply)
+        plan_repairs_generic = bool(turn_plan and turn_plan.should_repair_generic)
+        if not (
+            scenario_continuity
+            or plan_prefers_state
+            or ((generic and plan_repairs_generic) and (continuity_ask or continuity_state))
+        ):
+            return decision
+        continuity_reply = self.with_lock(
+            lambda c: build_goal_continuity_reply(c, task_id)
+        )
+        if not continuity_reply:
+            return decision
+        return AndreaRouteDecision(
+            mode="direct",
+            reason="continuity_state_repaired_direct_reply",
+            reply_text=continuity_reply,
+            collaboration_mode=decision.collaboration_mode,
+        )
 
     def _extract_cursor_prompt(self, task_id: str) -> str:
         snapshot = self._task_snapshot(task_id)

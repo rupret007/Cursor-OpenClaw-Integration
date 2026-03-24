@@ -44,6 +44,17 @@ def try_goal_status_nl_reply(
     """
     if not user_text or not _GOAL_STATUS_PATTERNS.search(user_text):
         return None
+    return build_goal_continuity_reply(conn, task_id)
+
+
+def build_goal_continuity_reply(
+    conn: Any,
+    task_id: str,
+) -> Optional[str]:
+    """
+    Build a compact continuity/status answer from goal + plan + projection state.
+    Unlike try_goal_status_nl_reply, this does not apply intent regex gating.
+    """
     principal_id = get_task_principal_id(conn, task_id)
     if not principal_id:
         return None

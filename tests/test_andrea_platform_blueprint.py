@@ -9,10 +9,15 @@ from services.andrea_sync.bus import handle_command
 from services.andrea_sync.dashboard import _build_blueprint_platform_summary
 from services.andrea_sync.experience_assurance import blueprint_platform_health
 from services.andrea_sync.failure_classifier import classify_error
-from services.andrea_sync.goal_runtime import ensure_delegate_goal_link, try_goal_status_nl_reply
+from services.andrea_sync.goal_runtime import (
+    build_goal_continuity_reply,
+    ensure_delegate_goal_link,
+    try_goal_status_nl_reply,
+)
 from services.andrea_sync.recovery_engine import recovery_plan_from_message
 from services.andrea_sync.resource_router import rank_execution_lanes, routing_explanation
 from services.andrea_sync.schema import CommandType, EventType
+from services.andrea_sync.turn_intelligence import build_turn_plan
 from services.andrea_sync.store import (
     append_event,
     connect,
@@ -71,6 +76,35 @@ class BlueprintPlatformTests(unittest.TestCase):
         self.assertIn("Ship feature X", reply)
         self.assertIn("completed", reply.lower())
 
+    def test_goal_continuity_reply_without_status_keyword(self) -> None:
+        create_task(self.conn, "tsk_a2", "telegram")
+        link_task_principal(self.conn, "tsk_a2", "pri_test2", channel="telegram")
+        r = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.CREATE_GOAL.value,
+                "channel": "internal",
+                "payload": {"principal_id": "pri_test2", "summary": "Prepare weekly report"},
+            },
+        )
+        self.assertTrue(r.get("ok"), r)
+        gid = str(r.get("goal_id"))
+        linked = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.LINK_TASK_TO_GOAL.value,
+                "channel": "internal",
+                "task_id": "tsk_a2",
+                "payload": {"task_id": "tsk_a2", "goal_id": gid},
+            },
+        )
+        self.assertTrue(linked.get("ok"), linked)
+        reply = build_goal_continuity_reply(self.conn, "tsk_a2")
+        self.assertIsNotNone(reply)
+        assert reply is not None
+        self.assertIn(gid, reply)
+        self.assertIn("Prepare weekly report", reply)
+
     def test_auto_goal_link(self) -> None:
         create_task(self.conn, "tsk_b", "cli")
         link_task_principal(self.conn, "tsk_b", "pri_z", channel="cli")
@@ -116,6 +150,38 @@ class BlueprintPlatformTests(unittest.TestCase):
     def test_get_task_channel_used_by_goal_runtime(self) -> None:
         create_task(self.conn, "tsk_c", "telegram")
         self.assertEqual(get_task_channel(self.conn, "tsk_c"), "telegram")
+
+    def test_turn_plan_domains_cover_core_queries(self) -> None:
+        plan_news = build_turn_plan(
+            "What's the news today?",
+            scenario_id="researchSummary",
+            projection_has_continuity_state=True,
+        )
+        self.assertEqual(plan_news.domain, "external_information")
+        self.assertEqual(plan_news.context_boundary, "external_world_only")
+
+        plan_status = build_turn_plan(
+            "What are we working on right now?",
+            scenario_id="statusFollowupContinue",
+            projection_has_continuity_state=True,
+        )
+        self.assertEqual(plan_status.domain, "project_status")
+        self.assertTrue(plan_status.prefer_state_reply)
+
+        plan_approval = build_turn_plan(
+            "What still needs my approval?",
+            scenario_id="statusFollowupContinue",
+            projection_has_continuity_state=True,
+        )
+        self.assertEqual(plan_approval.domain, "approval_state")
+
+        plan_exec = build_turn_plan(
+            "Please inspect the repo and fix failing tests",
+            scenario_id="repoHelpVerified",
+            projection_has_continuity_state=False,
+        )
+        self.assertEqual(plan_exec.domain, "technical_execution")
+        self.assertTrue(plan_exec.force_delegate)
 
 
 if __name__ == "__main__":

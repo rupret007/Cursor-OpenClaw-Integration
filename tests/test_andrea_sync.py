@@ -1865,6 +1865,61 @@ class TestAndreaSync(unittest.TestCase):
             else:
                 os.environ["ANDREA_SYNC_CLI_SUBMIT_AUTO_ROUTE"] = prev_cli_auto
 
+    def test_server_followups_repairs_generic_direct_with_goal_continuity(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        os.environ["OPENAI_API_ENABLED"] = "0"
+        os.environ.pop("OPENAI_API_KEY", None)
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        result = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-continuity-repair",
+                "payload": {
+                    "text": "What are we working on?",
+                    "chat_id": 92001,
+                    "message_id": 1,
+                },
+            },
+        )
+        task_id = str(result["task_id"])
+        pre = project_task_dict(server.conn, task_id, "telegram")
+        principal_id = str(((pre.get("meta") or {}).get("identity") or {}).get("principal_id") or "")
+        self.assertTrue(principal_id)
+
+        created = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.CREATE_GOAL.value,
+                "channel": "internal",
+                "payload": {"principal_id": principal_id, "summary": "Finish continuity rollout"},
+            },
+        )
+        self.assertTrue(created.get("ok"), created)
+        goal_id = str(created.get("goal_id") or "")
+        linked = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.LINK_TASK_TO_GOAL.value,
+                "channel": "internal",
+                "task_id": task_id,
+                "payload": {"task_id": task_id, "goal_id": goal_id},
+            },
+        )
+        self.assertTrue(linked.get("ok"), linked)
+
+        server._handle_task_followups(task_id)
+        proj = project_task_dict(server.conn, task_id, "telegram")
+        assistant = (proj.get("meta") or {}).get("assistant") or {}
+        text = str(assistant.get("last_reply") or "")
+        self.assertEqual(assistant.get("reason"), "continuity_state_repaired_direct_reply")
+        self.assertIn(goal_id, text)
+        self.assertNotIn("say a bit more", text.lower())
+
     def test_server_followups_cli_skips_routing_when_auto_route_disabled(self) -> None:
         prev_cli_auto = os.environ.get("ANDREA_SYNC_CLI_SUBMIT_AUTO_ROUTE")
         try:
@@ -1975,6 +2030,34 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(proj["status"], TaskStatus.QUEUED.value)
         self.assertEqual(proj["meta"]["cursor"]["kind"], "openclaw")
         self.assertEqual(proj["meta"]["execution"]["lane"], "openclaw_hybrid")
+
+    def test_turn_plan_forces_delegate_for_troubleshoot_domain(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        result = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-turn-plan-troubleshoot",
+                "payload": {
+                    "text": "It keeps crashing after startup. What should we do?",
+                    "chat_id": 1,
+                    "message_id": 203,
+                },
+            },
+        )
+        server._handle_task_followups(result["task_id"])
+        proj = project_task_dict(server.conn, result["task_id"], "telegram")
+        self.assertEqual(proj["status"], TaskStatus.QUEUED.value)
+        self.assertEqual(proj["meta"]["execution"]["lane"], "openclaw_hybrid")
+        self.assertEqual(
+            proj["meta"]["execution"]["route_reason"],
+            "turn_plan_technical_execution",
+        )
 
     def test_create_openclaw_job_passes_explicit_session_id(self) -> None:
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"

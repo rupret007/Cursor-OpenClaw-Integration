@@ -18,7 +18,7 @@ from services.andrea_sync.goal_runtime import (
 from services.andrea_sync.recovery_engine import recovery_plan_from_message
 from services.andrea_sync.resource_router import rank_execution_lanes, routing_explanation
 from services.andrea_sync.schema import CommandType, EventType
-from services.andrea_sync.turn_intelligence import build_turn_plan
+from services.andrea_sync.turn_intelligence import build_turn_plan, classify_continuity_focus
 from services.andrea_sync.store import (
     append_event,
     connect,
@@ -237,6 +237,8 @@ class BlueprintPlatformTests(unittest.TestCase):
         )
         self.assertEqual(plan_blocked.domain, "project_status")
         self.assertTrue(plan_blocked.prefer_state_reply)
+        self.assertEqual(plan_blocked.continuity_focus, "blocked_state")
+        self.assertEqual(classify_continuity_focus("What's blocked right now?"), "blocked_state")
 
         plan_task_history = build_turn_plan(
             "What happened with that task earlier?",
@@ -244,6 +246,7 @@ class BlueprintPlatformTests(unittest.TestCase):
             projection_has_continuity_state=True,
         )
         self.assertEqual(plan_task_history.domain, "project_status")
+        self.assertEqual(plan_task_history.continuity_focus, "recent_outcome_history")
 
     @mock.patch("services.andrea_sync.goal_runtime.project_task_dict")
     def test_goal_continuity_surfaces_outcome_and_cursor_delegation(self, m_proj: mock.MagicMock) -> None:

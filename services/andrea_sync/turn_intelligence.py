@@ -6,9 +6,18 @@ import re
 from typing import Literal
 
 
+ContinuityFocus = Literal[
+    "none",
+    "blocked_state",
+    "recent_outcome_history",
+    "cursor_followup_heavy_lift",
+]
+
+
 TurnDomain = Literal[
     "casual_conversation",
     "personal_agenda",
+    "attention_today",
     "project_status",
     "approval_state",
     "external_information",
@@ -29,7 +38,21 @@ _AGENDA_RE = re.compile(
     r"agenda|"
     r"day'?s\s+plan|plan\s+for\s+today|"
     r"what'?s\s+on\s+(?:the\s+)?agenda|"
-    r"anything\s+on\s+(?:the\s+)?agenda"
+    r"anything\s+on\s+(?:the\s+)?agenda|"
+    r"what'?s\s+planned\s+(?:for\s+)?today|"
+    r"what\s+is\s+planned\s+(?:for\s+)?today|"
+    r"planned\s+for\s+today"
+    r")\b",
+    re.I,
+)
+# Triage / attention — distinct from generic status or bare calendar asks.
+_ATTENTION_TODAY_RE = re.compile(
+    r"\b("
+    r"pay\s+attention|need\s+to\s+pay\s+attention|what\s+to\s+pay\s+attention|"
+    r"what\s+do\s+i\s+need\s+to\s+pay\s+attention|"
+    r"what\s+needs\s+(?:my\s+)?attention|"
+    r"attention\s+today|"
+    r"what\s+should\s+i\s+focus\s+on\s+today"
     r")\b",
     re.I,
 )
@@ -43,6 +66,45 @@ _OPINION_RE = re.compile(
     r"\b(what(?:'s|s|\s+do)\s+you\s+think|your\s+(opinion|view)|what(?:'s|s)\s+your\s+take)\b",
     re.I,
 )
+# Blocker / stuck — deterministic state-first lane (must beat generic status fallbacks).
+_BLOCKED_STATE_RE = re.compile(
+    r"\b("
+    r"what'?s\s+blocked|blocked\s+right\s+now|what\s+is\s+blocking|"
+    r"main\s+blocker|what\s+are\s+you\s+blocked\s+on|where\s+are\s+we\s+stuck|"
+    r"what'?s\s+the\s+blocker|anything\s+blocking"
+    r")\b",
+    re.I,
+)
+# Recent trajectory / outcome — prefer receipts and task history over “no active work”.
+_RECENT_OUTCOME_HISTORY_RE = re.compile(
+    r"\b("
+    r"what\s+happened\s+with\s+(?:that\s+)?task|what\s+happened\s+to\s+that\s+task|"
+    r"what\s+happened\s+with\s+that\s+work|"
+    r"last\s+task|that\s+task\s+earlier|task\s+earlier|"
+    r"what\s+was\s+the\s+outcome|what\s+did\s+cursor\s+say|what\s+did\s+openclaw\s+do|"
+    r"recap\s+(?:that\s+)?task|outcome\s+of\s+that"
+    r")\b",
+    re.I,
+)
+# Heavy-lift / Cursor thread follow-ups (orchestration language, not raw plumbing).
+_CURSOR_FOLLOWUP_HEAVY_RE = re.compile(
+    r"@cursor|\bopenclaw\b|"
+    r"continue\s+(?:that|the|this)\s+(?:cursor|heavy)[\s-]?(?:run|task|work)?|"
+    r"heavy[\s-]?lift|repo[\s-]?wide",
+    re.I,
+)
+
+
+def classify_continuity_focus(text: str) -> ContinuityFocus:
+    """Sub-intent for status/continuity turns (priority: blocked > history > cursor)."""
+    clean = str(text or "").strip()
+    if _BLOCKED_STATE_RE.search(clean):
+        return "blocked_state"
+    if _RECENT_OUTCOME_HISTORY_RE.search(clean):
+        return "recent_outcome_history"
+    if _CURSOR_FOLLOWUP_HEAVY_RE.search(clean):
+        return "cursor_followup_heavy_lift"
+    return "none"
 
 
 def _policy_flags_for_domain(domain: TurnDomain) -> tuple[bool, bool]:
@@ -53,6 +115,8 @@ def _policy_flags_for_domain(domain: TurnDomain) -> tuple[bool, bool]:
         return False, False
     if domain in {"project_status", "approval_state"}:
         return True, True
+    if domain == "attention_today":
+        return False, True
     return False, True
 
 
@@ -65,6 +129,7 @@ class TurnPlan:
     should_repair_generic: bool
     allow_goal_continuity_repair: bool
     inject_durable_memory: bool
+    continuity_focus: ContinuityFocus
 
 
 def build_turn_plan(
@@ -80,6 +145,7 @@ def build_turn_plan(
     prefer_state_reply = False
     force_delegate = False
     should_repair_generic = True
+    continuity_focus: ContinuityFocus = classify_continuity_focus(clean)
 
     if sid in {"repoHelpVerified", "multiStepTroubleshoot", "verificationSensitiveAction"}:
         domain = "technical_execution"
@@ -93,6 +159,9 @@ def build_turn_plan(
         elif _APPROVAL_RE.search(clean):
             domain = "approval_state"
             context_boundary = "approval_and_plan_state"
+        elif _ATTENTION_TODAY_RE.search(clean):
+            domain = "attention_today"
+            context_boundary = "attention_and_triage_state"
         elif _AGENDA_RE.search(clean):
             domain = "personal_agenda"
             context_boundary = "personal_agenda_state"
@@ -102,7 +171,7 @@ def build_turn_plan(
         else:
             domain = "project_status"
             context_boundary = "project_continuity_state"
-        # personal_agenda must not prefer goal-thread continuity replies (no calendar source yet).
+        # personal_agenda / attention_today must not prefer goal-thread continuity replies.
         if domain in {"project_status", "approval_state"}:
             prefer_state_reply = projection_has_continuity_state
         if domain == "external_information":
@@ -116,6 +185,9 @@ def build_turn_plan(
     elif _OPINION_RE.search(clean):
         domain = "opinion_reflection"
         context_boundary = "recent_thread_only"
+    elif _ATTENTION_TODAY_RE.search(clean):
+        domain = "attention_today"
+        context_boundary = "attention_and_triage_state"
     elif _AGENDA_RE.search(clean):
         domain = "personal_agenda"
         context_boundary = "personal_agenda_state"
@@ -132,4 +204,5 @@ def build_turn_plan(
         should_repair_generic=should_repair_generic,
         allow_goal_continuity_repair=allow_goal_continuity_repair,
         inject_durable_memory=inject_durable_memory,
+        continuity_focus=continuity_focus,
     )

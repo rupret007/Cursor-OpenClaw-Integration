@@ -13,11 +13,14 @@ from .andrea_router import (
     _history_hint,
     is_generic_direct_reply,
 )
+from .delegated_lifecycle import build_delegated_lifecycle_contract
+from .execution_runtime import summarize_execution_attempt_for_user
 from .goal_runtime import _APPROVAL_STATUS_PATTERNS, build_goal_continuity_reply
 from .projector import project_task_dict
 from .store import (
     get_task_channel,
     get_task_principal_id,
+    list_pending_goal_approvals_for_task,
     list_recent_closure_decisions_for_task,
     list_recent_followup_recommendations_for_task,
     list_recent_open_loop_records_for_task,
@@ -142,6 +145,205 @@ def _proactive_section(meta: Dict[str, Any]) -> Dict[str, Any]:
 def _telegram_section(meta: Dict[str, Any]) -> Dict[str, Any]:
     t = meta.get("telegram")
     return t if isinstance(t, dict) else {}
+
+
+def _assistant_section(meta: Dict[str, Any]) -> Dict[str, Any]:
+    a = meta.get("assistant")
+    return a if isinstance(a, dict) else {}
+
+
+def _projection_full(conn: Any, task_id: str) -> Dict[str, Any]:
+    channel = get_task_channel(conn, task_id) or "cli"
+    return project_task_dict(conn, task_id, channel)
+
+
+def build_blocked_state_reply_from_state(conn: Any, task_id: str) -> str:
+    """
+    Short, concrete blocker answer from outcome, approvals, follow-through, and ledger rows.
+    Always returns user-facing text (including explicit no-blocker when nothing is live).
+    """
+    meta = _projection_meta(conn, task_id)
+    outcome = _outcome_section(meta)
+    ft = _followthrough_section(meta)
+    blocked_reason = str(outcome.get("blocked_reason") or "").strip()
+    phase_summary = str(outcome.get("current_phase_summary") or "").strip()
+    phase = str(outcome.get("current_phase") or "").strip()
+    result_kind = str(outcome.get("result_kind") or "").strip()
+
+    pending = list_pending_goal_approvals_for_task(conn, task_id)
+    lines: List[str] = []
+
+    if blocked_reason:
+        lines.append(f"The main blocker right now is: {blocked_reason}")
+    elif pending:
+        top = pending[0]
+        aid = str(top.get("approval_id") or "").strip() or "approval"
+        rationale = str(top.get("rationale") or "").strip()
+        lines.append(
+            f"The main blocker right now is a pending approval (`{aid}`)"
+            + (f": {rationale}" if rationale else ".")
+        )
+    elif followthrough_needs_user_attention(ft):
+        r = str(ft.get("last_closure_reason") or ft.get("last_open_loop_state") or "").strip()
+        if r:
+            lines.append(f"The main blocker right now is follow-up state: {r[:280]}")
+        else:
+            lines.append(
+                "The main blocker right now is that something still needs your input or confirmation."
+            )
+
+    if not lines:
+        for row in list_recent_open_loop_records_for_task(conn, task_id, limit=2):
+            lk = str(row["loop_kind"] or "").strip()
+            st = str(row["open_loop_state"] or "").strip()
+            ore = str(row["opened_reason"] or "").strip()[:200]
+            if lk or st or ore:
+                lines.append(
+                    "The main blocker right now is an open loop"
+                    + (f" ({lk})" if lk else "")
+                    + f": {st or ore or 'see task details'}."
+                )
+                break
+        if not lines:
+            for row in list_recent_stale_task_indicators_for_task(conn, task_id, limit=1):
+                sk = str(row["staleness_kind"] or "").strip()
+                rsn = str(row["reason"] or "").strip()[:200]
+                if sk or rsn:
+                    lines.append(
+                        f"Risk signal on the task: {sk or 'stale'}{(' — ' + rsn) if rsn else ''}."
+                    )
+                    break
+
+    phase_bits = phase_summary or phase
+    if phase_bits:
+        lines.append(f"The task is in: {phase_bits}" + (f" (result: {result_kind})" if result_kind else "."))
+    elif result_kind:
+        lines.append(f"Current result state: **{result_kind}**.")
+
+    if not lines:
+        return (
+            "I'm not seeing a live blocker in the current tracked work right now. "
+            "If you want, I can check a specific task or recap the latest outcome."
+        )
+
+    nxt = ""
+    for row in list_recent_followup_recommendations_for_task(conn, task_id, limit=1):
+        act = str(row["recommended_action"] or "").strip()[:220]
+        if act:
+            nxt = f" Next useful move: {act}"
+            break
+    if not nxt and pending and not blocked_reason:
+        nxt = " Next useful move: review the pending approval and confirm or revise."
+    elif not nxt and followthrough_needs_user_attention(ft):
+        nxt = " Next useful move: reply with the decision or detail I’m waiting on."
+    lead = " ".join(lines).strip()
+    return f"{lead}{nxt}".strip()
+
+
+def build_recent_outcome_history_reply_from_state(conn: Any, task_id: str) -> str:
+    """
+    Recap what happened on the current task from projection, receipts, and continuation data.
+    Prefer this over generic “no active tracked work” when the ask is history-shaped.
+    """
+    meta = _projection_meta(conn, task_id)
+    proj = _projection_full(conn, task_id)
+    outcome = _outcome_section(meta)
+    asst = _assistant_section(meta)
+    summary = str(proj.get("summary") or "").strip()
+    last_reply = str(asst.get("last_reply") or "").strip()
+    status = str(proj.get("status") or "").strip()
+    phase_summary = str(outcome.get("current_phase_summary") or "").strip()
+    result_kind = str(outcome.get("result_kind") or "").strip()
+    blocked_reason = str(outcome.get("blocked_reason") or "").strip()
+
+    lines: List[str] = []
+    if last_reply and len(last_reply) > 12:
+        lines.append(f"Last assistant update on this task: {last_reply[:900]}")
+    elif summary and len(summary) > 12:
+        lines.append(f"Recorded summary: {summary[:900]}")
+
+    for row in list_recent_user_outcome_receipts_for_task(conn, task_id, limit=3):
+        summ = str(row["summary"] or "").strip()[:400]
+        kind = str(row["receipt_kind"] or "").strip()
+        if summ:
+            lines.append(
+                f"Recent receipt ({kind}): {summ}" if kind else f"Recent receipt: {summ}"
+            )
+
+    tm = _telegram_section(meta)
+    cr = tm.get("continuation_records") if isinstance(tm.get("continuation_records"), list) else []
+    if cr:
+        last = cr[-1]
+        if isinstance(last, dict):
+            r = str(last.get("reason") or "").strip()[:320]
+            if r:
+                lines.append(f"Continuation context: {r}")
+
+    state_bits: List[str] = []
+    if status:
+        state_bits.append(f"task status **{status}**")
+    if phase_summary:
+        state_bits.append(f"phase: {phase_summary}")
+    if result_kind:
+        state_bits.append(f"result: **{result_kind}**")
+    if blocked_reason:
+        state_bits.append(f"blocker: {blocked_reason}")
+    if state_bits:
+        lines.append("Where things stand: " + "; ".join(state_bits) + ".")
+
+    if not lines:
+        return (
+            "I don't have enough recorded history on the current task to say that confidently. "
+            "I can still check the latest linked goal or start tracking the next step explicitly."
+        )
+    tail = ""
+    if blocked_reason or followthrough_needs_user_attention(_followthrough_section(meta)):
+        tail = " Next step: address the open item above when you’re ready."
+    return ("\n".join(lines) + tail).strip()
+
+
+def build_cursor_heavy_lift_context_reply(conn: Any, task_id: str) -> Optional[str]:
+    """Orchestration-style recap for in-flight or recent Cursor / OpenClaw execution."""
+    meta = _projection_meta(conn, task_id)
+    contract = build_delegated_lifecycle_contract(meta)
+    ex = contract.get("execution") if isinstance(contract.get("execution"), dict) else {}
+    cur = contract.get("cursor") if isinstance(contract.get("cursor"), dict) else {}
+    oc = contract.get("openclaw") if isinstance(contract.get("openclaw"), dict) else {}
+    outcome = _outcome_section(meta)
+    att = summarize_execution_attempt_for_user(conn, task_id)
+    has_signal = bool(
+        ex.get("delegated_to_cursor")
+        or cur.get("agent_id")
+        or oc.get("run_id")
+        or str(outcome.get("current_phase_summary") or "").strip()
+        or (att.get("ok") if isinstance(att, dict) else False)
+    )
+    if not has_signal:
+        return None
+
+    parts: List[str] = []
+    phase = str(outcome.get("current_phase_summary") or outcome.get("current_phase") or "").strip()
+    if phase:
+        parts.append(f"Current heavy-lift phase: {phase}.")
+    br = str(outcome.get("blocked_reason") or "").strip()
+    if br:
+        parts.append(f"Blocker / wait state: {br}.")
+    if isinstance(att, dict) and att.get("ok"):
+        parts.append(
+            f"Execution lane `{att.get('lane') or 'n/a'}` is **{att.get('status') or 'unknown'}** "
+            f"(backend: {att.get('backend') or 'n/a'})."
+        )
+    aid = str(cur.get("agent_id") or "").strip()
+    if aid:
+        parts.append(f"Cursor agent `{aid}` is attached when execution delegates to the repo.")
+    if oc.get("run_id"):
+        parts.append(f"OpenClaw run `{oc.get('run_id')}` is part of this workstream.")
+    if not parts:
+        return None
+    return (
+        "I'm keeping this on the current heavy-lift workstream.\n"
+        + "\n".join(f"• {p}" for p in parts)
+    )
 
 
 def collect_task_state_snippets(conn: Any, task_id: str, *, limit_each: int = 3) -> List[str]:
@@ -398,6 +600,15 @@ def try_composer_early_short_circuit(
         text = build_attention_reply_from_state(conn, task_id)
         return text, "composer_attention_today_state"
 
+    if domain in {"project_status", "approval_state"} and turn_plan.continuity_focus == "blocked_state":
+        text = build_blocked_state_reply_from_state(conn, task_id)
+        return text, "composer_blocked_state"
+
+    if domain == "project_status" and turn_plan.continuity_focus == "cursor_followup_heavy_lift":
+        cur = build_cursor_heavy_lift_context_reply(conn, task_id)
+        if cur:
+            return cur, "composer_cursor_heavy_lift_context"
+
     if domain == "external_information":
         return (
             _heuristic_reply(str(user_text or ""), history=hist),
@@ -491,6 +702,22 @@ def gather_repair_candidates(
         return out
 
     if domain in {"project_status", "approval_state"} and turn_plan.allow_goal_continuity_repair:
+        cf = turn_plan.continuity_focus
+        if cf == "blocked_state":
+            blk = build_blocked_state_reply_from_state(conn, task_id)
+            out.append(AnswerCandidate(source="blocked_state_reply", text=blk, priority=99))
+        elif cf == "recent_outcome_history":
+            hist = build_recent_outcome_history_reply_from_state(conn, task_id)
+            out.append(
+                AnswerCandidate(source="recent_outcome_history_reply", text=hist, priority=98)
+            )
+        elif cf == "cursor_followup_heavy_lift":
+            cur = build_cursor_heavy_lift_context_reply(conn, task_id)
+            if cur:
+                out.append(
+                    AnswerCandidate(source="cursor_heavy_lift_context", text=cur, priority=97)
+                )
+
         goal = build_goal_continuity_reply(conn, task_id, user_text=str(classify_text or ""))
         snippets = collect_task_state_snippets(conn, task_id)
         lead = followthrough_corrective_lead(ft, str(model_reply or ""))
@@ -528,16 +755,28 @@ def gather_repair_candidates(
                 )
             )
         if domain == "project_status" and not goal:
-            out.append(
-                AnswerCandidate(
-                    source="goal_continuity",
-                    text=(
-                        "I do not see active tracked work right now. "
-                        "If you want, I can start a fresh task and track it from here."
-                    ),
-                    priority=72,
+            if cf == "recent_outcome_history":
+                out.append(
+                    AnswerCandidate(
+                        source="goal_continuity",
+                        text=(
+                            "I don't have enough recorded history on the current task to say that confidently. "
+                            "I can still check the latest linked goal or start tracking the next step explicitly."
+                        ),
+                        priority=71,
+                    )
                 )
-            )
+            elif cf != "blocked_state":
+                out.append(
+                    AnswerCandidate(
+                        source="goal_continuity",
+                        text=(
+                            "I do not see active tracked work right now. "
+                            "If you want, I can start a fresh task and track it from here."
+                        ),
+                        priority=72,
+                    )
+                )
         elif domain == "approval_state" and not goal:
             if _APPROVAL_STATUS_PATTERNS.search(str(classify_text or "")):
                 out.append(
@@ -590,6 +829,13 @@ def pick_repair_winner(
         if generic_model or winner.priority >= 85:
             return winner.text, winner.source
         return None
+
+    if winner.source in {
+        "blocked_state_reply",
+        "recent_outcome_history_reply",
+        "cursor_heavy_lift_context",
+    }:
+        return winner.text, winner.source
 
     if winner.source == "followthrough_goal":
         return winner.text, winner.source
@@ -651,17 +897,22 @@ def bounded_composer_repair(
     )
 
     plan_prefers_state = bool(turn_plan.prefer_state_reply)
+    cf = turn_plan.continuity_focus
     stateful_goal_ok = (
         scenario_continuity
         or plan_prefers_state
         or continuity_ask
         or continuity_state
+        or cf
+        in {"blocked_state", "recent_outcome_history", "cursor_followup_heavy_lift"}
     )
 
     should_run_goal_branch = allow_goal and (
         scenario_continuity
         or plan_prefers_state
         or ((generic and plan_repairs) and (continuity_ask or continuity_state))
+        or cf
+        in {"blocked_state", "recent_outcome_history", "cursor_followup_heavy_lift"}
     )
     lane_domain = domain in {"personal_agenda", "attention_today"}
     should_run_lane_branch = (not allow_goal) and plan_repairs and (

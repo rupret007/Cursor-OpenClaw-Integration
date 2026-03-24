@@ -242,6 +242,80 @@ class TestAssistantAnswerComposer(unittest.TestCase):
         texts = " ".join(c.text for c in cands)
         self.assertIn("Waiting on CI proof", texts)
         self.assertIn("Tests still red", texts)
+        sources = [c.source for c in cands]
+        self.assertIn("blocked_state_reply", sources)
+
+    def test_pick_repair_prefers_blocked_state_reply(self) -> None:
+        cands = [
+            AnswerCandidate(source="model", text="Hey! How is your day?", priority=12),
+            AnswerCandidate(
+                source="blocked_state_reply",
+                text="The main blocker right now is: waiting on CI.",
+                priority=99,
+            ),
+        ]
+        got = pick_repair_winner(
+            cands,
+            model_reply="Hey! How is your day?",
+            followthrough={},
+            stateful_goal_ok=False,
+        )
+        self.assertIsNotNone(got)
+        assert got is not None
+        self.assertEqual(got[1], "blocked_state_reply")
+
+    def test_gather_repair_recent_outcome_prefers_receipts_over_no_active_work(self) -> None:
+        r0 = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "comp-roh-1",
+                "payload": {
+                    "text": "hi",
+                    "routing_text": "hi",
+                    "chat_id": 77008,
+                    "message_id": 1,
+                },
+            },
+        )
+        tid = r0["task_id"]
+        link_task_principal(self.conn, tid, "pri_roh", channel="telegram")
+        insert_user_outcome_receipt(
+            self.conn,
+            receipt_id="rcpt_roh_1",
+            task_id=tid,
+            goal_id="",
+            receipt_kind="outcome",
+            summary="Shipped the fix to staging.",
+        )
+        plan = build_turn_plan(
+            "What happened with that task?",
+            scenario_id="statusFollowupContinue",
+            projection_has_continuity_state=True,
+        )
+        self.assertEqual(plan.continuity_focus, "recent_outcome_history")
+        cands = gather_repair_candidates(
+            self.conn,
+            tid,
+            classify_text="What happened with that task?",
+            turn_plan=plan,
+            model_reply="I do not see active tracked work right now.",
+            history=[],
+            memory_notes=[],
+        )
+        sources = [c.source for c in cands]
+        self.assertIn("recent_outcome_history_reply", sources)
+        winner = pick_repair_winner(
+            cands,
+            model_reply="I do not see active tracked work right now.",
+            followthrough={},
+            stateful_goal_ok=True,
+        )
+        self.assertIsNotNone(winner)
+        assert winner is not None
+        self.assertEqual(winner[1], "recent_outcome_history_reply")
+        self.assertIn("staging", winner[0].lower())
 
     def test_gather_repair_includes_attention_state_for_attention_domain(self) -> None:
         from services.andrea_sync.assistant_answer_composer import (  # noqa: E402

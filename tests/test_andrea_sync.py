@@ -4886,7 +4886,7 @@ class TestAndreaSync(unittest.TestCase):
         with mock.patch.object(tg_adapt, "send_text_message") as send_mock:
             server._handle_telegram_followups(created["task_id"], snapshot)
         sent_texts = [call.kwargs["text"] for call in send_mock.call_args_list]
-        self.assertTrue(any("Merged with your current task" in text for text in sent_texts))
+        self.assertTrue(any("folded this into the current heavy-lift task" in text for text in sent_texts))
         self.assertFalse(any("may not include it" in text for text in sent_texts))
 
     def test_publish_capability_requires_internal_channel(self) -> None:

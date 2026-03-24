@@ -24,6 +24,8 @@ from .alexa_request_verify import verify_alexa_http_request
 from .andrea_router import AndreaRouteDecision, route_message
 from .assistant_answer_composer import (
     bounded_composer_repair,
+    build_blocked_state_reply_from_state,
+    build_recent_outcome_history_reply_from_state,
     merge_goal_reply_with_followthrough,
     try_composer_early_short_circuit,
 )
@@ -199,8 +201,10 @@ LIVE_NEWS_RE = re.compile(r"\b(news|headline|headlines)\b", re.I)
 CONTINUITY_HINT_RE = re.compile(
     r"\b("
     r"status|progress|update|where are we|what happened|"
+    r"blocked|blocker|blocking|stuck|"
     r"approval|awaiting|pending|waiting on|"
-    r"working on|still needs attention"
+    r"working on|still needs attention|"
+    r"cursor|openclaw|heavy lift|outcome|that task"
     r")\b",
     re.I,
 )
@@ -1071,6 +1075,13 @@ class SyncServer:
     ) -> None:
         if snapshot.get("channel") != "telegram":
             return
+        projection = snapshot.get("projection") or {}
+        telegram_meta = self._projection_meta(projection, "telegram")
+        execution_meta = self._projection_meta(projection, "execution")
+        cont_routing = str(telegram_meta.get("routing_hint") or self._task_routing_hint(task_id) or "")
+        cont_collab = str(
+            execution_meta.get("collaboration_mode") or telegram_meta.get("collaboration_mode") or ""
+        )
         events = snapshot.get("events") or []
         worker_label = self._telegram_worker_label(snapshot["projection"], running=True)
         for seq, _ts, et, payload in reversed(events):
@@ -1089,6 +1100,8 @@ class SyncServer:
                         task_id,
                         chunk_preview=preview,
                         worker_label=worker_label,
+                        routing_hint=cont_routing,
+                        collaboration_mode=cont_collab,
                     ),
                 )
             except Exception as exc:  # noqa: BLE001
@@ -1205,9 +1218,17 @@ class SyncServer:
             else {}
         )
         execution_meta = self._projection_meta(projection, "execution")
+        telegram_meta = self._projection_meta(projection, "telegram")
         if status == "running":
             agent_url = cursor_meta.get("agent_url")
             openclaw_meta = self._projection_meta(projection, "openclaw")
+            run_routing = str(telegram_meta.get("routing_hint") or self._task_routing_hint(task_id) or "")
+            run_collab = str(
+                execution_meta.get("collaboration_mode") or telegram_meta.get("collaboration_mode") or ""
+            )
+            run_preferred = str(
+                execution_meta.get("preferred_model_label") or telegram_meta.get("preferred_model_label") or ""
+            )
             if self._telegram_send_lifecycle_messages(projection):
                 try:
                     self._send_telegram_message_once(
@@ -1218,11 +1239,11 @@ class SyncServer:
                             agent_url=str(agent_url or ""),
                             worker_label=self._telegram_worker_label(projection, running=True),
                             delegated_to_cursor=bool(execution_meta.get("delegated_to_cursor")),
-                            routing_hint="",
-                            collaboration_mode="",
+                            routing_hint=run_routing,
+                            collaboration_mode=run_collab,
                             provider=str(openclaw_meta.get("provider") or ""),
                             model=str(openclaw_meta.get("model") or ""),
-                            preferred_model_label="",
+                            preferred_model_label=run_preferred,
                         ),
                     )
                 except Exception as exc:  # noqa: BLE001
@@ -1234,6 +1255,13 @@ class SyncServer:
             openclaw_meta = self._projection_meta(projection, "openclaw")
             visibility_mode = self._task_visibility_mode(task_id)
             try:
+                fin_routing = str(telegram_meta.get("routing_hint") or self._task_routing_hint(task_id) or "")
+                fin_collab = str(
+                    execution_meta.get("collaboration_mode") or telegram_meta.get("collaboration_mode") or ""
+                )
+                fin_preferred = str(
+                    execution_meta.get("preferred_model_label") or telegram_meta.get("preferred_model_label") or ""
+                )
                 self._send_telegram_message_once(
                     task_id,
                     "final",
@@ -1254,11 +1282,11 @@ class SyncServer:
                         ),
                         visibility_mode=visibility_mode,
                         collaboration_trace=self._telegram_collaboration_trace(projection),
-                        routing_hint="",
-                        collaboration_mode="",
+                        routing_hint=fin_routing,
+                        collaboration_mode=fin_collab,
                         provider=str(openclaw_meta.get("provider") or ""),
                         model=str(openclaw_meta.get("model") or ""),
-                        preferred_model_label="",
+                        preferred_model_label=fin_preferred,
                     ),
                 )
             except Exception as exc:  # noqa: BLE001
@@ -1422,14 +1450,31 @@ class SyncServer:
                         c, task_id, user_text=classify_text
                     )
                 )
-                if not goal_nl:
-                    if pre_turn_plan.domain == "project_status":
-                        goal_nl = (
-                            "I do not see active tracked work right now. "
-                            "If you want, I can start a fresh task and track it from here."
-                        )
-                    elif pre_turn_plan.domain == "approval_state":
-                        goal_nl = "There are no pending approvals right now."
+            if (
+                not goal_nl
+                and pre_turn_plan.prefer_state_reply
+                and pre_turn_plan.allow_goal_continuity_repair
+            ):
+                if pre_turn_plan.continuity_focus == "recent_outcome_history":
+                    goal_nl = self.with_lock(
+                        lambda c: build_recent_outcome_history_reply_from_state(c, task_id)
+                    )
+                elif pre_turn_plan.continuity_focus == "blocked_state":
+                    goal_nl = self.with_lock(
+                        lambda c: build_blocked_state_reply_from_state(c, task_id)
+                    )
+            if (
+                not goal_nl
+                and pre_turn_plan.prefer_state_reply
+                and pre_turn_plan.allow_goal_continuity_repair
+            ):
+                if pre_turn_plan.domain == "project_status":
+                    goal_nl = (
+                        "I do not see active tracked work right now. "
+                        "If you want, I can start a fresh task and track it from here."
+                    )
+                elif pre_turn_plan.domain == "approval_state":
+                    goal_nl = "There are no pending approvals right now."
             if goal_nl:
                 goal_nl = self.with_lock(
                     lambda c: merge_goal_reply_with_followthrough(
@@ -2139,10 +2184,15 @@ class SyncServer:
             "telegram",
             "proactive",
             "outcome",
+            "execution",
+            "assistant",
         ):
             section = meta.get(key)
             if isinstance(section, dict) and section:
                 return True
+        summary = str(projection.get("summary") or "").strip()
+        if len(summary) > 8:
+            return True
         return False
 
     def _maybe_repair_direct_reply_from_continuity(
@@ -2190,6 +2240,9 @@ class SyncServer:
             "state_rich_goal": "continuity_state_repaired_direct_reply",
             "followthrough_goal": "continuity_state_repaired_direct_reply",
             "followthrough_only": "continuity_state_repaired_direct_reply",
+            "blocked_state_reply": "continuity_state_repaired_direct_reply",
+            "recent_outcome_history_reply": "continuity_state_repaired_direct_reply",
+            "cursor_heavy_lift_context": "continuity_state_repaired_direct_reply",
         }
         reason = reason_map.get(tag, f"state_composer_repair:{tag}")
         return AndreaRouteDecision(

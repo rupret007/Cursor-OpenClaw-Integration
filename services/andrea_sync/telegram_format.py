@@ -218,21 +218,26 @@ def format_continuation_notice(
     *,
     chunk_preview: str = "",
     worker_label: str = "OpenClaw",
+    routing_hint: str = "",
+    collaboration_mode: str = "",
 ) -> str:
     """Short Telegram copy when a follow-up message was merged onto the current task."""
     preview = _clip(chunk_preview, 100)
     lane_line = "OpenClaw keeps one coordination run"
     if worker_label == "OpenClaw and Cursor":
-        lane_line = "OpenClaw and Cursor keep one shared execution thread"
+        lane_line = "OpenClaw and Cursor stay on one shared heavy-lift workstream"
     elif worker_label == "Cursor":
-        lane_line = "Cursor keeps one execution run"
+        lane_line = "Cursor stays on one execution run"
+    routing_note = _routing_note(routing_hint, collaboration_mode)
     lines = [
         "Andrea:",
-        f"Merged with your current task `{task_id}` — {lane_line} (no duplicate job).",
+        f"I folded this into the current heavy-lift task `{task_id}` so Andrea and Cursor stay on one workstream (no duplicate job).",
+        f"{lane_line}. I'll treat your latest message as the next instruction and keep the result in the same thread.",
     ]
     if preview:
         lines.append(f"Latest chunk: {preview}")
-    lines.append("Reply is threaded under your first message.")
+    if routing_note:
+        lines.append(routing_note.strip())
     return "\n".join(lines)
 
 

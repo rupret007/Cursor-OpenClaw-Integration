@@ -1370,6 +1370,108 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
         self.assertEqual(detail["task"]["meta"]["assistant"]["route"], "direct")
         self.assertNotIn("cursor", detail["task"]["meta"])
 
+    def test_telegram_plain_greeting_after_queued_collab_is_new_direct_task(self) -> None:
+        """Regression: casual greeting must not merge onto an active delegated Telegram task."""
+        prev_cont = os.environ.get("ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS")
+        os.environ["ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS"] = "300"
+        prev_openai = os.environ.get("OPENAI_API_ENABLED")
+        os.environ["OPENAI_API_ENABLED"] = "0"
+        os.environ.pop("OPENAI_API_KEY", None)
+        try:
+            chat_id = 884433
+
+            def post(update_id: int, mid: int, text: str) -> None:
+                body = json.dumps(
+                    {
+                        "update_id": update_id,
+                        "message": {
+                            "text": text,
+                            "message_id": mid,
+                            "chat": {"id": chat_id, "type": "private"},
+                            "from": {"id": 701, "username": "u_greet"},
+                        },
+                    }
+                ).encode("utf-8")
+                req = urllib.request.Request(
+                    self._url("/v1/telegram/webhook"),
+                    data=body,
+                    method="POST",
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-Telegram-Bot-Api-Secret-Token": "hdrsecret",
+                    },
+                )
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    self.assertEqual(resp.status, 200)
+
+            post(91001, 501, "@Andrea @Cursor please collaborate on repo cleanup")
+
+            tid_collab: str | None = None
+            for _ in range(80):
+                req_tasks = urllib.request.Request(self._url("/v1/tasks?limit=40"), method="GET")
+                with urllib.request.urlopen(req_tasks, timeout=5) as resp_tasks:
+                    tasks = json.loads(resp_tasks.read().decode("utf-8"))["tasks"]
+                for row in tasks:
+                    if row["channel"] != "telegram":
+                        continue
+                    req_task = urllib.request.Request(
+                        self._url(f"/v1/tasks/{row['task_id']}"), method="GET"
+                    )
+                    with urllib.request.urlopen(req_task, timeout=5) as resp_task:
+                        candidate = json.loads(resp_task.read().decode("utf-8"))
+                    meta = candidate["task"].get("meta", {})
+                    if meta.get("telegram", {}).get("message_id") == 501:
+                        tid_collab = str(row["task_id"])
+                        break
+                if tid_collab:
+                    break
+                time.sleep(0.05)
+            self.assertIsNotNone(tid_collab)
+
+            post(91002, 502, "Hi Andrea")
+
+            detail_greet: dict | None = None
+            for _ in range(80):
+                req_tasks = urllib.request.Request(self._url("/v1/tasks?limit=40"), method="GET")
+                with urllib.request.urlopen(req_tasks, timeout=5) as resp_tasks:
+                    tasks = json.loads(resp_tasks.read().decode("utf-8"))["tasks"]
+                for row in tasks:
+                    if row["channel"] != "telegram":
+                        continue
+                    req_task = urllib.request.Request(
+                        self._url(f"/v1/tasks/{row['task_id']}"), method="GET"
+                    )
+                    with urllib.request.urlopen(req_task, timeout=5) as resp_task:
+                        candidate = json.loads(resp_task.read().decode("utf-8"))
+                    meta = candidate["task"].get("meta", {})
+                    if meta.get("telegram", {}).get("message_id") == 502:
+                        if candidate["task"]["status"] == "completed":
+                            detail_greet = candidate
+                            break
+                if detail_greet:
+                    break
+                time.sleep(0.05)
+            self.assertIsNotNone(detail_greet)
+            assert detail_greet is not None
+            t = detail_greet["task"]
+            self.assertEqual(t["status"], "completed")
+            self.assertNotEqual(t["task_id"], tid_collab)
+            self.assertEqual(t["meta"]["assistant"]["route"], "direct")
+            self.assertEqual(t["meta"]["assistant"].get("reason"), "greeting_or_social")
+            self.assertNotIn("cursor", t["meta"])
+            last_reply = str(t["meta"].get("assistant", {}).get("last_reply") or "").lower()
+            self.assertNotIn("technical details", last_reply)
+            self.assertNotIn("what happened", last_reply)
+        finally:
+            if prev_cont is None:
+                os.environ.pop("ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS", None)
+            else:
+                os.environ["ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS"] = prev_cont
+            if prev_openai is None:
+                os.environ.pop("OPENAI_API_ENABLED", None)
+            else:
+                os.environ["OPENAI_API_ENABLED"] = prev_openai
+
     def test_telegram_history_followups_do_not_recycle_latest_useful_thread(self) -> None:
         prev_enabled = os.environ.get("OPENAI_API_ENABLED")
         prev_key = os.environ.get("OPENAI_API_KEY")

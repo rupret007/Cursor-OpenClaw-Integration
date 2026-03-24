@@ -34,7 +34,12 @@ from services.andrea_sync.store import (  # noqa: E402
     migrate,
     set_meta,
 )
-from services.andrea_sync.andrea_router import _scrub_history_for_direct, route_message  # noqa: E402
+from services.andrea_sync.andrea_router import (  # noqa: E402
+    _scrub_history_for_direct,
+    classify_route,
+    is_standalone_casual_social_turn,
+    route_message,
+)
 from services.andrea_sync.user_surface import is_stale_openclaw_narrative  # noqa: E402
 from services.andrea_sync.telegram_format import (  # noqa: E402
     format_ack_message,
@@ -927,6 +932,110 @@ class TestAndreaSync(unittest.TestCase):
             else:
                 os.environ["ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS"] = prev
 
+    def test_telegram_continuation_hi_andrea_does_not_merge_queued_collab_task(self) -> None:
+        from services.andrea_sync.telegram_continuation import attach_continuation_if_applicable
+
+        prev = os.environ.get("ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS")
+        os.environ["ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS"] = "300"
+        try:
+            cmd1 = tg_adapt.update_to_command(
+                {
+                    "update_id": 613,
+                    "message": {
+                        "text": "@Andrea @Cursor please collaborate on repo cleanup",
+                        "message_id": 2111,
+                        "chat": {"id": 9293, "type": "private"},
+                        "from": {"id": 88, "username": "u3b"},
+                    },
+                }
+            )
+            assert cmd1
+            r1 = handle_command(self.conn, cmd1)
+            tid1 = r1["task_id"]
+            append_event(
+                self.conn,
+                tid1,
+                EventType.JOB_QUEUED,
+                {
+                    "kind": "openclaw",
+                    "execution_lane": "openclaw_hybrid",
+                    "runner": "openclaw",
+                },
+            )
+
+            cmd2 = tg_adapt.update_to_command(
+                {
+                    "update_id": 614,
+                    "message": {
+                        "text": "Hi Andrea",
+                        "message_id": 2112,
+                        "chat": {"id": 9293, "type": "private"},
+                        "from": {"id": 88, "username": "u3b"},
+                    },
+                }
+            )
+            assert cmd2
+            self.assertFalse(attach_continuation_if_applicable(self.conn, cmd2))
+            self.assertIsNone(cmd2.get("task_id"))
+        finally:
+            if prev is None:
+                os.environ.pop("ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS", None)
+            else:
+                os.environ["ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS"] = prev
+
+    def test_telegram_continuation_good_morning_andrea_does_not_merge_queued_collab_task(
+        self,
+    ) -> None:
+        from services.andrea_sync.telegram_continuation import attach_continuation_if_applicable
+
+        prev = os.environ.get("ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS")
+        os.environ["ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS"] = "300"
+        try:
+            cmd1 = tg_adapt.update_to_command(
+                {
+                    "update_id": 615,
+                    "message": {
+                        "text": "@Andrea @Cursor please collaborate on repo cleanup",
+                        "message_id": 2121,
+                        "chat": {"id": 9294, "type": "private"},
+                        "from": {"id": 88, "username": "u3c"},
+                    },
+                }
+            )
+            assert cmd1
+            r1 = handle_command(self.conn, cmd1)
+            tid1 = r1["task_id"]
+            append_event(
+                self.conn,
+                tid1,
+                EventType.JOB_QUEUED,
+                {
+                    "kind": "openclaw",
+                    "execution_lane": "openclaw_hybrid",
+                    "runner": "openclaw",
+                },
+            )
+
+            cmd2 = tg_adapt.update_to_command(
+                {
+                    "update_id": 616,
+                    "message": {
+                        "text": "Good morning Andrea",
+                        "message_id": 2122,
+                        "chat": {"id": 9294, "type": "private"},
+                        "from": {"id": 88, "username": "u3c"},
+                    },
+                }
+            )
+            assert cmd2
+            self.assertFalse(attach_continuation_if_applicable(self.conn, cmd2))
+            self.assertIsNone(cmd2.get("task_id"))
+        finally:
+            if prev is None:
+                os.environ.pop("ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS", None)
+            else:
+                os.environ["ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS"] = prev
+
     def test_telegram_continuation_question_does_not_merge_created_task(self) -> None:
         """Regression: 'Is this OpenClaw?' must not merge onto a CREATED technical task."""
         from services.andrea_sync.telegram_continuation import attach_continuation_if_applicable
@@ -1235,6 +1344,20 @@ class TestAndreaSync(unittest.TestCase):
         low = decision.reply_text.lower()
         self.assertNotIn("say a bit more about what you want", low)
         self.assertNotIn("i can help with that directly", low)
+
+    def test_classify_route_casual_checkin_is_greeting_or_social(self) -> None:
+        mode, reason, target, collab = classify_route("How's it going?")
+        self.assertEqual(mode, "direct")
+        self.assertEqual(reason, "greeting_or_social")
+        self.assertEqual(target, "")
+        self.assertNotEqual(collab, "cursor_primary")
+
+    def test_is_standalone_casual_social_turn_covers_planned_phrases(self) -> None:
+        self.assertTrue(is_standalone_casual_social_turn("Hi Andrea"))
+        self.assertTrue(is_standalone_casual_social_turn("Good morning Andrea"))
+        self.assertTrue(is_standalone_casual_social_turn("Hey Andrea good morning"))
+        self.assertTrue(is_standalone_casual_social_turn("How's it going?"))
+        self.assertFalse(is_standalone_casual_social_turn("Please fix the repo and run the tests"))
 
     def test_router_agenda_today_soft_limit_without_cursor(self) -> None:
         os.environ["OPENAI_API_ENABLED"] = "0"
@@ -1854,6 +1977,72 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(proj["status"], TaskStatus.COMPLETED.value)
         self.assertEqual(proj["meta"]["assistant"]["route"], "direct")
         self.assertNotIn("cursor", proj["meta"])
+
+    def test_server_followups_route_hows_it_going_greeting_or_social(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        os.environ["OPENAI_API_ENABLED"] = "0"
+        os.environ.pop("OPENAI_API_KEY", None)
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        result = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-how-going",
+                "payload": {
+                    "text": "How's it going?",
+                    "routing_text": "How's it going?",
+                    "chat_id": 92002,
+                    "message_id": 3,
+                },
+            },
+        )
+        server._handle_task_followups(result["task_id"])
+        proj = project_task_dict(server.conn, result["task_id"], "telegram")
+        self.assertEqual(proj["status"], TaskStatus.COMPLETED.value)
+        self.assertEqual(proj["meta"]["assistant"]["route"], "direct")
+        self.assertEqual(proj["meta"]["assistant"].get("reason"), "greeting_or_social")
+        self.assertNotIn("cursor", proj["meta"])
+        last_reply = str(proj["meta"].get("assistant", {}).get("last_reply") or "").lower()
+        self.assertNotIn("technical details", last_reply)
+        self.assertNotIn("what happened", last_reply)
+
+    def test_server_followups_plain_hi_andrea_direct_without_task_summary_surface(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        os.environ["OPENAI_API_ENABLED"] = "0"
+        os.environ.pop("OPENAI_API_KEY", None)
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        result = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-hi-andrea",
+                "payload": {
+                    "text": "Hi Andrea",
+                    "routing_text": "Hi Andrea",
+                    "chat_id": 92003,
+                    "message_id": 4,
+                },
+            },
+        )
+        server._handle_task_followups(result["task_id"])
+        proj = project_task_dict(server.conn, result["task_id"], "telegram")
+        self.assertEqual(proj["status"], TaskStatus.COMPLETED.value)
+        self.assertEqual(proj["meta"]["assistant"]["route"], "direct")
+        self.assertEqual(proj["meta"]["assistant"].get("reason"), "greeting_or_social")
+        self.assertNotIn("cursor", proj["meta"])
+        outcome = proj.get("meta", {}).get("outcome") or {}
+        self.assertNotEqual(outcome.get("route_mode"), "delegate")
+        last_reply = str(proj["meta"].get("assistant", {}).get("last_reply") or "").lower()
+        self.assertNotIn("technical details", last_reply)
+        self.assertNotIn("what happened", last_reply)
 
     def test_server_followups_route_cli_greeting_direct(self) -> None:
         prev_cli_auto = os.environ.get("ANDREA_SYNC_CLI_SUBMIT_AUTO_ROUTE")

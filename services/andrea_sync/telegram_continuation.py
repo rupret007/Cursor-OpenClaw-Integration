@@ -7,6 +7,7 @@ import uuid
 from typing import Any, Dict, Optional, Tuple
 
 from .adapters.telegram import MENTION_RE
+from .andrea_router import is_standalone_casual_social_turn
 from .projector import project_task_dict
 from .schema import TaskStatus
 from .store import (
@@ -76,6 +77,11 @@ def _parse_status(raw: Any) -> Optional[TaskStatus]:
 
 def _should_continue_message(new_payload: Dict[str, Any], prev_telegram_meta: Dict[str, Any]) -> bool:
     """Heuristic: continuation chunk vs a brand-new routed request."""
+    social_line = str(
+        new_payload.get("routing_text") or new_payload.get("text") or ""
+    ).strip()
+    if is_standalone_casual_social_turn(social_line):
+        return False
     new_text = str(new_payload.get("text") or "")
     reply_to_message_id = new_payload.get("reply_to_message_id")
     anchor_message_id = prev_telegram_meta.get("message_id")
@@ -204,6 +210,10 @@ def attach_continuation_if_applicable(conn: Any, cmd: Dict[str, Any]) -> bool:
         return False
     chat_id = payload.get("chat_id")
     if chat_id is None:
+        return False
+
+    social_line = str(payload.get("routing_text") or payload.get("text") or "").strip()
+    if is_standalone_casual_social_turn(social_line):
         return False
 
     window_sec = float(os.environ.get("ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS", "180"))

@@ -212,6 +212,22 @@ def _is_greeting_only(text: str) -> bool:
     return False
 
 
+def is_standalone_casual_social_turn(text: str) -> bool:
+    """
+    Short greeting or casual check-in that should stay on the direct conversational path
+    and must not merge onto an active Telegram task via continuation.
+    """
+    clean = _normalize(text)
+    if not clean or MEMORY_RE.search(clean):
+        return False
+    if len(clean.split()) > 8:
+        return False
+    if _is_greeting_only(clean):
+        return True
+    trimmed = clean.rstrip("?.! ").strip()
+    return bool(CASUAL_CHECKIN_RE.match(trimmed))
+
+
 @dataclass
 class AndreaRouteDecision:
     mode: str
@@ -244,7 +260,7 @@ def classify_route(
         return "delegate", "explicit_collaboration_mention", "openclaw_hybrid", "collaborative"
     if not clean:
         return "direct", "explicit_andrea_mention" if andrea_preferred else "empty_or_whitespace", "", "andrea_primary" if andrea_preferred else collab
-    if _is_greeting_only(clean) and word_count <= 6:
+    if is_standalone_casual_social_turn(text):
         return "direct", "explicit_andrea_mention" if andrea_preferred else "greeting_or_social", "", "andrea_primary" if andrea_preferred else collab
     if CURSOR_EXPLICIT_ACTION_RE.search(clean):
         if collab == "auto" and COLLABORATE_RE.search(clean):

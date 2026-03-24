@@ -5,7 +5,7 @@ Last updated: closeout after greeting/casual Telegram guardrail slice.
 ## Git
 
 - **Branch:** `main`
-- **Commit:** `17ef40f` — `fix(sync): block casual greetings from Telegram continuation + social route`
+- **Commits (tip):** `a06de5b` — handoff doc; `17ef40f` — `fix(sync): block casual greetings from Telegram continuation + social route`
 - **Remote:** pushed to `origin/main`
 
 ## What shipped

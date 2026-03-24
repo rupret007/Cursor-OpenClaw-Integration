@@ -26,6 +26,7 @@ from .assistant_answer_composer import (
     bounded_composer_repair,
     build_blocked_state_reply_from_state,
     build_recent_outcome_history_reply_from_state,
+    cursor_followup_context_reply_with_fallback,
     merge_goal_reply_with_followthrough,
     try_composer_early_short_circuit,
 )
@@ -1457,11 +1458,19 @@ class SyncServer:
             ):
                 if pre_turn_plan.continuity_focus == "recent_outcome_history":
                     goal_nl = self.with_lock(
-                        lambda c: build_recent_outcome_history_reply_from_state(c, task_id)
+                        lambda c: build_recent_outcome_history_reply_from_state(
+                            c, task_id, user_message=classify_text
+                        )
                     )
                 elif pre_turn_plan.continuity_focus == "blocked_state":
                     goal_nl = self.with_lock(
                         lambda c: build_blocked_state_reply_from_state(c, task_id)
+                    )
+                elif pre_turn_plan.continuity_focus == "cursor_followup_heavy_lift":
+                    goal_nl = self.with_lock(
+                        lambda c: cursor_followup_context_reply_with_fallback(
+                            c, task_id, user_message=classify_text
+                        )
                     )
             if (
                 not goal_nl
@@ -2241,7 +2250,7 @@ class SyncServer:
             "followthrough_goal": "continuity_state_repaired_direct_reply",
             "followthrough_only": "continuity_state_repaired_direct_reply",
             "blocked_state_reply": "continuity_state_repaired_direct_reply",
-            "recent_outcome_history_reply": "continuity_state_repaired_direct_reply",
+            "cursor_continuity_recall": "continuity_state_repaired_direct_reply",
             "cursor_heavy_lift_context": "continuity_state_repaired_direct_reply",
         }
         reason = reason_map.get(tag, f"state_composer_repair:{tag}")

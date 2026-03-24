@@ -83,6 +83,26 @@ def is_stale_openclaw_narrative(text: Any) -> bool:
     return False
 
 
+# Lifecycle / terminal notifications sometimes reuse this canned line; strip it from
+# conversational direct replies so recall questions do not sound like hard failures.
+SOFT_FAILURE_BOILERPLATE_RE = re.compile(
+    r"I\s+could\s+not\s+complete\s+your\s+request\s+successfully[^.\n]*(?:\.|$)",
+    re.I,
+)
+SOFT_FAILURE_CAPTURE_TAIL_RE = re.compile(
+    r"(?:,\s*)?but\s+I\s+captured\s+the\s+safe\s+failure\s+summary\s+below\.?",
+    re.I,
+)
+
+
+def strip_conversational_soft_failure_boilerplate(text: Any) -> str:
+    """Remove terminal-style soft-failure boilerplate from normal assistant / direct surfaces."""
+    raw = str(text or "")
+    cleaned = SOFT_FAILURE_BOILERPLATE_RE.sub("", raw)
+    cleaned = SOFT_FAILURE_CAPTURE_TAIL_RE.sub("", cleaned)
+    return normalize_whitespace(cleaned)
+
+
 def sanitize_user_surface_text(text: Any, *, fallback: Any = "", limit: int = 500) -> str:
     safe_lines: list[str] = []
     for raw_line in str(text or "").splitlines():

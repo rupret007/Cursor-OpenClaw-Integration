@@ -7,6 +7,8 @@ from typing import Any, Dict
 from .user_surface import (
     dedupe_user_surface_items,
     normalize_whitespace as shared_normalize_whitespace,
+    sanitize_user_surface_text,
+    strip_conversational_soft_failure_boilerplate,
     surface_similarity_key,
 )
 
@@ -308,7 +310,11 @@ def format_progress_message(
 
 
 def format_direct_message(reply_text: str) -> str:
-    clean = _normalize_whitespace(reply_text)
+    scrubbed = strip_conversational_soft_failure_boilerplate(reply_text)
+    safe = sanitize_user_surface_text(scrubbed, fallback=scrubbed, limit=4000)
+    if not str(safe or "").strip():
+        safe = _normalize_whitespace(scrubbed)
+    clean = _normalize_whitespace(safe)
     return "\n".join(
         [
             "Andrea:",

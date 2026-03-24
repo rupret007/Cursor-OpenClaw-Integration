@@ -8,6 +8,9 @@ from pathlib import Path
 from unittest import mock
 
 from services.andrea_sync.bus import handle_command
+from services.andrea_sync.assistant_answer_composer import (
+    build_cursor_continuity_recall_reply_from_state,
+)
 from services.andrea_sync.delegated_lifecycle import build_delegated_lifecycle_contract
 from services.andrea_sync.execution_runtime import continue_cursor_followup_for_task
 from services.andrea_sync.goal_runtime import (
@@ -187,6 +190,25 @@ class ExecutionContinuityTests(unittest.TestCase):
         self.assertTrue(out2.get("ok"))
         ev = load_events_for_task(self.conn, "tsk_f")
         self.assertTrue(any(e[2] == EventType.JOB_PROGRESS.value for e in ev))
+
+    def test_cursor_recall_surfaces_openclaw_user_summary(self) -> None:
+        create_task(self.conn, "tsk_recall", "telegram")
+        append_event(
+            self.conn,
+            "tsk_recall",
+            EventType.JOB_COMPLETED,
+            {
+                "summary": "done",
+                "backend": "openclaw",
+                "runner": "openclaw",
+                "user_summary": "Implemented the continuity recall slice with tests.",
+            },
+        )
+        text = build_cursor_continuity_recall_reply_from_state(
+            self.conn, "tsk_recall", user_message="What did Cursor do?"
+        )
+        self.assertIn("Implemented the continuity", text)
+        self.assertIn("Latest from Cursor / OpenClaw", text)
 
 
 if __name__ == "__main__":

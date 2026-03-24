@@ -22,6 +22,7 @@ from services.andrea_sync.assistant_answer_composer import (  # noqa: E402
 from services.andrea_sync.turn_intelligence import build_turn_plan  # noqa: E402
 from services.andrea_sync.bus import handle_command  # noqa: E402
 from services.andrea_sync.schema import CommandType, EventType  # noqa: E402
+from services.andrea_sync.telegram_format import format_direct_message  # noqa: E402
 from services.andrea_sync.store import (  # noqa: E402
     append_event,
     connect,
@@ -305,7 +306,7 @@ class TestAssistantAnswerComposer(unittest.TestCase):
             memory_notes=[],
         )
         sources = [c.source for c in cands]
-        self.assertIn("recent_outcome_history_reply", sources)
+        self.assertIn("cursor_continuity_recall", sources)
         winner = pick_repair_winner(
             cands,
             model_reply="I do not see active tracked work right now.",
@@ -314,8 +315,56 @@ class TestAssistantAnswerComposer(unittest.TestCase):
         )
         self.assertIsNotNone(winner)
         assert winner is not None
-        self.assertEqual(winner[1], "recent_outcome_history_reply")
+        self.assertEqual(winner[1], "cursor_continuity_recall")
         self.assertIn("staging", winner[0].lower())
+
+    def test_cursor_continuity_recall_prefers_openclaw_user_summary(self) -> None:
+        from services.andrea_sync.assistant_answer_composer import (  # noqa: E402
+            build_cursor_continuity_recall_reply_from_state,
+        )
+
+        r0 = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "comp-ccr-1",
+                "payload": {
+                    "text": "hi",
+                    "routing_text": "hi",
+                    "chat_id": 77018,
+                    "message_id": 1,
+                },
+            },
+        )
+        tid = r0["task_id"]
+        append_event(
+            self.conn,
+            tid,
+            EventType.JOB_COMPLETED,
+            {
+                "summary": "done",
+                "backend": "openclaw",
+                "runner": "openclaw",
+                "user_summary": "Refactored the composer path and added regression tests.",
+            },
+        )
+        text = build_cursor_continuity_recall_reply_from_state(
+            self.conn, tid, user_message="What did Cursor say?"
+        )
+        self.assertIn("Refactored", text)
+        self.assertIn("Latest from Cursor / OpenClaw", text)
+        self.assertNotRegex(text.lower(), r"task status \*\*created\*\*")
+
+    def test_format_direct_message_strips_soft_failure_boilerplate(self) -> None:
+        raw = (
+            "I could not complete your request successfully, "
+            "but I captured the safe failure summary below. "
+            "Here is the substantive recap."
+        )
+        text = format_direct_message(raw)
+        self.assertNotIn("could not complete", text.lower())
+        self.assertIn("substantive recap", text.lower())
 
     def test_gather_repair_includes_attention_state_for_attention_domain(self) -> None:
         from services.andrea_sync.assistant_answer_composer import (  # noqa: E402

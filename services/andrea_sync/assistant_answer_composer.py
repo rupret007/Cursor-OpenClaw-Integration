@@ -18,6 +18,7 @@ from .execution_runtime import summarize_execution_attempt_for_user
 from .goal_runtime import _APPROVAL_STATUS_PATTERNS, build_goal_continuity_reply
 from .projector import project_task_dict
 from .store import (
+    get_active_execution_attempt_for_task,
     get_task_channel,
     get_task_principal_id,
     list_pending_goal_approvals_for_task,
@@ -26,8 +27,10 @@ from .store import (
     list_recent_open_loop_records_for_task,
     list_recent_stale_task_indicators_for_task,
     list_recent_user_outcome_receipts_for_task,
+    list_telegram_task_ids_for_chat,
     list_upcoming_reminders_for_principal,
 )
+from .user_surface import sanitize_user_surface_text, strip_conversational_soft_failure_boilerplate
 from .turn_intelligence import TurnPlan
 
 _STATUS_SCENARIOS = frozenset({"statusFollowupContinue", "goalContinuationAcrossSessions"})
@@ -157,6 +160,259 @@ def _projection_full(conn: Any, task_id: str) -> Dict[str, Any]:
     return project_task_dict(conn, task_id, channel)
 
 
+_CURSOR_THREAD_RECALL_RE = re.compile(
+    r"\b("
+    r"what\s+did\s+cursor\s+(?:say|do)|"
+    r"what\s+happened\s+in\s+(?:the\s+)?cursor\s+thread|"
+    r"what\s+did\s+openclaw\s+do"
+    r")\b",
+    re.I,
+)
+
+_GRACE_CURSOR_CONTINUITY = (
+    "I'm not finding a strong stored summary from the recent Cursor work yet. "
+    "I can check the latest tracked state or start a fresh heavy-lift pass from the last known context."
+)
+_GRACE_GENERIC_HISTORY = (
+    "I don't have enough recorded history on the current task to say that confidently. "
+    "I can still check the latest linked goal or start tracking the next step explicitly."
+)
+
+
+def is_cursor_thread_recall_question(text: str) -> bool:
+    """True for Cursor/OpenClaw thread recall phrasing (used for graceful copy)."""
+    return bool(_CURSOR_THREAD_RECALL_RE.search(str(text or "")))
+
+
+def _normalize_echo_key(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text or "").strip().lower())
+
+
+def _is_echo_of_user_question(assistant_text: str, user_message: str) -> bool:
+    u = _normalize_echo_key(user_message)
+    a = _normalize_echo_key(assistant_text)
+    if len(u) < 10 or len(a) < 10:
+        return False
+    return a == u or (u in a and len(a) - len(u) < 12)
+
+
+def _telegram_chat_id_for_task(conn: Any, task_id: str) -> Any:
+    meta = _projection_meta(conn, task_id)
+    tg = _telegram_section(meta)
+    return tg.get("chat_id")
+
+
+def _task_has_delegated_continuity_signal(meta: Dict[str, Any]) -> bool:
+    oc = meta.get("openclaw") if isinstance(meta.get("openclaw"), dict) else {}
+    ex = meta.get("execution") if isinstance(meta.get("execution"), dict) else {}
+    cur = meta.get("cursor") if isinstance(meta.get("cursor"), dict) else {}
+    outcome = meta.get("outcome") if isinstance(meta.get("outcome"), dict) else {}
+    if str(oc.get("user_summary") or "").strip():
+        return True
+    po = oc.get("phase_outputs")
+    if isinstance(po, dict):
+        for v in po.values():
+            if isinstance(v, dict) and str(v.get("summary") or "").strip():
+                return True
+    ct = oc.get("collaboration_trace")
+    if isinstance(ct, list) and any(str(x).strip() for x in ct[:8]):
+        return True
+    if ex.get("delegated_to_cursor"):
+        return True
+    if str(cur.get("cursor_agent_id") or cur.get("agent_id") or "").strip():
+        return True
+    if str(outcome.get("current_phase_summary") or "").strip():
+        return True
+    return False
+
+
+def find_recent_delegated_cursor_task_id(
+    conn: Any,
+    current_task_id: str,
+    *,
+    chat_id: Any,
+    limit: int = 18,
+) -> Optional[str]:
+    """
+    Same-chat Telegram task (excluding current) with delegated Cursor/OpenClaw continuity,
+    ordered by recency. Used when the active task is thin but recent chat work exists.
+    """
+    if chat_id is None or str(chat_id).strip() == "":
+        return None
+    for tid in list_telegram_task_ids_for_chat(conn, chat_id, limit=limit):
+        if tid == current_task_id:
+            continue
+        channel = get_task_channel(conn, tid) or "cli"
+        proj = project_task_dict(conn, tid, channel)
+        meta = proj.get("meta") if isinstance(proj.get("meta"), dict) else {}
+        if not _task_has_delegated_continuity_signal(meta):
+            continue
+        row = get_active_execution_attempt_for_task(conn, tid)
+        oc = meta.get("openclaw") if isinstance(meta.get("openclaw"), dict) else {}
+        has_summary = bool(str(oc.get("user_summary") or "").strip())
+        ex = meta.get("execution") if isinstance(meta.get("execution"), dict) else {}
+        if row or has_summary or ex.get("delegated_to_cursor"):
+            return tid
+    return None
+
+
+def _openclaw_narrative_lines(meta: Dict[str, Any]) -> List[str]:
+    oc = meta.get("openclaw") if isinstance(meta.get("openclaw"), dict) else {}
+    lines: List[str] = []
+    us = sanitize_user_surface_text(str(oc.get("user_summary") or ""), limit=900)
+    if us:
+        lines.append(f"Latest from Cursor / OpenClaw: {us}")
+    po = oc.get("phase_outputs")
+    if isinstance(po, dict):
+        for phase in ("synthesis", "execution", "critique", "plan"):
+            block = po.get(phase)
+            if not isinstance(block, dict):
+                continue
+            summ = sanitize_user_surface_text(str(block.get("summary") or ""), limit=360)
+            if summ:
+                lines.append(f"Phase {phase}: {summ}")
+                if len(lines) >= 4:
+                    break
+    tr = oc.get("collaboration_trace")
+    if isinstance(tr, list):
+        for raw in tr[:3]:
+            t = sanitize_user_surface_text(str(raw), limit=240)
+            if t:
+                lines.append(f"Collaboration note: {t}")
+    br = str(oc.get("blocked_reason") or "").strip()
+    if br:
+        safe_br = sanitize_user_surface_text(br, limit=280)
+        if safe_br:
+            lines.append(f"Delegated wait state: {safe_br}")
+    return lines
+
+
+def _state_snapshot_is_low_information_only(
+    status: str,
+    result_kind: str,
+    phase_summary: str,
+    blocked_reason: str,
+) -> bool:
+    if blocked_reason and len(blocked_reason.strip()) > 6:
+        return False
+    if phase_summary and len(phase_summary.strip()) > 14:
+        return False
+    st = str(status or "").strip().lower()
+    rk = str(result_kind or "").strip().lower()
+    trivial = {"", "created", "queued", "pending", "running", "completed"}
+    return st in trivial and rk in trivial
+
+
+def build_cursor_continuity_recall_reply_from_state(
+    conn: Any,
+    task_id: str,
+    *,
+    user_message: str = "",
+) -> str:
+    """
+    Human-facing recall from delegated OpenClaw narrative, receipts, and outcome state.
+    Prefers durable summaries over raw task status / result_kind metadata.
+    """
+    meta = _projection_meta(conn, task_id)
+    proj = _projection_full(conn, task_id)
+    outcome = _outcome_section(meta)
+    asst = _assistant_section(meta)
+    summary = strip_conversational_soft_failure_boilerplate(str(proj.get("summary") or "").strip())
+    last_reply = strip_conversational_soft_failure_boilerplate(str(asst.get("last_reply") or "").strip())
+    status = str(proj.get("status") or "").strip()
+    phase_summary = sanitize_user_surface_text(
+        str(outcome.get("current_phase_summary") or ""), limit=500
+    )
+    result_kind = str(outcome.get("result_kind") or "").strip()
+    blocked_reason = sanitize_user_surface_text(str(outcome.get("blocked_reason") or ""), limit=400)
+
+    narrative_lines = _openclaw_narrative_lines(meta)
+
+    receipt_lines: List[str] = []
+    for row in list_recent_user_outcome_receipts_for_task(conn, task_id, limit=3):
+        summ = sanitize_user_surface_text(str(row["summary"] or ""), limit=400)
+        kind = str(row["receipt_kind"] or "").strip()
+        if summ:
+            receipt_lines.append(
+                f"Recent receipt ({kind}): {summ}" if kind else f"Recent receipt: {summ}"
+            )
+
+    tm = _telegram_section(meta)
+    cr = tm.get("continuation_records") if isinstance(tm.get("continuation_records"), list) else []
+    cont_line = ""
+    if cr:
+        last = cr[-1]
+        if isinstance(last, dict):
+            r = sanitize_user_surface_text(str(last.get("reason") or ""), limit=320)
+            if r:
+                cont_line = f"Continuation context: {r}"
+
+    assistant_lines: List[str] = []
+    um = str(user_message or "").strip()
+    if last_reply and len(last_reply) > 12 and not _is_echo_of_user_question(last_reply, um):
+        safe_lr = sanitize_user_surface_text(last_reply, limit=900)
+        if safe_lr:
+            assistant_lines.append(f"Last assistant update on this task: {safe_lr}")
+    elif summary and len(summary) > 12:
+        safe_s = sanitize_user_surface_text(summary, limit=900)
+        if safe_s:
+            assistant_lines.append(f"Recorded summary: {safe_s}")
+
+    state_bits: List[str] = []
+    if status:
+        state_bits.append(f"task status **{status}**")
+    if phase_summary:
+        state_bits.append(f"phase: {phase_summary}")
+    if result_kind:
+        state_bits.append(f"result: **{result_kind}**")
+    if blocked_reason:
+        state_bits.append(f"blocker: {blocked_reason}")
+
+    lines: List[str] = []
+    lines.extend(narrative_lines)
+    lines.extend(receipt_lines)
+    if cont_line:
+        lines.append(cont_line)
+    lines.extend(assistant_lines)
+
+    low_info = _state_snapshot_is_low_information_only(
+        status, result_kind, phase_summary, blocked_reason
+    )
+    has_narrative = bool(narrative_lines or receipt_lines or cont_line)
+    if state_bits and (has_narrative or not low_info):
+        lines.append("Where things stand: " + "; ".join(state_bits) + ".")
+
+    if not lines:
+        if is_cursor_thread_recall_question(um):
+            return _GRACE_CURSOR_CONTINUITY
+        return _GRACE_GENERIC_HISTORY
+
+    if (
+        low_info
+        and not has_narrative
+        and not assistant_lines
+        and is_cursor_thread_recall_question(um)
+    ):
+        return _GRACE_CURSOR_CONTINUITY
+
+    tail = ""
+    if blocked_reason or followthrough_needs_user_attention(_followthrough_section(meta)):
+        tail = " Next step: address the open item above when you’re ready."
+    return ("\n".join(lines) + tail).strip()
+
+
+def build_recent_outcome_history_reply_from_state(
+    conn: Any,
+    task_id: str,
+    *,
+    user_message: str = "",
+) -> str:
+    """Backward-compatible alias for continuity recall (prefers delegated narrative)."""
+    return build_cursor_continuity_recall_reply_from_state(
+        conn, task_id, user_message=user_message
+    )
+
+
 def build_blocked_state_reply_from_state(conn: Any, task_id: str) -> str:
     """
     Short, concrete blocker answer from outcome, approvals, follow-through, and ledger rows.
@@ -240,66 +496,64 @@ def build_blocked_state_reply_from_state(conn: Any, task_id: str) -> str:
     return f"{lead}{nxt}".strip()
 
 
-def build_recent_outcome_history_reply_from_state(conn: Any, task_id: str) -> str:
+def _resolve_cursor_heavy_lift_reply(
+    conn: Any,
+    task_id: str,
+) -> Tuple[Optional[str], bool]:
     """
-    Recap what happened on the current task from projection, receipts, and continuation data.
-    Prefer this over generic “no active tracked work” when the ask is history-shaped.
+    Prefer the current task; if thin, use the most recent same-chat delegated Cursor task.
+    Returns (reply_text, used_alternate_task).
     """
-    meta = _projection_meta(conn, task_id)
-    proj = _projection_full(conn, task_id)
-    outcome = _outcome_section(meta)
-    asst = _assistant_section(meta)
-    summary = str(proj.get("summary") or "").strip()
-    last_reply = str(asst.get("last_reply") or "").strip()
-    status = str(proj.get("status") or "").strip()
-    phase_summary = str(outcome.get("current_phase_summary") or "").strip()
-    result_kind = str(outcome.get("result_kind") or "").strip()
-    blocked_reason = str(outcome.get("blocked_reason") or "").strip()
+    cur = build_cursor_heavy_lift_context_reply(conn, task_id)
+    if cur:
+        return cur, False
+    cid = _telegram_chat_id_for_task(conn, task_id)
+    if cid is None:
+        return None, False
+    alt = find_recent_delegated_cursor_task_id(conn, task_id, chat_id=cid)
+    if not alt:
+        return None, False
+    cur2 = build_cursor_heavy_lift_context_reply(conn, alt)
+    if cur2:
+        return cur2, True
+    return None, False
 
-    lines: List[str] = []
-    if last_reply and len(last_reply) > 12:
-        lines.append(f"Last assistant update on this task: {last_reply[:900]}")
-    elif summary and len(summary) > 12:
-        lines.append(f"Recorded summary: {summary[:900]}")
 
-    for row in list_recent_user_outcome_receipts_for_task(conn, task_id, limit=3):
-        summ = str(row["summary"] or "").strip()[:400]
-        kind = str(row["receipt_kind"] or "").strip()
-        if summ:
-            lines.append(
-                f"Recent receipt ({kind}): {summ}" if kind else f"Recent receipt: {summ}"
+def cursor_followup_context_reply_with_fallback(
+    conn: Any,
+    task_id: str,
+    *,
+    user_message: str,
+) -> str:
+    """
+    Conductor-style continuation: current Cursor workstream, or recent same-chat delegated task,
+    or an explicit boundary when nothing durable is available.
+    """
+    cur, used_alt = _resolve_cursor_heavy_lift_reply(conn, task_id)
+    if cur:
+        if used_alt:
+            return (
+                "I found the recent Cursor workstream on this thread and I’m continuing it "
+                "from the latest tracked context.\n"
+                f"{cur}"
             )
-
-    tm = _telegram_section(meta)
-    cr = tm.get("continuation_records") if isinstance(tm.get("continuation_records"), list) else []
-    if cr:
-        last = cr[-1]
-        if isinstance(last, dict):
-            r = str(last.get("reason") or "").strip()[:320]
-            if r:
-                lines.append(f"Continuation context: {r}")
-
-    state_bits: List[str] = []
-    if status:
-        state_bits.append(f"task status **{status}**")
-    if phase_summary:
-        state_bits.append(f"phase: {phase_summary}")
-    if result_kind:
-        state_bits.append(f"result: **{result_kind}**")
-    if blocked_reason:
-        state_bits.append(f"blocker: {blocked_reason}")
-    if state_bits:
-        lines.append("Where things stand: " + "; ".join(state_bits) + ".")
-
-    if not lines:
-        return (
-            "I don't have enough recorded history on the current task to say that confidently. "
-            "I can still check the latest linked goal or start tracking the next step explicitly."
+        return cur
+    cid = _telegram_chat_id_for_task(conn, task_id)
+    alt = find_recent_delegated_cursor_task_id(conn, task_id, chat_id=cid) if cid else None
+    if alt:
+        recap = build_cursor_continuity_recall_reply_from_state(
+            conn, alt, user_message=user_message
         )
-    tail = ""
-    if blocked_reason or followthrough_needs_user_attention(_followthrough_section(meta)):
-        tail = " Next step: address the open item above when you’re ready."
-    return ("\n".join(lines) + tail).strip()
+        if recap not in (_GRACE_GENERIC_HISTORY, _GRACE_CURSOR_CONTINUITY):
+            return (
+                "The last Cursor run on this thread already finished. "
+                "I can start a new heavy-lift pass using this as the starting point:\n"
+                f"{recap}"
+            )
+    return (
+        "I’m not finding a recent Cursor workstream with enough context to safely continue, "
+        "so I’d need to start a new one from your latest instruction."
+    )
 
 
 def build_cursor_heavy_lift_context_reply(conn: Any, task_id: str) -> Optional[str]:
@@ -308,13 +562,17 @@ def build_cursor_heavy_lift_context_reply(conn: Any, task_id: str) -> Optional[s
     contract = build_delegated_lifecycle_contract(meta)
     ex = contract.get("execution") if isinstance(contract.get("execution"), dict) else {}
     cur = contract.get("cursor") if isinstance(contract.get("cursor"), dict) else {}
-    oc = contract.get("openclaw") if isinstance(contract.get("openclaw"), dict) else {}
+    oc_contract = contract.get("openclaw") if isinstance(contract.get("openclaw"), dict) else {}
+    oc_meta = meta.get("openclaw") if isinstance(meta.get("openclaw"), dict) else {}
     outcome = _outcome_section(meta)
     att = summarize_execution_attempt_for_user(conn, task_id)
+    oc_lines = _openclaw_narrative_lines(meta)
     has_signal = bool(
         ex.get("delegated_to_cursor")
         or cur.get("agent_id")
-        or oc.get("run_id")
+        or oc_contract.get("run_id")
+        or str(oc_meta.get("user_summary") or "").strip()
+        or oc_lines
         or str(outcome.get("current_phase_summary") or "").strip()
         or (att.get("ok") if isinstance(att, dict) else False)
     )
@@ -322,12 +580,20 @@ def build_cursor_heavy_lift_context_reply(conn: Any, task_id: str) -> Optional[s
         return None
 
     parts: List[str] = []
-    phase = str(outcome.get("current_phase_summary") or outcome.get("current_phase") or "").strip()
+    us = sanitize_user_surface_text(str(oc_meta.get("user_summary") or ""), limit=700)
+    if us:
+        parts.append(f"Latest useful result: {us}")
+    elif oc_lines:
+        parts.extend(oc_lines[:3])
+    phase = sanitize_user_surface_text(
+        str(outcome.get("current_phase_summary") or outcome.get("current_phase") or ""),
+        limit=500,
+    )
     if phase:
         parts.append(f"Current heavy-lift phase: {phase}.")
     br = str(outcome.get("blocked_reason") or "").strip()
     if br:
-        parts.append(f"Blocker / wait state: {br}.")
+        parts.append(f"Blocker / wait state: {sanitize_user_surface_text(br, limit=400)}.")
     if isinstance(att, dict) and att.get("ok"):
         parts.append(
             f"Execution lane `{att.get('lane') or 'n/a'}` is **{att.get('status') or 'unknown'}** "
@@ -335,9 +601,17 @@ def build_cursor_heavy_lift_context_reply(conn: Any, task_id: str) -> Optional[s
         )
     aid = str(cur.get("agent_id") or "").strip()
     if aid:
-        parts.append(f"Cursor agent `{aid}` is attached when execution delegates to the repo.")
-    if oc.get("run_id"):
-        parts.append(f"OpenClaw run `{oc.get('run_id')}` is part of this workstream.")
+        parts.append("Cursor is attached for delegated execution when this lane runs.")
+    rid = str(oc_contract.get("run_id") or oc_meta.get("run_id") or "").strip()
+    if rid:
+        parts.append(f"OpenClaw run `{rid}` is part of this workstream.")
+    nacts = contract.get("recommended_next_actions") or []
+    if isinstance(nacts, list) and nacts:
+        parts.append(
+            "Likely next moves on this workstream: "
+            + ", ".join(str(x) for x in nacts[:4])
+            + "."
+        )
     if not parts:
         return None
     return (
@@ -605,8 +879,14 @@ def try_composer_early_short_circuit(
         return text, "composer_blocked_state"
 
     if domain == "project_status" and turn_plan.continuity_focus == "cursor_followup_heavy_lift":
-        cur = build_cursor_heavy_lift_context_reply(conn, task_id)
+        cur, used_alt = _resolve_cursor_heavy_lift_reply(conn, task_id)
         if cur:
+            if used_alt:
+                return (
+                    "I found the recent Cursor workstream on this thread and I’m continuing it "
+                    "from the latest tracked context.\n"
+                    f"{cur}"
+                ), "composer_cursor_heavy_lift_context"
             return cur, "composer_cursor_heavy_lift_context"
 
     if domain == "external_information":
@@ -707,15 +987,24 @@ def gather_repair_candidates(
             blk = build_blocked_state_reply_from_state(conn, task_id)
             out.append(AnswerCandidate(source="blocked_state_reply", text=blk, priority=99))
         elif cf == "recent_outcome_history":
-            hist = build_recent_outcome_history_reply_from_state(conn, task_id)
-            out.append(
-                AnswerCandidate(source="recent_outcome_history_reply", text=hist, priority=98)
+            cc = build_cursor_continuity_recall_reply_from_state(
+                conn, task_id, user_message=str(classify_text or "")
             )
+            out.append(AnswerCandidate(source="cursor_continuity_recall", text=cc, priority=100))
         elif cf == "cursor_followup_heavy_lift":
-            cur = build_cursor_heavy_lift_context_reply(conn, task_id)
+            cur, used_alt = _resolve_cursor_heavy_lift_reply(conn, task_id)
             if cur:
+                text = (
+                    (
+                        "I found the recent Cursor workstream on this thread and I’m continuing it "
+                        "from the latest tracked context.\n"
+                        f"{cur}"
+                    )
+                    if used_alt
+                    else cur
+                )
                 out.append(
-                    AnswerCandidate(source="cursor_heavy_lift_context", text=cur, priority=97)
+                    AnswerCandidate(source="cursor_heavy_lift_context", text=text, priority=97)
                 )
 
         goal = build_goal_continuity_reply(conn, task_id, user_text=str(classify_text or ""))
@@ -832,7 +1121,7 @@ def pick_repair_winner(
 
     if winner.source in {
         "blocked_state_reply",
-        "recent_outcome_history_reply",
+        "cursor_continuity_recall",
         "cursor_heavy_lift_context",
     }:
         return winner.text, winner.source

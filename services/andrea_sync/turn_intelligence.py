@@ -81,7 +81,9 @@ _RECENT_OUTCOME_HISTORY_RE = re.compile(
     r"what\s+happened\s+with\s+(?:that\s+)?task|what\s+happened\s+to\s+that\s+task|"
     r"what\s+happened\s+with\s+that\s+work|"
     r"last\s+task|that\s+task\s+earlier|task\s+earlier|"
-    r"what\s+was\s+the\s+outcome|what\s+did\s+cursor\s+say|what\s+did\s+openclaw\s+do|"
+    r"what\s+was\s+the\s+outcome|what\s+did\s+cursor\s+say|what\s+did\s+cursor\s+do|"
+    r"what\s+happened\s+in\s+(?:the\s+)?cursor\s+thread|"
+    r"what\s+did\s+openclaw\s+do|"
     r"recap\s+(?:that\s+)?task|outcome\s+of\s+that"
     r")\b",
     re.I,

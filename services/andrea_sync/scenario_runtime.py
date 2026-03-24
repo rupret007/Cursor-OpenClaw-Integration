@@ -80,7 +80,8 @@ _RESUME = re.compile(
 _RESEARCH = re.compile(
     r"\b("
     r"search\s+the\s+web|look\s+up\s+online|fresh\s+(news|headlines)|"
-    r"what'?s\s+the\s+latest|research\s+"
+    r"what'?s\s+the\s+latest|what'?s\s+the\s+news|what'?s\s+in\s+the\s+news|"
+    r"news\s+today|headlines?\s+today|research\s+"
     r")\b",
     re.I,
 )

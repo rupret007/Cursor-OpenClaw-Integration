@@ -25,8 +25,11 @@ from services.andrea_sync.store import (  # noqa: E402
     SYSTEM_TASK_ID,
     append_event,
     connect,
+    create_goal,
     create_goal_approval,
     get_meta,
+    link_task_principal,
+    link_task_to_goal,
     list_tasks,
     list_telegram_task_ids_for_chat,
     load_events_for_task,
@@ -36,7 +39,9 @@ from services.andrea_sync.store import (  # noqa: E402
 )
 from services.andrea_sync.andrea_router import (  # noqa: E402
     _scrub_history_for_direct,
+    build_direct_reply,
     classify_route,
+    is_generic_direct_reply,
     is_standalone_casual_social_turn,
     route_message,
 )
@@ -1544,6 +1549,406 @@ class TestAndreaSync(unittest.TestCase):
         self.assertNotIn("recent context from this chat", decision.reply_text.lower())
         self.assertNotIn("latest useful context", decision.reply_text.lower())
         self.assertNotIn("recent thread:", decision.reply_text.lower())
+
+    def test_openai_direct_path_passes_inject_durable_memory_flag(self) -> None:
+        with mock.patch(
+            "services.andrea_sync.andrea_router._openai_direct_reply",
+            return_value="Brief ok reply without fluff.",
+        ) as m:
+            build_direct_reply(
+                "What's the news today?",
+                history=[],
+                memory_notes=["principal note about sprint"],
+                turn_domain="external_information",
+                context_boundary="external_world_only",
+                inject_durable_memory=False,
+            )
+        kw = m.call_args.kwargs
+        self.assertFalse(kw.get("inject_durable_memory", True))
+
+    def test_build_direct_reply_replaces_model_generic_for_ranked_domains(self) -> None:
+        weak = "I'm here. Say a bit more about what you want and I'll take it from there."
+        with mock.patch(
+            "services.andrea_sync.andrea_router._openai_direct_reply",
+            return_value=weak,
+        ):
+            agenda_r = build_direct_reply(
+                "What's on the agenda today?",
+                history=[],
+                memory_notes=[],
+                turn_domain="personal_agenda",
+                context_boundary="personal_agenda_state",
+                inject_durable_memory=False,
+            )
+            self.assertFalse(is_generic_direct_reply(agenda_r))
+            self.assertIn("calendar", agenda_r.lower())
+
+            news_r = build_direct_reply(
+                "What's the news today?",
+                history=[],
+                memory_notes=[],
+                turn_domain="external_information",
+                context_boundary="external_world_only",
+                inject_durable_memory=False,
+            )
+            self.assertFalse(is_generic_direct_reply(news_r))
+            self.assertIn("news", news_r.lower())
+
+            opinion_r = build_direct_reply(
+                "What do you think about that?",
+                history=[],
+                memory_notes=[],
+                turn_domain="opinion_reflection",
+                context_boundary="recent_thread_only",
+                inject_durable_memory=False,
+            )
+            self.assertFalse(is_generic_direct_reply(opinion_r))
+
+    def test_cross_domain_weak_generic_is_not_returned_where_guarded(self) -> None:
+        weak = "Tell me what you need."
+        domains_guarded = (
+            "personal_agenda",
+            "external_information",
+            "opinion_reflection",
+        )
+        with mock.patch(
+            "services.andrea_sync.andrea_router._openai_direct_reply",
+            return_value=weak,
+        ):
+            for dom in domains_guarded:
+                body = (
+                    "What's on the agenda today?"
+                    if dom == "personal_agenda"
+                    else (
+                        "What's the news today?"
+                        if dom == "external_information"
+                        else "What do you think about that?"
+                    )
+                )
+                r = build_direct_reply(
+                    body,
+                    history=[],
+                    memory_notes=[],
+                    turn_domain=dom,
+                    context_boundary="test",
+                    inject_durable_memory=False,
+                )
+                self.assertFalse(is_generic_direct_reply(r), msg=f"{dom}: {r!r}")
+
+    def test_server_repair_swaps_generic_agenda_to_no_calendar_copy(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.andrea_router import AndreaRouteDecision  # noqa: E402
+        from services.andrea_sync.scenario_registry import SCENARIO_CATALOG  # noqa: E402
+        from services.andrea_sync.scenario_schema import ScenarioResolution  # noqa: E402
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+        from services.andrea_sync.turn_intelligence import build_turn_plan  # noqa: E402
+
+        server = SyncServer()
+        sc = SCENARIO_CATALOG["statusFollowupContinue"]
+        text = "What's on the agenda today?"
+        plan = build_turn_plan(
+            text, scenario_id=sc.scenario_id, projection_has_continuity_state=True
+        )
+        res = ScenarioResolution(
+            scenario_id=sc.scenario_id,
+            confidence=0.9,
+            support_level=sc.support_level,
+            reason="test",
+            goal_id="",
+            needs_plan=False,
+            suggested_lane="direct_assistant",
+            action_class=sc.action_class,
+            proof_class=sc.proof_class,
+            approval_mode=sc.approval_mode,
+        )
+        bad = AndreaRouteDecision(
+            mode="direct",
+            reason="short_general_request",
+            reply_text=(
+                "I'm here. Say a bit more about what you want and I'll take it from there."
+            ),
+        )
+        out = server._maybe_repair_direct_reply_from_continuity(
+            "nonexistent_task",
+            classify_text=text,
+            decision=bad,
+            resolution=res,
+            turn_plan=plan,
+            history=[],
+            memory_notes=[],
+        )
+        self.assertIn("calendar", out.reply_text.lower())
+        self.assertEqual(out.reason, "domain_agenda_repaired_direct_reply")
+
+    def test_ranking_working_on_prefers_linked_goal(self) -> None:
+        os.environ["OPENAI_API_ENABLED"] = "0"
+        os.environ.pop("OPENAI_API_KEY", None)
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        r0 = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "rank-goal-1",
+                "payload": {
+                    "text": "hello",
+                    "routing_text": "hello",
+                    "chat_id": 66001,
+                    "message_id": 10,
+                    "from_user": 500,
+                },
+            },
+        )
+        tid = r0["task_id"]
+        link_task_principal(self.conn, tid, "pri_rank_goal", channel="telegram")
+        gid = create_goal(
+            self.conn, "pri_rank_goal", "Ship the ranking engine", channel="telegram"
+        )
+        link_task_to_goal(self.conn, tid, gid)
+        handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "task_id": tid,
+                "external_id": "rank-goal-2",
+                "payload": {
+                    "text": "What are we working on right now?",
+                    "routing_text": "What are we working on right now?",
+                    "chat_id": 66001,
+                    "message_id": 11,
+                    "from_user": 500,
+                },
+            },
+        )
+        server = SyncServer()
+        decision, _applied = server._route_task_with_decision(
+            tid, history=[], source="test_rank_goal"
+        )
+        self.assertEqual(decision.mode, "direct")
+        low = decision.reply_text.lower()
+        self.assertIn("ship the ranking engine", low)
+        self.assertIn("goal", low)
+
+    def test_ranking_approval_question_reports_none_pending_when_empty(self) -> None:
+        os.environ["OPENAI_API_ENABLED"] = "0"
+        os.environ.pop("OPENAI_API_KEY", None)
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        r0 = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "rank-apr-1",
+                "payload": {
+                    "text": "hello",
+                    "routing_text": "hello",
+                    "chat_id": 66004,
+                    "message_id": 40,
+                    "from_user": 503,
+                },
+            },
+        )
+        tid = r0["task_id"]
+        link_task_principal(self.conn, tid, "pri_rank_apr", channel="telegram")
+        gid = create_goal(self.conn, "pri_rank_apr", "Side project", channel="telegram")
+        link_task_to_goal(self.conn, tid, gid)
+        handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "task_id": tid,
+                "external_id": "rank-apr-2",
+                "payload": {
+                    "text": "What still needs my approval?",
+                    "routing_text": "What still needs my approval?",
+                    "chat_id": 66004,
+                    "message_id": 41,
+                    "from_user": 503,
+                },
+            },
+        )
+        server = SyncServer()
+        decision, _applied = server._route_task_with_decision(
+            tid, history=[], source="test_rank_apr"
+        )
+        self.assertEqual(decision.mode, "direct")
+        low = decision.reply_text.lower()
+        self.assertIn("no pending", low)
+
+    def test_ranking_agenda_question_uses_calendar_visibility_not_generic(self) -> None:
+        os.environ["OPENAI_API_ENABLED"] = "0"
+        os.environ.pop("OPENAI_API_KEY", None)
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        r0 = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "rank-age-1",
+                "payload": {
+                    "text": "hello",
+                    "routing_text": "hello",
+                    "chat_id": 66005,
+                    "message_id": 50,
+                    "from_user": 504,
+                },
+            },
+        )
+        tid = r0["task_id"]
+        link_task_principal(self.conn, tid, "pri_rank_age", channel="telegram")
+        gid = create_goal(self.conn, "pri_rank_age", "Big delivery", channel="telegram")
+        link_task_to_goal(self.conn, tid, gid)
+        handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "task_id": tid,
+                "external_id": "rank-age-2",
+                "payload": {
+                    "text": "What's on the agenda today?",
+                    "routing_text": "What's on the agenda today?",
+                    "chat_id": 66005,
+                    "message_id": 51,
+                    "from_user": 504,
+                },
+            },
+        )
+        server = SyncServer()
+        decision, _applied = server._route_task_with_decision(
+            tid, history=[], source="test_rank_age"
+        )
+        self.assertEqual(decision.mode, "direct")
+        low = decision.reply_text.lower()
+        self.assertIn("calendar", low)
+        self.assertNotIn("say a bit more about what you want", low)
+
+    def test_ranking_news_question_stays_off_goal_copy_with_active_goal(self) -> None:
+        os.environ["OPENAI_API_ENABLED"] = "0"
+        os.environ.pop("OPENAI_API_KEY", None)
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        r0 = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "rank-news-1",
+                "payload": {
+                    "text": "seed",
+                    "routing_text": "seed",
+                    "chat_id": 66002,
+                    "message_id": 20,
+                    "from_user": 501,
+                },
+            },
+        )
+        tid = r0["task_id"]
+        link_task_principal(self.conn, tid, "pri_rank_news", channel="telegram")
+        gid = create_goal(
+            self.conn,
+            "pri_rank_news",
+            "Secret goal title for contamination test",
+            channel="telegram",
+        )
+        link_task_to_goal(self.conn, tid, gid)
+        handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "task_id": tid,
+                "external_id": "rank-news-2",
+                "payload": {
+                    "text": "What's the news today?",
+                    "routing_text": "What's the news today?",
+                    "chat_id": 66002,
+                    "message_id": 21,
+                    "from_user": 501,
+                },
+            },
+        )
+        server = SyncServer()
+        decision, _applied = server._route_task_with_decision(
+            tid, history=[], source="test_rank_news"
+        )
+        self.assertEqual(decision.mode, "direct")
+        self.assertNotIn("secret goal title", decision.reply_text.lower())
+
+    def test_ranking_opinion_uses_thread_not_goal_state(self) -> None:
+        os.environ["OPENAI_API_ENABLED"] = "0"
+        os.environ.pop("OPENAI_API_KEY", None)
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        r0 = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "rank-op-1",
+                "payload": {
+                    "text": "seed",
+                    "routing_text": "seed",
+                    "chat_id": 66003,
+                    "message_id": 30,
+                    "from_user": 502,
+                },
+            },
+        )
+        tid = r0["task_id"]
+        link_task_principal(self.conn, tid, "pri_rank_op", channel="telegram")
+        gid = create_goal(self.conn, "pri_rank_op", "Milestone gamma", channel="telegram")
+        link_task_to_goal(self.conn, tid, gid)
+        hist = [
+            {"role": "user", "content": "We're debating the rollout timeline for April."},
+            {
+                "role": "assistant",
+                "content": "April could work if QA keeps two weeks buffer.",
+            },
+        ]
+        handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "task_id": tid,
+                "external_id": "rank-op-2",
+                "payload": {
+                    "text": "What do you think about that?",
+                    "routing_text": "What do you think about that?",
+                    "chat_id": 66003,
+                    "message_id": 31,
+                    "from_user": 502,
+                },
+            },
+        )
+        server = SyncServer()
+        decision, _applied = server._route_task_with_decision(
+            tid, history=hist, source="test_rank_op"
+        )
+        self.assertEqual(decision.mode, "direct")
+        low = decision.reply_text.lower()
+        self.assertTrue(
+            "april" in low or "rollout" in low or "qa" in low or "buffer" in low,
+            msg=decision.reply_text,
+        )
+        self.assertNotIn("milestone gamma", low)
 
     def test_router_openclaw_presence_question_stays_specific_with_history(self) -> None:
         os.environ["OPENAI_API_ENABLED"] = "0"

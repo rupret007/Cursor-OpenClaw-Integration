@@ -20,7 +20,14 @@ from typing import Any, Callable, Dict, Optional
 from .adapters import alexa as alexa_adapt
 from .adapters import telegram as tg_adapt
 from .alexa_request_verify import verify_alexa_http_request
-from .andrea_router import AndreaRouteDecision, is_generic_direct_reply, route_message
+from .andrea_router import (
+    AndreaRouteDecision,
+    DIRECT_AGENDA_NO_CALENDAR_REPLY,
+    _contextual_fallback,
+    _heuristic_reply,
+    is_generic_direct_reply,
+    route_message,
+)
 from .goal_runtime import (
     build_goal_continuity_reply,
     ensure_delegate_goal_link,
@@ -193,7 +200,7 @@ CONTINUITY_HINT_RE = re.compile(
     r"\b("
     r"status|progress|update|where are we|what happened|"
     r"approval|awaiting|pending|waiting on|"
-    r"working on|still needs attention|agenda|today"
+    r"working on|still needs attention"
     r")\b",
     re.I,
 )
@@ -1339,10 +1346,24 @@ class SyncServer:
             goal_nl = self.with_lock(
                 lambda c: try_goal_status_nl_reply(c, task_id, classify_text)
             )
-            if not goal_nl and pre_turn_plan.prefer_state_reply:
+            if (
+                not goal_nl
+                and pre_turn_plan.prefer_state_reply
+                and pre_turn_plan.allow_goal_continuity_repair
+            ):
                 goal_nl = self.with_lock(
-                    lambda c: build_goal_continuity_reply(c, task_id)
+                    lambda c: build_goal_continuity_reply(
+                        c, task_id, user_text=classify_text
+                    )
                 )
+                if not goal_nl:
+                    if pre_turn_plan.domain == "project_status":
+                        goal_nl = (
+                            "I do not see active tracked work right now. "
+                            "If you want, I can start a fresh task and track it from here."
+                        )
+                    elif pre_turn_plan.domain == "approval_state":
+                        goal_nl = "There are no pending approvals right now."
             if goal_nl:
                 gid = self.with_lock(lambda c: get_goal_id_for_task(c, task_id) or "")
                 sc = SCENARIO_CATALOG["statusFollowupContinue"]
@@ -1415,7 +1436,11 @@ class SyncServer:
                         task_id, decision.reply_text, decision.reason
                     )
                 return decision, applied
-            route_memory_notes = self._principal_memory_notes(task_id)
+            route_memory_notes = (
+                self._principal_memory_notes(task_id)
+                if pre_turn_plan.inject_durable_memory
+                else []
+            )
             if pre_turn_plan.force_delegate:
                 decision = AndreaRouteDecision(
                     mode="delegate",
@@ -1449,6 +1474,7 @@ class SyncServer:
                     ),
                     turn_domain=pre_turn_plan.domain,
                     context_boundary=pre_turn_plan.context_boundary,
+                    inject_durable_memory=pre_turn_plan.inject_durable_memory,
                 )
             resolution, scenario_contract = resolve_scenario(
                 classify_text,
@@ -1461,6 +1487,8 @@ class SyncServer:
                 decision=decision,
                 resolution=resolution,
                 turn_plan=pre_turn_plan,
+                history=effective_history,
+                memory_notes=route_memory_notes,
             )
             self._append_task_event(
                 task_id,
@@ -2049,6 +2077,8 @@ class SyncServer:
         decision: AndreaRouteDecision,
         resolution: ScenarioResolution,
         turn_plan: TurnPlan | None = None,
+        history: list[dict[str, str]] | None = None,
+        memory_notes: list[str] | None = None,
     ) -> AndreaRouteDecision:
         if getattr(decision, "mode", "") != "direct":
             return decision
@@ -2066,32 +2096,68 @@ class SyncServer:
         )
         plan_prefers_state = bool(turn_plan and turn_plan.prefer_state_reply)
         plan_repairs_generic = bool(turn_plan and turn_plan.should_repair_generic)
-        if not (
-            scenario_continuity
-            or plan_prefers_state
-            or ((generic and plan_repairs_generic) and (continuity_ask or continuity_state))
-        ):
-            return decision
-        continuity_reply = self.with_lock(
-            lambda c: build_goal_continuity_reply(c, task_id, user_text=classify_text)
-        )
-        if not continuity_reply:
-            domain = str((turn_plan.domain if turn_plan else "") or "").strip()
-            if generic and domain == "project_status":
-                continuity_reply = (
-                    "I do not see active tracked work right now. "
-                    "If you want, I can start a fresh task and track it from here."
-                )
-            elif generic and domain == "approval_state":
-                continuity_reply = "There are no pending approvals right now."
-            else:
+        allow_goal = bool(turn_plan and turn_plan.allow_goal_continuity_repair)
+        inject_mem = bool(turn_plan and turn_plan.inject_durable_memory)
+        domain = str((turn_plan.domain if turn_plan else "") or "").strip()
+        mem_ctx = list(memory_notes or []) if inject_mem else []
+
+        if allow_goal:
+            if not (
+                scenario_continuity
+                or plan_prefers_state
+                or ((generic and plan_repairs_generic) and (continuity_ask or continuity_state))
+            ):
                 return decision
-        return AndreaRouteDecision(
-            mode="direct",
-            reason="continuity_state_repaired_direct_reply",
-            reply_text=continuity_reply,
-            collaboration_mode=decision.collaboration_mode,
-        )
+            continuity_reply = self.with_lock(
+                lambda c: build_goal_continuity_reply(
+                    c, task_id, user_text=classify_text
+                )
+            )
+            if not continuity_reply:
+                if generic and domain == "project_status":
+                    continuity_reply = (
+                        "I do not see active tracked work right now. "
+                        "If you want, I can start a fresh task and track it from here."
+                    )
+                elif generic and domain == "approval_state":
+                    continuity_reply = "There are no pending approvals right now."
+                else:
+                    return decision
+            return AndreaRouteDecision(
+                mode="direct",
+                reason="continuity_state_repaired_direct_reply",
+                reply_text=continuity_reply,
+                collaboration_mode=decision.collaboration_mode,
+            )
+
+        if not (generic and plan_repairs_generic):
+            return decision
+        if domain == "personal_agenda":
+            return AndreaRouteDecision(
+                mode="direct",
+                reason="domain_agenda_repaired_direct_reply",
+                reply_text=DIRECT_AGENDA_NO_CALENDAR_REPLY,
+                collaboration_mode=decision.collaboration_mode,
+            )
+        if domain == "opinion_reflection":
+            repaired = _contextual_fallback(
+                classify_text, history=history, memory_notes=mem_ctx
+            )
+            return AndreaRouteDecision(
+                mode="direct",
+                reason="domain_opinion_thread_repaired_direct_reply",
+                reply_text=repaired,
+                collaboration_mode=decision.collaboration_mode,
+            )
+        if domain == "external_information":
+            repaired = _heuristic_reply(classify_text, history=history)
+            return AndreaRouteDecision(
+                mode="direct",
+                reason="domain_external_world_repaired_direct_reply",
+                reply_text=repaired,
+                collaboration_mode=decision.collaboration_mode,
+            )
+        return decision
 
     def _extract_cursor_prompt(self, task_id: str) -> str:
         snapshot = self._task_snapshot(task_id)

@@ -156,6 +156,13 @@ class TestScenarioRuntime(unittest.TestCase):
             self.assertEqual(r.scenario_id, "statusFollowupContinue")
             self.assertEqual(r.reason, "status_or_followup_language")
 
+    def test_plain_news_today_hits_research_summary_before_repo_noise(self) -> None:
+        text = "What's the news today?"
+        d = route_message(text, history=[], routing_hint="auto")
+        r, _c = resolve_scenario(text, route_decision=d)
+        self.assertEqual(r.scenario_id, "researchSummary")
+        self.assertEqual(r.reason, "research_or_web_language")
+
 
 class TestScenarioPlanPersistence(unittest.TestCase):
     def setUp(self) -> None:

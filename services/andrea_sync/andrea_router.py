@@ -160,6 +160,12 @@ AGENDA_OR_DAY_PLAN_RE = re.compile(
     r")\b",
     re.I,
 )
+# Shared copy for agenda guardrails (router + server repair).
+DIRECT_AGENDA_NO_CALENDAR_REPLY = (
+    "I don't have a connected calendar view in this chat, so I can't see your real schedule here. "
+    "Tell me what you're trying to get done today, or ask for reminders or status on something specific."
+)
+
 OPINION_OR_TAKE_RE = re.compile(
     r"\b("
     r"what(?:'s|s|\s+do)\s+you\s+think|"
@@ -451,10 +457,7 @@ def _heuristic_reply(text: str, history: list[dict[str, str]] | None = None) -> 
             )
         return "Hi! Good to hear from you. How can I help?"
     if AGENDA_OR_DAY_PLAN_RE.search(clean):
-        return (
-            "I don't have a connected calendar view in this chat, so I can't see your real schedule here. "
-            "Tell me what you're trying to get done today, or ask for reminders or status on something specific."
-        )
+        return DIRECT_AGENDA_NO_CALENDAR_REPLY
     if OPINION_OR_TAKE_RE.search(clean):
         h = _history_hint(history)
         if h and len(h) > 12 and (
@@ -549,6 +552,7 @@ def _openai_direct_reply(
     *,
     turn_domain: str = "",
     context_boundary: str = "",
+    inject_durable_memory: bool = True,
 ) -> str:
     api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
     if not api_key or not _env_truthy("OPENAI_API_ENABLED", False):
@@ -583,6 +587,16 @@ def _openai_direct_reply(
         boundary_extra = (
             " This turn is casual conversation: keep the answer warm, brief, and avoid runtime or repo details."
         )
+    elif domain == "personal_agenda":
+        boundary_extra = (
+            " This turn is personal-agenda or schedule: do not substitute project goals, sprint status, "
+            "or approvals for the user's calendar or day plan; if you lack schedule data, say so clearly."
+        )
+    elif domain == "opinion_reflection":
+        boundary_extra = (
+            " This turn asks for an opinion or reflection: ground the answer in the recent thread when "
+            "the user refers to 'that' or 'this', not in unrelated project continuity."
+        )
     if context_boundary:
         boundary_extra += f" Context boundary: {context_boundary}."
     messages = [
@@ -604,7 +618,11 @@ def _openai_direct_reply(
             ),
         }
     ]
-    durable_notes = [str(note or "").strip() for note in (memory_notes or []) if str(note or "").strip()]
+    durable_notes = (
+        [str(note or "").strip() for note in (memory_notes or []) if str(note or "").strip()]
+        if inject_durable_memory
+        else []
+    )
     if durable_notes:
         messages.append(
             {
@@ -668,9 +686,12 @@ def build_direct_reply(
     *,
     turn_domain: str = "",
     context_boundary: str = "",
+    inject_durable_memory: bool = True,
 ) -> str:
     clean = _normalize(text)
-    has_memory = bool(memory_notes and any(str(n).strip() for n in memory_notes))
+    has_memory = bool(
+        inject_durable_memory and memory_notes and any(str(n).strip() for n in memory_notes)
+    )
     greeting_short = _is_greeting_only(clean) and len(clean.split()) <= 6
     # Longer turns with principal memory should reach the model/heuristic fallback chain
     # instead of the ultra-short greeting fast-path.
@@ -697,19 +718,37 @@ def build_direct_reply(
                 memory_notes=memory_notes,
                 turn_domain=turn_domain,
                 context_boundary=context_boundary,
+                inject_durable_memory=inject_durable_memory,
             ),
             user_seed=text,
             history=history,
         )
     except Exception:
+        mem_fb = memory_notes if inject_durable_memory else []
         reply = _finalize_direct_surface_reply(
-            _contextual_fallback(text, history=history, memory_notes=memory_notes),
+            _contextual_fallback(text, history=history, memory_notes=mem_fb),
             user_seed=text,
             history=history,
         )
-    # Domain-aware guardrail: never emit the weak generic fallback for casual turns.
-    if str(turn_domain or "").strip() == "casual_conversation" and is_generic_direct_reply(reply):
+    domain = str(turn_domain or "").strip()
+    mem_ctx = memory_notes if inject_durable_memory else []
+    # Domain-aware guardrail: never emit the weak generic fallback for these lanes.
+    if domain == "casual_conversation" and is_generic_direct_reply(reply):
         return "Pretty good, thanks for asking. How are you doing?"
+    if domain == "personal_agenda" and is_generic_direct_reply(reply):
+        return DIRECT_AGENDA_NO_CALENDAR_REPLY
+    if domain == "opinion_reflection" and is_generic_direct_reply(reply):
+        return _finalize_direct_surface_reply(
+            _contextual_fallback(text, history=history, memory_notes=mem_ctx),
+            user_seed=text,
+            history=history,
+        )
+    if domain == "external_information" and is_generic_direct_reply(reply):
+        return _finalize_direct_surface_reply(
+            _heuristic_reply(text, history=history),
+            user_seed=text,
+            history=history,
+        )
     return reply
 
 
@@ -723,6 +762,7 @@ def route_message(
     memory_notes: list[str] | None = None,
     turn_domain: str = "",
     context_boundary: str = "",
+    inject_durable_memory: bool = True,
 ) -> AndreaRouteDecision:
     mode, reason, delegate_target, resolved_collab = classify_route(
         text,
@@ -746,6 +786,7 @@ def route_message(
             memory_notes=memory_notes,
             turn_domain=turn_domain,
             context_boundary=context_boundary,
+            inject_durable_memory=inject_durable_memory,
         ),
         collaboration_mode=resolved_collab,
     )

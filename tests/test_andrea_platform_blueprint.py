@@ -159,6 +159,33 @@ class BlueprintPlatformTests(unittest.TestCase):
         )
         self.assertEqual(plan_news.domain, "external_information")
         self.assertEqual(plan_news.context_boundary, "external_world_only")
+        self.assertFalse(plan_news.allow_goal_continuity_repair)
+        self.assertFalse(plan_news.inject_durable_memory)
+
+        plan_news_status_branch = build_turn_plan(
+            "What's the news today?",
+            scenario_id="statusFollowupContinue",
+            projection_has_continuity_state=True,
+        )
+        self.assertEqual(plan_news_status_branch.domain, "external_information")
+        self.assertFalse(plan_news_status_branch.allow_goal_continuity_repair)
+
+        plan_agenda = build_turn_plan(
+            "What's on the agenda today?",
+            scenario_id="statusFollowupContinue",
+            projection_has_continuity_state=True,
+        )
+        self.assertEqual(plan_agenda.domain, "personal_agenda")
+        self.assertFalse(plan_agenda.prefer_state_reply)
+        self.assertFalse(plan_agenda.allow_goal_continuity_repair)
+
+        plan_opinion = build_turn_plan(
+            "What do you think about that?",
+            scenario_id="statusFollowupContinue",
+            projection_has_continuity_state=True,
+        )
+        self.assertEqual(plan_opinion.domain, "opinion_reflection")
+        self.assertFalse(plan_opinion.allow_goal_continuity_repair)
 
         plan_status = build_turn_plan(
             "What are we working on right now?",
@@ -167,6 +194,8 @@ class BlueprintPlatformTests(unittest.TestCase):
         )
         self.assertEqual(plan_status.domain, "project_status")
         self.assertTrue(plan_status.prefer_state_reply)
+        self.assertTrue(plan_status.allow_goal_continuity_repair)
+        self.assertTrue(plan_status.inject_durable_memory)
 
         plan_approval = build_turn_plan(
             "What still needs my approval?",

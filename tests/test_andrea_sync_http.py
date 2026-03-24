@@ -207,6 +207,22 @@ class TestAndreaSyncHTTP(unittest.TestCase):
         task_ids = [task["task_id"] for task in data["tasks"]["items"]]
         self.assertIn(created["task_id"], task_ids)
 
+    def test_dashboard_summary_includes_daily_pack_proving_signals(self) -> None:
+        req = urllib.request.Request(self._url("/v1/dashboard/summary?limit=3"), method="GET")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            self.assertEqual(resp.status, 200)
+            data = json.loads(resp.read().decode("utf-8"))
+        pack = data.get("daily_assistant_pack") or {}
+        self.assertIn("proving_signals", pack)
+        ps = pack.get("proving_signals") or {}
+        self.assertIn("routed_task_count_7d", ps)
+        self.assertIn("receipt_coverage_rate_7d", ps)
+        ev = pack.get("live_rollout_evidence") or {}
+        self.assertIn("evidence_gate_detail", ev)
+        gd = ev.get("evidence_gate_detail") or {}
+        self.assertIn("gate_components", gd)
+        self.assertIn("blocking_signals", gd)
+
     def test_dashboard_summary_exposes_phase_hints_for_running_delegated_task(self) -> None:
         created = self._srv.with_lock(
             lambda c: handle_command(
@@ -832,7 +848,12 @@ class TestAndreaSyncHTTP(unittest.TestCase):
         with urllib.request.urlopen(req, timeout=10) as resp:
             self.assertEqual(resp.status, 200)
             data = json.loads(resp.read().decode("utf-8"))
-        self.assertIn("ready to help", data["response"]["outputSpeech"]["text"].lower())
+        speech = data["response"]["outputSpeech"]["text"].lower()
+        self.assertTrue(
+            "thanks" in speech or "good" in speech or "well" in speech,
+            msg=data["response"]["outputSpeech"]["text"],
+        )
+        self.assertNotIn("cursor", speech)
         detail = None
         for _ in range(40):
             req_tasks = urllib.request.Request(self._url("/v1/tasks?limit=20"), method="GET")

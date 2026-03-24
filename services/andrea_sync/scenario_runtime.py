@@ -33,7 +33,10 @@ _UNSAFE = re.compile(
 _STATUS = re.compile(
     r"\b("
     r"what\s+happened|where\s+are\s+we|status(\s+of)?|what'?s\s+the\s+status|"
-    r"continue(\s+that|\s+this)?|follow[\s-]*up|any\s+update|progress(\s+so\s+far)?"
+    r"continue(\s+that|\s+this)?|follow[\s-]*up|any\s+update|progress(\s+so\s+far)?|"
+    r"needs?\s+(my|our)\s+approval|awaiting\s+(my|our)\s+approval|"
+    r"pending\s+(my|our)\s+approval|waiting\s+on\s+(my|our)\s+approval|"
+    r"what\s+still\s+needs\s+(my|our)\s+approval"
     r")\b",
     re.I,
 )

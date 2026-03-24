@@ -46,7 +46,8 @@ MEMORY_RE = re.compile(
 )
 GENERIC_DIRECT_REPLY_RE = re.compile(
     r"(i can help with that directly|i'm here and ready to help|what would you like to do|"
-    r"what would you like me to work on|tell me what you need)",
+    r"what would you like me to work on|tell me what you need|"
+    r"bring in cursor when the task needs deeper|deeper technical work\. tell me what you need)",
     re.I,
 )
 # Coordination / capability questions — not actionable "have Cursor fix X" instructions.
@@ -129,6 +130,31 @@ DELEGATE_KEYWORDS_RE = re.compile(
 PATH_RE = re.compile(r"[/~][\w.\-~/]+|`[^`]+`|\b\w+\.(py|ts|tsx|js|jsx|md|sh|json|yaml|yml)\b", re.I)
 COLLABORATE_RE = re.compile(
     r"\b(work together|team up|collaborate|both of you|double-?check|second opinion)\b",
+    re.I,
+)
+CASUAL_CHECKIN_RE = re.compile(
+    r"^(?:how(?:'s|\s+is)\s+it\s+going|how\s+are\s+things|how(?:'s|\s+is)\s+everything)\s*[?.!]*\s*$",
+    re.I,
+)
+AGENDA_OR_DAY_PLAN_RE = re.compile(
+    r"\b("
+    r"what(?:'s|s|\s+is)?\s+on\s+(?:the\s+)?agenda|"
+    r"what(?:'s|s|\s+is)\s+on\s+(?:for\s+)?today|"
+    r"on\s+(?:the\s+)?agenda\s+today|"
+    r"anything\s+on\s+(?:the\s+)?agenda|"
+    r"my\s+agenda|"
+    r"(?:the\s+)?day'?s\s+plan|"
+    r"plan\s+for\s+today"
+    r")\b",
+    re.I,
+)
+OPINION_OR_TAKE_RE = re.compile(
+    r"\b("
+    r"what(?:'s|s|\s+do)\s+you\s+think|"
+    r"what(?:'s|s|\s+is)\s+your\s+take|"
+    r"your\s+(?:opinion|view)\b|"
+    r"how\s+do\s+you\s+feel\s+about"
+    r")\b",
     re.I,
 )
 
@@ -262,13 +288,18 @@ def classify_route(
     return "direct", "explicit_andrea_mention" if andrea_preferred else "balanced_default_direct", "", "andrea_primary" if andrea_preferred else collab
 
 
-def _finalize_direct_surface_reply(text: str, *, user_seed: str) -> str:
+def _finalize_direct_surface_reply(
+    text: str,
+    *,
+    user_seed: str,
+    history: list[dict[str, str]] | None = None,
+) -> str:
     """Last-line guard: never return stale/runtime/provider chatter from direct or fallback paths."""
     raw = str(text or "").strip()
     safe = sanitize_user_surface_text(raw, fallback="", limit=2000)
     if safe and not is_stale_openclaw_narrative(raw):
         return safe
-    return _heuristic_reply(user_seed)
+    return _heuristic_reply(user_seed, history=history)
 
 
 def _clip(text: str, limit: int = 220) -> str:
@@ -334,21 +365,21 @@ def _contextual_fallback(
                 f"Recent thread: {hint} Durable note: {memory_hint}"
             )
             safe = sanitize_user_surface_text(reply, fallback="", limit=2000)
-            return safe or _heuristic_reply(text)
+            return safe or _heuristic_reply(text, history=history)
         if hint:
             reply = (
                 "Yes, I remember the recent conversation in this chat. "
                 f"The latest useful context I have is: {hint} What would you like to continue?"
             )
             safe = sanitize_user_surface_text(reply, fallback="", limit=2000)
-            return safe or _heuristic_reply(text)
+            return safe or _heuristic_reply(text, history=history)
         if memory_hint:
             reply = (
                 "Yes. I have a durable note for this principal, even if this specific chat thread is light. "
                 f"The strongest saved note I have is: {memory_hint}"
             )
             safe = sanitize_user_surface_text(reply, fallback="", limit=2000)
-            return safe or _heuristic_reply(text)
+            return safe or _heuristic_reply(text, history=history)
         return (
             "I can remember the recent conversation in this chat once we build a little history together. "
             "Tell me what you want to continue, and I'll pick it up from there."
@@ -360,18 +391,57 @@ def _contextual_fallback(
                 f"the most relevant recent context is: {hint}"
             )
             safe = sanitize_user_surface_text(reply, fallback="", limit=2000)
-            return safe or _heuristic_reply(text)
-        return _heuristic_reply(text)
-    return _heuristic_reply(text)
+            return safe or _heuristic_reply(text, history=history)
+        return _heuristic_reply(text, history=history)
+    if OPINION_OR_TAKE_RE.search(clean) and (
+        bool(re.search(r"\bthat\b", clean)) or bool(re.search(r"\bthis\b", clean))
+    ):
+        if hint and len(hint) > 12:
+            reply = (
+                f"Given what we were just discussing ({hint[:160]}), I'd take it seriously—"
+                "want me to go sharper or more cautious?"
+            )
+            safe = sanitize_user_surface_text(reply, fallback="", limit=2000)
+            return safe or _heuristic_reply(text, history=history)
+        reply = "Which part do you mean—something we were just discussing, or something else?"
+        safe = sanitize_user_surface_text(reply, fallback="", limit=2000)
+        return safe or _heuristic_reply(text, history=history)
+    return _heuristic_reply(text, history=history)
 
 
-def _heuristic_reply(text: str) -> str:
+def _heuristic_reply(text: str, history: list[dict[str, str]] | None = None) -> str:
     clean = _normalize(text)
     trimmed = clean.rstrip("?.! ").strip()
+    if CASUAL_CHECKIN_RE.match(trimmed):
+        return (
+            "Pretty good, thanks for asking. How are you doing?"
+        )
     if _is_greeting_only(clean):
         if "how are you" in clean or "how're you" in clean:
-            return "Hi! I'm doing well, and I'm ready to help. What would you like me to work on?"
-        return "Hi! I'm here and ready to help. What would you like to do?"
+            return (
+                "Hi! I'm doing well, thanks for asking. What's on your mind?"
+            )
+        return "Hi! Good to hear from you. How can I help?"
+    if AGENDA_OR_DAY_PLAN_RE.search(clean):
+        return (
+            "I don't have a connected calendar view in this chat, so I can't see your real schedule here. "
+            "Tell me what you're trying to get done today, or ask for reminders or status on something specific."
+        )
+    if OPINION_OR_TAKE_RE.search(clean):
+        h = _history_hint(history)
+        if h and len(h) > 12 and (
+            bool(re.search(r"\bthat\b", clean)) or bool(re.search(r"\bthis\b", clean))
+        ):
+            return (
+                f"Given what we were discussing ({h[:160]}), I'd weigh it carefully—happy to go deeper on any angle."
+            )
+        if bool(re.search(r"\bthat\b", clean)) or bool(re.search(r"\bthis\b", clean)):
+            return (
+                "Which part should I weigh in on—something from our last exchange, or a new topic?"
+            )
+        return (
+            "Happy to share a take—give me the topic or a bit of context and I'll keep it concise."
+        )
     if THANKS_RE.search(clean):
         return "You're welcome. I'm ready for the next thing whenever you are."
     if META_CURSOR_RE.search(clean):
@@ -398,8 +468,9 @@ def _heuristic_reply(text: str) -> str:
         )
     if NEWS_RE.search(clean):
         return (
-            "I can help with current news. Tell me the topic or place you want, "
-            "and I'll focus the update there."
+            "For live headlines I need the web-news lane your setup uses; if that's enabled, ask the same "
+            "in your usual chat and I'll pull a short grounded update. "
+            "Otherwise tell me a topic and I can give a quick general snapshot with the caveat it may not be live."
         )
     if _meta_stack_question(clean, text):
         return (
@@ -409,17 +480,15 @@ def _heuristic_reply(text: str) -> str:
         )
     if HELP_RE.search(clean) and len(clean.split()) <= 6:
         return (
-            "Absolutely. Tell me what you want to get done, and I'll either handle it directly "
-            "or bring in Cursor if the work needs deeper technical help."
+            "Absolutely—what would you like to tackle first?"
         )
     if IDENTITY_RE.search(clean):
         return (
-            "I'm Andrea, your personal assistant layer here. I handle direct assistant requests myself "
-            "and bring in Cursor when the task needs deeper technical or repo work."
+            "I'm Andrea, your assistant here. I answer everyday questions directly and can help with "
+            "reminders, messages, quick lookups, and heavier projects when you need that."
         )
     return (
-        "I can help with that directly when it's lightweight, and I'll bring in Cursor when the task "
-        "needs deeper technical work. Tell me what you need."
+        "I'm here. Say a bit more about what you want and I'll take it from there."
     )
 
 
@@ -560,20 +629,25 @@ def build_direct_reply(
         or THANKS_RE.search(clean)
         or IDENTITY_RE.search(clean)
         or META_CURSOR_RE.search(clean)
-        or NEWS_RE.search(clean)
         or _meta_stack_question(clean, text)
         or (HELP_RE.search(clean) and len(clean.split()) <= 6 and not has_memory)
     ):
-        return _finalize_direct_surface_reply(_heuristic_reply(text), user_seed=text)
+        return _finalize_direct_surface_reply(
+            _heuristic_reply(text, history=history),
+            user_seed=text,
+            history=history,
+        )
     try:
         return _finalize_direct_surface_reply(
             _openai_direct_reply(text, history=history, memory_notes=memory_notes),
             user_seed=text,
+            history=history,
         )
     except Exception:
         return _finalize_direct_surface_reply(
             _contextual_fallback(text, history=history, memory_notes=memory_notes),
             user_seed=text,
+            history=history,
         )
 
 

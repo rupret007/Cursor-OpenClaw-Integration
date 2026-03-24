@@ -1209,7 +1209,69 @@ class TestAndreaSync(unittest.TestCase):
     def test_router_greeting_stays_direct(self) -> None:
         decision = route_message("hi andrea how are you?")
         self.assertEqual(decision.mode, "direct")
-        self.assertIn("ready to help", decision.reply_text.lower())
+        low = decision.reply_text.lower()
+        self.assertTrue(
+            "thanks" in low or "good" in low or "well" in low,
+            msg=decision.reply_text,
+        )
+        self.assertNotIn("cursor", low)
+
+    def test_router_casual_checkin_is_natural_without_cursor(self) -> None:
+        os.environ["OPENAI_API_ENABLED"] = "0"
+        os.environ.pop("OPENAI_API_KEY", None)
+        decision = route_message("How's it going?")
+        self.assertEqual(decision.mode, "direct")
+        low = decision.reply_text.lower()
+        self.assertNotIn("cursor", low)
+        self.assertNotIn("bring in cursor", low)
+        self.assertNotIn("i can help with that directly", low)
+
+    def test_router_agenda_today_soft_limit_without_cursor(self) -> None:
+        os.environ["OPENAI_API_ENABLED"] = "0"
+        os.environ.pop("OPENAI_API_KEY", None)
+        decision = route_message("What on the agenda today?")
+        self.assertEqual(decision.mode, "direct")
+        low = decision.reply_text.lower()
+        self.assertNotIn("cursor", low)
+        self.assertNotIn("bring in cursor", low)
+        self.assertIn("calendar", low)
+
+    def test_router_opinion_about_that_asks_clarifier_without_cursor(self) -> None:
+        os.environ["OPENAI_API_ENABLED"] = "0"
+        os.environ.pop("OPENAI_API_KEY", None)
+        decision = route_message("What do you think about that?")
+        self.assertEqual(decision.mode, "direct")
+        low = decision.reply_text.lower()
+        self.assertNotIn("cursor", low)
+        self.assertTrue("mean" in low or "part" in low or "discuss" in low, msg=decision.reply_text)
+
+    def test_router_opinion_with_history_weighs_in_without_cursor(self) -> None:
+        os.environ["OPENAI_API_ENABLED"] = "0"
+        os.environ.pop("OPENAI_API_KEY", None)
+        decision = route_message(
+            "What do you think about that?",
+            history=[
+                {"role": "user", "content": "We're debating the new rollout timeline."},
+                {"role": "assistant", "content": "A shorter window could reduce risk if QA stays tight."},
+            ],
+        )
+        self.assertEqual(decision.mode, "direct")
+        low = decision.reply_text.lower()
+        self.assertNotIn("cursor", low)
+        self.assertTrue(
+            "shorter" in low or "window" in low or "seriously" in low or "rollout" in low,
+            msg=decision.reply_text,
+        )
+
+    def test_router_news_today_openai_off_still_mentions_news_not_cursor(self) -> None:
+        os.environ["OPENAI_API_ENABLED"] = "0"
+        os.environ.pop("OPENAI_API_KEY", None)
+        decision = route_message("What's in the news today?")
+        self.assertEqual(decision.mode, "direct")
+        low = decision.reply_text.lower()
+        self.assertIn("news", low)
+        self.assertNotIn("cursor", low)
+        self.assertNotIn("bring in cursor", low)
 
     def test_router_greeting_plus_news_request_stays_on_request(self) -> None:
         os.environ["OPENAI_API_ENABLED"] = "0"
@@ -1770,6 +1832,68 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(proj["status"], TaskStatus.COMPLETED.value)
         self.assertEqual(proj["meta"]["assistant"]["route"], "direct")
         self.assertNotIn("cursor", proj["meta"])
+
+    def test_server_followups_route_cli_greeting_direct(self) -> None:
+        prev_cli_auto = os.environ.get("ANDREA_SYNC_CLI_SUBMIT_AUTO_ROUTE")
+        try:
+            os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+            os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+            os.environ["ANDREA_SYNC_CLI_SUBMIT_AUTO_ROUTE"] = "1"
+            from services.andrea_sync.server import SyncServer  # noqa: E402
+
+            server = SyncServer()
+            result = handle_command(
+                server.conn,
+                {
+                    "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                    "channel": "cli",
+                    "external_id": "cli-direct-greet",
+                    "payload": {
+                        "text": "hi andrea how are you?",
+                        "routing_text": "hi andrea how are you?",
+                    },
+                },
+            )
+            server._handle_task_followups(result["task_id"])
+            proj = project_task_dict(server.conn, result["task_id"], "cli")
+            self.assertEqual(proj["status"], TaskStatus.COMPLETED.value)
+            self.assertEqual(proj["meta"]["assistant"]["route"], "direct")
+            self.assertNotIn("cursor", proj["meta"])
+        finally:
+            if prev_cli_auto is None:
+                os.environ.pop("ANDREA_SYNC_CLI_SUBMIT_AUTO_ROUTE", None)
+            else:
+                os.environ["ANDREA_SYNC_CLI_SUBMIT_AUTO_ROUTE"] = prev_cli_auto
+
+    def test_server_followups_cli_skips_routing_when_auto_route_disabled(self) -> None:
+        prev_cli_auto = os.environ.get("ANDREA_SYNC_CLI_SUBMIT_AUTO_ROUTE")
+        try:
+            os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+            os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+            os.environ["ANDREA_SYNC_CLI_SUBMIT_AUTO_ROUTE"] = "0"
+            from services.andrea_sync.server import SyncServer  # noqa: E402
+
+            server = SyncServer()
+            result = handle_command(
+                server.conn,
+                {
+                    "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                    "channel": "cli",
+                    "external_id": "cli-no-auto-route",
+                    "payload": {
+                        "text": "hi andrea how are you?",
+                        "routing_text": "hi andrea how are you?",
+                    },
+                },
+            )
+            server._handle_task_followups(result["task_id"])
+            proj = project_task_dict(server.conn, result["task_id"], "cli")
+            self.assertEqual(proj["status"], TaskStatus.CREATED.value)
+        finally:
+            if prev_cli_auto is None:
+                os.environ.pop("ANDREA_SYNC_CLI_SUBMIT_AUTO_ROUTE", None)
+            else:
+                os.environ["ANDREA_SYNC_CLI_SUBMIT_AUTO_ROUTE"] = prev_cli_auto
 
     def test_telegram_followups_summary_skips_lifecycle_when_quiet(self) -> None:
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "1"
@@ -3414,7 +3538,9 @@ class TestAndreaSync(unittest.TestCase):
             }
         )
         self.assertTrue(response["response"]["shouldEndSession"])
-        self.assertIn("ready to help", response["response"]["outputSpeech"]["text"].lower())
+        speech = response["response"]["outputSpeech"]["text"].lower()
+        self.assertTrue("thanks" in speech or "good" in speech or "well" in speech)
+        self.assertNotIn("cursor", speech)
 
     def test_alexa_process_delegate_request_returns_short_ack(self) -> None:
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"

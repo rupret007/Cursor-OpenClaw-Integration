@@ -1247,6 +1247,119 @@ def count_user_outcome_receipts_window(
         return 0, 0
 
 
+def daily_pack_proving_window_aggregates(
+    conn: sqlite3.Connection,
+    *,
+    pack_id: str,
+    scenario_ids: Tuple[str, ...],
+    since_ts: float,
+) -> Dict[str, Any]:
+    """
+    Pack-scoped ledgers for daily proving: routed tasks (ScenarioResolved),
+    receipt coverage/quality/failure rows, continuations, domain repairs.
+
+    All windows use the same since_ts floor; callers typically use a 7d horizon.
+    """
+    pid = str(pack_id or "")
+    since = float(since_ts or 0.0)
+    sids = tuple(str(s) for s in scenario_ids if str(s).strip())
+    out: Dict[str, Any] = {
+        "routed_distinct_task_count": 0,
+        "ingress_breakdown": {},
+        "receipt_row_count": 0,
+        "receipt_distinct_task_count": 0,
+        "receipt_pass_count": 0,
+        "receipt_quality_good_count": 0,
+        "receipt_completed_closure_count": 0,
+        "receipt_needs_repair_count": 0,
+        "continuation_count": 0,
+        "domain_repair_count": 0,
+    }
+    if not sids:
+        return out
+
+    try:
+        ph = ",".join("?" * len(sids))
+        q_routed = f"""
+            SELECT DISTINCT e.task_id AS task_id, IFNULL(t.channel, '') AS channel
+            FROM events e
+            INNER JOIN tasks t ON t.task_id = e.task_id
+            WHERE e.event_type = ?
+              AND e.ts >= ?
+              AND json_extract(e.payload_json, '$.scenario_id') IN ({ph})
+        """
+        params_routed: List[Any] = [EventType.SCENARIO_RESOLVED.value, since, *sids]
+        rrows = conn.execute(q_routed, params_routed).fetchall()
+        channels: Dict[str, int] = {}
+        for r in rrows:
+            tid = str(r["task_id"] or "")
+            if not tid:
+                continue
+            ch = str(r["channel"] or "") or "unknown"
+            channels[ch] = channels.get(ch, 0) + 1
+        # DISTINCT task_ids: one row per task in rrows may duplicate if join weird — query uses DISTINCT
+        out["routed_distinct_task_count"] = len(rrows)
+        out["ingress_breakdown"] = dict(sorted(channels.items()))
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        row = conn.execute(
+            """
+            SELECT
+              COUNT(*) AS receipt_row_count,
+              COUNT(DISTINCT task_id) AS receipt_distinct_task_count,
+              SUM(CASE WHEN pass_hint = 1 THEN 1 ELSE 0 END) AS receipt_pass_count,
+              SUM(
+                CASE
+                  WHEN pass_hint = 1 AND IFNULL(closure_state, '') != 'needs_repair' THEN 1
+                  ELSE 0
+                END
+              ) AS receipt_quality_good_count,
+              SUM(CASE WHEN closure_state = 'completed' THEN 1 ELSE 0 END) AS receipt_completed_closure_count,
+              SUM(CASE WHEN closure_state = 'needs_repair' THEN 1 ELSE 0 END) AS receipt_needs_repair_count
+            FROM user_outcome_receipts
+            WHERE pack_id = ? AND created_at >= ?
+            """,
+            (pid, since),
+        ).fetchone()
+        if row:
+            out["receipt_row_count"] = int(row["receipt_row_count"] or 0)
+            out["receipt_distinct_task_count"] = int(row["receipt_distinct_task_count"] or 0)
+            out["receipt_pass_count"] = int(row["receipt_pass_count"] or 0)
+            out["receipt_quality_good_count"] = int(row["receipt_quality_good_count"] or 0)
+            out["receipt_completed_closure_count"] = int(row["receipt_completed_closure_count"] or 0)
+            out["receipt_needs_repair_count"] = int(row["receipt_needs_repair_count"] or 0)
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        c_row = conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM continuation_records WHERE created_at >= ?
+            """,
+            (since,),
+        ).fetchone()
+        out["continuation_count"] = int(c_row["c"] or 0) if c_row else 0
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        ph2 = ",".join("?" * len(sids))
+        dr_row = conn.execute(
+            f"""
+            SELECT COUNT(*) AS c FROM domain_repair_outcomes
+            WHERE ts >= ? AND scenario_id IN ({ph2})
+            """,
+            (since, *sids),
+        ).fetchone()
+        out["domain_repair_count"] = int(dr_row["c"] or 0) if dr_row else 0
+    except sqlite3.OperationalError:
+        pass
+
+    return out
+
+
 def insert_continuation_record(
     conn: sqlite3.Connection,
     *,

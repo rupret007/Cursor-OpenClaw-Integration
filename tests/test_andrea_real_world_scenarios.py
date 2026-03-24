@@ -33,6 +33,27 @@ class TestRealWorldScenarioPack(unittest.TestCase):
         r, c = resolve_scenario(text, route_decision=d)
         self.assertEqual(r.scenario_id, "statusFollowupContinue")
 
+    def test_pack_status_followup_approval_queue_phrasing(self) -> None:
+        for text in (
+            "What still needs my approval right now?",
+            "What is awaiting my approval?",
+            "What's pending my approval?",
+            "What is waiting on my approval?",
+        ):
+            with self.subTest(text=text):
+                d = route_message(text, history=[], routing_hint="auto")
+                r, c = resolve_scenario(text, route_decision=d)
+                self.assertEqual(r.scenario_id, "statusFollowupContinue")
+
+    def test_pack_outbound_still_wins_when_send_and_approval_mentioned(self) -> None:
+        text = (
+            "Send an email to finance@example.com with the invoice "
+            "and get my approval first"
+        )
+        d = route_message(text, history=[], routing_hint="auto")
+        r, c = resolve_scenario(text, route_decision=d)
+        self.assertEqual(r.scenario_id, "approvalRequiredOutboundAction")
+
     def test_pack_reminder_capture_supported(self) -> None:
         text = "Remind me tomorrow to call the dentist"
         d = route_message(text, history=[], routing_hint="auto")

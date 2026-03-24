@@ -17,6 +17,7 @@ Operator-facing summary of the first low-risk **daily assistant** rollout pack: 
 - **Receipts**: user-facing outcome receipts persist to `user_outcome_receipts` and emit `UserOutcomeReceiptRecorded` (toggle with `ANDREA_DAILY_PACK_RECEIPTS_ENABLED`).
 - **Continuation**: Telegram thread continuation writes `continuation_records` + `ContinuationRecorded` on the linked task.
 - **Bounded repair observability**: missing reminder delivery target records a **non-executed** domain repair outcome (`resolve_missing_reminder_target`) — no automatic outbound sends.
+- **CLI `SubmitUserMessage`**: `POST /v1/commands` with `channel=cli` runs the same post-command follow-up routing as `alexa` (from `created` → `_route_task_with_decision`, from `queued` → delegated execution scheduling) when **`ANDREA_SYNC_CLI_SUBMIT_AUTO_ROUTE`** is enabled (default **on**). Set to `0` / `false` to keep CLI tasks ingest-only after the command returns (no auto-routing).
 
 ## Operator surfaces
 
@@ -27,11 +28,14 @@ Operator-facing summary of the first low-risk **daily assistant** rollout pack: 
 
 ## Evaluation gates (receipt-truth)
 
-Evidence helper `daily_pack_live_evidence_report` encodes plan thresholds (7-day window):
+Evidence helper `daily_pack_live_evidence_report` encodes plan thresholds (7-day window). `evidence_ok` is true only when **all** of the following hold:
 
-- ≥ **30** receipt events for the pack.
-- Receipt **pass** rate ≥ **0.95** (`pass_hint` on stored receipts).
-- Plan also calls for **0** privacy / false-receipt incidents and low continuation/delivery failure rates — wire those as separate metrics as delivery health instrumentation matures.
+- **Volume:** ≥ **30** pack-scoped receipt rows in the window.
+- **Coverage:** distinct receipt `task_id`s vs routed daily-pack tasks (from `ScenarioResolved` for pack scenarios) ≥ **0.90**.
+- **Quality:** share of receipts with `pass_hint=1` and `closure_state != needs_repair` ≥ **0.95**.
+- **Failure budget:** `needs_repair` receipt rate ≤ **0.05** and pack-scenario `domain_repair` count / receipt rows ≤ **0.05**.
+
+The dashboard snapshot also exposes `proving_signals` (rates + ingress breakdown) and `live_rollout_evidence.evidence_gate_detail` (`blocking_signals`, `sample_size_band`). Plan also calls for **0** privacy / false-receipt incidents — wire as hard blockers when incidents are structured in the ledger.
 
 These gates **do not auto-promote** behavior; they inform operators and dashboards.
 

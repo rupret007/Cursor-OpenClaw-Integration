@@ -139,6 +139,13 @@ class TestScenarioRuntime(unittest.TestCase):
         assert c is not None
         self.assertFalse(lane_allowed_for_scenario(c, "openclaw_hybrid"))
 
+    def test_status_followup_matches_approval_queue_language(self) -> None:
+        text = "What still needs my approval right now?"
+        d = route_message(text, history=[], routing_hint="auto")
+        r, c = resolve_scenario(text, route_decision=d)
+        self.assertEqual(r.scenario_id, "statusFollowupContinue")
+        self.assertEqual(r.reason, "status_or_followup_language")
+
 
 class TestScenarioPlanPersistence(unittest.TestCase):
     def setUp(self) -> None:

@@ -1313,10 +1313,20 @@ def render_dashboard_html() -> str:
       `).join("") || `<div class="item"><strong>No follow-through rows yet</strong><p class="subtle" style="margin-top:8px;">Enable ANDREA_FOLLOWTHROUGH_ENABLED and flow daily-pack receipts.</p></div>`;
 
       const items = [];
+      const ps = pack.proving_signals || {};
+      const evg = (pack.live_rollout_evidence && pack.live_rollout_evidence.evidence_gate_detail) || {};
+      const covLabel = (ps.receipt_coverage_rate_7d !== null && ps.receipt_coverage_rate_7d !== undefined)
+        ? Math.round(Number(ps.receipt_coverage_rate_7d) * 100) + "%"
+        : (Number(ps.routed_task_count_7d || 0) > 0 ? "n/a" : "insufficient sample");
+      const qualLabel = (ps.receipt_quality_rate_7d !== null && ps.receipt_quality_rate_7d !== undefined)
+        ? Math.round(Number(ps.receipt_quality_rate_7d) * 100) + "%" : "n/a";
+      const blockers = (evg.blocking_signals && evg.blocking_signals.length)
+        ? evg.blocking_signals.join(", ")
+        : ((pack.live_rollout_evidence && pack.live_rollout_evidence.evidence_notes) || []).join(", ");
       items.push({
         title: `Pack ${pack.pack_id || "trusted_daily_continuity_v1"}`,
         note: (pack.live_rollout_slice && pack.live_rollout_slice.description) ? pack.live_rollout_slice.description.slice(0, 280) : "Low-risk daily assistant continuity and productivity.",
-        extra: `Receipts 7d: ${(pack.receipt_metrics && pack.receipt_metrics.receipt_count) || 0} · pass rate ${(pack.receipt_metrics && pack.receipt_metrics.receipt_pass_rate !== null && pack.receipt_metrics.receipt_pass_rate !== undefined) ? Math.round(Number(pack.receipt_metrics.receipt_pass_rate) * 100) + "%" : "n/a"}`,
+        extra: `Receipts 7d: ${(pack.receipt_metrics && pack.receipt_metrics.receipt_count) || 0} · pass rate ${(pack.receipt_metrics && pack.receipt_metrics.receipt_pass_rate !== null && pack.receipt_metrics.receipt_pass_rate !== undefined) ? Math.round(Number(pack.receipt_metrics.receipt_pass_rate) * 100) + "%" : "n/a"} · routed tasks 7d: ${ps.routed_task_count_7d ?? 0} · receipt coverage ${covLabel} · quality ${qualLabel}${blockers ? " · blockers: " + blockers : ""}`,
         status: (pack.live_rollout_evidence && pack.live_rollout_evidence.evidence_ok) ? "ready" : "warn",
       });
       for (const row of (pack.scenarios || [])) {

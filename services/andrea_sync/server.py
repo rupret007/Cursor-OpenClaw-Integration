@@ -1020,6 +1020,29 @@ class SyncServer:
             return
         if snapshot["channel"] == "alexa":
             self._handle_alexa_followups(task_id, snapshot)
+            return
+        if snapshot["channel"] == "cli" and _env_bool(
+            "ANDREA_SYNC_CLI_SUBMIT_AUTO_ROUTE", True
+        ):
+            self._handle_cli_followups(task_id, snapshot)
+
+    def _handle_cli_followups(
+        self,
+        task_id: str,
+        snapshot: Dict[str, Any],
+    ) -> None:
+        """HTTP SubmitUserMessage on channel=cli: route and delegate like alexa (no Telegram lifecycle)."""
+        projection = snapshot["projection"]
+        status = str(projection.get("status") or "")
+        if status == "created":
+            self._route_task_with_decision(
+                task_id,
+                history=[],
+                source="cli_commands_ingress",
+            )
+            return
+        if status == "queued":
+            self._schedule_delegated_execution(task_id)
 
     def _maybe_notify_telegram_continuation(
         self,

@@ -25,7 +25,10 @@ from .store import (
 _GOAL_STATUS_PATTERNS = re.compile(
     r"(?i)\b("
     r"status|what'?s\s+the\s+status|where\s+are\s+we|what\s+happened|"
-    r"continue|follow\s*up|any\s+update|progress"
+    r"continue|follow\s*up|any\s+update|progress|"
+    r"needs?\s+(my|our)\s+approval|awaiting\s+(my|our)\s+approval|"
+    r"pending\s+(my|our)\s+approval|waiting\s+on\s+(my|our)\s+approval|"
+    r"what\s+still\s+needs\s+(my|our)\s+approval"
     r")\b"
 )
 

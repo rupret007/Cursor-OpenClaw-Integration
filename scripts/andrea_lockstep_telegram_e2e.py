@@ -308,8 +308,12 @@ def cmd_tunnel_and_webhook() -> int:
     except Exception as e:  # noqa: BLE001
         print(
             f"Local andrea_sync not reachable at {local}/v1/health ({e}).\n"
-            "Start: export ANDREA_SYNC_TELEGRAM_SECRET=... ANDREA_SYNC_INTERNAL_TOKEN=...; "
-            "python3 scripts/andrea_sync_server.py",
+            "If LaunchAgents manage sync (recommended on macOS): "
+            "bash scripts/andrea_services.sh start sync  (or restart sync).\n"
+            "Otherwise (dev / no LaunchAgent): "
+            "export ANDREA_SYNC_TELEGRAM_SECRET=... ANDREA_SYNC_INTERNAL_TOKEN=...; "
+            "python3 scripts/andrea_sync_server.py\n"
+            "Do not start a second python3 scripts/andrea_sync_server.py while sync is already running.",
             file=sys.stderr,
         )
         return 1

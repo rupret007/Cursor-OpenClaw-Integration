@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import errno
 import json
 import os
 import re
@@ -4894,11 +4895,32 @@ def make_handler(server: SyncServer) -> type:
     return Handler
 
 
+class AndreaThreadingHTTPServer(ThreadingHTTPServer):
+    """Allow quick rebinding after launchctl kickstart / rapid restart (TIME_WAIT)."""
+
+    allow_reuse_address = True
+
+
 def serve_forever(host: str = "127.0.0.1", port: Optional[int] = None) -> None:
     p = port or int(os.environ.get("ANDREA_SYNC_PORT", "8765"))
     srv_state = SyncServer()
     handler = make_handler(srv_state)
-    httpd = ThreadingHTTPServer((host, p), handler)
+    try:
+        httpd = AndreaThreadingHTTPServer((host, p), handler)
+    except OSError as exc:
+        if exc.errno == errno.EADDRINUSE:
+            print(
+                f"andrea_sync: cannot bind {host}:{p} (address already in use). "
+                "Another andrea_sync is likely already listening. "
+                "If you use LaunchAgents: bash scripts/andrea_services.sh status sync; "
+                "restart only if needed (bash scripts/andrea_services.sh restart sync "
+                "or launchctl kickstart -k gui/$(id -u)/com.andrea.andrea-sync). "
+                "Do not run a second python3 scripts/andrea_sync_server.py while sync is already running.",
+                file=sys.stderr,
+                flush=True,
+            )
+            raise SystemExit(1) from None
+        raise
     print(f"andrea_sync listening on http://{host}:{p} db={srv_state.db_path}", flush=True)
     httpd.serve_forever()
 

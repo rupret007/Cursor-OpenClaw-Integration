@@ -146,7 +146,7 @@ bash scripts/andrea_slo_check.sh
 | Tests fail | Fix on a branch; do not merge to `main` until green |
 | Readiness **Grade C** | `python3 scripts/andrea_capabilities.py` — unblock **blocked** rows (often `github:auth`: `gh auth login` or `python3 scripts/dotenv_set_key.py GH_TOKEN --skill`) |
 | Pre-release strict gate | `bash scripts/andrea_release_gate.sh` |
-| Lockstep server down | First try `bash scripts/andrea_services.sh restart all`; if you are intentionally outside LaunchAgents, start `python3 scripts/andrea_sync_server.py` and check `ANDREA_SYNC_URL` + `python3 scripts/andrea_sync_health.py` |
+| Lockstep server down | First try `bash scripts/andrea_services.sh restart all` or `restart sync`. If you are intentionally outside LaunchAgents, start **one** `python3 scripts/andrea_sync_server.py` (never a second while LaunchAgent already owns the port) and check `ANDREA_SYNC_URL` + `python3 scripts/andrea_sync_health.py` |
 | Lockstep kill switch engaged | `GET /v1/status` shows `kill_switch.engaged`; run `bash scripts/andrea_kill_switch.sh release` (needs `ANDREA_SYNC_INTERNAL_TOKEN`) or clear env/file per [ANDREA_LOCKSTEP_ARCHITECTURE.md](ANDREA_LOCKSTEP_ARCHITECTURE.md) |
 | Capability / “missing skill” drift | Publish snapshot: `python3 scripts/andrea_sync_publish_capabilities.py`; channels should call `GET /v1/policy/skill-absence?skill=…` before denying a skill |
 | Telegram webhook 403 | Match `?secret=` to `ANDREA_SYNC_TELEGRAM_SECRET` and/or header to `ANDREA_SYNC_TELEGRAM_WEBHOOK_SECRET`; re-run `setWebhook` |

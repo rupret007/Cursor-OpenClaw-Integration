@@ -21,6 +21,15 @@ End-to-end path: **Telegram** → **HTTPS webhook** → **local `andrea_sync`** 
 
 2. **`andrea_sync` running** on `ANDREA_SYNC_URL` (default `http://127.0.0.1:8765`):
 
+**Preferred (macOS, reboot-ready):** use LaunchAgents so only one process owns the port:
+
+```bash
+bash scripts/andrea_services.sh status sync
+bash scripts/andrea_services.sh start sync   # or: restart sync
+```
+
+**Dev / no LaunchAgent:** run the server directly (only one instance; a second will exit with a clear bind error):
+
 ```bash
 cd /path/to/Cursor-OpenClaw-Integration
 export ANDREA_SYNC_TELEGRAM_SECRET='long-random'

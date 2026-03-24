@@ -9,6 +9,7 @@ from typing import Literal
 TurnDomain = Literal[
     "casual_conversation",
     "personal_agenda",
+    "attention_today",
     "project_status",
     "approval_state",
     "external_information",
@@ -41,6 +42,15 @@ _STATUS_EXTERNAL_NEWS_RE = re.compile(
 )
 _OPINION_RE = re.compile(
     r"\b(what(?:'s|s|\s+do)\s+you\s+think|your\s+(opinion|view)|what(?:'s|s)\s+your\s+take)\b",
+    re.I,
+)
+_ATTENTION_RE = re.compile(
+    r"\b("
+    r"what\s+should\s+i\s+focus\s+on(?:\s+today)?|"
+    r"what\s+needs?\s+my\s+attention(?:\s+today)?|"
+    r"where\s+should\s+i\s+focus(?:\s+today)?|"
+    r"top\s+priorit(?:y|ies)\s+today"
+    r")\b",
     re.I,
 )
 
@@ -93,6 +103,9 @@ def build_turn_plan(
         elif _APPROVAL_RE.search(clean):
             domain = "approval_state"
             context_boundary = "approval_and_plan_state"
+        elif _ATTENTION_RE.search(clean):
+            domain = "attention_today"
+            context_boundary = "attention_runtime_state"
         elif _AGENDA_RE.search(clean):
             domain = "personal_agenda"
             context_boundary = "personal_agenda_state"

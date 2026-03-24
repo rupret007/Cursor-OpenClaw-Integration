@@ -26,6 +26,8 @@ from .store import (
 _GOAL_STATUS_PATTERNS = re.compile(
     r"(?i)\b("
     r"status|what'?s\s+the\s+status|where\s+are\s+we|what\s+happened|"
+    r"what\s+happened\s+with\s+(?:that\s+)?task|what\s+happened\s+earlier|"
+    r"what'?s\s+blocked|blocked\s+right\s+now|"
     r"continue|follow\s*up|any\s+update|progress|"
     r"what\s+are\s+we\s+working\s+on(?:\s+right\s+now|\s+with\s+andrea)?|"
     r"working\s+on\s+right\s+now|working\s+on\s+with\s+andrea|"
@@ -107,12 +109,25 @@ def build_goal_continuity_reply(
     projection = project_task_dict(conn, exec_task, channel)
     meta = projection.get("meta") if isinstance(projection.get("meta"), dict) else {}
     contract = build_delegated_lifecycle_contract(meta)
+    outcome = meta.get("outcome") if isinstance(meta.get("outcome"), dict) else {}
+    phase = str(outcome.get("current_phase") or "").strip()
+    phase_summary = str(outcome.get("current_phase_summary") or "").strip()
+    blocked_reason = str(outcome.get("blocked_reason") or "").strip()
+    result_kind = str(outcome.get("result_kind") or "").strip()
     status = str(projection.get("status") or "")
     gsummary = str(goal_row.get("summary") or "").strip()
     lines: List[str] = [
         f"Goal `{goal_id}`" + (f" — {gsummary}" if gsummary else ""),
         f"Tracked task `{exec_task}` status: **{status}**.",
     ]
+    if phase_summary:
+        lines.append(f"Execution phase: {phase_summary}")
+    elif phase:
+        lines.append(f"Execution phase: **{phase}**")
+    if blocked_reason:
+        lines.append(f"Blocked: {blocked_reason}")
+    if result_kind:
+        lines.append(f"Result: **{result_kind}**")
     plan_row = get_active_execution_plan_for_task(conn, exec_task)
     if plan_row:
         pid = str(plan_row.get("plan_id") or "")
@@ -139,6 +154,9 @@ def build_goal_continuity_reply(
             )
     oc = contract.get("openclaw") if isinstance(contract.get("openclaw"), dict) else {}
     cur = contract.get("cursor") if isinstance(contract.get("cursor"), dict) else {}
+    ex = contract.get("execution") if isinstance(contract.get("execution"), dict) else {}
+    if ex.get("delegated_to_cursor"):
+        lines.append("Heavy execution: **Cursor** was involved for this task.")
     if oc.get("run_id"):
         lines.append(f"OpenClaw run: `{oc.get('run_id')}`")
     if cur.get("agent_id"):

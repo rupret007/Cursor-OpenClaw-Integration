@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
@@ -191,6 +192,56 @@ class TestAssistantAnswerComposer(unittest.TestCase):
         )
         sources = [c.source for c in cands]
         self.assertIn("state_rich_goal", sources)
+
+    @mock.patch("services.andrea_sync.goal_runtime.project_task_dict")
+    def test_gather_repair_goal_candidate_includes_execution_outcome_summary(
+        self, m_proj: mock.MagicMock
+    ) -> None:
+        r0 = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "comp-exo-1",
+                "payload": {
+                    "text": "hi",
+                    "routing_text": "hi",
+                    "chat_id": 77007,
+                    "message_id": 1,
+                },
+            },
+        )
+        tid = r0["task_id"]
+        link_task_principal(self.conn, tid, "pri_exo", channel="telegram")
+        gid = create_goal(self.conn, "pri_exo", "Delegated slice", channel="telegram")
+        link_task_to_goal(self.conn, tid, gid)
+        m_proj.return_value = {
+            "status": "running",
+            "meta": {
+                "outcome": {
+                    "current_phase_summary": "Waiting on CI proof for the patch",
+                    "blocked_reason": "Tests still red on main",
+                },
+                "execution": {"delegated_to_cursor": True},
+            },
+        }
+        plan = build_turn_plan(
+            "What's blocked right now?",
+            scenario_id="statusFollowupContinue",
+            projection_has_continuity_state=True,
+        )
+        cands = gather_repair_candidates(
+            self.conn,
+            tid,
+            classify_text="What's blocked right now?",
+            turn_plan=plan,
+            model_reply="Things are moving along.",
+            history=[],
+            memory_notes=[],
+        )
+        texts = " ".join(c.text for c in cands)
+        self.assertIn("Waiting on CI proof", texts)
+        self.assertIn("Tests still red", texts)
 
     def test_gather_repair_includes_attention_state_for_attention_domain(self) -> None:
         from services.andrea_sync.assistant_answer_composer import (  # noqa: E402

@@ -55,6 +55,7 @@ from .dashboard import (
 )
 from .kill_switch import is_kill_switch_engaged, kill_switch_status
 from .observability import metric_log, structured_log
+from .orchestration_boundary import build_decision_profile
 from .policy_learning import record_routing_alignment
 from .resource_router import rank_execution_lanes
 from .policy import (
@@ -1341,6 +1342,19 @@ class SyncServer:
                 classify_text,
                 scenario_id=pre_resolution.scenario_id,
                 projection_has_continuity_state=self._projection_has_continuity_state(task_id),
+            )
+            _decision_profile = build_decision_profile(
+                classify_text,
+                turn_domain=pre_turn_plan.domain,
+                scenario_force_delegate=pre_turn_plan.force_delegate,
+            )
+            metric_log(
+                "orchestration_decision_profile",
+                task_id=task_id,
+                answer_first=_decision_profile.answer_first,
+                state_first=_decision_profile.state_first,
+                heavy_lift_hint=_decision_profile.heavy_lift_hint,
+                profile_reason=_decision_profile.reason,
             )
             route_memory_notes = (
                 self._principal_memory_notes(task_id)

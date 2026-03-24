@@ -1357,6 +1357,26 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(target, "")
         self.assertNotEqual(collab, "cursor_primary")
 
+    def test_classify_route_answer_before_delegate_blocks_repo_keyword_escalation(self) -> None:
+        mode, reason, target, collab = classify_route(
+            "What are we working on with Andrea regarding the repository and failing tests?",
+        )
+        self.assertEqual(mode, "direct")
+        self.assertEqual(reason, "answer_before_delegate")
+        self.assertEqual(target, "")
+
+    def test_classify_route_heavy_implementation_still_delegates(self) -> None:
+        mode, reason, target, collab = classify_route(
+            "What are we working on? Please implement the auth fix in the repo.",
+        )
+        self.assertEqual(mode, "delegate")
+        self.assertIn("technical_or_repo_request", reason)
+
+    def test_classify_route_blocked_now_prefers_direct(self) -> None:
+        mode, reason, target, collab = classify_route("What's blocked right now?")
+        self.assertEqual(mode, "direct")
+        self.assertEqual(reason, "answer_before_delegate")
+
     def test_is_standalone_casual_social_turn_covers_planned_phrases(self) -> None:
         self.assertTrue(is_standalone_casual_social_turn("Hi Andrea"))
         self.assertTrue(is_standalone_casual_social_turn("Good morning Andrea"))

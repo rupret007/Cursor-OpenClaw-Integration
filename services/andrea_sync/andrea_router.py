@@ -8,6 +8,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 
+from .orchestration_boundary import should_answer_before_delegate
 from .user_surface import is_stale_openclaw_narrative, sanitize_user_surface_text
 
 
@@ -296,6 +297,14 @@ def classify_route(
         if andrea_preferred:
             return "delegate", "explicit_andrea_mention_delegate", "openclaw_hybrid", "andrea_primary"
         return "delegate", "openclaw_hybrid_request", "openclaw_hybrid", collab
+    # Status/history follow-ups stay direct even when repo-ish keywords appear later.
+    if should_answer_before_delegate(text):
+        return (
+            "direct",
+            "explicit_andrea_mention" if andrea_preferred else "answer_before_delegate",
+            "",
+            "andrea_primary" if andrea_preferred else collab,
+        )
     if DELEGATE_KEYWORDS_RE.search(clean):
         if collab == "auto" and COLLABORATE_RE.search(clean):
             collab = "collaborative"

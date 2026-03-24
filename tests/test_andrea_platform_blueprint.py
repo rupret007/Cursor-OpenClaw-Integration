@@ -4,6 +4,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from services.andrea_sync.bus import handle_command
 from services.andrea_sync.dashboard import _build_blueprint_platform_summary
@@ -228,6 +229,66 @@ class BlueprintPlatformTests(unittest.TestCase):
         )
         self.assertEqual(plan_exec.domain, "technical_execution")
         self.assertTrue(plan_exec.force_delegate)
+
+        plan_blocked = build_turn_plan(
+            "What's blocked right now?",
+            scenario_id="statusFollowupContinue",
+            projection_has_continuity_state=True,
+        )
+        self.assertEqual(plan_blocked.domain, "project_status")
+        self.assertTrue(plan_blocked.prefer_state_reply)
+
+        plan_task_history = build_turn_plan(
+            "What happened with that task earlier?",
+            scenario_id="statusFollowupContinue",
+            projection_has_continuity_state=True,
+        )
+        self.assertEqual(plan_task_history.domain, "project_status")
+
+    @mock.patch("services.andrea_sync.goal_runtime.project_task_dict")
+    def test_goal_continuity_surfaces_outcome_and_cursor_delegation(self, m_proj: mock.MagicMock) -> None:
+        create_task(self.conn, "tsk_out", "telegram")
+        link_task_principal(self.conn, "tsk_out", "pri_o", channel="telegram")
+        r = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.CREATE_GOAL.value,
+                "channel": "internal",
+                "payload": {"principal_id": "pri_o", "summary": "Ship rollout"},
+            },
+        )
+        self.assertTrue(r.get("ok"), r)
+        gid = str(r.get("goal_id"))
+        linked = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.LINK_TASK_TO_GOAL.value,
+                "channel": "internal",
+                "task_id": "tsk_out",
+                "payload": {"task_id": "tsk_out", "goal_id": gid},
+            },
+        )
+        self.assertTrue(linked.get("ok"), linked)
+        m_proj.return_value = {
+            "status": "running",
+            "meta": {
+                "outcome": {
+                    "current_phase": "execution",
+                    "current_phase_summary": "Implementing feature X",
+                    "blocked_reason": "Waiting for your approval on the rollout plan",
+                    "result_kind": "in_progress",
+                },
+                "execution": {"delegated_to_cursor": True},
+                "cursor": {"agent_id": "ag_cursor", "terminal_status": ""},
+            },
+        }
+        reply = build_goal_continuity_reply(self.conn, "tsk_out", user_text="What's blocked right now?")
+        self.assertIsNotNone(reply)
+        assert reply is not None
+        self.assertIn("Implementing feature X", reply)
+        self.assertIn("Waiting for your approval", reply)
+        self.assertIn("in_progress", reply)
+        self.assertIn("Cursor", reply)
 
 
 if __name__ == "__main__":

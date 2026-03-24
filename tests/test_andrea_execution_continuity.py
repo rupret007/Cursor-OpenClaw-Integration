@@ -10,7 +10,10 @@ from unittest import mock
 from services.andrea_sync.bus import handle_command
 from services.andrea_sync.delegated_lifecycle import build_delegated_lifecycle_contract
 from services.andrea_sync.execution_runtime import continue_cursor_followup_for_task
-from services.andrea_sync.goal_runtime import try_goal_status_nl_reply
+from services.andrea_sync.goal_runtime import (
+    build_goal_continuity_reply,
+    try_goal_status_nl_reply,
+)
 from services.andrea_sync.schema import (
     CommandType,
     EventType,
@@ -114,6 +117,29 @@ class ExecutionContinuityTests(unittest.TestCase):
         assert isinstance(gm, dict)
         self.assertEqual(gm.get("goal_id"), "g1")
         self.assertEqual(gm.get("status"), "paused")
+
+    @mock.patch("services.andrea_sync.goal_runtime.project_task_dict")
+    def test_goal_continuity_surfaces_outcome_for_delegated_work(self, m_proj: mock.MagicMock) -> None:
+        create_task(self.conn, "tsk_oc", "telegram")
+        link_task_principal(self.conn, "tsk_oc", "pri_oc", channel="telegram")
+        gid = create_goal(self.conn, "pri_oc", "Continuity goal", channel="telegram")
+        link_task_to_goal(self.conn, "tsk_oc", gid)
+        m_proj.return_value = {
+            "status": "running",
+            "meta": {
+                "outcome": {
+                    "current_phase_summary": "Cursor run in progress",
+                    "blocked_reason": "Waiting on CI",
+                },
+                "execution": {"delegated_to_cursor": True},
+            },
+        }
+        reply = build_goal_continuity_reply(self.conn, "tsk_oc", user_text="What happened with that task earlier?")
+        self.assertIsNotNone(reply)
+        assert reply is not None
+        self.assertIn("Cursor run in progress", reply)
+        self.assertIn("Waiting on CI", reply)
+        self.assertIn("Cursor", reply)
 
     def test_try_goal_status_prefers_task_linked_goal(self) -> None:
         create_task(self.conn, "tsk_cur", "telegram")

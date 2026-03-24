@@ -10,6 +10,7 @@ from unittest import mock
 from services.andrea_sync.bus import handle_command
 from services.andrea_sync.assistant_answer_composer import (
     build_cursor_continuity_recall_reply_from_state,
+    cursor_followup_context_reply_with_fallback,
 )
 from services.andrea_sync.delegated_lifecycle import build_delegated_lifecycle_contract
 from services.andrea_sync.execution_runtime import continue_cursor_followup_for_task
@@ -208,7 +209,57 @@ class ExecutionContinuityTests(unittest.TestCase):
             self.conn, "tsk_recall", user_message="What did Cursor do?"
         )
         self.assertIn("Implemented the continuity", text)
-        self.assertIn("Latest from Cursor / OpenClaw", text)
+        self.assertIn("Latest useful result", text)
+
+    def test_cursor_followup_fallback_picks_ranked_same_chat_delegated_task(self) -> None:
+        """Thin current task + richer older same-chat delegated task yields continuation context."""
+        first = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "ec-rank-a",
+                "payload": {
+                    "text": "older",
+                    "routing_text": "older",
+                    "chat_id": 88060,
+                    "message_id": 1,
+                },
+            },
+        )
+        tid_a = first["task_id"]
+        append_event(
+            self.conn,
+            tid_a,
+            EventType.JOB_COMPLETED,
+            {
+                "summary": "done",
+                "backend": "openclaw",
+                "runner": "openclaw",
+                "delegated_to_cursor": True,
+                "user_summary": "CONTINUATION_ANCHOR_ABC finished the repo-wide refactor.",
+            },
+        )
+        second = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "ec-rank-b",
+                "payload": {
+                    "text": "new shell",
+                    "routing_text": "new shell",
+                    "chat_id": 88060,
+                    "message_id": 2,
+                },
+            },
+        )
+        tid_b = second["task_id"]
+        text = cursor_followup_context_reply_with_fallback(
+            self.conn, tid_b, user_message="Continue that Cursor task"
+        )
+        self.assertIn("CONTINUATION_ANCHOR_ABC", text)
+        self.assertIn("recent cursor workstream", text.lower())
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
+from dataclasses import replace
 import errno
 import json
 import os
@@ -1372,6 +1373,19 @@ class SyncServer:
                 scenario_id=pre_resolution.scenario_id,
                 projection_has_continuity_state=self._projection_has_continuity_state(task_id),
             )
+            effective_turn_plan = pre_turn_plan
+            if (
+                pre_turn_plan.domain == "project_status"
+                and pre_turn_plan.continuity_focus
+                in (
+                    "recent_outcome_history",
+                    "cursor_followup_heavy_lift",
+                    "blocked_state",
+                )
+            ):
+                ch = self.with_lock(lambda c: get_task_channel(c, task_id))
+                if ch == "telegram":
+                    effective_turn_plan = replace(pre_turn_plan, prefer_state_reply=True)
             _decision_profile = build_decision_profile(
                 classify_text,
                 turn_domain=pre_turn_plan.domain,
@@ -1395,7 +1409,7 @@ class SyncServer:
                     c,
                     task_id,
                     classify_text,
-                    pre_turn_plan,
+                    effective_turn_plan,
                     pre_resolution.scenario_id,
                     effective_history,
                     route_memory_notes,
@@ -1438,13 +1452,35 @@ class SyncServer:
                         reason=decision.reason,
                     )
                 return decision, applied
-            goal_nl = self.with_lock(
-                lambda c: try_goal_status_nl_reply(c, task_id, classify_text)
-            )
+            goal_nl = None
+            if (
+                effective_turn_plan.prefer_state_reply
+                and effective_turn_plan.allow_goal_continuity_repair
+            ):
+                if effective_turn_plan.continuity_focus == "blocked_state":
+                    goal_nl = self.with_lock(
+                        lambda c: build_blocked_state_reply_from_state(c, task_id)
+                    )
+                elif effective_turn_plan.continuity_focus == "recent_outcome_history":
+                    goal_nl = self.with_lock(
+                        lambda c: build_recent_outcome_history_reply_from_state(
+                            c, task_id, user_message=classify_text
+                        )
+                    )
+                elif effective_turn_plan.continuity_focus == "cursor_followup_heavy_lift":
+                    goal_nl = self.with_lock(
+                        lambda c: cursor_followup_context_reply_with_fallback(
+                            c, task_id, user_message=classify_text
+                        )
+                    )
+            if not goal_nl:
+                goal_nl = self.with_lock(
+                    lambda c: try_goal_status_nl_reply(c, task_id, classify_text)
+                )
             if (
                 not goal_nl
-                and pre_turn_plan.prefer_state_reply
-                and pre_turn_plan.allow_goal_continuity_repair
+                and effective_turn_plan.prefer_state_reply
+                and effective_turn_plan.allow_goal_continuity_repair
             ):
                 goal_nl = self.with_lock(
                     lambda c: build_goal_continuity_reply(
@@ -1453,36 +1489,15 @@ class SyncServer:
                 )
             if (
                 not goal_nl
-                and pre_turn_plan.prefer_state_reply
-                and pre_turn_plan.allow_goal_continuity_repair
+                and effective_turn_plan.prefer_state_reply
+                and effective_turn_plan.allow_goal_continuity_repair
             ):
-                if pre_turn_plan.continuity_focus == "recent_outcome_history":
-                    goal_nl = self.with_lock(
-                        lambda c: build_recent_outcome_history_reply_from_state(
-                            c, task_id, user_message=classify_text
-                        )
-                    )
-                elif pre_turn_plan.continuity_focus == "blocked_state":
-                    goal_nl = self.with_lock(
-                        lambda c: build_blocked_state_reply_from_state(c, task_id)
-                    )
-                elif pre_turn_plan.continuity_focus == "cursor_followup_heavy_lift":
-                    goal_nl = self.with_lock(
-                        lambda c: cursor_followup_context_reply_with_fallback(
-                            c, task_id, user_message=classify_text
-                        )
-                    )
-            if (
-                not goal_nl
-                and pre_turn_plan.prefer_state_reply
-                and pre_turn_plan.allow_goal_continuity_repair
-            ):
-                if pre_turn_plan.domain == "project_status":
+                if effective_turn_plan.domain == "project_status":
                     goal_nl = (
                         "I do not see active tracked work right now. "
                         "If you want, I can start a fresh task and track it from here."
                     )
-                elif pre_turn_plan.domain == "approval_state":
+                elif effective_turn_plan.domain == "approval_state":
                     goal_nl = "There are no pending approvals right now."
             if goal_nl:
                 goal_nl = self.with_lock(
@@ -1607,7 +1622,7 @@ class SyncServer:
                 classify_text=classify_text,
                 decision=decision,
                 resolution=resolution,
-                turn_plan=pre_turn_plan,
+                turn_plan=effective_turn_plan,
                 history=effective_history,
                 memory_notes=route_memory_notes,
             )
@@ -2195,6 +2210,8 @@ class SyncServer:
             "outcome",
             "execution",
             "assistant",
+            "openclaw",
+            "cursor",
         ):
             section = meta.get(key)
             if isinstance(section, dict) and section:

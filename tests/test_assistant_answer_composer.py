@@ -353,8 +353,88 @@ class TestAssistantAnswerComposer(unittest.TestCase):
             self.conn, tid, user_message="What did Cursor say?"
         )
         self.assertIn("Refactored", text)
-        self.assertIn("Latest from Cursor / OpenClaw", text)
+        self.assertIn("Latest useful result", text)
         self.assertNotRegex(text.lower(), r"task status \*\*created\*\*")
+
+    def test_cursor_recall_ranks_richer_same_chat_task_over_thin_current(self) -> None:
+        """Older same-chat task with OpenClaw narrative beats a newer thin shell task."""
+        from services.andrea_sync.assistant_answer_composer import (  # noqa: E402
+            build_cursor_continuity_recall_reply_from_state,
+        )
+
+        first = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "comp-rank-a",
+                "payload": {
+                    "text": "first",
+                    "routing_text": "first",
+                    "chat_id": 88050,
+                    "message_id": 1,
+                },
+            },
+        )
+        tid_a = first["task_id"]
+        append_event(
+            self.conn,
+            tid_a,
+            EventType.JOB_COMPLETED,
+            {
+                "summary": "done",
+                "backend": "openclaw",
+                "runner": "openclaw",
+                "user_summary": "DELEGATED_RICH_SUMMARY_UNIQUE_XYZ older workstream result.",
+            },
+        )
+        second = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "comp-rank-b",
+                "payload": {
+                    "text": "second",
+                    "routing_text": "second",
+                    "chat_id": 88050,
+                    "message_id": 2,
+                },
+            },
+        )
+        tid_b = second["task_id"]
+        self.assertNotEqual(tid_a, tid_b)
+        text = build_cursor_continuity_recall_reply_from_state(
+            self.conn, tid_b, user_message="What did Cursor say?"
+        )
+        self.assertIn("DELEGATED_RICH_SUMMARY_UNIQUE_XYZ", text)
+
+    def test_cursor_recall_skips_echo_projection_summary(self) -> None:
+        """Do not surface the user's question as a 'Recorded summary' when it matches."""
+        from services.andrea_sync.assistant_answer_composer import (  # noqa: E402
+            build_cursor_continuity_recall_reply_from_state,
+        )
+
+        r0 = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "comp-echo-1",
+                "payload": {
+                    "text": "What did Cursor say?",
+                    "routing_text": "What did Cursor say?",
+                    "chat_id": 88051,
+                    "message_id": 1,
+                },
+            },
+        )
+        tid = r0["task_id"]
+        text = build_cursor_continuity_recall_reply_from_state(
+            self.conn, tid, user_message="What did Cursor say?"
+        )
+        self.assertNotIn("Recorded summary: What did Cursor say?", text)
+        self.assertIn("not finding a strong", text.lower())
 
     def test_format_direct_message_strips_soft_failure_boilerplate(self) -> None:
         raw = (

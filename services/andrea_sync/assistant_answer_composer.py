@@ -30,7 +30,11 @@ from .store import (
     list_telegram_task_ids_for_chat,
     list_upcoming_reminders_for_principal,
 )
-from .user_surface import sanitize_user_surface_text, strip_conversational_soft_failure_boilerplate
+from .user_surface import (
+    sanitize_user_surface_text,
+    strip_conversational_soft_failure_boilerplate,
+    surface_similarity_key,
+)
 from .turn_intelligence import TurnPlan
 
 _STATUS_SCENARIOS = frozenset({"statusFollowupContinue", "goalContinuationAcrossSessions"})
@@ -188,12 +192,32 @@ def _normalize_echo_key(text: str) -> str:
     return re.sub(r"\s+", " ", str(text or "").strip().lower())
 
 
+def _strip_answer_wrappers(text: str) -> str:
+    """Strip common lead-in prefixes so echo detection compares the actual content."""
+    t = str(text or "").strip()
+    low = t.lower()
+    for prefix in (
+        "recorded summary:",
+        "last assistant update on this task:",
+        "last assistant update:",
+    ):
+        if low.startswith(prefix):
+            return t.split(":", 1)[-1].strip()
+    return t
+
+
 def _is_echo_of_user_question(assistant_text: str, user_message: str) -> bool:
-    u = _normalize_echo_key(user_message)
-    a = _normalize_echo_key(assistant_text)
-    if len(u) < 10 or len(a) < 10:
+    u_raw = str(user_message or "").strip()
+    a_raw = _strip_answer_wrappers(assistant_text)
+    if not u_raw or not a_raw:
         return False
-    return a == u or (u in a and len(a) - len(u) < 12)
+    if surface_similarity_key(u_raw) == surface_similarity_key(a_raw):
+        return True
+    u = _normalize_echo_key(u_raw)
+    a = _normalize_echo_key(a_raw)
+    if len(u) >= 6 and len(a) >= 6:
+        return a == u or (u in a and len(a) - len(u) < 20)
+    return False
 
 
 def _telegram_chat_id_for_task(conn: Any, task_id: str) -> Any:
@@ -226,34 +250,195 @@ def _task_has_delegated_continuity_signal(meta: Dict[str, Any]) -> bool:
     return False
 
 
+def _ordered_cursor_chat_candidates(
+    conn: Any,
+    current_task_id: str,
+    chat_id: Any,
+    *,
+    limit: int = 18,
+) -> List[str]:
+    """Current task first (tie-break), then same-chat tasks by recency."""
+    if chat_id is None or str(chat_id).strip() == "":
+        return [current_task_id]
+    ordered: List[str] = []
+    seen: set[str] = set()
+    if current_task_id not in seen:
+        ordered.append(current_task_id)
+        seen.add(current_task_id)
+    for tid in list_telegram_task_ids_for_chat(conn, chat_id, limit=limit):
+        if tid in seen:
+            continue
+        seen.add(tid)
+        ordered.append(tid)
+    return ordered
+
+
+def _score_cursor_recall_candidate(
+    conn: Any,
+    task_id: str,
+    user_message: str,
+) -> Tuple[int, bool]:
+    """
+    Narrative-first score for ranking Cursor recall / delegated selection.
+    Second return is True when there is durable human-readable signal beyond thin metadata.
+    """
+    channel = get_task_channel(conn, task_id) or "cli"
+    proj = project_task_dict(conn, task_id, channel)
+    meta = proj.get("meta") if isinstance(proj.get("meta"), dict) else {}
+    um = str(user_message or "").strip()
+
+    score = 0
+    narrative_units = 0
+
+    oc = meta.get("openclaw") if isinstance(meta.get("openclaw"), dict) else {}
+    us = str(oc.get("user_summary") or "").strip()
+    if us:
+        narrative_units += 1
+        score += 520
+        if _is_echo_of_user_question(us, um):
+            score -= 480
+
+    po = oc.get("phase_outputs")
+    if isinstance(po, dict):
+        for phase in ("synthesis", "execution", "critique", "plan"):
+            block = po.get(phase)
+            if not isinstance(block, dict):
+                continue
+            s = str(block.get("summary") or "").strip()
+            if not s:
+                continue
+            narrative_units += 1
+            score += 200
+            if _is_echo_of_user_question(s, um):
+                score -= 170
+
+    ct = oc.get("collaboration_trace")
+    if isinstance(ct, list) and any(str(x).strip() for x in ct[:8]):
+        narrative_units += 1
+        score += 140
+
+    for row in list_recent_user_outcome_receipts_for_task(conn, task_id, limit=3):
+        try:
+            s = str(row["summary"] or "").strip()
+        except (KeyError, TypeError, IndexError):
+            s = ""
+        if s:
+            narrative_units += 1
+            score += 150
+            if _is_echo_of_user_question(s, um):
+                score -= 120
+
+    tm = _telegram_section(meta)
+    cr = tm.get("continuation_records") if isinstance(tm.get("continuation_records"), list) else []
+    if cr:
+        last = cr[-1]
+        if isinstance(last, dict) and str(last.get("reason") or "").strip():
+            narrative_units += 1
+            score += 170
+
+    outcome = _outcome_section(meta)
+    ps = str(outcome.get("current_phase_summary") or "").strip()
+    if ps:
+        score += 210
+        narrative_units += 1
+        if _is_echo_of_user_question(ps, um):
+            score -= 190
+
+    br = str(outcome.get("blocked_reason") or "").strip()
+    if br and len(br) > 6:
+        score += 95
+
+    ex = meta.get("execution") if isinstance(meta.get("execution"), dict) else {}
+    if ex.get("delegated_to_cursor"):
+        score += 230
+
+    cur = meta.get("cursor") if isinstance(meta.get("cursor"), dict) else {}
+    if str(cur.get("cursor_agent_id") or cur.get("agent_id") or "").strip():
+        score += 85
+
+    att = summarize_execution_attempt_for_user(conn, task_id)
+    if isinstance(att, dict) and att.get("ok"):
+        score += 130
+
+    asst = _assistant_section(meta)
+    lr = str(asst.get("last_reply") or "").strip()
+    if lr and len(lr) > 12 and not _is_echo_of_user_question(lr, um):
+        narrative_units += 1
+        score += 125
+
+    summ = str(proj.get("summary") or "").strip()
+    if summ and len(summ) > 12 and not _is_echo_of_user_question(summ, um):
+        narrative_units += 1
+        score += 95
+
+    has_meaningful = narrative_units >= 1 and score >= 120
+    if not _task_has_delegated_continuity_signal(meta) and narrative_units == 0:
+        return 0, False
+
+    return score, has_meaningful
+
+
+def select_best_task_for_cursor_recall(
+    conn: Any,
+    current_task_id: str,
+    user_message: str,
+) -> str:
+    """Pick the strongest same-chat delegated Cursor task for recall-style answers."""
+    cid = _telegram_chat_id_for_task(conn, current_task_id)
+    cands = _ordered_cursor_chat_candidates(conn, current_task_id, cid)
+    best_id = current_task_id
+    best_score = -10**9
+    best_idx = 10**9
+    for idx, tid in enumerate(cands):
+        s, _ = _score_cursor_recall_candidate(conn, tid, user_message)
+        if s > best_score or (s == best_score and idx < best_idx):
+            best_score = s
+            best_idx = idx
+            best_id = tid
+    return best_id
+
+
 def find_recent_delegated_cursor_task_id(
     conn: Any,
     current_task_id: str,
     *,
     chat_id: Any,
     limit: int = 18,
+    user_message: str = "",
+    continuation_boost: bool = True,
 ) -> Optional[str]:
     """
     Same-chat Telegram task (excluding current) with delegated Cursor/OpenClaw continuity,
-    ordered by recency. Used when the active task is thin but recent chat work exists.
+    ranked by narrative strength and optional active-attempt boost.
     """
     if chat_id is None or str(chat_id).strip() == "":
         return None
-    for tid in list_telegram_task_ids_for_chat(conn, chat_id, limit=limit):
+    best_tid: Optional[str] = None
+    best_score = -10**9
+    best_idx = 10**9
+    for idx, tid in enumerate(list_telegram_task_ids_for_chat(conn, chat_id, limit=limit)):
         if tid == current_task_id:
             continue
-        channel = get_task_channel(conn, tid) or "cli"
-        proj = project_task_dict(conn, tid, channel)
-        meta = proj.get("meta") if isinstance(proj.get("meta"), dict) else {}
-        if not _task_has_delegated_continuity_signal(meta):
+        meta = _projection_meta(conn, tid)
+        s, meaningful = _score_cursor_recall_candidate(conn, tid, user_message)
+        if continuation_boost:
+            row = get_active_execution_attempt_for_task(conn, tid)
+            if row:
+                s += 420
+        hl = build_cursor_heavy_lift_context_reply(conn, tid)
+        if hl is None and s < 100 and not meaningful:
             continue
-        row = get_active_execution_attempt_for_task(conn, tid)
-        oc = meta.get("openclaw") if isinstance(meta.get("openclaw"), dict) else {}
-        has_summary = bool(str(oc.get("user_summary") or "").strip())
-        ex = meta.get("execution") if isinstance(meta.get("execution"), dict) else {}
-        if row or has_summary or ex.get("delegated_to_cursor"):
-            return tid
-    return None
+        if not _task_has_delegated_continuity_signal(meta) and not meaningful:
+            continue
+        if s > best_score or (s == best_score and idx < best_idx):
+            best_score = s
+            best_idx = idx
+            best_tid = tid
+    if best_tid is None:
+        return None
+    if best_score < 55:
+        return None
+    return best_tid
 
 
 def _openclaw_narrative_lines(meta: Dict[str, Any]) -> List[str]:
@@ -261,7 +446,7 @@ def _openclaw_narrative_lines(meta: Dict[str, Any]) -> List[str]:
     lines: List[str] = []
     us = sanitize_user_surface_text(str(oc.get("user_summary") or ""), limit=900)
     if us:
-        lines.append(f"Latest from Cursor / OpenClaw: {us}")
+        lines.append(f"Latest useful result: {us}")
     po = oc.get("phase_outputs")
     if isinstance(po, dict):
         for phase in ("synthesis", "execution", "critique", "plan"):
@@ -313,8 +498,14 @@ def build_cursor_continuity_recall_reply_from_state(
     Human-facing recall from delegated OpenClaw narrative, receipts, and outcome state.
     Prefers durable summaries over raw task status / result_kind metadata.
     """
-    meta = _projection_meta(conn, task_id)
-    proj = _projection_full(conn, task_id)
+    cid = _telegram_chat_id_for_task(conn, task_id)
+    use_id = (
+        select_best_task_for_cursor_recall(conn, task_id, user_message)
+        if cid is not None
+        else task_id
+    )
+    meta = _projection_meta(conn, use_id)
+    proj = _projection_full(conn, use_id)
     outcome = _outcome_section(meta)
     asst = _assistant_section(meta)
     summary = strip_conversational_soft_failure_boilerplate(str(proj.get("summary") or "").strip())
@@ -329,7 +520,7 @@ def build_cursor_continuity_recall_reply_from_state(
     narrative_lines = _openclaw_narrative_lines(meta)
 
     receipt_lines: List[str] = []
-    for row in list_recent_user_outcome_receipts_for_task(conn, task_id, limit=3):
+    for row in list_recent_user_outcome_receipts_for_task(conn, use_id, limit=3):
         summ = sanitize_user_surface_text(str(row["summary"] or ""), limit=400)
         kind = str(row["receipt_kind"] or "").strip()
         if summ:
@@ -353,7 +544,7 @@ def build_cursor_continuity_recall_reply_from_state(
         safe_lr = sanitize_user_surface_text(last_reply, limit=900)
         if safe_lr:
             assistant_lines.append(f"Last assistant update on this task: {safe_lr}")
-    elif summary and len(summary) > 12:
+    elif summary and len(summary) > 12 and not _is_echo_of_user_question(summary, um):
         safe_s = sanitize_user_surface_text(summary, limit=900)
         if safe_s:
             assistant_lines.append(f"Recorded summary: {safe_s}")
@@ -499,6 +690,8 @@ def build_blocked_state_reply_from_state(conn: Any, task_id: str) -> str:
 def _resolve_cursor_heavy_lift_reply(
     conn: Any,
     task_id: str,
+    *,
+    user_message: str = "",
 ) -> Tuple[Optional[str], bool]:
     """
     Prefer the current task; if thin, use the most recent same-chat delegated Cursor task.
@@ -510,7 +703,9 @@ def _resolve_cursor_heavy_lift_reply(
     cid = _telegram_chat_id_for_task(conn, task_id)
     if cid is None:
         return None, False
-    alt = find_recent_delegated_cursor_task_id(conn, task_id, chat_id=cid)
+    alt = find_recent_delegated_cursor_task_id(
+        conn, task_id, chat_id=cid, user_message=user_message
+    )
     if not alt:
         return None, False
     cur2 = build_cursor_heavy_lift_context_reply(conn, alt)
@@ -529,7 +724,8 @@ def cursor_followup_context_reply_with_fallback(
     Conductor-style continuation: current Cursor workstream, or recent same-chat delegated task,
     or an explicit boundary when nothing durable is available.
     """
-    cur, used_alt = _resolve_cursor_heavy_lift_reply(conn, task_id)
+    um = str(user_message or "")
+    cur, used_alt = _resolve_cursor_heavy_lift_reply(conn, task_id, user_message=um)
     if cur:
         if used_alt:
             return (
@@ -539,7 +735,13 @@ def cursor_followup_context_reply_with_fallback(
             )
         return cur
     cid = _telegram_chat_id_for_task(conn, task_id)
-    alt = find_recent_delegated_cursor_task_id(conn, task_id, chat_id=cid) if cid else None
+    alt = (
+        find_recent_delegated_cursor_task_id(
+            conn, task_id, chat_id=cid, user_message=um
+        )
+        if cid
+        else None
+    )
     if alt:
         recap = build_cursor_continuity_recall_reply_from_state(
             conn, alt, user_message=user_message
@@ -879,7 +1081,9 @@ def try_composer_early_short_circuit(
         return text, "composer_blocked_state"
 
     if domain == "project_status" and turn_plan.continuity_focus == "cursor_followup_heavy_lift":
-        cur, used_alt = _resolve_cursor_heavy_lift_reply(conn, task_id)
+        cur, used_alt = _resolve_cursor_heavy_lift_reply(
+            conn, task_id, user_message=str(user_text or "")
+        )
         if cur:
             if used_alt:
                 return (
@@ -992,7 +1196,9 @@ def gather_repair_candidates(
             )
             out.append(AnswerCandidate(source="cursor_continuity_recall", text=cc, priority=100))
         elif cf == "cursor_followup_heavy_lift":
-            cur, used_alt = _resolve_cursor_heavy_lift_reply(conn, task_id)
+            cur, used_alt = _resolve_cursor_heavy_lift_reply(
+                conn, task_id, user_message=str(classify_text or "")
+            )
             if cur:
                 text = (
                     (

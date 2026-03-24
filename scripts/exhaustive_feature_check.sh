@@ -94,12 +94,24 @@ pass "andrea_model_guard --dry-run"
 expect_fail "andrea_model_guard invalid timeout" \
   bash "${BASE_DIR}/scripts/andrea_model_guard.sh" --dry-run --probe-timeout-ms nope
 
+# Valid invocation (script prints FAIL:... via die() on bad values; ensure it accepts integers)
+bash "${BASE_DIR}/scripts/andrea_model_guard.sh" --dry-run --probe-timeout-ms 30000 >/dev/null \
+  || fail "andrea_model_guard valid timeout"
+pass "andrea_model_guard valid timeout"
+
+expect_fail "andrea_model_guard invalid timeout" \
+  bash "${BASE_DIR}/scripts/andrea_model_guard.sh" --dry-run --probe-timeout-ms nope
+
 bash "${BASE_DIR}/scripts/andrea_openclaw_enforce.sh" --help >/dev/null || fail "andrea_openclaw_enforce --help"
 pass "andrea_openclaw_enforce --help"
 
-bash "${BASE_DIR}/scripts/andrea_openclaw_enforce.sh" --dry-run --required-skills "cursor_handoff,github" >/dev/null \
-  || fail "andrea_openclaw_enforce --dry-run"
-pass "andrea_openclaw_enforce --dry-run"
+if command -v openclaw >/dev/null 2>&1; then
+  bash "${BASE_DIR}/scripts/andrea_openclaw_enforce.sh" --dry-run --required-skills "cursor_handoff,github" >/dev/null \
+    || fail "andrea_openclaw_enforce --dry-run"
+  pass "andrea_openclaw_enforce --dry-run"
+else
+  echo "(Skip andrea_openclaw_enforce --dry-run: openclaw not on PATH)"
+fi
 
 expect_fail "andrea_openclaw_enforce invalid timeout" \
   bash "${BASE_DIR}/scripts/andrea_openclaw_enforce.sh" --dry-run --probe-timeout-ms nope

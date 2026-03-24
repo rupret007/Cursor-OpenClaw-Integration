@@ -1,6 +1,6 @@
-# cursor_handoff (OpenClaw Local Skill)
+# Cursor Handoff: Safely delegate repo work to Cursor
 
-`cursor_handoff` is a local OpenClaw skill for safely delegating heavy coding and repository tasks to Cursor.
+`cursor_handoff` is a local OpenClaw skill for delegating heavy coding and repository tasks to Cursor with clear backend selection and safe defaults.
 
 It is designed for production-style use on macOS with explicit backend selection, clear failure modes, and audit-friendly output.
 

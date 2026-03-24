@@ -3,11 +3,30 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
+from .activation_policy import (
+    ACTIVATION_POLICY_VERSION,
+    MEASURED_SCENARIOS,
+    collab_policy_recording_enabled,
+    evaluate_activation_policy,
+)
 from .approval_policy import evaluate_plan_step_approval, risk_tier_for_lane
-from .arbitration_policy import build_collaboration_bundle, collaboration_summary_patch
+from .arbitration_policy import (
+    build_collaboration_bundle,
+    collaboration_layer_enabled,
+    collaboration_summary_patch,
+    explain_collaboration_attachment_blockers,
+)
+from . import collaboration_runtime
+from .collaboration_effectiveness import (
+    build_collaboration_outcome_payload,
+    build_repair_outcome_payload,
+    canonical_usefulness_class,
+)
+from .collaboration_promotion import evaluate_promotion_guardrails_after_outcome
 from .collaboration_schema import collaboration_event_payload
 from .plan_schema import PlanStatus, StepKind, StepStatus
 from .recovery_engine import suggest_recovery
@@ -40,6 +59,9 @@ from .store import (
     get_task_channel,
     insert_execution_plan,
     insert_plan_step,
+    insert_collaboration_activation_decision,
+    insert_collaboration_outcome_row,
+    insert_repair_outcome_row,
     insert_verification_result,
     link_task_to_goal,
     list_plan_steps,
@@ -466,13 +488,68 @@ def _bounded_collaboration_for_verification(
     lane: str,
     pr_url: str,
     agent_url: str,
-) -> Tuple[Dict[str, Any], Dict[str, Any], Optional[Dict[str, Any]], str]:
+) -> Tuple[
+    Dict[str, Any],
+    Dict[str, Any],
+    Optional[Dict[str, Any]],
+    str,
+    List[Dict[str, Any]],
+    Optional[Dict[str, Any]],
+    Optional[Dict[str, Any]],
+    Optional[Dict[str, Any]],
+    Optional[Dict[str, Any]],
+]:
     """
     Persist collaboration/repair metadata for enabled scenarios.
-    Returns (summary_patch, recovery_patch, collaboration_event_payload, user_note).
+    Returns (summary_patch, recovery_patch, collaboration_event_payload, user_note,
+             collaboration_role_events, collaboration_repair_dispatch,
+             activation_event_payload, collaboration_outcome_event_payload,
+             repair_outcome_event_payload).
     Empty patches / no payload when disabled or inapplicable.
     """
     goal_id = str(get_goal_id_for_task(conn, task_id) or "")
+    attach_blockers = explain_collaboration_attachment_blockers(
+        scenario_id=sid, contract=contract, trigger=trigger, plan_summary=summ
+    )
+    will_attach = not bool(attach_blockers)
+
+    if (
+        collab_policy_recording_enabled()
+        and str(sid or "").strip() in MEASURED_SCENARIOS
+        and trigger in ("verify_fail", "trust_gate", "verify_weak")
+        and not will_attach
+    ):
+        act = evaluate_activation_policy(
+            conn=conn,
+            task_id=task_id,
+            plan_id=plan_id,
+            step_id=execute_step_id,
+            scenario_id=str(sid or ""),
+            trigger=trigger,
+            verdict=verdict,
+            lane=lane,
+            collab_id="",
+            collaboration_layer_on=collaboration_layer_enabled(),
+            will_attach_collaboration_bundle=False,
+            attach_blocked_reasons=attach_blockers,
+            base_live_advisory_eligible=False,
+            approval_blocked=False,
+        )
+        try:
+            from .assistant_followthrough import merge_followthrough_collaboration_gate
+
+            act = merge_followthrough_collaboration_gate(
+                conn, act, task_id=task_id, scenario_id=str(sid or "")
+            )
+        except Exception:
+            pass
+        act["recorded_at"] = time.time()
+        try:
+            insert_collaboration_activation_decision(conn, task_id, act)
+        except sqlite3.OperationalError:
+            pass
+        return {}, {}, None, "", [], None, act, None, None
+
     bundle = build_collaboration_bundle(
         task_id=task_id,
         goal_id=goal_id,
@@ -490,9 +567,132 @@ def _bounded_collaboration_for_verification(
         agent_url=agent_url,
     )
     if not bundle:
-        return {}, {}, None, ""
+        return {}, {}, None, "", [], None, None, None, None
     req, repair, arb, roles, contrib = bundle
-    sp = collaboration_summary_patch(summ, request=req, repair=repair, arbitration=arb)
+    role_events: List[Dict[str, Any]] = []
+    repair_dispatch: Optional[Dict[str, Any]] = None
+    live_round: Optional[Dict[str, Any]] = None
+    usefulness_status = ""
+    advisory_source = "deterministic"
+    role_delta = 0
+    act_sp: Dict[str, Any] = {}
+    act_rec: Dict[str, Any] = {}
+    proof_requirements = ""
+    if contract is not None:
+        proof_requirements = str(getattr(contract, "proof_class", "") or "")
+
+    base_live = collaboration_runtime.advisory_live_roles_eligible(
+        scenario_id=sid, trigger=trigger, plan_summary=summ
+    )
+    activation_event_payload: Optional[Dict[str, Any]] = None
+    if str(sid or "").strip() in MEASURED_SCENARIOS:
+        act_decision = evaluate_activation_policy(
+            conn=conn,
+            task_id=task_id,
+            plan_id=plan_id,
+            step_id=execute_step_id,
+            scenario_id=str(sid or ""),
+            trigger=trigger,
+            verdict=verdict,
+            lane=lane,
+            collab_id=req.collab_id,
+            collaboration_layer_on=collaboration_layer_enabled(),
+            will_attach_collaboration_bundle=True,
+            attach_blocked_reasons=[],
+            base_live_advisory_eligible=base_live,
+            approval_blocked=False,
+        )
+        try:
+            from .assistant_followthrough import merge_followthrough_collaboration_gate
+
+            act_decision = merge_followthrough_collaboration_gate(
+                conn, act_decision, task_id=task_id, scenario_id=str(sid or "")
+            )
+        except Exception:
+            pass
+        act_decision["recorded_at"] = time.time()
+        try:
+            insert_collaboration_activation_decision(conn, task_id, act_decision)
+        except sqlite3.OperationalError:
+            pass
+        activation_event_payload = act_decision
+        run_live = bool(act_decision.get("executed_live_advisory_planned"))
+    else:
+        act_decision = {
+            "activation_mode": "",
+            "policy_version": "",
+            "reason_codes": [],
+        }
+        run_live = base_live
+
+    collaboration_outcome_event_payload: Optional[Dict[str, Any]] = None
+    repair_outcome_event_payload: Optional[Dict[str, Any]] = None
+
+    if run_live:
+        merged = collaboration_runtime.run_collaboration_round(
+            task_id=task_id,
+            plan_id=plan_id,
+            collab_id=req.collab_id,
+            scenario_id=sid,
+            trigger=trigger,
+            verdict=verdict,
+            outcome_summary=outcome_summary,
+            lane=lane,
+            deterministic_strategy=repair.strategy,
+            candidate_lanes=list(req.candidate_lanes or []),
+            pr_url=pr_url,
+            agent_url=agent_url,
+            proof_requirements=proof_requirements,
+            repair=repair,
+            arbitration=arb,
+        )
+        if merged:
+            repair = merged["repair"]
+            arb = merged["arbitration"]
+            role_events = list(merged.get("role_events") or [])
+            live_round = merged.get("live_round") if isinstance(merged.get("live_round"), dict) else None
+            usefulness_status = str(merged.get("usefulness_status") or "")
+            advisory_source = "live_advisory"
+            role_delta = int(merged.get("role_invocation_delta") or 0)
+            target_hint = str(merged.get("target_lane_hint") or "")
+            act_sp, act_rec, repair_dispatch = collaboration_runtime.maybe_execute_bounded_collaboration_action(
+                conn=conn,
+                scenario_id=sid,
+                task_id=task_id,
+                plan_id=plan_id,
+                collab_id=req.collab_id,
+                final_strategy=repair.strategy,
+                lane=lane,
+                candidate_lanes=list(req.candidate_lanes or []),
+                target_lane_hint=target_hint,
+                plan_summary=summ,
+                outcome_summary=outcome_summary,
+                trigger=trigger,
+            )
+
+    c_use = canonical_usefulness_class(usefulness_status) if usefulness_status else ""
+    act_mode = str((act_decision or {}).get("activation_mode") or "")
+    act_ver = str((act_decision or {}).get("policy_version") or "")
+    act_reasons = list((act_decision or {}).get("reason_codes") or [])
+
+    sp = collaboration_summary_patch(
+        summ,
+        request=req,
+        repair=repair,
+        arbitration=arb,
+        role_invocation_delta=role_delta,
+        usefulness_status=usefulness_status,
+        advisory_source=advisory_source,
+        activation_mode=act_mode if str(sid or "").strip() in MEASURED_SCENARIOS else "",
+        canonical_usefulness=c_use if str(sid or "").strip() in MEASURED_SCENARIOS else "",
+        activation_policy_version=act_ver if str(sid or "").strip() in MEASURED_SCENARIOS else "",
+        activation_reason_codes=act_reasons if str(sid or "").strip() in MEASURED_SCENARIOS else None,
+    )
+    if act_sp and isinstance(act_sp.get("collaboration"), dict):
+        c = sp.setdefault("collaboration", {})
+        for k, v in act_sp["collaboration"].items():
+            c[k] = v
+
     recovery = {
         "collaboration_last": {
             "collab_id": req.collab_id,
@@ -502,6 +702,19 @@ def _bounded_collaboration_for_verification(
             "arbitration": arb.to_dict(),
         }
     }
+    if live_round:
+        recovery["collaboration_last"]["live_round"] = live_round
+    if act_rec:
+        recovery.update(act_rec)
+
+    executed_action = (
+        act_sp.get("collaboration", {}).get("last_executed_action")
+        if isinstance(act_sp.get("collaboration"), dict)
+        else None
+    )
+    _had_action = bool(
+        isinstance(executed_action, dict) and str(executed_action.get("type") or "").strip()
+    )
     evt = collaboration_event_payload(
         task_id=task_id,
         plan_id=plan_id,
@@ -512,9 +725,78 @@ def _bounded_collaboration_for_verification(
         arbitration=arb,
         role_assignments=roles,
         contribution=contrib,
+        live_round=live_round,
+        advisory_only=not _had_action,
+        executed_action=executed_action if isinstance(executed_action, dict) else None,
+        usefulness_status=usefulness_status,
     )
     note = collaboration_repair_user_note(strategy=repair.strategy, proof_plan=repair.proof_plan)
-    return sp, recovery, evt, note
+
+    bounded_action_type = ""
+    if isinstance(executed_action, dict):
+        bounded_action_type = str(executed_action.get("type") or "")
+
+    if str(sid or "").strip() in MEASURED_SCENARIOS:
+        collaboration_outcome_event_payload = build_collaboration_outcome_payload(
+            task_id=task_id,
+            goal_id=goal_id,
+            plan_id=plan_id,
+            step_id=execute_step_id,
+            collab_id=req.collab_id,
+            scenario_id=sid,
+            trigger=trigger,
+            verdict_before=verdict,
+            verification_method=method,
+            advisory_source=advisory_source,
+            usefulness_detail=usefulness_status,
+            final_strategy=repair.strategy,
+            bounded_action_type=bounded_action_type,
+            live_advisory_ran=bool(run_live),
+            role_invocation_delta=role_delta,
+            policy_version=act_ver or ACTIVATION_POLICY_VERSION,
+        )
+        try:
+            insert_collaboration_outcome_row(conn, task_id, collaboration_outcome_event_payload)
+            evaluate_promotion_guardrails_after_outcome(
+                conn,
+                scenario_id=sid,
+                trigger=trigger,
+                canonical_class=str(collaboration_outcome_event_payload.get("canonical_class") or ""),
+            )
+        except sqlite3.OperationalError:
+            pass
+
+    if _had_action and isinstance(executed_action, dict) and str(sid or "").strip() in MEASURED_SCENARIOS:
+        dispatch_kind = ""
+        if isinstance(repair_dispatch, dict):
+            dispatch_kind = str(repair_dispatch.get("kind") or "")
+        repair_outcome_event_payload = build_repair_outcome_payload(
+            task_id=task_id,
+            plan_id=plan_id,
+            collab_id=req.collab_id,
+            action_type=str(executed_action.get("type") or ""),
+            executed=True,
+            from_lane=str(executed_action.get("from_lane") or executed_action.get("lane") or lane),
+            to_lane=str(executed_action.get("to_lane") or ""),
+            dispatch_kind=dispatch_kind,
+            verdict_after="",
+        )
+        try:
+            insert_repair_outcome_row(conn, task_id, repair_outcome_event_payload)
+        except sqlite3.OperationalError:
+            pass
+
+    return (
+        sp,
+        recovery,
+        evt,
+        note,
+        role_events,
+        repair_dispatch,
+        activation_event_payload,
+        collaboration_outcome_event_payload,
+        repair_outcome_event_payload,
+    )
 
 
 def finalize_execute_step_verification(
@@ -601,7 +883,17 @@ def finalize_execute_step_verification(
     weak_complete = verdict == "needs_human" and not strict_post_execution_verification()
     if (verdict == "pass" or weak_complete) and not _trust_allows_completion():
         rx = _scenario_receipt_lines(verified=False)
-        c_sp, c_rec, c_evt, c_note = _bounded_collaboration_for_verification(
+        (
+            c_sp,
+            c_rec,
+            c_evt,
+            c_note,
+            c_roles,
+            c_dispatch,
+            c_act,
+            c_out,
+            c_rep,
+        ) = _bounded_collaboration_for_verification(
             conn,
             task_id=task_id,
             plan_id=plan_id,
@@ -655,6 +947,16 @@ def finalize_execute_step_verification(
             out_tg["collaboration_event_payload"] = c_evt
         if c_note:
             out_tg["collaboration_user_note"] = c_note
+        if c_roles:
+            out_tg["collaboration_role_events"] = c_roles
+        if c_dispatch:
+            out_tg["collaboration_repair_dispatch"] = c_dispatch
+        if c_act:
+            out_tg["activation_event_payload"] = c_act
+        if c_out:
+            out_tg["collaboration_outcome_event_payload"] = c_out
+        if c_rep:
+            out_tg["repair_outcome_event_payload"] = c_rep
         return out_tg
 
     if verdict == "pass":
@@ -712,7 +1014,17 @@ def finalize_execute_step_verification(
             "scenario_user_receipt": _scenario_receipt_lines(verified=False),
         }
 
-    c_sp_f, c_rec_f, c_evt_f, c_note_f = _bounded_collaboration_for_verification(
+    (
+        c_sp_f,
+        c_rec_f,
+        c_evt_f,
+        c_note_f,
+        c_roles_f,
+        c_dispatch_f,
+        c_act_f,
+        c_out_f,
+        c_rep_f,
+    ) = _bounded_collaboration_for_verification(
         conn,
         task_id=task_id,
         plan_id=plan_id,
@@ -764,6 +1076,16 @@ def finalize_execute_step_verification(
         out["collaboration_event_payload"] = c_evt_f
     if c_note_f:
         out["collaboration_user_note"] = c_note_f
+    if c_roles_f:
+        out["collaboration_role_events"] = c_roles_f
+    if c_dispatch_f:
+        out["collaboration_repair_dispatch"] = c_dispatch_f
+    if c_act_f:
+        out["activation_event_payload"] = c_act_f
+    if c_out_f:
+        out["collaboration_outcome_event_payload"] = c_out_f
+    if c_rep_f:
+        out["repair_outcome_event_payload"] = c_rep_f
     return out
 
 

@@ -121,7 +121,27 @@ class EventType(str, Enum):
     WORKFLOW_STEP_ADVANCED = "WorkflowStepAdvanced"
     VERIFICATION_RECORDED = "VerificationRecorded"
     COLLABORATION_RECORDED = "CollaborationRecorded"
+    COLLABORATION_ROLE_RECORDED = "CollaborationRoleRecorded"
+    ACTIVATION_DECISION_RECORDED = "ActivationDecisionRecorded"
+    COLLABORATION_OUTCOME_RECORDED = "CollaborationOutcomeRecorded"
+    REPAIR_OUTCOME_RECORDED = "RepairOutcomeRecorded"
     SCENARIO_RESOLVED = "ScenarioResolved"
+    PROMOTION_DECISION_RECORDED = "PromotionDecisionRecorded"
+    PROMOTION_ROLLBACK_RECORDED = "PromotionRollbackRecorded"
+    LIVE_SHADOW_COMPARISON_RECORDED = "LiveShadowComparisonRecorded"
+    ROLLOUT_DECISION_RECORDED = "RolloutDecisionRecorded"
+    SCENARIO_ONBOARDING_RECORDED = "ScenarioOnboardingRecorded"
+    OPERATOR_APPROVAL_RECORDED = "OperatorApprovalRecorded"
+    USER_OUTCOME_RECEIPT_RECORDED = "UserOutcomeReceiptRecorded"
+    CONTINUATION_RECORDED = "ContinuationRecorded"
+    DOMAIN_REPAIR_OUTCOME_RECORDED = "DomainRepairOutcomeRecorded"
+    DOMAIN_ROLLOUT_DECISION_RECORDED = "DomainRolloutDecisionRecorded"
+    OPEN_LOOP_RECORDED = "OpenLoopRecorded"
+    CLOSURE_DECISION_RECORDED = "ClosureDecisionRecorded"
+    CONTINUATION_TRIGGER_RECORDED = "ContinuationTriggerRecorded"
+    FOLLOWUP_RECOMMENDATION_RECORDED = "FollowupRecommendationRecorded"
+    CONTINUATION_EXECUTION_RECORDED = "ContinuationExecutionRecorded"
+    STALE_TASK_INDICATED = "StaleTaskIndicated"
 
 
 # --- Task status (projected) ---
@@ -1089,6 +1109,16 @@ def legal_task_transition(
         EventType.EXTERNAL_REF,
         EventType.ORCHESTRATION_STEP,
         EventType.SCENARIO_RESOLVED,
+        EventType.USER_OUTCOME_RECEIPT_RECORDED,
+        EventType.CONTINUATION_RECORDED,
+        EventType.DOMAIN_REPAIR_OUTCOME_RECORDED,
+        EventType.DOMAIN_ROLLOUT_DECISION_RECORDED,
+        EventType.OPEN_LOOP_RECORDED,
+        EventType.CLOSURE_DECISION_RECORDED,
+        EventType.CONTINUATION_TRIGGER_RECORDED,
+        EventType.FOLLOWUP_RECOMMENDATION_RECORDED,
+        EventType.CONTINUATION_EXECUTION_RECORDED,
+        EventType.STALE_TASK_INDICATED,
         EventType.PRINCIPAL_LINKED,
         EventType.PRINCIPAL_MEMORY_SAVED,
         EventType.PRINCIPAL_PREFERENCE_UPDATED,
@@ -1141,6 +1171,10 @@ def legal_task_transition(
         EventType.WORKFLOW_STEP_ADVANCED,
         EventType.VERIFICATION_RECORDED,
         EventType.COLLABORATION_RECORDED,
+        EventType.COLLABORATION_ROLE_RECORDED,
+        EventType.ACTIVATION_DECISION_RECORDED,
+        EventType.COLLABORATION_OUTCOME_RECORDED,
+        EventType.REPAIR_OUTCOME_RECORDED,
         EventType.SCENARIO_RESOLVED,
     ):
         return True, None
@@ -1405,6 +1439,8 @@ def fold_projection(
             collab_meta["last_pattern"] = str(payload["pattern"])
         if payload.get("repair_strategy"):
             collab_meta["last_repair_strategy"] = str(payload["repair_strategy"])
+        if payload.get("usefulness_status"):
+            collab_meta["last_usefulness_status"] = str(payload["usefulness_status"])[:120]
         plan_meta = _ensure_meta_dict(proj.meta, "plan")
         if payload.get("plan_id"):
             plan_meta["plan_id"] = str(payload["plan_id"])
@@ -1420,6 +1456,46 @@ def fold_projection(
             execution_meta["last_resource_shift"] = _clip_meta_text(
                 payload.get("repair_rationale"), 400
             )
+    if event_type == EventType.COLLABORATION_ROLE_RECORDED:
+        collab_meta = _ensure_meta_dict(proj.meta, "collaboration")
+        if payload.get("collab_id"):
+            collab_meta["last_collab_id"] = str(payload["collab_id"])
+        if payload.get("role"):
+            collab_meta["last_collaboration_role"] = str(payload["role"])[:80]
+        try:
+            collab_meta["role_event_count"] = int(collab_meta.get("role_event_count") or 0) + 1
+        except (TypeError, ValueError):
+            collab_meta["role_event_count"] = 1
+        if payload.get("model"):
+            collab_meta["last_role_model"] = _clip_meta_text(payload.get("model"), 120)
+        if payload.get("ok") is not None:
+            collab_meta["last_role_ok"] = bool(payload.get("ok"))
+    if event_type == EventType.ACTIVATION_DECISION_RECORDED:
+        collab_meta = _ensure_meta_dict(proj.meta, "collaboration")
+        if payload.get("collab_id"):
+            collab_meta["last_collab_id"] = str(payload["collab_id"])
+        if payload.get("activation_mode"):
+            collab_meta["last_activation_mode"] = str(payload["activation_mode"])[:40]
+        if payload.get("policy_version"):
+            collab_meta["last_activation_policy_version"] = str(payload["policy_version"])[:40]
+        if payload.get("reason_codes") and isinstance(payload.get("reason_codes"), list):
+            collab_meta["last_activation_reasons"] = [
+                str(x)[:80] for x in (payload.get("reason_codes") or [])[:6]
+            ]
+    if event_type == EventType.COLLABORATION_OUTCOME_RECORDED:
+        collab_meta = _ensure_meta_dict(proj.meta, "collaboration")
+        if payload.get("collab_id"):
+            collab_meta["last_collab_id"] = str(payload["collab_id"])
+        if payload.get("canonical_class"):
+            collab_meta["last_canonical_usefulness"] = str(payload["canonical_class"])[:40]
+        if payload.get("usefulness_detail"):
+            collab_meta["last_usefulness_detail"] = str(payload["usefulness_detail"])[:120]
+    if event_type == EventType.REPAIR_OUTCOME_RECORDED:
+        collab_meta = _ensure_meta_dict(proj.meta, "collaboration")
+        if payload.get("action_type"):
+            collab_meta["last_repair_action_type"] = str(payload["action_type"])[:80]
+        if payload.get("executed") is not None:
+            collab_meta["last_repair_action_executed"] = bool(payload.get("executed"))
     if event_type == EventType.JOB_STARTED:
         execution_meta = proj.meta.setdefault("execution", {})
         if payload.get("backend"):
@@ -1851,6 +1927,57 @@ def fold_projection(
             capability_meta["last_skill_key"] = str(payload.get("skill_key"))
         if payload.get("error"):
             capability_meta["last_error"] = _clip_meta_text(payload.get("error"), 800)
+    if event_type == EventType.USER_OUTCOME_RECEIPT_RECORDED:
+        am = proj.meta.setdefault("assistant", {})
+        am["latest_receipt_id"] = str(payload.get("receipt_id") or "")
+        am["latest_receipt_kind"] = str(payload.get("receipt_kind") or "")
+        am["latest_receipt_scenario"] = str(payload.get("scenario_id") or "")
+        dp = proj.meta.setdefault("daily_assistant_pack", {})
+        dp["last_receipt_at"] = float(payload.get("created_at") or 0.0)
+        dp["last_receipt_summary"] = _clip_meta_text(payload.get("summary"), 240)
+    if event_type == EventType.CONTINUATION_RECORDED:
+        tm = proj.meta.setdefault("telegram", {})
+        cr = tm.setdefault("continuation_records", [])
+        cr.append(
+            {
+                "continuation_id": str(payload.get("continuation_id") or ""),
+                "linked_task_id": str(payload.get("linked_task_id") or ""),
+                "reason": str(payload.get("reason") or "")[:120],
+                "confidence_band": str(payload.get("confidence_band") or ""),
+            }
+        )
+        if len(cr) > 16:
+            del cr[:-16]
+    if event_type == EventType.DOMAIN_REPAIR_OUTCOME_RECORDED:
+        dm = proj.meta.setdefault("daily_assistant_pack", {})
+        dm["last_domain_repair_family"] = str(payload.get("repair_family") or "")
+        dm["last_domain_repair_result"] = _clip_meta_text(payload.get("result"), 200)
+    if event_type == EventType.DOMAIN_ROLLOUT_DECISION_RECORDED:
+        dm = proj.meta.setdefault("daily_assistant_pack", {})
+        dm["last_pack_decision"] = str(payload.get("decision") or "")
+        dm["last_pack_decision_actor"] = str(payload.get("actor") or "")[:120]
+    if event_type == EventType.OPEN_LOOP_RECORDED:
+        ft = proj.meta.setdefault("followthrough", {})
+        ft["last_loop_id"] = str(payload.get("loop_id") or "")
+        ft["last_loop_kind"] = str(payload.get("loop_kind") or "")
+        ft["last_open_loop_state"] = str(payload.get("open_loop_state") or "")
+    if event_type == EventType.CLOSURE_DECISION_RECORDED:
+        ft = proj.meta.setdefault("followthrough", {})
+        ft["last_closure_state"] = str(payload.get("closure_state") or "")
+        ft["last_closure_reason"] = _clip_meta_text(payload.get("reason"), 240)
+        ft["last_closure_decision_id"] = str(payload.get("decision_id") or "")
+    if event_type == EventType.CONTINUATION_TRIGGER_RECORDED:
+        ft = proj.meta.setdefault("followthrough", {})
+        ft["last_continuation_trigger_id"] = str(payload.get("trigger_id") or "")
+    if event_type == EventType.FOLLOWUP_RECOMMENDATION_RECORDED:
+        ft = proj.meta.setdefault("followthrough", {})
+        ft["last_followup_recommendation_id"] = str(payload.get("recommendation_id") or "")
+    if event_type == EventType.CONTINUATION_EXECUTION_RECORDED:
+        ft = proj.meta.setdefault("followthrough", {})
+        ft["last_continuation_execution_id"] = str(payload.get("execution_id") or "")
+    if event_type == EventType.STALE_TASK_INDICATED:
+        ft = proj.meta.setdefault("followthrough", {})
+        ft["last_stale_indicator_id"] = str(payload.get("indicator_id") or "")
     if event_type == EventType.CAPABILITY_SNAPSHOT:
         proj.meta["last_capability_excerpt"] = str(payload.get("summary_json_excerpt", ""))[:500]
     if event_type in (EventType.KILL_SWITCH_ENGAGED, EventType.KILL_SWITCH_RELEASED):

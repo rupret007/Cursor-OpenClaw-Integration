@@ -1306,6 +1306,13 @@ class SyncServer:
                 )
                 if applied:
                     self.with_lock(lambda c: set_meta(c, marker, str(time.time())))
+                    self._record_daily_assistant_receipt_after_direct_reply(
+                        task_id,
+                        scen_res.to_event_payload(),
+                        decision.reply_text,
+                        route="direct",
+                        reason=decision.reason,
+                    )
                 return decision, applied
             structured_action = self._maybe_handle_structured_assistant_action(task_id)
             if structured_action is not None:
@@ -1326,6 +1333,9 @@ class SyncServer:
                 )
                 if applied:
                     self.with_lock(lambda c: set_meta(c, marker, str(time.time())))
+                    self._record_daily_assistant_structured_receipt(
+                        task_id, decision.reply_text, decision.reason
+                    )
                 return decision, applied
             decision = route_message(
                 classify_text,
@@ -1552,6 +1562,14 @@ class SyncServer:
                             "reason": "plan_awaiting_approval",
                         },
                     )
+                    if applied:
+                        self._record_daily_assistant_receipt_after_direct_reply(
+                            task_id,
+                            resolution.to_event_payload(),
+                            gate.user_message,
+                            route="direct",
+                            reason="plan_awaiting_approval",
+                        )
                 else:
                     if gate.plan_id:
                         job_payload["plan_id"] = gate.plan_id
@@ -1573,6 +1591,15 @@ class SyncServer:
                 )
             if applied:
                 self.with_lock(lambda c: set_meta(c, marker, str(time.time())))
+            # Receipts only for direct assistant text turns (not queued delegate jobs).
+            if applied and getattr(decision, "mode", "") != "delegate":
+                self._record_daily_assistant_receipt_after_direct_reply(
+                    task_id,
+                    resolution.to_event_payload(),
+                    decision.reply_text,
+                    route="direct",
+                    reason=decision.reason,
+                )
             return decision, applied
         finally:
             self._finish_routing_attempt(task_id)
@@ -1673,6 +1700,104 @@ class SyncServer:
             self._queue_task_followups(task_id)
             return True
         return False
+
+    def _record_daily_assistant_receipt_after_direct_reply(
+        self,
+        task_id: str,
+        scenario_payload: Dict[str, Any],
+        reply_text: str,
+        *,
+        route: str = "direct",
+        reason: str = "",
+    ) -> None:
+        from .assistant_receipts import try_record_assistant_receipt_for_direct_reply
+
+        def run(c: sqlite3.Connection) -> None:
+            try_record_assistant_receipt_for_direct_reply(
+                c,
+                task_id,
+                scenario_payload=scenario_payload,
+                reply_text=reply_text,
+                reply_meta={"route": route, "reason": reason},
+            )
+
+        try:
+            self.with_lock(run)
+        except Exception:
+            pass
+
+    def _record_daily_assistant_structured_receipt(
+        self, task_id: str, reply_text: str, structured_reason: str
+    ) -> None:
+        structured_daily = {
+            "principal_memory_saved": "noteOrReminderCapture",
+            "reminder_created": "noteOrReminderCapture",
+            "reminder_saved_awaiting_channel": "noteOrReminderCapture",
+            "recent_text_messages_ready": "recentMessagesOrInboxLookup",
+            "recent_text_messages_failed": "recentMessagesOrInboxLookup",
+            "recent_text_messages_unavailable": "recentMessagesOrInboxLookup",
+            "messaging_capability_answer": "recentMessagesOrInboxLookup",
+        }
+        sid = structured_daily.get(str(structured_reason or ""))
+        if not sid:
+            return
+        from .assistant_receipts import try_record_assistant_receipt_for_direct_reply
+
+        def run(c: sqlite3.Connection) -> None:
+            gid = get_goal_id_for_task(c, task_id) or ""
+            try_record_assistant_receipt_for_direct_reply(
+                c,
+                task_id,
+                scenario_payload={
+                    "scenario_id": sid,
+                    "goal_id": gid,
+                    "confidence": 0.85,
+                },
+                reply_text=reply_text,
+                reply_meta={"route": "direct", "reason": structured_reason},
+            )
+
+        try:
+            self.with_lock(run)
+        except Exception:
+            pass
+
+    def _spawn_collaboration_repair_dispatch(self, dispatch: Dict[str, Any]) -> None:
+        """Background bridge to incident repair (bounded action: invoke_repair_cycle)."""
+
+        def _run() -> None:
+            try:
+                from .repair_orchestrator import run_incident_repair_cycle
+                from .store import connect as _connect, migrate as _migrate
+
+                conn = _connect(self.db_path)
+                try:
+                    _migrate(conn)
+                    run_incident_repair_cycle(
+                        conn,
+                        repo_path=self.cursor_repo_path,
+                        actor="collaboration_advisory",
+                        incident_payload=dispatch.get("incident_payload")
+                        if isinstance(dispatch.get("incident_payload"), dict)
+                        else None,
+                        source_task_id=str(dispatch.get("task_id") or ""),
+                        cursor_execute=False,
+                        write_report=True,
+                    )
+                finally:
+                    conn.close()
+            except Exception as exc:  # noqa: BLE001
+                structured_log(
+                    "collaboration_repair_dispatch_failed",
+                    error=str(exc),
+                    task_id=str(dispatch.get("task_id") or ""),
+                )
+
+        threading.Thread(
+            target=_run,
+            name="andrea-collab-repair-dispatch",
+            daemon=True,
+        ).start()
 
     def _run_json_subprocess(
         self,
@@ -2993,6 +3118,40 @@ class SyncServer:
                         EventType.COLLABORATION_RECORDED,
                         collab_payload,
                     )
+                for role_ev in fv.get("collaboration_role_events") or []:
+                    if isinstance(role_ev, dict) and role_ev:
+                        self._append_task_event(
+                            task_id,
+                            EventType.COLLABORATION_ROLE_RECORDED,
+                            role_ev,
+                        )
+                collab_dispatch = fv.get("collaboration_repair_dispatch")
+                if (
+                    isinstance(collab_dispatch, dict)
+                    and str(collab_dispatch.get("kind") or "") == "invoke_repair_cycle"
+                ):
+                    self._spawn_collaboration_repair_dispatch(collab_dispatch)
+                act_payload = fv.get("activation_event_payload")
+                if isinstance(act_payload, dict) and act_payload:
+                    self._append_task_event(
+                        task_id,
+                        EventType.ACTIVATION_DECISION_RECORDED,
+                        act_payload,
+                    )
+                out_payload = fv.get("collaboration_outcome_event_payload")
+                if isinstance(out_payload, dict) and out_payload:
+                    self._append_task_event(
+                        task_id,
+                        EventType.COLLABORATION_OUTCOME_RECORDED,
+                        out_payload,
+                    )
+                rep_payload = fv.get("repair_outcome_event_payload")
+                if isinstance(rep_payload, dict) and rep_payload:
+                    self._append_task_event(
+                        task_id,
+                        EventType.REPAIR_OUTCOME_RECORDED,
+                        rep_payload,
+                    )
             if fv and not fv.get("should_complete_job", True):
                 self._append_orchestration_step(
                     task_id,
@@ -4080,6 +4239,53 @@ def make_handler(server: SyncServer) -> type:
 
                 self._send(200, server.with_lock(lst))
                 return
+            if path == "/v1/internal/rollout/candidates":
+                if not self._auth_internal():
+                    self._send(401, b'{"error":"unauthorized"}')
+                    return
+                if server.with_lock(is_kill_switch_engaged):
+                    self._send(
+                        503,
+                        b'{"ok":false,"error":"kill_switch_engaged"}',
+                    )
+                    return
+
+                def rollout_candidates_body(c: sqlite3.Connection) -> bytes:
+                    from .collaboration_rollout import rollout_api_list_candidates
+
+                    return json.dumps(rollout_api_list_candidates(c), indent=2).encode("utf-8")
+
+                self._send(200, server.with_lock(rollout_candidates_body))
+                return
+            if path == "/v1/internal/daily-assistant-pack":
+                if not self._auth_internal():
+                    self._send(401, b'{"error":"unauthorized"}')
+                    return
+                if server.with_lock(is_kill_switch_engaged):
+                    self._send(
+                        503,
+                        b'{"ok":false,"error":"kill_switch_engaged"}',
+                    )
+                    return
+
+                def daily_pack_get(c: sqlite3.Connection) -> bytes:
+                    from .assistant_domain_rollout import (
+                        build_daily_pack_operator_snapshot,
+                        daily_pack_live_evidence_report,
+                    )
+
+                    snap = build_daily_pack_operator_snapshot(c)
+                    return json.dumps(
+                        {
+                            "ok": True,
+                            "snapshot": snap,
+                            "evidence": daily_pack_live_evidence_report(c),
+                        },
+                        indent=2,
+                    ).encode("utf-8")
+
+                self._send(200, server.with_lock(daily_pack_get))
+                return
             self._send(404, b'{"error":"not found"}')
 
         def do_POST(self) -> None:  # noqa: N802
@@ -4175,6 +4381,187 @@ def make_handler(server: SyncServer) -> type:
                     err = str(result.get("error") or "").lower()
                     code = 404 if "unknown" in err else 400
                     self._send(code, raw)
+                return
+            if path == "/v1/internal/rollout":
+                if not self._auth_internal():
+                    self._send(401, b'{"error":"unauthorized"}')
+                    return
+                if server.with_lock(is_kill_switch_engaged):
+                    self._send(
+                        503,
+                        b'{"ok":false,"error":"kill_switch_engaged"}',
+                    )
+                    return
+                body = self._read_json()
+                action = str(body.get("action") or "").strip().lower()
+
+                def rollout_run(c: sqlite3.Connection) -> bytes:
+                    from .collaboration_rollout import (
+                        build_comparison_from_subject,
+                        operator_approve_live_advisory,
+                        operator_freeze_subject,
+                        operator_rollback_subject,
+                        operator_promote_bounded_action,
+                        record_scenario_onboarding,
+                        rollout_api_list_candidates,
+                    )
+
+                    actor = str(body.get("actor") or "").strip()
+                    scenario_id = str(body.get("scenario_id") or "").strip()
+                    trigger = str(body.get("trigger") or "").strip()
+                    if action == "list_candidates":
+                        return json.dumps(rollout_api_list_candidates(c), indent=2).encode("utf-8")
+                    if action == "approve_live_advisory":
+                        out = operator_approve_live_advisory(
+                            c,
+                            scenario_id=scenario_id,
+                            trigger=trigger,
+                            actor=actor,
+                            risk_notes=str(body.get("risk_notes") or ""),
+                            grant_subject=bool(body.get("grant_subject")),
+                        )
+                        return json.dumps(out, indent=2).encode("utf-8")
+                    if action == "freeze":
+                        out = operator_freeze_subject(
+                            c,
+                            scenario_id=scenario_id,
+                            trigger=trigger,
+                            actor=actor,
+                            reason_codes=body.get("reason_codes")
+                            if isinstance(body.get("reason_codes"), list)
+                            else None,
+                            notes=str(body.get("notes") or ""),
+                        )
+                        return json.dumps(out, indent=2).encode("utf-8")
+                    if action == "rollback":
+                        out = operator_rollback_subject(
+                            c,
+                            scenario_id=scenario_id,
+                            trigger=trigger,
+                            actor=actor,
+                            reason_codes=body.get("reason_codes")
+                            if isinstance(body.get("reason_codes"), list)
+                            else None,
+                        )
+                        return json.dumps(out, indent=2).encode("utf-8")
+                    if action == "promote_bounded_action":
+                        out = operator_promote_bounded_action(
+                            c,
+                            scenario_id=scenario_id,
+                            trigger=trigger,
+                            action_family=str(body.get("action_family") or ""),
+                            actor=actor,
+                            risk_notes=str(body.get("risk_notes") or ""),
+                        )
+                        return json.dumps(out, indent=2).encode("utf-8")
+                    if action == "record_comparison":
+                        if scenario_id and trigger:
+                            out = build_comparison_from_subject(
+                                c, scenario_id=scenario_id, trigger=trigger
+                            )
+                        else:
+                            sk = str(body.get("subject_key") or "").strip()
+                            if not sk:
+                                return json.dumps(
+                                    {"ok": False, "error": "subject_key_or_scenario_trigger_required"}
+                                ).encode("utf-8")
+                            parts = sk.split("|", 1)
+                            if len(parts) != 2:
+                                return json.dumps(
+                                    {"ok": False, "error": "invalid_subject_key"}
+                                ).encode("utf-8")
+                            out = build_comparison_from_subject(
+                                c, scenario_id=parts[0], trigger=parts[1]
+                            )
+                        return json.dumps(out, indent=2).encode("utf-8")
+                    if action == "scenario_onboarding":
+                        out = record_scenario_onboarding(
+                            c,
+                            scenario_id=str(body.get("onboarding_scenario_id") or scenario_id),
+                            state=str(body.get("state") or ""),
+                            actor=actor,
+                            notes=str(body.get("notes") or ""),
+                            evidence=body.get("evidence")
+                            if isinstance(body.get("evidence"), dict)
+                            else None,
+                        )
+                        return json.dumps(out, indent=2).encode("utf-8")
+                    return json.dumps(
+                        {"ok": False, "error": "unknown_action", "action": action}
+                    ).encode("utf-8")
+
+                raw_out = server.with_lock(rollout_run)
+                try:
+                    obj = json.loads(raw_out.decode("utf-8"))
+                except json.JSONDecodeError:
+                    self._send(500, raw_out)
+                    return
+                code = 200 if obj.get("ok") is not False else 400
+                self._send(code, raw_out)
+                return
+            if path == "/v1/internal/daily-assistant-pack":
+                if not self._auth_internal():
+                    self._send(401, b'{"error":"unauthorized"}')
+                    return
+                if server.with_lock(is_kill_switch_engaged):
+                    self._send(
+                        503,
+                        b'{"ok":false,"error":"kill_switch_engaged"}',
+                    )
+                    return
+                body = self._read_json()
+
+                def daily_pack_post(c: sqlite3.Connection) -> bytes:
+                    from .assistant_domain_rollout import record_domain_pack_decision
+
+                    action = str(body.get("action") or "").strip().lower()
+                    actor = str(body.get("actor") or "").strip()
+                    if action == "record_decision":
+                        out = record_domain_pack_decision(
+                            c,
+                            pack_id=str(body.get("pack_id") or ""),
+                            decision=str(body.get("decision") or ""),
+                            actor=actor,
+                            reason=str(body.get("reason") or ""),
+                            payload=body.get("payload") if isinstance(body.get("payload"), dict) else {},
+                        )
+                        return json.dumps(out, indent=2).encode("utf-8")
+                    if action == "snapshot":
+                        from .assistant_domain_rollout import build_daily_pack_operator_snapshot
+
+                        return json.dumps(
+                            {"ok": True, "snapshot": build_daily_pack_operator_snapshot(c)},
+                            indent=2,
+                        ).encode("utf-8")
+                    if action == "followthrough_snapshot":
+                        from .assistant_followthrough import build_followthrough_operator_board
+
+                        return json.dumps(
+                            {"ok": True, "followthrough": build_followthrough_operator_board(c)},
+                            indent=2,
+                        ).encode("utf-8")
+                    if action == "set_followthrough_pack_status":
+                        from .assistant_followthrough import set_followthrough_pack_status_override
+
+                        out = set_followthrough_pack_status_override(
+                            c,
+                            status=str(body.get("followthrough_pack_status") or body.get("status") or ""),
+                            actor=actor,
+                            reason=str(body.get("reason") or ""),
+                        )
+                        return json.dumps(out, indent=2).encode("utf-8")
+                    return json.dumps({"ok": False, "error": "unknown_action", "action": action}).encode(
+                        "utf-8"
+                    )
+
+                raw_dp = server.with_lock(daily_pack_post)
+                try:
+                    obj = json.loads(raw_dp.decode("utf-8"))
+                except json.JSONDecodeError:
+                    self._send(500, raw_dp)
+                    return
+                code = 200 if obj.get("ok") is not False else 400
+                self._send(code, raw_dp)
                 return
             if path == "/v1/telegram/webhook":
                 if server.with_lock(is_kill_switch_engaged):

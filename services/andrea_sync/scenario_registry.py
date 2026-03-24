@@ -1,4 +1,8 @@
-"""Code-defined scenario catalog: support boundaries and defaults."""
+"""Code-defined scenario catalog: support boundaries and defaults.
+
+Rollout onboarding for measured→shadow→live flows is tracked in scenario_onboarding
+(see collaboration_rollout); DRAFT_ONLY scenarios cannot be moved to live_advisory there.
+"""
 from __future__ import annotations
 
 from typing import Dict, FrozenSet, Optional
@@ -210,6 +214,7 @@ FIRST_SUPPORTED_SCENARIO_IDS: FrozenSet[str] = frozenset(
         "statusFollowupContinue",
         "noteOrReminderCapture",
         "recentMessagesOrInboxLookup",
+        "goalContinuationAcrossSessions",
     }
 )
 

@@ -57,19 +57,40 @@ def should_attach_collaboration(
     trigger: str,
     plan_summary: Dict[str, Any],
 ) -> bool:
+    return not bool(
+        explain_collaboration_attachment_blockers(
+            scenario_id=scenario_id,
+            contract=contract,
+            trigger=trigger,
+            plan_summary=plan_summary,
+        )
+    )
+
+
+def explain_collaboration_attachment_blockers(
+    *,
+    scenario_id: str,
+    contract: Any,
+    trigger: str,
+    plan_summary: Dict[str, Any],
+) -> List[str]:
+    """Stable reason codes when collaboration metadata is not attached."""
+    reasons: List[str] = []
     if not collaboration_layer_enabled():
-        return False
+        reasons.append("collaboration_layer_disabled")
+        return reasons
     sid = str(scenario_id or "").strip()
     if sid not in COLLABORATION_ENABLED_SCENARIOS:
-        return False
+        reasons.append("scenario_not_collaboration_enabled")
     if contract is None:
-        return False
+        reasons.append("missing_contract")
     rounds = _prior_collab_rounds(plan_summary)
-    if rounds >= int(collaboration_budget().get("max_rounds_per_step") or 2):
-        return False
+    max_rounds = int(collaboration_budget().get("max_rounds_per_step") or 2)
+    if rounds >= max_rounds:
+        reasons.append("collaboration_round_budget_exhausted")
     if trigger not in ("verify_fail", "trust_gate", "verify_weak"):
-        return False
-    return True
+        reasons.append("trigger_not_collaboration_eligible")
+    return reasons
 
 
 def _candidate_lanes_for_contract(contract: Any, current_lane: str) -> List[str]:
@@ -103,7 +124,8 @@ def build_collaboration_bundle(
     agent_url: str = "",
 ) -> Optional[Tuple[CollaborationRequest, RepairRecommendation, ArbitrationDecision, List[RoleAssignment], ModelContribution]]:
     """
-    Deterministic repair strategist: no live model calls in v1.
+    Deterministic repair strategist baseline; live OpenClaw roles may augment this when
+    `ANDREA_SYNC_COLLAB_RUNTIME_ENABLED` is on (see `collaboration_runtime`).
     Returns artifacts to persist and optionally emit COLLABORATION_RECORDED.
     """
     if not should_attach_collaboration(
@@ -232,6 +254,13 @@ def collaboration_summary_patch(
     request: CollaborationRequest,
     repair: RepairRecommendation,
     arbitration: ArbitrationDecision,
+    role_invocation_delta: int = 0,
+    usefulness_status: str = "",
+    advisory_source: str = "",
+    activation_mode: str = "",
+    canonical_usefulness: str = "",
+    activation_policy_version: str = "",
+    activation_reason_codes: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Keys to merge into execution_plans.summary_json (shallow update via store)."""
     prior = prev.get("collaboration") if isinstance(prev.get("collaboration"), dict) else {}
@@ -239,16 +268,36 @@ def collaboration_summary_patch(
     strategies = list(prior.get("strategies") or [])
     if isinstance(strategies, list) and repair.strategy not in strategies:
         strategies.append(repair.strategy)
-    return {
-        "collaboration": {
-            "rounds": rounds,
-            "last_collab_id": request.collab_id,
-            "last_trigger": request.trigger,
-            "last_strategy": repair.strategy,
-            "strategies": strategies[-8:],
-            "repair_state": (
-                "suggested" if repair.strategy != "incident_escalation_hint" else "escalation_hint"
-            ),
-            "arbitration_state": arbitration.decision,
-        }
+    try:
+        prior_roles = max(0, int(prior.get("role_invocation_count") or 0))
+    except (TypeError, ValueError):
+        prior_roles = 0
+    try:
+        delta = max(0, int(role_invocation_delta or 0))
+    except (TypeError, ValueError):
+        delta = 0
+    collab: Dict[str, Any] = {
+        "rounds": rounds,
+        "last_collab_id": request.collab_id,
+        "last_trigger": request.trigger,
+        "last_strategy": repair.strategy,
+        "strategies": strategies[-8:],
+        "repair_state": (
+            "suggested" if repair.strategy != "incident_escalation_hint" else "escalation_hint"
+        ),
+        "arbitration_state": arbitration.decision,
+        "role_invocation_count": prior_roles + delta,
     }
+    if usefulness_status:
+        collab["usefulness_status"] = str(usefulness_status)[:120]
+    if advisory_source:
+        collab["advisory_source"] = str(advisory_source)[:80]
+    if activation_mode:
+        collab["last_activation_mode"] = str(activation_mode)[:40]
+    if canonical_usefulness:
+        collab["last_canonical_usefulness"] = str(canonical_usefulness)[:40]
+    if activation_policy_version:
+        collab["activation_policy_version"] = str(activation_policy_version)[:40]
+    if activation_reason_codes:
+        collab["last_activation_reason_codes"] = [str(x)[:80] for x in activation_reason_codes[:8]]
+    return {"collaboration": collab}

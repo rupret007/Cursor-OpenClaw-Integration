@@ -691,6 +691,15 @@ def _finalize_reported_cursor_completion(
     collab_payload = fv.get("collaboration_event_payload")
     if isinstance(collab_payload, dict) and collab_payload:
         _append(conn, task_id, EventType.COLLABORATION_RECORDED, collab_payload)
+    act_payload = fv.get("activation_event_payload")
+    if isinstance(act_payload, dict) and act_payload:
+        _append(conn, task_id, EventType.ACTIVATION_DECISION_RECORDED, act_payload)
+    out_payload = fv.get("collaboration_outcome_event_payload")
+    if isinstance(out_payload, dict) and out_payload:
+        _append(conn, task_id, EventType.COLLABORATION_OUTCOME_RECORDED, out_payload)
+    rep_payload = fv.get("repair_outcome_event_payload")
+    if isinstance(rep_payload, dict) and rep_payload:
+        _append(conn, task_id, EventType.REPAIR_OUTCOME_RECORDED, rep_payload)
 
     if not fv.get("should_complete_job", True):
         scen_rx = str(fv.get("scenario_user_receipt") or "").strip()
@@ -1256,6 +1265,30 @@ def _handle_create_reminder(
             "delivery_target": delivery_target,
         },
     )
+    try:
+        from .assistant_receipts import try_record_reminder_receipt
+        from .domain_repairs import suggest_missing_reminder_target_repair
+
+        try_record_reminder_receipt(
+            conn,
+            task_id=tid,
+            reminder_id=reminder_id,
+            message=message,
+            due_at=due_at,
+            status=status,
+            delivery_channel=delivery_channel,
+            delivery_target=delivery_target,
+            principal_id=principal_id,
+        )
+        if str(status or "") == "awaiting_delivery_channel":
+            suggest_missing_reminder_target_repair(
+                conn,
+                task_id=tid,
+                reminder_id=reminder_id,
+                principal_id=principal_id,
+            )
+    except Exception:
+        pass
     return {
         "ok": True,
         "task_id": tid,
@@ -1339,6 +1372,21 @@ def _handle_run_proactive_sweep(
                     "delivery_target": target,
                 },
             )
+            try:
+                from .assistant_followthrough import on_reminder_lifecycle_event
+
+                on_reminder_lifecycle_event(
+                    conn,
+                    task_id=task_id,
+                    event_name="delivered",
+                    payload={
+                        "principal_id": principal_id,
+                        "reminder_id": reminder_id,
+                        "delivery_target": target,
+                    },
+                )
+            except Exception:
+                pass
             delivered += 1
         except Exception as exc:  # noqa: BLE001
             update_reminder(
@@ -1358,7 +1406,30 @@ def _handle_run_proactive_sweep(
                     "error": str(exc),
                 },
             )
+            try:
+                from .assistant_followthrough import on_reminder_lifecycle_event
+
+                on_reminder_lifecycle_event(
+                    conn,
+                    task_id=task_id,
+                    event_name="failed",
+                    payload={
+                        "principal_id": principal_id,
+                        "reminder_id": reminder_id,
+                        "delivery_target": target,
+                        "error": str(exc),
+                    },
+                )
+            except Exception:
+                pass
             failed += 1
+    ft_poll: list = []
+    try:
+        from .assistant_followthrough import poll_due_workflows_for_followthrough
+
+        ft_poll = poll_due_workflows_for_followthrough(conn, limit=12)
+    except Exception:
+        ft_poll = []
     return {
         "ok": True,
         "task_id": SYSTEM_TASK_ID,
@@ -1366,6 +1437,7 @@ def _handle_run_proactive_sweep(
         "failed": failed,
         "awaiting_delivery_channel": awaiting,
         "due_count": len(due),
+        "followthrough_workflow_signals": ft_poll,
     }
 
 

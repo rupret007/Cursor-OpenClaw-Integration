@@ -314,12 +314,333 @@ def migrate(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_verification_results_plan
             ON verification_results(plan_id, step_id);
+        CREATE TABLE IF NOT EXISTS collaboration_activation_decisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT NOT NULL,
+            plan_id TEXT NOT NULL,
+            step_id TEXT NOT NULL,
+            collab_id TEXT NOT NULL DEFAULT '',
+            scenario_id TEXT NOT NULL,
+            trigger TEXT NOT NULL,
+            ts REAL NOT NULL,
+            activation_mode TEXT NOT NULL,
+            policy_version TEXT NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_collab_activation_task_ts
+            ON collaboration_activation_decisions(task_id, ts DESC);
+        CREATE TABLE IF NOT EXISTS collaboration_outcomes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT NOT NULL,
+            plan_id TEXT NOT NULL,
+            step_id TEXT NOT NULL,
+            collab_id TEXT NOT NULL,
+            scenario_id TEXT NOT NULL,
+            trigger TEXT NOT NULL,
+            ts REAL NOT NULL,
+            canonical_class TEXT NOT NULL,
+            usefulness_detail TEXT NOT NULL DEFAULT '',
+            live_advisory_ran INTEGER NOT NULL DEFAULT 0,
+            role_invocation_delta INTEGER NOT NULL DEFAULT 0,
+            payload_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_collab_outcomes_scen_trig
+            ON collaboration_outcomes(scenario_id, trigger, ts DESC);
+        CREATE TABLE IF NOT EXISTS repair_outcomes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT NOT NULL,
+            plan_id TEXT NOT NULL,
+            collab_id TEXT NOT NULL,
+            ts REAL NOT NULL,
+            action_type TEXT NOT NULL,
+            executed INTEGER NOT NULL DEFAULT 0,
+            payload_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_repair_outcomes_task_ts
+            ON repair_outcomes(task_id, ts DESC);
+        CREATE TABLE IF NOT EXISTS collaboration_promotion_revisions (
+            revision_id TEXT PRIMARY KEY,
+            subject_key TEXT NOT NULL,
+            promotion_level TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active',
+            operator_ack INTEGER NOT NULL DEFAULT 0,
+            fallback_revision_id TEXT NOT NULL DEFAULT '',
+            evidence_snapshot_json TEXT NOT NULL DEFAULT '{}',
+            risk_notes TEXT NOT NULL DEFAULT '',
+            created_at REAL NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_collab_promo_subject_status_created
+            ON collaboration_promotion_revisions(subject_key, status, created_at DESC);
+        CREATE TABLE IF NOT EXISTS collaboration_promotion_rollbacks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            revision_id TEXT NOT NULL,
+            subject_key TEXT NOT NULL,
+            trigger_type TEXT NOT NULL,
+            observed_json TEXT NOT NULL DEFAULT '{}',
+            fallback_revision_id TEXT NOT NULL DEFAULT '',
+            reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            ts REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_collab_promo_rb_subject_ts
+            ON collaboration_promotion_rollbacks(subject_key, ts DESC);
+        CREATE TABLE IF NOT EXISTS collaboration_operator_actions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            action_id TEXT NOT NULL UNIQUE,
+            actor TEXT NOT NULL,
+            action_kind TEXT NOT NULL,
+            subject_key TEXT NOT NULL DEFAULT '',
+            scenario_id TEXT NOT NULL DEFAULT '',
+            trigger TEXT NOT NULL DEFAULT '',
+            requested_level TEXT NOT NULL DEFAULT '',
+            decision TEXT NOT NULL DEFAULT '',
+            revision_id TEXT NOT NULL DEFAULT '',
+            reason TEXT NOT NULL DEFAULT '',
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            ts REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_collab_op_actions_ts
+            ON collaboration_operator_actions(ts DESC);
+        CREATE TABLE IF NOT EXISTS scenario_onboarding (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            onboarding_id TEXT NOT NULL UNIQUE,
+            scenario_id TEXT NOT NULL,
+            state TEXT NOT NULL,
+            actor TEXT NOT NULL DEFAULT '',
+            notes TEXT NOT NULL DEFAULT '',
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            ts REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_scenario_onboarding_scenario_ts
+            ON scenario_onboarding(scenario_id, ts DESC);
+        CREATE TABLE IF NOT EXISTS live_shadow_comparison_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            comparison_id TEXT NOT NULL UNIQUE,
+            subject_key TEXT NOT NULL,
+            revision_id TEXT NOT NULL DEFAULT '',
+            window_start REAL NOT NULL DEFAULT 0,
+            window_end REAL NOT NULL DEFAULT 0,
+            baseline_json TEXT NOT NULL DEFAULT '{}',
+            shadow_json TEXT NOT NULL DEFAULT '{}',
+            live_json TEXT NOT NULL DEFAULT '{}',
+            deltas_json TEXT NOT NULL DEFAULT '{}',
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            ts REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_live_shadow_subject_ts
+            ON live_shadow_comparison_records(subject_key, ts DESC);
+        CREATE TABLE IF NOT EXISTS collaboration_rollout_subject_grants (
+            subject_key TEXT PRIMARY KEY,
+            actor TEXT NOT NULL DEFAULT '',
+            notes TEXT NOT NULL DEFAULT '',
+            granted_at REAL NOT NULL,
+            revoked INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS user_outcome_receipts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            receipt_id TEXT NOT NULL UNIQUE,
+            task_id TEXT NOT NULL,
+            goal_id TEXT NOT NULL DEFAULT '',
+            scenario_id TEXT NOT NULL DEFAULT '',
+            pack_id TEXT NOT NULL DEFAULT '',
+            receipt_kind TEXT NOT NULL DEFAULT '',
+            summary TEXT NOT NULL DEFAULT '',
+            proof_refs_json TEXT NOT NULL DEFAULT '{}',
+            delivery_state TEXT NOT NULL DEFAULT '',
+            next_step TEXT NOT NULL DEFAULT '',
+            pass_hint INTEGER NOT NULL DEFAULT 1,
+            created_at REAL NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            closure_state TEXT NOT NULL DEFAULT '',
+            closure_proof_id TEXT NOT NULL DEFAULT '',
+            followthrough_kind TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_user_outcome_receipts_task
+            ON user_outcome_receipts(task_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_user_outcome_receipts_scenario
+            ON user_outcome_receipts(scenario_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_user_outcome_receipts_pack
+            ON user_outcome_receipts(pack_id, created_at DESC);
+        CREATE TABLE IF NOT EXISTS continuation_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            continuation_id TEXT NOT NULL UNIQUE,
+            principal_id TEXT NOT NULL DEFAULT '',
+            source_channel TEXT NOT NULL DEFAULT '',
+            source_task_id TEXT NOT NULL DEFAULT '',
+            linked_task_id TEXT NOT NULL DEFAULT '',
+            reason TEXT NOT NULL DEFAULT '',
+            confidence_band TEXT NOT NULL DEFAULT '',
+            created_at REAL NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_continuation_records_linked
+            ON continuation_records(linked_task_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_continuation_records_principal
+            ON continuation_records(principal_id, created_at DESC);
+        CREATE TABLE IF NOT EXISTS domain_repair_outcomes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            repair_outcome_id TEXT NOT NULL UNIQUE,
+            domain_id TEXT NOT NULL DEFAULT '',
+            scenario_id TEXT NOT NULL DEFAULT '',
+            task_id TEXT NOT NULL DEFAULT '',
+            repair_family TEXT NOT NULL DEFAULT '',
+            executed INTEGER NOT NULL DEFAULT 0,
+            result TEXT NOT NULL DEFAULT '',
+            fallback_used INTEGER NOT NULL DEFAULT 0,
+            trust_safe INTEGER NOT NULL DEFAULT 1,
+            ts REAL NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_domain_repair_outcomes_task
+            ON domain_repair_outcomes(task_id, ts DESC);
+        CREATE INDEX IF NOT EXISTS idx_domain_repair_outcomes_domain
+            ON domain_repair_outcomes(domain_id, ts DESC);
+        CREATE TABLE IF NOT EXISTS domain_rollout_decisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            decision_id TEXT NOT NULL UNIQUE,
+            pack_id TEXT NOT NULL DEFAULT '',
+            decision TEXT NOT NULL DEFAULT '',
+            actor TEXT NOT NULL DEFAULT '',
+            reason TEXT NOT NULL DEFAULT '',
+            created_at REAL NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_domain_rollout_decisions_pack
+            ON domain_rollout_decisions(pack_id, created_at DESC);
+        CREATE TABLE IF NOT EXISTS open_loop_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            loop_id TEXT NOT NULL UNIQUE,
+            task_id TEXT NOT NULL DEFAULT '',
+            goal_id TEXT NOT NULL DEFAULT '',
+            scenario_id TEXT NOT NULL DEFAULT '',
+            pack_id TEXT NOT NULL DEFAULT '',
+            loop_kind TEXT NOT NULL DEFAULT '',
+            open_loop_state TEXT NOT NULL DEFAULT '',
+            opened_reason TEXT NOT NULL DEFAULT '',
+            opened_at REAL NOT NULL,
+            due_at REAL NOT NULL DEFAULT 0,
+            owner_kind TEXT NOT NULL DEFAULT '',
+            receipt_id TEXT NOT NULL DEFAULT '',
+            risk_tier TEXT NOT NULL DEFAULT 'low',
+            proof_refs_json TEXT NOT NULL DEFAULT '{}',
+            payload_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_open_loop_task_opened
+            ON open_loop_records(task_id, opened_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_open_loop_pack
+            ON open_loop_records(pack_id, opened_at DESC);
+        CREATE TABLE IF NOT EXISTS closure_decisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            decision_id TEXT NOT NULL UNIQUE,
+            loop_id TEXT NOT NULL DEFAULT '',
+            task_id TEXT NOT NULL DEFAULT '',
+            closure_state TEXT NOT NULL DEFAULT '',
+            reason TEXT NOT NULL DEFAULT '',
+            proof_kind TEXT NOT NULL DEFAULT '',
+            proof_refs_json TEXT NOT NULL DEFAULT '{}',
+            confidence_band TEXT NOT NULL DEFAULT '',
+            actor_or_rule TEXT NOT NULL DEFAULT '',
+            created_at REAL NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_closure_loop
+            ON closure_decisions(loop_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_closure_task
+            ON closure_decisions(task_id, created_at DESC);
+        CREATE TABLE IF NOT EXISTS continuation_triggers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trigger_id TEXT NOT NULL UNIQUE,
+            loop_id TEXT NOT NULL DEFAULT '',
+            task_id TEXT NOT NULL DEFAULT '',
+            trigger_type TEXT NOT NULL DEFAULT '',
+            due_at REAL NOT NULL DEFAULT 0,
+            eligibility TEXT NOT NULL DEFAULT '',
+            evidence_snapshot_json TEXT NOT NULL DEFAULT '{}',
+            created_at REAL NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_continuation_triggers_task
+            ON continuation_triggers(task_id, created_at DESC);
+        CREATE TABLE IF NOT EXISTS followup_recommendations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            recommendation_id TEXT NOT NULL UNIQUE,
+            loop_id TEXT NOT NULL DEFAULT '',
+            task_id TEXT NOT NULL DEFAULT '',
+            recommended_action TEXT NOT NULL DEFAULT '',
+            channel TEXT NOT NULL DEFAULT '',
+            why_now TEXT NOT NULL DEFAULT '',
+            urgency TEXT NOT NULL DEFAULT '',
+            shadow_only INTEGER NOT NULL DEFAULT 1,
+            risk_notes TEXT NOT NULL DEFAULT '',
+            created_at REAL NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_followup_reco_task
+            ON followup_recommendations(task_id, created_at DESC);
+        CREATE TABLE IF NOT EXISTS continuation_executions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            execution_id TEXT NOT NULL UNIQUE,
+            loop_id TEXT NOT NULL DEFAULT '',
+            task_id TEXT NOT NULL DEFAULT '',
+            action_kind TEXT NOT NULL DEFAULT '',
+            channel TEXT NOT NULL DEFAULT '',
+            executed INTEGER NOT NULL DEFAULT 0,
+            result TEXT NOT NULL DEFAULT '',
+            message_ref TEXT NOT NULL DEFAULT '',
+            created_at REAL NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_continuation_exec_task
+            ON continuation_executions(task_id, created_at DESC);
+        CREATE TABLE IF NOT EXISTS closure_proofs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            proof_id TEXT NOT NULL UNIQUE,
+            loop_id TEXT NOT NULL DEFAULT '',
+            task_id TEXT NOT NULL DEFAULT '',
+            proof_kind TEXT NOT NULL DEFAULT '',
+            proof_refs_json TEXT NOT NULL DEFAULT '{}',
+            verdict TEXT NOT NULL DEFAULT '',
+            summary TEXT NOT NULL DEFAULT '',
+            created_at REAL NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_closure_proofs_loop
+            ON closure_proofs(loop_id, created_at DESC);
+        CREATE TABLE IF NOT EXISTS stale_task_indicators (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            indicator_id TEXT NOT NULL UNIQUE,
+            loop_id TEXT NOT NULL DEFAULT '',
+            task_id TEXT NOT NULL DEFAULT '',
+            staleness_kind TEXT NOT NULL DEFAULT '',
+            window_seconds REAL NOT NULL DEFAULT 0,
+            severity TEXT NOT NULL DEFAULT '',
+            detected_at REAL NOT NULL,
+            reason TEXT NOT NULL DEFAULT '',
+            payload_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_stale_task_task
+            ON stale_task_indicators(task_id, detected_at DESC);
         """
     )
     conn.execute(
         "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '1')"
     )
     conn.commit()
+    _apply_user_outcome_receipt_followthrough_columns(conn)
+
+
+def _apply_user_outcome_receipt_followthrough_columns(conn: sqlite3.Connection) -> None:
+    """Best-effort ALTER for existing DBs (SQLite has no IF NOT EXISTS for columns)."""
+    for stmt in (
+        "ALTER TABLE user_outcome_receipts ADD COLUMN closure_state TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE user_outcome_receipts ADD COLUMN closure_proof_id TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE user_outcome_receipts ADD COLUMN followthrough_kind TEXT NOT NULL DEFAULT ''",
+    ):
+        try:
+            conn.execute(stmt)
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
 
 
 def append_event(
@@ -339,6 +660,1167 @@ def append_event(
     )
     conn.commit()
     return int(cur.lastrowid)
+
+
+def insert_collaboration_activation_decision(
+    conn: sqlite3.Connection, task_id: str, payload: Dict[str, Any]
+) -> None:
+    ts = float(payload.get("recorded_at") or time.time())
+    conn.execute(
+        """
+        INSERT INTO collaboration_activation_decisions(
+            task_id, plan_id, step_id, collab_id, scenario_id, trigger, ts,
+            activation_mode, policy_version, payload_json
+        ) VALUES (?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            task_id,
+            str(payload.get("plan_id") or ""),
+            str(payload.get("step_id") or ""),
+            str(payload.get("collab_id") or ""),
+            str(payload.get("scenario_id") or ""),
+            str(payload.get("trigger") or ""),
+            ts,
+            str(payload.get("activation_mode") or ""),
+            str(payload.get("policy_version") or ""),
+            json.dumps(payload, ensure_ascii=False),
+        ),
+    )
+    conn.commit()
+
+
+def insert_collaboration_outcome_row(
+    conn: sqlite3.Connection, task_id: str, payload: Dict[str, Any]
+) -> None:
+    ts = float(payload.get("recorded_at") or time.time())
+    conn.execute(
+        """
+        INSERT INTO collaboration_outcomes(
+            task_id, plan_id, step_id, collab_id, scenario_id, trigger, ts,
+            canonical_class, usefulness_detail, live_advisory_ran, role_invocation_delta,
+            payload_json
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            task_id,
+            str(payload.get("plan_id") or ""),
+            str(payload.get("step_id") or ""),
+            str(payload.get("collab_id") or ""),
+            str(payload.get("scenario_id") or ""),
+            str(payload.get("trigger") or ""),
+            ts,
+            str(payload.get("canonical_class") or ""),
+            str(payload.get("usefulness_detail") or "")[:200],
+            1 if payload.get("live_advisory_ran") else 0,
+            int(payload.get("role_invocation_delta") or 0),
+            json.dumps(payload, ensure_ascii=False),
+        ),
+    )
+    conn.commit()
+
+
+def insert_repair_outcome_row(conn: sqlite3.Connection, task_id: str, payload: Dict[str, Any]) -> None:
+    ts = float(payload.get("recorded_at") or time.time())
+    conn.execute(
+        """
+        INSERT INTO repair_outcomes(
+            task_id, plan_id, collab_id, ts, action_type, executed, payload_json
+        ) VALUES (?,?,?,?,?,?,?)
+        """,
+        (
+            task_id,
+            str(payload.get("plan_id") or ""),
+            str(payload.get("collab_id") or ""),
+            ts,
+            str(payload.get("action_type") or "")[:120],
+            1 if payload.get("executed") else 0,
+            json.dumps(payload, ensure_ascii=False),
+        ),
+    )
+    conn.commit()
+
+
+def supersede_active_promotion_revisions(conn: sqlite3.Connection, subject_key: str) -> None:
+    conn.execute(
+        """
+        UPDATE collaboration_promotion_revisions
+        SET status = 'superseded'
+        WHERE subject_key = ? AND status = 'active'
+        """,
+        (str(subject_key or ""),),
+    )
+    conn.commit()
+
+
+def insert_collaboration_promotion_revision(
+    conn: sqlite3.Connection,
+    *,
+    revision_id: str,
+    subject_key: str,
+    promotion_level: str,
+    status: str = "active",
+    operator_ack: int = 0,
+    fallback_revision_id: str = "",
+    evidence_snapshot: Optional[Dict[str, Any]] = None,
+    risk_notes: str = "",
+    payload: Optional[Dict[str, Any]] = None,
+    created_at: Optional[float] = None,
+) -> None:
+    ts = float(created_at if created_at is not None else time.time())
+    conn.execute(
+        """
+        INSERT INTO collaboration_promotion_revisions(
+            revision_id, subject_key, promotion_level, status, operator_ack,
+            fallback_revision_id, evidence_snapshot_json, risk_notes, created_at, payload_json
+        ) VALUES (?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            str(revision_id or ""),
+            str(subject_key or ""),
+            str(promotion_level or ""),
+            str(status or "active"),
+            1 if operator_ack else 0,
+            str(fallback_revision_id or ""),
+            json.dumps(evidence_snapshot or {}, ensure_ascii=False),
+            str(risk_notes or "")[:2000],
+            ts,
+            json.dumps(payload or {}, ensure_ascii=False),
+        ),
+    )
+    conn.commit()
+
+
+def fetch_active_promotion_revision(
+    conn: sqlite3.Connection, subject_key: str
+) -> Optional[sqlite3.Row]:
+    try:
+        return conn.execute(
+            """
+            SELECT * FROM collaboration_promotion_revisions
+            WHERE subject_key = ? AND status = 'active'
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (str(subject_key or ""),),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+
+
+def insert_collaboration_promotion_rollback(
+    conn: sqlite3.Connection,
+    *,
+    revision_id: str,
+    subject_key: str,
+    trigger_type: str,
+    observed: Optional[Dict[str, Any]] = None,
+    fallback_revision_id: str = "",
+    reason_codes: Optional[List[str]] = None,
+    ts: Optional[float] = None,
+) -> None:
+    t = float(ts if ts is not None else time.time())
+    conn.execute(
+        """
+        INSERT INTO collaboration_promotion_rollbacks(
+            revision_id, subject_key, trigger_type, observed_json,
+            fallback_revision_id, reason_codes_json, ts
+        ) VALUES (?,?,?,?,?,?,?)
+        """,
+        (
+            str(revision_id or ""),
+            str(subject_key or ""),
+            str(trigger_type or ""),
+            json.dumps(observed or {}, ensure_ascii=False),
+            str(fallback_revision_id or ""),
+            json.dumps(list(reason_codes or []), ensure_ascii=False),
+            t,
+        ),
+    )
+    conn.commit()
+
+
+def list_recent_promotion_rollbacks(
+    conn: sqlite3.Connection, *, limit: int = 12
+) -> List[sqlite3.Row]:
+    try:
+        return list(
+            conn.execute(
+                """
+                SELECT * FROM collaboration_promotion_rollbacks
+                ORDER BY ts DESC
+                LIMIT ?
+                """,
+                (max(1, int(limit)),),
+            ).fetchall()
+        )
+    except sqlite3.OperationalError:
+        return []
+
+
+def list_active_promotion_revisions(conn: sqlite3.Connection) -> List[sqlite3.Row]:
+    try:
+        return list(
+            conn.execute(
+                """
+                SELECT * FROM collaboration_promotion_revisions
+                WHERE status = 'active'
+                ORDER BY created_at DESC
+                LIMIT 64
+                """
+            ).fetchall()
+        )
+    except sqlite3.OperationalError:
+        return []
+
+
+def insert_collaboration_operator_action(
+    conn: sqlite3.Connection,
+    *,
+    action_id: str,
+    actor: str,
+    action_kind: str,
+    subject_key: str = "",
+    scenario_id: str = "",
+    trigger: str = "",
+    requested_level: str = "",
+    decision: str = "",
+    revision_id: str = "",
+    reason: str = "",
+    payload: Optional[Dict[str, Any]] = None,
+    ts: Optional[float] = None,
+) -> None:
+    t = float(ts if ts is not None else time.time())
+    conn.execute(
+        """
+        INSERT INTO collaboration_operator_actions(
+            action_id, actor, action_kind, subject_key, scenario_id, trigger,
+            requested_level, decision, revision_id, reason, payload_json, ts
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            str(action_id or ""),
+            str(actor or "")[:200],
+            str(action_kind or "")[:120],
+            str(subject_key or "")[:240],
+            str(scenario_id or "")[:120],
+            str(trigger or "")[:120],
+            str(requested_level or "")[:80],
+            str(decision or "")[:80],
+            str(revision_id or "")[:120],
+            str(reason or "")[:2000],
+            json.dumps(payload or {}, ensure_ascii=False),
+            t,
+        ),
+    )
+    conn.commit()
+
+
+def list_recent_operator_actions(
+    conn: sqlite3.Connection, *, limit: int = 24
+) -> List[sqlite3.Row]:
+    try:
+        return list(
+            conn.execute(
+                """
+                SELECT * FROM collaboration_operator_actions
+                ORDER BY ts DESC
+                LIMIT ?
+                """,
+                (max(1, int(limit)),),
+            ).fetchall()
+        )
+    except sqlite3.OperationalError:
+        return []
+
+
+def insert_scenario_onboarding_record(
+    conn: sqlite3.Connection,
+    *,
+    onboarding_id: str,
+    scenario_id: str,
+    state: str,
+    actor: str = "",
+    notes: str = "",
+    evidence: Optional[Dict[str, Any]] = None,
+    ts: Optional[float] = None,
+) -> None:
+    t = float(ts if ts is not None else time.time())
+    conn.execute(
+        """
+        INSERT INTO scenario_onboarding(
+            onboarding_id, scenario_id, state, actor, notes, evidence_json, ts
+        ) VALUES (?,?,?,?,?,?,?)
+        """,
+        (
+            str(onboarding_id or ""),
+            str(scenario_id or "")[:120],
+            str(state or "")[:80],
+            str(actor or "")[:200],
+            str(notes or "")[:2000],
+            json.dumps(evidence or {}, ensure_ascii=False),
+            t,
+        ),
+    )
+    conn.commit()
+
+
+def fetch_latest_scenario_onboarding(
+    conn: sqlite3.Connection, scenario_id: str
+) -> Optional[sqlite3.Row]:
+    try:
+        return conn.execute(
+            """
+            SELECT * FROM scenario_onboarding
+            WHERE scenario_id = ?
+            ORDER BY ts DESC
+            LIMIT 1
+            """,
+            (str(scenario_id or ""),),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+
+
+def insert_live_shadow_comparison_record(
+    conn: sqlite3.Connection,
+    *,
+    comparison_id: str,
+    subject_key: str,
+    revision_id: str = "",
+    window_start: float = 0.0,
+    window_end: float = 0.0,
+    baseline: Optional[Dict[str, Any]] = None,
+    shadow: Optional[Dict[str, Any]] = None,
+    live: Optional[Dict[str, Any]] = None,
+    deltas: Optional[Dict[str, Any]] = None,
+    payload: Optional[Dict[str, Any]] = None,
+    ts: Optional[float] = None,
+) -> None:
+    t = float(ts if ts is not None else time.time())
+    conn.execute(
+        """
+        INSERT INTO live_shadow_comparison_records(
+            comparison_id, subject_key, revision_id, window_start, window_end,
+            baseline_json, shadow_json, live_json, deltas_json, payload_json, ts
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            str(comparison_id or ""),
+            str(subject_key or "")[:240],
+            str(revision_id or "")[:120],
+            float(window_start or 0.0),
+            float(window_end or 0.0),
+            json.dumps(baseline or {}, ensure_ascii=False),
+            json.dumps(shadow or {}, ensure_ascii=False),
+            json.dumps(live or {}, ensure_ascii=False),
+            json.dumps(deltas or {}, ensure_ascii=False),
+            json.dumps(payload or {}, ensure_ascii=False),
+            t,
+        ),
+    )
+    conn.commit()
+
+
+def list_recent_live_shadow_comparisons(
+    conn: sqlite3.Connection, *, limit: int = 16
+) -> List[sqlite3.Row]:
+    try:
+        return list(
+            conn.execute(
+                """
+                SELECT * FROM live_shadow_comparison_records
+                ORDER BY ts DESC
+                LIMIT ?
+                """,
+                (max(1, int(limit)),),
+            ).fetchall()
+        )
+    except sqlite3.OperationalError:
+        return []
+
+
+def upsert_rollout_subject_grant(
+    conn: sqlite3.Connection,
+    *,
+    subject_key: str,
+    actor: str = "",
+    notes: str = "",
+) -> None:
+    ts = time.time()
+    conn.execute(
+        """
+        INSERT INTO collaboration_rollout_subject_grants(
+            subject_key, actor, notes, granted_at, revoked
+        ) VALUES (?,?,?,?,0)
+        ON CONFLICT(subject_key) DO UPDATE SET
+            actor = excluded.actor,
+            notes = excluded.notes,
+            granted_at = excluded.granted_at,
+            revoked = 0
+        """,
+        (
+            str(subject_key or "")[:240],
+            str(actor or "")[:200],
+            str(notes or "")[:2000],
+            ts,
+        ),
+    )
+    conn.commit()
+
+
+def revoke_rollout_subject_grant(conn: sqlite3.Connection, subject_key: str) -> None:
+    conn.execute(
+        """
+        UPDATE collaboration_rollout_subject_grants
+        SET revoked = 1
+        WHERE subject_key = ?
+        """,
+        (str(subject_key or ""),),
+    )
+    conn.commit()
+
+
+def list_active_rollout_subject_grants(conn: sqlite3.Connection) -> List[sqlite3.Row]:
+    try:
+        return list(
+            conn.execute(
+                """
+                SELECT * FROM collaboration_rollout_subject_grants
+                WHERE revoked = 0
+                ORDER BY granted_at DESC
+                LIMIT 64
+                """
+            ).fetchall()
+        )
+    except sqlite3.OperationalError:
+        return []
+
+
+def subject_has_active_rollout_grant(conn: sqlite3.Connection, subject_key: str) -> bool:
+    try:
+        row = conn.execute(
+            """
+            SELECT 1 FROM collaboration_rollout_subject_grants
+            WHERE subject_key = ? AND revoked = 0
+            LIMIT 1
+            """,
+            (str(subject_key or ""),),
+        ).fetchone()
+        return row is not None
+    except sqlite3.OperationalError:
+        return False
+
+
+def insert_user_outcome_receipt(
+    conn: sqlite3.Connection,
+    *,
+    receipt_id: str,
+    task_id: str,
+    goal_id: str = "",
+    scenario_id: str = "",
+    pack_id: str = "",
+    receipt_kind: str = "",
+    summary: str = "",
+    proof_refs: Optional[Dict[str, Any]] = None,
+    delivery_state: str = "",
+    next_step: str = "",
+    pass_hint: bool = True,
+    created_at: Optional[float] = None,
+    payload: Optional[Dict[str, Any]] = None,
+    closure_state: str = "",
+    closure_proof_id: str = "",
+    followthrough_kind: str = "",
+) -> None:
+    ts = float(created_at if created_at is not None else time.time())
+    conn.execute(
+        """
+        INSERT INTO user_outcome_receipts(
+            receipt_id, task_id, goal_id, scenario_id, pack_id, receipt_kind, summary,
+            proof_refs_json, delivery_state, next_step, pass_hint, created_at, payload_json,
+            closure_state, closure_proof_id, followthrough_kind
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            str(receipt_id or ""),
+            str(task_id or ""),
+            str(goal_id or ""),
+            str(scenario_id or "")[:120],
+            str(pack_id or "")[:120],
+            str(receipt_kind or "")[:120],
+            str(summary or "")[:4000],
+            json.dumps(proof_refs or {}, ensure_ascii=False),
+            str(delivery_state or "")[:120],
+            str(next_step or "")[:2000],
+            1 if pass_hint else 0,
+            ts,
+            json.dumps(payload or {}, ensure_ascii=False),
+            str(closure_state or "")[:80],
+            str(closure_proof_id or "")[:120],
+            str(followthrough_kind or "")[:120],
+        ),
+    )
+    conn.commit()
+
+
+def update_user_outcome_receipt_followthrough(
+    conn: sqlite3.Connection,
+    *,
+    receipt_id: str,
+    closure_state: str = "",
+    closure_proof_id: str = "",
+    followthrough_kind: str = "",
+) -> None:
+    try:
+        conn.execute(
+            """
+            UPDATE user_outcome_receipts
+            SET closure_state = ?, closure_proof_id = ?, followthrough_kind = ?
+            WHERE receipt_id = ?
+            """,
+            (
+                str(closure_state or "")[:80],
+                str(closure_proof_id or "")[:120],
+                str(followthrough_kind or "")[:120],
+                str(receipt_id or ""),
+            ),
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+
+
+def list_recent_user_outcome_receipts(
+    conn: sqlite3.Connection,
+    *,
+    pack_id: str = "",
+    since_ts: float = 0.0,
+    limit: int = 64,
+) -> List[sqlite3.Row]:
+    try:
+        lim = max(1, int(limit))
+        if str(pack_id or "").strip():
+            return list(
+                conn.execute(
+                    """
+                    SELECT * FROM user_outcome_receipts
+                    WHERE pack_id = ? AND created_at >= ?
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (str(pack_id), float(since_ts or 0.0), lim),
+                ).fetchall()
+            )
+        return list(
+            conn.execute(
+                """
+                SELECT * FROM user_outcome_receipts
+                WHERE created_at >= ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (float(since_ts or 0.0), lim),
+            ).fetchall()
+        )
+    except sqlite3.OperationalError:
+        return []
+
+
+def count_user_outcome_receipts_window(
+    conn: sqlite3.Connection,
+    *,
+    pack_id: str,
+    since_ts: float,
+) -> Tuple[int, int]:
+    """Returns (total, pass_count) for receipt pass-rate heuristics."""
+    try:
+        rows = conn.execute(
+            """
+            SELECT pass_hint FROM user_outcome_receipts
+            WHERE pack_id = ? AND created_at >= ?
+            """,
+            (str(pack_id or ""), float(since_ts or 0.0)),
+        ).fetchall()
+        total = len(rows)
+        passed = sum(1 for r in rows if int(r["pass_hint"] or 0) == 1)
+        return total, passed
+    except sqlite3.OperationalError:
+        return 0, 0
+
+
+def insert_continuation_record(
+    conn: sqlite3.Connection,
+    *,
+    continuation_id: str,
+    principal_id: str = "",
+    source_channel: str = "",
+    source_task_id: str = "",
+    linked_task_id: str = "",
+    reason: str = "",
+    confidence_band: str = "",
+    created_at: Optional[float] = None,
+    payload: Optional[Dict[str, Any]] = None,
+) -> None:
+    ts = float(created_at if created_at is not None else time.time())
+    conn.execute(
+        """
+        INSERT INTO continuation_records(
+            continuation_id, principal_id, source_channel, source_task_id, linked_task_id,
+            reason, confidence_band, created_at, payload_json
+        ) VALUES (?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            str(continuation_id or ""),
+            str(principal_id or ""),
+            str(source_channel or "")[:40],
+            str(source_task_id or ""),
+            str(linked_task_id or ""),
+            str(reason or "")[:500],
+            str(confidence_band or "")[:80],
+            ts,
+            json.dumps(payload or {}, ensure_ascii=False),
+        ),
+    )
+    conn.commit()
+
+
+def list_recent_continuation_records(
+    conn: sqlite3.Connection, *, limit: int = 32
+) -> List[sqlite3.Row]:
+    try:
+        return list(
+            conn.execute(
+                """
+                SELECT * FROM continuation_records
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (max(1, int(limit)),),
+            ).fetchall()
+        )
+    except sqlite3.OperationalError:
+        return []
+
+
+def insert_domain_repair_outcome_row(
+    conn: sqlite3.Connection,
+    *,
+    repair_outcome_id: str,
+    domain_id: str = "",
+    scenario_id: str = "",
+    task_id: str = "",
+    repair_family: str = "",
+    executed: bool = False,
+    result: str = "",
+    fallback_used: bool = False,
+    trust_safe: bool = True,
+    ts: Optional[float] = None,
+    payload: Optional[Dict[str, Any]] = None,
+) -> None:
+    t = float(ts if ts is not None else time.time())
+    conn.execute(
+        """
+        INSERT INTO domain_repair_outcomes(
+            repair_outcome_id, domain_id, scenario_id, task_id, repair_family,
+            executed, result, fallback_used, trust_safe, ts, payload_json
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            str(repair_outcome_id or ""),
+            str(domain_id or "")[:120],
+            str(scenario_id or "")[:120],
+            str(task_id or ""),
+            str(repair_family or "")[:120],
+            1 if executed else 0,
+            str(result or "")[:2000],
+            1 if fallback_used else 0,
+            1 if trust_safe else 0,
+            t,
+            json.dumps(payload or {}, ensure_ascii=False),
+        ),
+    )
+    conn.commit()
+
+
+def list_recent_domain_repair_outcomes(
+    conn: sqlite3.Connection, *, limit: int = 24
+) -> List[sqlite3.Row]:
+    try:
+        return list(
+            conn.execute(
+                """
+                SELECT * FROM domain_repair_outcomes
+                ORDER BY ts DESC
+                LIMIT ?
+                """,
+                (max(1, int(limit)),),
+            ).fetchall()
+        )
+    except sqlite3.OperationalError:
+        return []
+
+
+def insert_domain_rollout_decision_row(
+    conn: sqlite3.Connection,
+    *,
+    decision_id: str,
+    pack_id: str = "",
+    decision: str = "",
+    actor: str = "",
+    reason: str = "",
+    created_at: Optional[float] = None,
+    payload: Optional[Dict[str, Any]] = None,
+) -> None:
+    ts = float(created_at if created_at is not None else time.time())
+    conn.execute(
+        """
+        INSERT INTO domain_rollout_decisions(
+            decision_id, pack_id, decision, actor, reason, created_at, payload_json
+        ) VALUES (?,?,?,?,?,?,?)
+        """,
+        (
+            str(decision_id or ""),
+            str(pack_id or "")[:120],
+            str(decision or "")[:80],
+            str(actor or "")[:200],
+            str(reason or "")[:2000],
+            ts,
+            json.dumps(payload or {}, ensure_ascii=False),
+        ),
+    )
+    conn.commit()
+
+
+def list_recent_domain_rollout_decisions(
+    conn: sqlite3.Connection, *, pack_id: str = "", limit: int = 16
+) -> List[sqlite3.Row]:
+    try:
+        lim = max(1, int(limit))
+        if str(pack_id or "").strip():
+            return list(
+                conn.execute(
+                    """
+                    SELECT * FROM domain_rollout_decisions
+                    WHERE pack_id = ?
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (str(pack_id), lim),
+                ).fetchall()
+            )
+        return list(
+            conn.execute(
+                """
+                SELECT * FROM domain_rollout_decisions
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (lim,),
+            ).fetchall()
+        )
+    except sqlite3.OperationalError:
+        return []
+
+
+def insert_open_loop_record(
+    conn: sqlite3.Connection,
+    *,
+    loop_id: str,
+    task_id: str,
+    goal_id: str = "",
+    scenario_id: str = "",
+    pack_id: str = "",
+    loop_kind: str = "",
+    open_loop_state: str = "",
+    opened_reason: str = "",
+    opened_at: Optional[float] = None,
+    due_at: float = 0.0,
+    owner_kind: str = "user",
+    receipt_id: str = "",
+    risk_tier: str = "low",
+    proof_refs: Optional[Dict[str, Any]] = None,
+    payload: Optional[Dict[str, Any]] = None,
+) -> None:
+    ts = float(opened_at if opened_at is not None else time.time())
+    conn.execute(
+        """
+        INSERT INTO open_loop_records(
+            loop_id, task_id, goal_id, scenario_id, pack_id, loop_kind, open_loop_state,
+            opened_reason, opened_at, due_at, owner_kind, receipt_id, risk_tier,
+            proof_refs_json, payload_json
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            str(loop_id or ""),
+            str(task_id or ""),
+            str(goal_id or ""),
+            str(scenario_id or "")[:120],
+            str(pack_id or "")[:120],
+            str(loop_kind or "")[:120],
+            str(open_loop_state or "")[:80],
+            str(opened_reason or "")[:2000],
+            ts,
+            float(due_at or 0.0),
+            str(owner_kind or "")[:40],
+            str(receipt_id or "")[:120],
+            str(risk_tier or "")[:40],
+            json.dumps(proof_refs or {}, ensure_ascii=False),
+            json.dumps(payload or {}, ensure_ascii=False),
+        ),
+    )
+    conn.commit()
+
+
+def insert_closure_decision_row(
+    conn: sqlite3.Connection,
+    *,
+    decision_id: str,
+    loop_id: str = "",
+    task_id: str = "",
+    closure_state: str = "",
+    reason: str = "",
+    proof_kind: str = "",
+    proof_refs: Optional[Dict[str, Any]] = None,
+    confidence_band: str = "",
+    actor_or_rule: str = "",
+    created_at: Optional[float] = None,
+    payload: Optional[Dict[str, Any]] = None,
+) -> None:
+    ts = float(created_at if created_at is not None else time.time())
+    conn.execute(
+        """
+        INSERT INTO closure_decisions(
+            decision_id, loop_id, task_id, closure_state, reason, proof_kind,
+            proof_refs_json, confidence_band, actor_or_rule, created_at, payload_json
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            str(decision_id or ""),
+            str(loop_id or ""),
+            str(task_id or ""),
+            str(closure_state or "")[:80],
+            str(reason or "")[:2000],
+            str(proof_kind or "")[:120],
+            json.dumps(proof_refs or {}, ensure_ascii=False),
+            str(confidence_band or "")[:80],
+            str(actor_or_rule or "")[:120],
+            ts,
+            json.dumps(payload or {}, ensure_ascii=False),
+        ),
+    )
+    conn.commit()
+
+
+def insert_closure_proof_row(
+    conn: sqlite3.Connection,
+    *,
+    proof_id: str,
+    loop_id: str = "",
+    task_id: str = "",
+    proof_kind: str = "",
+    proof_refs: Optional[Dict[str, Any]] = None,
+    verdict: str = "",
+    summary: str = "",
+    created_at: Optional[float] = None,
+    payload: Optional[Dict[str, Any]] = None,
+) -> None:
+    ts = float(created_at if created_at is not None else time.time())
+    conn.execute(
+        """
+        INSERT INTO closure_proofs(
+            proof_id, loop_id, task_id, proof_kind, proof_refs_json, verdict, summary,
+            created_at, payload_json
+        ) VALUES (?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            str(proof_id or ""),
+            str(loop_id or ""),
+            str(task_id or ""),
+            str(proof_kind or "")[:120],
+            json.dumps(proof_refs or {}, ensure_ascii=False),
+            str(verdict or "")[:80],
+            str(summary or "")[:2000],
+            ts,
+            json.dumps(payload or {}, ensure_ascii=False),
+        ),
+    )
+    conn.commit()
+
+
+def insert_continuation_trigger_row(
+    conn: sqlite3.Connection,
+    *,
+    trigger_id: str,
+    loop_id: str = "",
+    task_id: str = "",
+    trigger_type: str = "",
+    due_at: float = 0.0,
+    eligibility: str = "",
+    evidence_snapshot: Optional[Dict[str, Any]] = None,
+    created_at: Optional[float] = None,
+    payload: Optional[Dict[str, Any]] = None,
+) -> None:
+    ts = float(created_at if created_at is not None else time.time())
+    conn.execute(
+        """
+        INSERT INTO continuation_triggers(
+            trigger_id, loop_id, task_id, trigger_type, due_at, eligibility,
+            evidence_snapshot_json, created_at, payload_json
+        ) VALUES (?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            str(trigger_id or ""),
+            str(loop_id or ""),
+            str(task_id or ""),
+            str(trigger_type or "")[:120],
+            float(due_at or 0.0),
+            str(eligibility or "")[:120],
+            json.dumps(evidence_snapshot or {}, ensure_ascii=False),
+            ts,
+            json.dumps(payload or {}, ensure_ascii=False),
+        ),
+    )
+    conn.commit()
+
+
+def insert_followup_recommendation_row(
+    conn: sqlite3.Connection,
+    *,
+    recommendation_id: str,
+    loop_id: str = "",
+    task_id: str = "",
+    recommended_action: str = "",
+    channel: str = "",
+    why_now: str = "",
+    urgency: str = "",
+    shadow_only: bool = True,
+    risk_notes: str = "",
+    created_at: Optional[float] = None,
+    payload: Optional[Dict[str, Any]] = None,
+) -> None:
+    ts = float(created_at if created_at is not None else time.time())
+    conn.execute(
+        """
+        INSERT INTO followup_recommendations(
+            recommendation_id, loop_id, task_id, recommended_action, channel, why_now,
+            urgency, shadow_only, risk_notes, created_at, payload_json
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            str(recommendation_id or ""),
+            str(loop_id or ""),
+            str(task_id or ""),
+            str(recommended_action or "")[:120],
+            str(channel or "")[:80],
+            str(why_now or "")[:2000],
+            str(urgency or "")[:40],
+            1 if shadow_only else 0,
+            str(risk_notes or "")[:2000],
+            ts,
+            json.dumps(payload or {}, ensure_ascii=False),
+        ),
+    )
+    conn.commit()
+
+
+def insert_continuation_execution_row(
+    conn: sqlite3.Connection,
+    *,
+    execution_id: str,
+    loop_id: str = "",
+    task_id: str = "",
+    action_kind: str = "",
+    channel: str = "",
+    executed: bool = False,
+    result: str = "",
+    message_ref: str = "",
+    created_at: Optional[float] = None,
+    payload: Optional[Dict[str, Any]] = None,
+) -> None:
+    ts = float(created_at if created_at is not None else time.time())
+    conn.execute(
+        """
+        INSERT INTO continuation_executions(
+            execution_id, loop_id, task_id, action_kind, channel, executed, result,
+            message_ref, created_at, payload_json
+        ) VALUES (?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            str(execution_id or ""),
+            str(loop_id or ""),
+            str(task_id or ""),
+            str(action_kind or "")[:120],
+            str(channel or "")[:80],
+            1 if executed else 0,
+            str(result or "")[:2000],
+            str(message_ref or "")[:500],
+            ts,
+            json.dumps(payload or {}, ensure_ascii=False),
+        ),
+    )
+    conn.commit()
+
+
+def insert_stale_task_indicator_row(
+    conn: sqlite3.Connection,
+    *,
+    indicator_id: str,
+    loop_id: str = "",
+    task_id: str = "",
+    staleness_kind: str = "",
+    window_seconds: float = 0.0,
+    severity: str = "",
+    detected_at: Optional[float] = None,
+    reason: str = "",
+    payload: Optional[Dict[str, Any]] = None,
+) -> None:
+    ts = float(detected_at if detected_at is not None else time.time())
+    conn.execute(
+        """
+        INSERT INTO stale_task_indicators(
+            indicator_id, loop_id, task_id, staleness_kind, window_seconds, severity,
+            detected_at, reason, payload_json
+        ) VALUES (?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            str(indicator_id or ""),
+            str(loop_id or ""),
+            str(task_id or ""),
+            str(staleness_kind or "")[:120],
+            float(window_seconds or 0.0),
+            str(severity or "")[:40],
+            ts,
+            str(reason or "")[:2000],
+            json.dumps(payload or {}, ensure_ascii=False),
+        ),
+    )
+    conn.commit()
+
+
+def list_recent_open_loop_records(
+    conn: sqlite3.Connection, *, pack_id: str = "", limit: int = 48
+) -> List[sqlite3.Row]:
+    try:
+        lim = max(1, int(limit))
+        if str(pack_id or "").strip():
+            return list(
+                conn.execute(
+                    """
+                    SELECT * FROM open_loop_records
+                    WHERE pack_id = ?
+                    ORDER BY opened_at DESC
+                    LIMIT ?
+                    """,
+                    (str(pack_id), lim),
+                ).fetchall()
+            )
+        return list(
+            conn.execute(
+                """
+                SELECT * FROM open_loop_records
+                ORDER BY opened_at DESC
+                LIMIT ?
+                """,
+                (lim,),
+            ).fetchall()
+        )
+    except sqlite3.OperationalError:
+        return []
+
+
+def list_recent_closure_decisions(
+    conn: sqlite3.Connection, *, limit: int = 48
+) -> List[sqlite3.Row]:
+    try:
+        return list(
+            conn.execute(
+                """
+                SELECT * FROM closure_decisions
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (max(1, int(limit)),),
+            ).fetchall()
+        )
+    except sqlite3.OperationalError:
+        return []
+
+
+def list_recent_followup_recommendations(
+    conn: sqlite3.Connection, *, limit: int = 32
+) -> List[sqlite3.Row]:
+    try:
+        return list(
+            conn.execute(
+                """
+                SELECT * FROM followup_recommendations
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (max(1, int(limit)),),
+            ).fetchall()
+        )
+    except sqlite3.OperationalError:
+        return []
+
+
+def list_recent_stale_task_indicators(
+    conn: sqlite3.Connection, *, limit: int = 24
+) -> List[sqlite3.Row]:
+    try:
+        return list(
+            conn.execute(
+                """
+                SELECT * FROM stale_task_indicators
+                ORDER BY detected_at DESC
+                LIMIT ?
+                """,
+                (max(1, int(limit)),),
+            ).fetchall()
+        )
+    except sqlite3.OperationalError:
+        return []
+
+
+def count_closure_decisions_window(
+    conn: sqlite3.Connection,
+    *,
+    since_ts: float,
+    closure_state: str = "",
+) -> int:
+    try:
+        if str(closure_state or "").strip():
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS c FROM closure_decisions
+                WHERE created_at >= ? AND closure_state = ?
+                """,
+                (float(since_ts or 0.0), str(closure_state)),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS c FROM closure_decisions
+                WHERE created_at >= ?
+                """,
+                (float(since_ts or 0.0),),
+            ).fetchone()
+        return int(row["c"] or 0) if row else 0
+    except sqlite3.OperationalError:
+        return 0
+
+
+def count_open_loops_window(conn: sqlite3.Connection, *, since_ts: float) -> int:
+    try:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM open_loop_records
+            WHERE opened_at >= ?
+            """,
+            (float(since_ts or 0.0),),
+        ).fetchone()
+        return int(row["c"] or 0) if row else 0
+    except sqlite3.OperationalError:
+        return 0
 
 
 def create_task(conn: sqlite3.Connection, task_id: str, channel: str) -> None:

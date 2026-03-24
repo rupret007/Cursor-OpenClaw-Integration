@@ -173,6 +173,21 @@ CATEGORY_TEMPLATES: Dict[str, Dict[str, Any]] = {
         "problem": "Recent collaborative runs missed or failed the critique pass that should catch weak plans before execution.",
         "action": "Make critique outputs explicit, auditable, and required when collaboration is requested.",
     },
+    "collaboration_usefulness": {
+        "title": "Measure and reduce wasted task-path collaboration",
+        "severity": "medium",
+        "target_files": [
+            "services/andrea_sync/collaboration_runtime.py",
+            "services/andrea_sync/activation_policy.py",
+            "services/andrea_sync/collaboration_effectiveness.py",
+            "services/andrea_sync/plan_runtime.py",
+            "services/andrea_sync/dashboard.py",
+            "services/andrea_sync/experience_assurance.py",
+            "tests/test_collaboration_runtime.py",
+        ],
+        "problem": "Advisory collaboration rounds add latency; many runs may be informational or wasteful without changing the safe next action.",
+        "action": "Use activation + outcome ledgers, scenario profiles, and shadow adaptive policy before promoting live advisory or bounded actions.",
+    },
     "executor_failure": {
         "title": "Reduce execution lane regressions",
         "severity": "high",
@@ -728,6 +743,75 @@ def collect_recent_task_outcomes(
             }
         )
     return outcomes
+
+
+def detect_collaboration_policy_findings(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    """Surface evidence-backed collaboration policy signals as optimizer findings."""
+    from .collaboration_effectiveness import rollup_collaboration_policy_profiles
+    from .collaboration_promotion import (
+        list_bounded_action_candidates,
+        list_promotion_candidates,
+        promotion_controller_enabled,
+    )
+
+    roll = rollup_collaboration_policy_profiles(conn)
+    if not roll.get("ok"):
+        return []
+    out: List[Dict[str, Any]] = []
+    for sig in roll.get("recommendation_signals") or []:
+        subj = str(sig.get("subject") or "")
+        samples = int(sig.get("evidence_samples") or 0)
+        out.append(
+            {
+                "category": "collaboration_usefulness",
+                "severity": "medium",
+                "count": max(1, min(samples, 12)),
+                "task_ids": [],
+                "examples": [
+                    {
+                        "task_id": "",
+                        "summary": subj[:200],
+                        "result_kind": "collaboration_policy_signal",
+                    }
+                ],
+            }
+        )
+    if promotion_controller_enabled():
+        for cand in list_promotion_candidates(conn):
+            sk = str(cand.get("subject_key") or "")
+            out.append(
+                {
+                    "category": "collaboration_usefulness",
+                    "severity": "low",
+                    "count": 1,
+                    "task_ids": [],
+                    "examples": [
+                        {
+                            "task_id": "",
+                            "summary": f"promotion_candidate_live_advisory:{sk}",
+                            "result_kind": "collaboration_promotion_candidate",
+                        }
+                    ],
+                }
+            )
+        for cand in list_bounded_action_candidates(conn):
+            sk = str(cand.get("subject_key") or "")
+            out.append(
+                {
+                    "category": "collaboration_usefulness",
+                    "severity": "low",
+                    "count": 1,
+                    "task_ids": [],
+                    "examples": [
+                        {
+                            "task_id": "",
+                            "summary": f"promotion_candidate_bounded_action:{sk}",
+                            "result_kind": "collaboration_bounded_promotion_candidate",
+                        }
+                    ],
+                }
+            )
+    return out
 
 
 def detect_failure_categories(outcomes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1786,7 +1870,7 @@ def run_optimization_cycle(
         if isinstance(regression_report, dict) and regression_report:
             record_regression_report(conn, regression_report, actor=actor)
         outcomes = collect_recent_task_outcomes(conn, limit=limit)
-        findings = detect_failure_categories(outcomes)
+        findings = detect_failure_categories(outcomes) + detect_collaboration_policy_findings(conn)
         gate = evaluate_autonomy_gate(
             conn,
             regression_report=regression_report,

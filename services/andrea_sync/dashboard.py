@@ -7,6 +7,7 @@ import urllib.parse
 from typing import Any, Dict, List
 
 from .adapters import telegram as tg_adapt
+from .collaboration_effectiveness import trusted_operator_summary
 from .kill_switch import kill_switch_status
 from .policy import digest_age_seconds, get_capability_digest
 from .projector import project_task_dict
@@ -15,6 +16,10 @@ from .optimizer import build_background_regression_report, evaluate_autonomy_gat
 from .repair_policy import configured_safe_repair_roots, repair_enabled
 from .policy_governance import governance_snapshot
 from .resource_vocabulary import infer_resource_lane, verification_story_from_outcome
+from .assistant_domain_rollout import (
+    build_daily_pack_operator_snapshot,
+    daily_pack_optimizer_hints,
+)
 from .scenario_registry import FIRST_SUPPORTED_SCENARIO_IDS, get_contract
 from .schema import EventType
 from .store import (
@@ -586,6 +591,9 @@ def _build_plan_orchestration_summary(conn: Any) -> Dict[str, Any]:
         first_pack_active = 0
         collaboration_plan_count = 0
         collaboration_repair_strategies: Dict[str, int] = {}
+        collaboration_usefulness: Dict[str, int] = {}
+        collaboration_role_invocations_total = 0
+        collaboration_bounded_actions: Dict[str, int] = {}
         for r in rows:
             summ = r.get("summary") if isinstance(r.get("summary"), dict) else {}
             sid = str(summ.get("scenario_id") or "").strip()
@@ -615,6 +623,21 @@ def _build_plan_orchestration_summary(conn: Any) -> Dict[str, Any]:
                 collaboration_plan_count += 1
                 ls = str(collab.get("last_strategy") or "").strip() or "unknown"
                 collaboration_repair_strategies[ls] = collaboration_repair_strategies.get(ls, 0) + 1
+                try:
+                    collaboration_role_invocations_total += int(collab.get("role_invocation_count") or 0)
+                except (TypeError, ValueError):
+                    pass
+                uh = str(collab.get("usefulness_status") or "").strip()
+                if uh:
+                    collaboration_usefulness[uh] = collaboration_usefulness.get(uh, 0) + 1
+                if collab.get("bounded_action_executed"):
+                    act = collab.get("last_executed_action")
+                    at = (
+                        str((act or {}).get("type") or "unknown").strip()
+                        if isinstance(act, dict)
+                        else "unknown"
+                    )
+                    collaboration_bounded_actions[at] = collaboration_bounded_actions.get(at, 0) + 1
         first_pack_health = [
             {
                 "scenario_id": pack_id,
@@ -650,6 +673,13 @@ def _build_plan_orchestration_summary(conn: Any) -> Dict[str, Any]:
             "collaboration_plan_count": collaboration_plan_count,
             "collaboration_repair_strategies": dict(
                 sorted(collaboration_repair_strategies.items(), key=lambda kv: (-kv[1], kv[0]))[:12]
+            ),
+            "collaboration_usefulness_counts": dict(
+                sorted(collaboration_usefulness.items(), key=lambda kv: (-kv[1], kv[0]))[:16]
+            ),
+            "collaboration_role_invocations_total": collaboration_role_invocations_total,
+            "collaboration_bounded_actions": dict(
+                sorted(collaboration_bounded_actions.items(), key=lambda kv: (-kv[1], kv[0]))[:12]
             ),
             "first_supported_scenario_ids": sorted(FIRST_SUPPORTED_SCENARIO_IDS),
             "awaiting_approval": [
@@ -823,6 +853,9 @@ def build_dashboard_summary(
         "background_autonomy": _build_background_autonomy_summary(conn),
         "blueprint_platform": _build_blueprint_platform_summary(conn),
         "plan_orchestration": _build_plan_orchestration_summary(conn),
+        "collaboration_policy": trusted_operator_summary(conn),
+        "daily_assistant_pack": build_daily_pack_operator_snapshot(conn),
+        "daily_assistant_optimizer_hints": daily_pack_optimizer_hints(conn),
     }
 
 
@@ -910,6 +943,27 @@ def render_dashboard_html() -> str:
         <h2>Experience Regressions</h2>
         <p class="subtle">Latest failing scenarios, score drops, and likely files if the experience slips.</p>
         <div class="list" id="experienceFailures"></div>
+      </section>
+    </div>
+
+    <div class="grid twoCol" style="margin-bottom:16px;">
+      <section class="panel">
+        <h2>Daily Assistant pack</h2>
+        <p class="subtle">Trusted low-risk continuity: receipts, Telegram continuation records, reminder repair signals, onboarding states, and receipt evidence vs rollout thresholds.</p>
+        <div class="list" id="dailyAssistantPack"></div>
+      </section>
+      <section class="panel">
+        <h2>Follow-through &amp; closure</h2>
+        <p class="subtle">Open loops, closure decisions, follow-up recommendations (shadow by default), stale workflow/delivery signals, and operator status override via internal API.</p>
+        <div class="list" id="followthroughBoard"></div>
+      </section>
+    </div>
+
+    <div class="grid" style="margin-bottom:16px;">
+      <section class="panel">
+        <h2>Collaboration rollout workspace</h2>
+        <p class="subtle">Promotion revisions, operator actions, scenario onboarding, live-vs-shadow comparison history, and evidence-gated candidates.</p>
+        <div class="list" id="collaborationPromotion"></div>
       </section>
     </div>
 
@@ -1217,6 +1271,194 @@ def render_dashboard_html() -> str:
       `).join("") || `<div class="item"><strong>No active experience regressions</strong><p class="subtle" style="margin-top:8px;">The latest deterministic replay passed.</p></div>`;
     }
 
+    function renderDailyAssistantPack(data) {
+      const pack = data.daily_assistant_pack || {};
+      const hints = data.daily_assistant_optimizer_hints || [];
+      const ft = pack.followthrough_board || {};
+      const ftItems = [];
+      if (ft.metrics) {
+        const m = ft.metrics;
+        ftItems.push({
+          title: `Follow-through status: ${ft.followthrough_pack_status || "n/a"}`,
+          note: `Closure rate (7d): ${(m.closure_rate !== null && m.closure_rate !== undefined) ? Math.round(Number(m.closure_rate) * 100) + "%" : "n/a"} · open-loop rows: ${m.open_loop_count || 0} · closure decisions: ${m.closure_decision_count || 0}`,
+          extra: ft.quiet_auto_exec ? "Quiet auto-exec flag ON (ledger)" : "Quiet auto-exec off",
+          status: ft.followthrough_pack_status === "frozen" ? "blocked" : "ready",
+        });
+      }
+      for (const row of (ft.recent_closure_decisions || []).slice(0, 6)) {
+        ftItems.push({
+          title: `Closure → ${row.closure_state || "n/a"}`,
+          note: (row.reason || "").slice(0, 220),
+          extra: row.task_id || "",
+          status: row.closure_state === "needs_repair" ? "bad" : (row.closure_state === "completed" ? "ready" : "warn"),
+        });
+      }
+      for (const row of (ft.recent_followup_recommendations || []).slice(0, 4)) {
+        ftItems.push({
+          title: `Follow-up reco (${row.shadow_only ? "shadow" : "live"})`,
+          note: (row.why_now || "").slice(0, 220),
+          extra: row.recommended_action || "",
+          status: row.shadow_only ? "muted" : "warn",
+        });
+      }
+      document.getElementById("followthroughBoard").innerHTML = ftItems.map((item) => `
+        <div class="item">
+          <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;">
+            <strong>${escapeHtml(item.title)}</strong>
+            <span class="pill ${pillClass(item.status)}">${escapeHtml(item.status)}</span>
+          </div>
+          <p class="subtle" style="margin-top:8px;">${escapeHtml(item.note)}</p>
+          ${item.extra ? `<p class="subtle" style="margin-top:6px;">${escapeHtml(item.extra)}</p>` : ""}
+        </div>
+      `).join("") || `<div class="item"><strong>No follow-through rows yet</strong><p class="subtle" style="margin-top:8px;">Enable ANDREA_FOLLOWTHROUGH_ENABLED and flow daily-pack receipts.</p></div>`;
+
+      const items = [];
+      items.push({
+        title: `Pack ${pack.pack_id || "trusted_daily_continuity_v1"}`,
+        note: (pack.live_rollout_slice && pack.live_rollout_slice.description) ? pack.live_rollout_slice.description.slice(0, 280) : "Low-risk daily assistant continuity and productivity.",
+        extra: `Receipts 7d: ${(pack.receipt_metrics && pack.receipt_metrics.receipt_count) || 0} · pass rate ${(pack.receipt_metrics && pack.receipt_metrics.receipt_pass_rate !== null && pack.receipt_metrics.receipt_pass_rate !== undefined) ? Math.round(Number(pack.receipt_metrics.receipt_pass_rate) * 100) + "%" : "n/a"}`,
+        status: (pack.live_rollout_evidence && pack.live_rollout_evidence.evidence_ok) ? "ready" : "warn",
+      });
+      for (const row of (pack.scenarios || [])) {
+        items.push({
+          title: `Scenario ${row.scenario_id} → ${row.effective_onboarding_state}`,
+          note: row.blocks_live_advisory ? "Live collaboration advisory blocked (direct-first pack default)." : "Live collaboration advisory allowed if other gates pass.",
+          extra: row.daily_assistant_pack ? "daily pack member" : "",
+          status: row.blocks_live_advisory ? "muted" : "ready",
+        });
+      }
+      for (const row of (pack.recent_continuations || []).slice(0, 6)) {
+        items.push({
+          title: `Continuation → ${row.linked_task_id}`,
+          note: row.reason || "telegram continuation",
+          extra: row.confidence_band || "",
+          status: "muted",
+        });
+      }
+      for (const row of (pack.recent_domain_repairs || []).slice(0, 4)) {
+        items.push({
+          title: `Domain repair: ${row.repair_family}`,
+          note: row.result || "",
+          extra: row.scenario_id || "",
+          status: "warn",
+        });
+      }
+      for (const h of hints.slice(0, 4)) {
+        items.push({
+          title: h.title || "Daily pack hint",
+          note: h.detail || "",
+          extra: h.category || "",
+          status: h.severity === "high" ? "bad" : "warn",
+        });
+      }
+      document.getElementById("dailyAssistantPack").innerHTML = items.map((item) => `
+        <div class="item">
+          <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;">
+            <strong>${escapeHtml(item.title)}</strong>
+            <span class="pill ${pillClass(item.status)}">${escapeHtml(item.status)}</span>
+          </div>
+          <p class="subtle" style="margin-top:8px;">${escapeHtml(item.note)}</p>
+          ${item.extra ? `<p class="subtle" style="margin-top:6px;">${escapeHtml(item.extra)}</p>` : ""}
+        </div>
+      `).join("") || `<div class="item"><strong>No daily pack rows yet</strong><p class="subtle" style="margin-top:8px;">Receipts and continuation records will populate as low-risk turns flow.</p></div>`;
+    }
+
+    function renderCollaborationPromotion(data) {
+      const pol = data.collaboration_policy || {};
+      const pr = pol.promotion_state || {};
+      const rw = pol.rollout_workspace || {};
+      const items = [];
+      if (rw.rollout_manager_version) {
+        items.push({
+          title: `Rollout manager ${rw.rollout_manager_version}`,
+          note: "Internal API: GET /v1/internal/rollout/candidates and POST /v1/internal/rollout (Bearer ANDREA_SYNC_INTERNAL_TOKEN).",
+          extra: "",
+          status: "muted",
+        });
+      }
+      if (!pr.promotion_controller_enabled) {
+        items.push({
+          title: "Promotion controller disabled",
+          note: "Set ANDREA_SYNC_COLLAB_PROMOTION_ENABLED=1 to enforce persisted promotion and rollback semantics.",
+          extra: "",
+          status: "muted",
+        });
+      } else {
+        items.push({
+          title: pr.promotion_global_freeze ? "Global promotion freeze ON" : "Global promotion freeze off",
+          note: `Rollback auto: ${pr.rollback_enabled ? "on" : "off"} · static allowlist ${(pr.allowlist || []).join(", ") || "defaults"}`,
+          extra: `Promotion ${pr.promotion_controller_version || "n/a"} · dynamic grants ${(rw.dynamic_subject_grants || []).length} · effective subjects ${(pr.effective_allowlist || pr.allowlist || []).length}`,
+          status: pr.promotion_global_freeze ? "blocked" : "ready",
+        });
+      }
+      for (const row of rw.scenario_onboarding || []) {
+        items.push({
+          title: `Scenario onboarding: ${row.scenario_id} → ${row.effective_state}`,
+          note: row.draft_only ? "Draft-only catalog entry: live advisory blocked at onboarding layer." : (row.blocks_live_advisory ? "Live advisory blocked until onboarding advances." : "Live advisory allowed if promotion gates pass."),
+          extra: "",
+          status: row.blocks_live_advisory ? "warn" : "ready",
+        });
+      }
+      for (const row of (rw.operator_actions_recent || []).slice(0, 8)) {
+        items.push({
+          title: `Operator ${row.action_kind}: ${row.subject_key || "n/a"}`,
+          note: `Actor ${row.actor || "n/a"} · ${row.decision || ""}`,
+          extra: row.revision_id ? `revision ${row.revision_id}` : (row.reason || "").slice(0, 120),
+          status: row.action_kind === "rollback" ? "bad" : (row.action_kind === "freeze" ? "blocked" : "ready"),
+        });
+      }
+      for (const row of (rw.live_shadow_comparisons_recent || []).slice(0, 6)) {
+        items.push({
+          title: `Compare: ${row.subject_key}`,
+          note: JSON.stringify(row.deltas || {}),
+          extra: row.comparison_id || "",
+          status: "muted",
+        });
+      }
+      for (const g of (rw.dynamic_subject_grants || []).slice(0, 6)) {
+        items.push({
+          title: `Grant: ${g.subject_key}`,
+          note: `Actor ${g.actor || "n/a"}`,
+          extra: g.notes || "",
+          status: "warn",
+        });
+      }
+      for (const row of pr.active_promotions || []) {
+        items.push({
+          title: `${row.subject_key} → ${row.promotion_level}`,
+          note: `revision ${row.revision_id || "n/a"} · op_ack ${row.operator_ack ? "yes" : "no"}`,
+          extra: row.risk_notes || "",
+          status: row.promotion_level === "frozen" ? "blocked" : (row.promotion_level === "bounded_action" ? "warn" : "ready"),
+        });
+      }
+      for (const c of pr.promotion_candidates || []) {
+        items.push({
+          title: `Candidate: ${c.subject_key}`,
+          note: "Meets live-advisory promotion evidence thresholds (operator confirm still required to persist).",
+          extra: `useful_rate ${(c.stats && c.stats.useful_rate) || "n/a"} · samples ${(c.stats && c.stats.samples) || "n/a"}`,
+          status: "warn",
+        });
+      }
+      for (const r of pr.recent_rollbacks || []) {
+        items.push({
+          title: `Rollback: ${r.subject_key}`,
+          note: (r.reason_codes || []).join(", ") || r.trigger_type || "rollback",
+          extra: `revision ${r.revision_id || ""}`,
+          status: "bad",
+        });
+      }
+      document.getElementById("collaborationPromotion").innerHTML = items.map((item) => `
+        <div class="item">
+          <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;">
+            <strong>${escapeHtml(item.title)}</strong>
+            <span class="pill ${pillClass(item.status)}">${escapeHtml(item.status)}</span>
+          </div>
+          <p class="subtle" style="margin-top:8px;">${escapeHtml(item.note)}</p>
+          ${item.extra ? `<p class="subtle" style="margin-top:6px;">${escapeHtml(item.extra)}</p>` : ""}
+        </div>
+      `).join("") || `<div class="item"><strong>No promotion rows yet</strong><p class="subtle" style="margin-top:8px;">Ledger-driven candidates and revisions will appear once collaboration outcomes accumulate.</p></div>`;
+    }
+
     function renderTasks(data) {
       const rows = data.tasks.items || [];
       const header = `
@@ -1308,6 +1550,8 @@ def render_dashboard_html() -> str:
       renderAttention(latestSummary);
       renderOptimization(latestSummary);
       renderExperience(latestSummary);
+      renderCollaborationPromotion(latestSummary);
+      renderDailyAssistantPack(latestSummary);
       renderTasks(latestSummary);
       document.getElementById("lastUpdated").textContent = `Last updated ${new Date().toLocaleTimeString()} (auto-refresh every 5s)`;
       const tasks = latestSummary.tasks.items || [];

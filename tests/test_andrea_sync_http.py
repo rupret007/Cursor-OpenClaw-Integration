@@ -581,6 +581,72 @@ class TestAndreaSyncHTTP(unittest.TestCase):
             urllib.request.urlopen(req, timeout=5)
         self.assertEqual(ctx.exception.code, 401)
 
+    def test_internal_rollout_candidates_requires_auth(self) -> None:
+        req = urllib.request.Request(self._url("/v1/internal/rollout/candidates"), method="GET")
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(req, timeout=5)
+        self.assertEqual(ctx.exception.code, 401)
+
+    def test_internal_rollout_approve_live_flow(self) -> None:
+        import sqlite3
+
+        os.environ["ANDREA_SYNC_COLLAB_PROMOTION_ENABLED"] = "1"
+        try:
+            conn = sqlite3.connect(self._dbpath)
+            conn.row_factory = sqlite3.Row
+            now = time.time()
+            for i in range(22):
+                conn.execute(
+                    """
+                    INSERT INTO collaboration_outcomes(
+                        task_id, plan_id, step_id, collab_id, scenario_id, trigger, ts,
+                        canonical_class, usefulness_detail, live_advisory_ran, role_invocation_delta,
+                        payload_json
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        f"t_http_roll_{i}",
+                        "p_http_roll",
+                        "s_http_roll",
+                        f"c_http_roll_{i}",
+                        "repoHelpVerified",
+                        "trust_gate",
+                        now,
+                        "useful",
+                        "useful_strategy_shift",
+                        0,
+                        2,
+                        "{}",
+                    ),
+                )
+            conn.commit()
+            conn.close()
+            body = json.dumps(
+                {
+                    "action": "approve_live_advisory",
+                    "actor": "http_tester",
+                    "scenario_id": "repoHelpVerified",
+                    "trigger": "trust_gate",
+                    "risk_notes": "http test",
+                }
+            ).encode("utf-8")
+            req = urllib.request.Request(
+                self._url("/v1/internal/rollout"),
+                data=body,
+                method="POST",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": "Bearer internal-test-token",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                self.assertEqual(resp.status, 200)
+                data = json.loads(resp.read().decode("utf-8"))
+            self.assertTrue(data.get("ok"))
+            self.assertIn("revision_id", data)
+        finally:
+            os.environ.pop("ANDREA_SYNC_COLLAB_PROMOTION_ENABLED", None)
+
     def test_internal_events_rejects_non_object_payload(self) -> None:
         create_body = json.dumps(
             {

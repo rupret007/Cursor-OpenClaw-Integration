@@ -55,6 +55,14 @@ from .scenario_registry import get_contract
 from .scenario_schema import SUPPORTED_APPROVAL, UNSUPPORTED
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# Follow-through / closure eval variants (baseline vs shadow engine vs live quiet dry-run).
+FOLLOWTHROUGH_EXPERIENCE_VARIANTS: tuple[str, ...] = (
+    "baseline_tracked_only",
+    "shadow_followthrough_engine",
+    "live_quiet_followthrough_dry_run",
+)
+
 DELEGATED_FINAL_LEAK_TERMS = (
     "lockstep_json",
     "sessionkey",
@@ -2165,6 +2173,520 @@ def _scenario_bounded_collaboration_verify_fail_repo(
     )
 
 
+def _scenario_collaboration_eval_baseline_no_live_round(
+    harness: ExperienceHarness, scenario: ExperienceScenario
+) -> ExperienceCheckResult:
+    """Baseline: collaboration runtime off — only deterministic strategist metadata."""
+    started = time.time()
+    observations: List[ExperienceObservation] = []
+    conn = harness.conn
+    os.environ["ANDREA_SYNC_STRICT_VERIFICATION"] = "1"
+    os.environ["ANDREA_SYNC_COLLABORATION_LAYER"] = "1"
+    os.environ["ANDREA_SYNC_COLLAB_RUNTIME_ENABLED"] = "0"
+    task_id = "tsk_exp_collab_base"
+    create_task(conn, task_id, "cli")
+    link_task_principal(conn, task_id, "p_exp_collab_b", channel="cli")
+    contract = get_contract("repoHelpVerified")
+    assert contract is not None
+    scen_blob = {
+        "scenario_id": "repoHelpVerified",
+        "support_level": contract.support_level,
+        "action_class": contract.action_class,
+        "proof_class": contract.proof_class,
+        "receipt_state": "pending",
+        "approval_mode": contract.approval_mode,
+    }
+    gate = gate_delegated_job(
+        conn,
+        task_id,
+        "",
+        "p_exp_collab_b",
+        "repo fix",
+        "cursor",
+        {"kind": "cursor", "runner": "cursor", "scenario": scen_blob},
+        [],
+    )
+    fv = finalize_execute_step_verification(
+        conn,
+        task_id=task_id,
+        plan_id=gate.plan_id,
+        execute_step_id=gate.execute_step_id,
+        terminal_status="FINISHED",
+        pr_url="",
+        agent_url="",
+        lane="cursor",
+    )
+    step_row = conn.execute(
+        "SELECT recovery_json FROM plan_steps WHERE step_id = ?",
+        (gate.execute_step_id,),
+    ).fetchone()
+    recovery_raw = step_row[0] if step_row else "{}"
+    try:
+        recovery = json.loads(recovery_raw or "{}")
+    except json.JSONDecodeError:
+        recovery = {}
+    last = recovery.get("collaboration_last") if isinstance(recovery.get("collaboration_last"), dict) else {}
+    observations.append(
+        _obs(
+            "baseline path skips live collaboration round payload",
+            expected="no live_round on collaboration_last",
+            observed="live_round" in last,
+            passed="live_round" not in last,
+            issue_code="collab_live_leak_baseline",
+        )
+    )
+    row = get_execution_plan(conn, gate.plan_id)
+    summ = row.get("summary") if isinstance(row, dict) else {}
+    collab = summ.get("collaboration") if isinstance(summ.get("collaboration"), dict) else {}
+    observations.append(
+        _obs(
+            "baseline records zero live role invocations",
+            expected=0,
+            observed=int(collab.get("role_invocation_count") or 0),
+            passed=int(collab.get("role_invocation_count") or 0) == 0,
+            issue_code="collab_role_count_baseline",
+        )
+    )
+    return ExperienceCheckResult.from_observations(
+        scenario,
+        observations,
+        output_excerpt=_clip(json.dumps({"fv_keys": sorted(fv.keys())}, indent=2)),
+        started_at=started,
+        completed_at=time.time(),
+        metadata={"collaboration_eval_variant": "baseline_no_live"},
+    )
+
+
+def _scenario_collaboration_eval_advisory_live_mocked(
+    harness: ExperienceHarness, scenario: ExperienceScenario
+) -> ExperienceCheckResult:
+    """Advisory variant: mocked OpenClaw roles populate live_round and role counts."""
+    started = time.time()
+    observations: List[ExperienceObservation] = []
+    conn = harness.conn
+    os.environ["ANDREA_SYNC_STRICT_VERIFICATION"] = "1"
+    os.environ["ANDREA_SYNC_COLLABORATION_LAYER"] = "1"
+    os.environ["ANDREA_SYNC_COLLAB_RUNTIME_ENABLED"] = "1"
+    os.environ["ANDREA_SYNC_COLLAB_ACTION_ENABLED"] = "0"
+
+    def _fake_run_role_json(**kwargs: Any) -> Dict[str, Any]:
+        role = str(kwargs.get("role") or "")
+        if role == "triage":
+            return {
+                "ok": True,
+                "role": "triage",
+                "provider": "exp_provider",
+                "model": "exp_strategist",
+                "payload": {
+                    "recommended_strategy": "ask_user",
+                    "analysis": "Missing PR URL; ask user before claiming done.",
+                    "confidence": 0.9,
+                },
+            }
+        return {
+            "ok": True,
+            "role": "challenger_patch",
+            "provider": "exp_provider",
+            "model": "exp_critic",
+            "payload": {
+                "accept_strategist": True,
+                "issues": [],
+                "recommended_override": "none",
+            },
+        }
+
+    task_id = "tsk_exp_collab_live"
+    create_task(conn, task_id, "cli")
+    link_task_principal(conn, task_id, "p_exp_collab_l", channel="cli")
+    contract = get_contract("repoHelpVerified")
+    assert contract is not None
+    scen_blob = {
+        "scenario_id": "repoHelpVerified",
+        "support_level": contract.support_level,
+        "action_class": contract.action_class,
+        "proof_class": contract.proof_class,
+        "receipt_state": "pending",
+        "approval_mode": contract.approval_mode,
+    }
+    gate = gate_delegated_job(
+        conn,
+        task_id,
+        "",
+        "p_exp_collab_l",
+        "repo fix",
+        "cursor",
+        {"kind": "cursor", "runner": "cursor", "scenario": scen_blob},
+        [],
+    )
+    with mock.patch("services.andrea_sync.collaboration_runtime.run_role_json", side_effect=_fake_run_role_json):
+        fv = finalize_execute_step_verification(
+            conn,
+            task_id=task_id,
+            plan_id=gate.plan_id,
+            execute_step_id=gate.execute_step_id,
+            terminal_status="FINISHED",
+            pr_url="",
+            agent_url="",
+            lane="cursor",
+        )
+    step_row = conn.execute(
+        "SELECT recovery_json FROM plan_steps WHERE step_id = ?",
+        (gate.execute_step_id,),
+    ).fetchone()
+    recovery_raw = step_row[0] if step_row else "{}"
+    try:
+        recovery = json.loads(recovery_raw or "{}")
+    except json.JSONDecodeError:
+        recovery = {}
+    last = recovery.get("collaboration_last") if isinstance(recovery.get("collaboration_last"), dict) else {}
+    observations.append(
+        _obs(
+            "advisory path persists live_round on collaboration_last",
+            expected="live_round present",
+            observed=bool(last.get("live_round")),
+            passed=bool(last.get("live_round")),
+            issue_code="collab_live_missing",
+        )
+    )
+    row = get_execution_plan(conn, gate.plan_id)
+    summ = row.get("summary") if isinstance(row, dict) else {}
+    collab = summ.get("collaboration") if isinstance(summ.get("collaboration"), dict) else {}
+    observations.append(
+        _obs(
+            "advisory path records live role invocations",
+            expected=">=2",
+            observed=int(collab.get("role_invocation_count") or 0),
+            passed=int(collab.get("role_invocation_count") or 0) >= 2,
+            issue_code="collab_role_count_live",
+        )
+    )
+    observations.append(
+        _obs(
+            "advisory path tags usefulness status",
+            expected="non-empty usefulness_status",
+            observed=collab.get("usefulness_status"),
+            passed=bool(str(collab.get("usefulness_status") or "").strip()),
+            issue_code="collab_usefulness_missing",
+        )
+    )
+    cp = fv.get("collaboration_event_payload")
+    observations.append(
+        _obs(
+            "finalize exposes collaboration payload with live_round summary",
+            expected="live_round in payload",
+            observed=list((cp or {}).keys()) if isinstance(cp, dict) else [],
+            passed=bool(isinstance(cp, dict) and isinstance(cp.get("live_round"), dict)),
+            issue_code="collab_event_live_missing",
+        )
+    )
+    return ExperienceCheckResult.from_observations(
+        scenario,
+        observations,
+        output_excerpt=_clip(json.dumps({"fv_keys": sorted(fv.keys())}, indent=2)),
+        started_at=started,
+        completed_at=time.time(),
+        metadata={"collaboration_eval_variant": "advisory_live_mocked"},
+    )
+
+
+def _scenario_collaboration_eval_adaptive_shadow_compare(
+    harness: ExperienceHarness, scenario: ExperienceScenario
+) -> ExperienceCheckResult:
+    """Adaptive ledger recommends suppressing live advisory, but shadow mode keeps live runs for compare."""
+    started = time.time()
+    observations: List[ExperienceObservation] = []
+    conn = harness.conn
+    prev_env: Dict[str, Any] = {}
+    for key in (
+        "ANDREA_SYNC_STRICT_VERIFICATION",
+        "ANDREA_SYNC_COLLABORATION_LAYER",
+        "ANDREA_SYNC_COLLAB_RUNTIME_ENABLED",
+        "ANDREA_SYNC_COLLAB_ACTION_ENABLED",
+        "ANDREA_SYNC_COLLAB_POLICY_SHADOW_ONLY",
+        "ANDREA_SYNC_COLLAB_POLICY_MIN_SAMPLE",
+        "ANDREA_SYNC_COLLAB_POLICY_MAX_WASTE_RATE",
+    ):
+        prev_env[key] = os.environ.get(key)
+
+    def _restore_env() -> None:
+        for k, v in prev_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    try:
+        os.environ["ANDREA_SYNC_STRICT_VERIFICATION"] = "1"
+        os.environ["ANDREA_SYNC_COLLABORATION_LAYER"] = "1"
+        os.environ["ANDREA_SYNC_COLLAB_RUNTIME_ENABLED"] = "1"
+        os.environ["ANDREA_SYNC_COLLAB_ACTION_ENABLED"] = "0"
+        os.environ["ANDREA_SYNC_COLLAB_POLICY_SHADOW_ONLY"] = "1"
+        os.environ["ANDREA_SYNC_COLLAB_POLICY_MIN_SAMPLE"] = "3"
+        os.environ["ANDREA_SYNC_COLLAB_POLICY_MAX_WASTE_RATE"] = "0.2"
+
+        now = time.time()
+        for i in range(15):
+            conn.execute(
+                """
+                INSERT INTO collaboration_outcomes(
+                    task_id, plan_id, step_id, collab_id, scenario_id, trigger, ts,
+                    canonical_class, usefulness_detail, live_advisory_ran, role_invocation_delta,
+                    payload_json
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    f"t_seed_shadow_{i}",
+                    "p_seed_shadow",
+                    "s_seed_shadow",
+                    f"c_seed_shadow_{i}",
+                    "repoHelpVerified",
+                    "verify_fail",
+                    now,
+                    "wasteful",
+                    "wasteful_no_alternate_lane",
+                    1,
+                    2,
+                    "{}",
+                ),
+            )
+        conn.commit()
+
+        def _fake_run_role_json(**kwargs: Any) -> Dict[str, Any]:
+            role = str(kwargs.get("role") or "")
+            if role == "triage":
+                return {
+                    "ok": True,
+                    "role": "triage",
+                    "provider": "exp_provider",
+                    "model": "exp_strategist",
+                    "payload": {
+                        "recommended_strategy": "ask_user",
+                        "analysis": "Shadow compare seed.",
+                        "confidence": 0.9,
+                    },
+                }
+            return {
+                "ok": True,
+                "role": "challenger_patch",
+                "provider": "exp_provider",
+                "model": "exp_critic",
+                "payload": {
+                    "accept_strategist": True,
+                    "issues": [],
+                    "recommended_override": "none",
+                },
+            }
+
+        task_id = "tsk_exp_collab_shadow"
+        create_task(conn, task_id, "cli")
+        link_task_principal(conn, task_id, "p_exp_collab_sh", channel="cli")
+        contract = get_contract("repoHelpVerified")
+        assert contract is not None
+        scen_blob = {
+            "scenario_id": "repoHelpVerified",
+            "support_level": contract.support_level,
+            "action_class": contract.action_class,
+            "proof_class": contract.proof_class,
+            "receipt_state": "pending",
+            "approval_mode": contract.approval_mode,
+        }
+        gate = gate_delegated_job(
+            conn,
+            task_id,
+            "",
+            "p_exp_collab_sh",
+            "repo fix",
+            "cursor",
+            {"kind": "cursor", "runner": "cursor", "scenario": scen_blob},
+            [],
+        )
+        with mock.patch(
+            "services.andrea_sync.collaboration_runtime.run_role_json",
+            side_effect=_fake_run_role_json,
+        ):
+            fv = finalize_execute_step_verification(
+                conn,
+                task_id=task_id,
+                plan_id=gate.plan_id,
+                execute_step_id=gate.execute_step_id,
+                terminal_status="FINISHED",
+                pr_url="",
+                agent_url="",
+                lane="cursor",
+            )
+        ap = fv.get("activation_event_payload") if isinstance(fv.get("activation_event_payload"), dict) else {}
+        observations.append(
+            _obs(
+                "ledger signals high waste; activation recommends suppressing live advisory",
+                expected="shadow_recommended_suppress_live=True",
+                observed=str(ap.get("shadow_recommended_suppress_live")),
+                passed=bool(ap.get("shadow_recommended_suppress_live")),
+                issue_code="collab_shadow_recommend_missing",
+            )
+        )
+        observations.append(
+            _obs(
+                "shadow mode still executes live advisory for A/B compare",
+                expected="executed_live_advisory_planned=True",
+                observed=str(ap.get("executed_live_advisory_planned")),
+                passed=bool(ap.get("executed_live_advisory_planned")),
+                issue_code="collab_shadow_live_missing",
+            )
+        )
+        step_row = conn.execute(
+            "SELECT recovery_json FROM plan_steps WHERE step_id = ?",
+            (gate.execute_step_id,),
+        ).fetchone()
+        recovery_raw = step_row[0] if step_row else "{}"
+        try:
+            recovery = json.loads(recovery_raw or "{}")
+        except json.JSONDecodeError:
+            recovery = {}
+        last = (
+            recovery.get("collaboration_last")
+            if isinstance(recovery.get("collaboration_last"), dict)
+            else {}
+        )
+        observations.append(
+            _obs(
+                "live_round still persisted under shadow policy",
+                expected="live_round present",
+                observed=bool(last.get("live_round")),
+                passed=bool(last.get("live_round")),
+                issue_code="collab_shadow_live_round_missing",
+            )
+        )
+        promo_meta = {
+            "collaboration_eval_variant": "adaptive_shadow_compare",
+            "promotion_controller_enabled": (
+                (os.environ.get("ANDREA_SYNC_COLLAB_PROMOTION_ENABLED") or "0").strip().lower()
+                in ("1", "true", "yes", "on")
+            ),
+        }
+        try:
+            from .collaboration_promotion import build_trusted_promotion_summary
+
+            promo_meta["promotion_state_summary"] = build_trusted_promotion_summary(conn)
+        except Exception:  # noqa: BLE001
+            promo_meta["promotion_state_summary"] = {"ok": False, "error": "promotion_summary_unavailable"}
+        return ExperienceCheckResult.from_observations(
+            scenario,
+            observations,
+            output_excerpt=_clip(json.dumps({"fv_keys": sorted(fv.keys())}, indent=2)),
+            started_at=started,
+            completed_at=time.time(),
+            metadata=promo_meta,
+        )
+    finally:
+        _restore_env()
+
+
+def _scenario_collaboration_eval_operator_approved_promotion_overlay(
+    harness: ExperienceHarness, scenario: ExperienceScenario
+) -> ExperienceCheckResult:
+    """Operator-approved promotion revision should surface as live advisory in promotion overlay."""
+    started = time.time()
+    observations: List[ExperienceObservation] = []
+    conn = harness.conn
+    prev_promo = os.environ.get("ANDREA_SYNC_COLLAB_PROMOTION_ENABLED")
+    os.environ["ANDREA_SYNC_COLLAB_PROMOTION_ENABLED"] = "1"
+    try:
+        now = time.time()
+        # Use trust_gate so earlier scenarios that seed verify_fail (e.g. adaptive shadow compare)
+        # do not dilute useful_rate for this subject in the shared harness database.
+        _trig = "trust_gate"
+        for i in range(22):
+            conn.execute(
+                """
+                INSERT INTO collaboration_outcomes(
+                    task_id, plan_id, step_id, collab_id, scenario_id, trigger, ts,
+                    canonical_class, usefulness_detail, live_advisory_ran, role_invocation_delta,
+                    payload_json
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    f"t_seed_promo_{i}",
+                    "p_seed_promo",
+                    "s_seed_promo",
+                    f"c_seed_promo_{i}",
+                    "repoHelpVerified",
+                    _trig,
+                    now,
+                    "useful",
+                    "useful_strategy_shift",
+                    0,
+                    2,
+                    "{}",
+                ),
+            )
+        conn.commit()
+        from .collaboration_rollout import operator_approve_live_advisory
+        from .collaboration_promotion import get_promotion_activation_overlay
+
+        res = operator_approve_live_advisory(
+            conn,
+            scenario_id="repoHelpVerified",
+            trigger=_trig,
+            actor="exp_operator",
+            risk_notes="experience_assurance",
+        )
+        observations.append(
+            _obs(
+                "operator approve live advisory succeeds under evidence gates",
+                expected="ok True",
+                observed=str(res.get("ok")),
+                passed=res.get("ok") is True,
+                issue_code="rollout_operator_approve_failed",
+            )
+        )
+        ov = get_promotion_activation_overlay(conn, "repoHelpVerified", _trig)
+        observations.append(
+            _obs(
+                "promotion overlay reports live advisory after operator approval",
+                expected="live_advisory",
+                observed=str(ov.get("promotion_level")),
+                passed=str(ov.get("promotion_level") or "") == "live_advisory",
+                issue_code="rollout_overlay_level_mismatch",
+            )
+        )
+        observations.append(
+            _obs(
+                "promotion overlay clears shadow-only enforcement for approved subject",
+                expected="effective_shadow_only False",
+                observed=str(ov.get("effective_shadow_only")),
+                passed=ov.get("effective_shadow_only") is False,
+                issue_code="rollout_overlay_shadow_stuck",
+            )
+        )
+        from .collaboration_rollout import build_comparison_from_subject
+
+        cmp_res = build_comparison_from_subject(
+            conn, scenario_id="repoHelpVerified", trigger=_trig
+        )
+        observations.append(
+            _obs(
+                "live-shadow comparison persistence returns an id",
+                expected="ok True with comparison_id",
+                observed=str(cmp_res.get("comparison_id", "")),
+                passed=cmp_res.get("ok") is True and bool(str(cmp_res.get("comparison_id") or "").strip()),
+                issue_code="rollout_comparison_persist_failed",
+            )
+        )
+        return ExperienceCheckResult.from_observations(
+            scenario,
+            observations,
+            output_excerpt=_clip(json.dumps({"approve": res, "overlay_keys": sorted(ov.keys())}, indent=2)),
+            started_at=started,
+            completed_at=time.time(),
+            metadata={"collaboration_eval_variant": "operator_approved_promotion_overlay"},
+        )
+    finally:
+        if prev_promo is None:
+            os.environ.pop("ANDREA_SYNC_COLLAB_PROMOTION_ENABLED", None)
+        else:
+            os.environ["ANDREA_SYNC_COLLAB_PROMOTION_ENABLED"] = prev_promo
+
+
 def default_experience_scenarios() -> List[ExperienceScenario]:
     return [
         ExperienceScenario(
@@ -2402,6 +2924,68 @@ def default_experience_scenarios() -> List[ExperienceScenario]:
                 "services/andrea_sync/collaboration_schema.py",
             ],
             runner=_scenario_bounded_collaboration_verify_fail_repo,
+        ),
+        ExperienceScenario(
+            scenario_id="collaboration_eval_baseline_no_live_round",
+            title="Collaboration eval baseline skips live advisory roles",
+            description=(
+                "With collaboration runtime disabled, verify-fail should persist deterministic "
+                "collaboration metadata without live_round payloads or role invocation counts."
+            ),
+            category="trust",
+            tags=["plan", "collaboration", "verification", "repo", "collaboration_eval"],
+            suspected_files=[
+                "services/andrea_sync/plan_runtime.py",
+                "services/andrea_sync/collaboration_runtime.py",
+            ],
+            runner=_scenario_collaboration_eval_baseline_no_live_round,
+        ),
+        ExperienceScenario(
+            scenario_id="collaboration_eval_advisory_live_mocked",
+            title="Collaboration eval advisory path records mocked live roles",
+            description=(
+                "With runtime enabled and OpenClaw calls mocked, verify-fail should persist "
+                "live_round, usefulness hints, and role invocation counts for operator metrics."
+            ),
+            category="trust",
+            tags=["plan", "collaboration", "verification", "repo", "collaboration_eval"],
+            suspected_files=[
+                "services/andrea_sync/plan_runtime.py",
+                "services/andrea_sync/collaboration_runtime.py",
+            ],
+            runner=_scenario_collaboration_eval_advisory_live_mocked,
+        ),
+        ExperienceScenario(
+            scenario_id="collaboration_eval_adaptive_shadow_compare",
+            title="Adaptive collaboration shadow mode keeps live advisory while logging suppress signal",
+            description=(
+                "Seeded wasteful outcomes should flip adaptive recommendation to suppress live advisory, "
+                "but shadow-only policy must still run live roles for measurable comparison."
+            ),
+            category="trust",
+            tags=["plan", "collaboration", "verification", "repo", "collaboration_eval", "policy"],
+            suspected_files=[
+                "services/andrea_sync/plan_runtime.py",
+                "services/andrea_sync/activation_policy.py",
+                "services/andrea_sync/collaboration_effectiveness.py",
+            ],
+            runner=_scenario_collaboration_eval_adaptive_shadow_compare,
+        ),
+        ExperienceScenario(
+            scenario_id="collaboration_eval_operator_approved_promotion_overlay",
+            title="Operator rollout approval exposes live advisory promotion overlay",
+            description=(
+                "Seeded useful outcomes plus operator approve-live should persist a promotion revision "
+                "and report live_advisory with shadow enforcement cleared for the subject."
+            ),
+            category="trust",
+            tags=["plan", "collaboration", "rollout", "promotion", "collaboration_eval"],
+            suspected_files=[
+                "services/andrea_sync/collaboration_rollout.py",
+                "services/andrea_sync/collaboration_promotion.py",
+                "services/andrea_sync/store.py",
+            ],
+            runner=_scenario_collaboration_eval_operator_approved_promotion_overlay,
         ),
         ExperienceScenario(
             scenario_id="trusted_layer_unsafe_request",

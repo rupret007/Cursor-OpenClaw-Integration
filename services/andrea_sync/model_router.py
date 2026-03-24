@@ -30,7 +30,13 @@ def model_for_role(role: ModelRole) -> str:
 
 
 def model_for_collaboration_role(role: CollaborationModelRole) -> str:
-    """Map bounded-collaboration roles onto existing env-backed model slots (slice 2 wiring)."""
+    """Map bounded-collaboration roles onto existing env-backed model slots.
+
+    Live OpenClaw task-path advisory rounds use repair adapters instead of this helper:
+    - repair_strategist -> ANDREA_REPAIR_TRIAGE_* via run_role_json(role="triage")
+    - critic -> ANDREA_REPAIR_CHALLENGER_* via run_role_json(role="challenger_patch")
+    This function remains the hook for future direct-slot routing or logging.
+    """
     mapped: ModelRole = {
         "planner": "planner",
         "executor": "worker",

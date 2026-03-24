@@ -51,7 +51,7 @@ class AndreaExperienceAssuranceTests(unittest.TestCase):
         latest = get_latest_experience_run(self.conn)
         self.assertEqual(latest["run_id"], result["run"]["run_id"])
         self.assertEqual(latest["failed_checks"], 0)
-        self.assertGreaterEqual(latest["total_checks"], 17)
+        self.assertGreaterEqual(latest["total_checks"], 18)
         self.assertEqual(len(latest["checks"]), latest["total_checks"])
         self.assertIn("score_counts", latest)
         check_ids = {row["check_id"] for row in latest["checks"]}
@@ -66,6 +66,8 @@ class AndreaExperienceAssuranceTests(unittest.TestCase):
         self.assertIn("experience_text_messages_from_today_via_bluebubbles", check_ids)
         self.assertIn("experience_structured_lookup_rejects_provider_leak_summary", check_ids)
         self.assertIn("experience_recent_text_shorthand_followup_same_thread", check_ids)
+        self.assertIn("experience_collaboration_eval_adaptive_shadow_compare", check_ids)
+        self.assertIn("experience_collaboration_eval_operator_approved_promotion_overlay", check_ids)
 
     def test_run_experience_assurance_bridges_failure_into_repair_cycle(self) -> None:
         def failing_runner(_harness: object, scenario: ExperienceScenario) -> ExperienceCheckResult:

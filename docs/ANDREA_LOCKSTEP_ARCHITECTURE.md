@@ -196,7 +196,7 @@ This keeps the same assistant persona available across text-first Telegram now a
 
 ## Scenario layer (trusted assistant pack)
 
-- **First supported pack** (auto / approval as defined per contract): `repoHelpVerified`, `verificationSensitiveAction`, `multiStepTroubleshoot`, `statusFollowupContinue`, `noteOrReminderCapture`, `recentMessagesOrInboxLookup` — see `FIRST_SUPPORTED_SCENARIO_IDS` in `scenario_registry.py`.
+- **First supported pack** (auto / approval as defined per contract): `repoHelpVerified`, `verificationSensitiveAction`, `multiStepTroubleshoot`, `statusFollowupContinue`, `noteOrReminderCapture`, `recentMessagesOrInboxLookup`, `goalContinuationAcrossSessions` — see `FIRST_SUPPORTED_SCENARIO_IDS` in `scenario_registry.py`. Daily continuity pack details: `docs/DAILY_ASSISTANT_PACK.md`.
 - **Draft-only or unsupported** scenarios stay in the catalog for classification and messaging but should not auto-delegate without product changes (e.g. outbound, research, multi-step troubleshoot, mixed default) or are blocked by policy.
 - **Delegated plans** store semantic `plan_kind` from `ScenarioContract.default_plan_kind` (not always `delegated_repo_task`).
 - **Lane enforcement**: `execution_lane` must appear in the contract’s `allowed_lanes` (Cursor lane aliases like `direct_cursor` normalize to `cursor`).

@@ -259,6 +259,12 @@ class TestPlanRuntime(unittest.TestCase):
         )
         self.assertIsInstance(fv.get("collaboration_event_payload"), dict)
         self.assertTrue(str(fv["collaboration_event_payload"].get("collab_id") or "").strip())
+        act = fv.get("activation_event_payload")
+        self.assertIsInstance(act, dict)
+        self.assertEqual(str(act.get("scenario_id") or ""), "repoHelpVerified")
+        out = fv.get("collaboration_outcome_event_payload")
+        self.assertIsInstance(out, dict)
+        self.assertTrue(str(out.get("canonical_class") or "").strip())
         row = get_execution_plan(self.conn, gate.plan_id)
         summ = row.get("summary") if isinstance(row, dict) else {}
         self.assertTrue((summ.get("collaboration") or {}).get("rounds"))
@@ -277,8 +283,13 @@ class TestPlanRuntime(unittest.TestCase):
         self.assertTrue(po.get("ok"))
         self.assertIn("scenario_counts", po)
         self.assertIn("proof_coverage", po)
+        self.assertIn("collaboration_role_invocations_total", po)
+        self.assertIn("collaboration_usefulness_counts", po)
         self.assertIn("receipt_state_counts", po)
         self.assertIn("first_pack_health", po)
+        cp = summ.get("collaboration_policy") or {}
+        self.assertTrue(cp.get("ok") is not False)
+        self.assertIn("policy_version", cp)
 
 
 if __name__ == "__main__":

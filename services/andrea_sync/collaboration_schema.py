@@ -115,6 +115,10 @@ def collaboration_event_payload(
     arbitration: ArbitrationDecision,
     role_assignments: List[RoleAssignment],
     contribution: ModelContribution | None = None,
+    live_round: Dict[str, Any] | None = None,
+    advisory_only: bool = True,
+    executed_action: Dict[str, Any] | None = None,
+    usefulness_status: str = "",
 ) -> Dict[str, Any]:
     """Payload for COLLABORATION_RECORDED (lean, operator-safe)."""
     out: Dict[str, Any] = {
@@ -131,7 +135,18 @@ def collaboration_event_payload(
         "arbitration_decision": arbitration.decision,
         "trusted_to_continue": arbitration.trusted_to_continue,
         "roles": [r.to_dict() for r in role_assignments],
+        "advisory_only": bool(advisory_only),
     }
     if contribution:
         out["contribution"] = contribution.to_dict()
+    if live_round and isinstance(live_round, dict):
+        out["live_round"] = {
+            "arbitration_note": str(live_round.get("arbitration_note") or "")[:400],
+            "usefulness_status": str(live_round.get("usefulness_status") or "")[:120],
+            "final_strategy": str(live_round.get("final_strategy") or "")[:80],
+        }
+    if usefulness_status:
+        out["usefulness_status"] = str(usefulness_status)[:120]
+    if executed_action and isinstance(executed_action, dict):
+        out["executed_action"] = executed_action
     return out

@@ -76,3 +76,24 @@ class SchemaCursorPlanMetaTests(unittest.TestCase):
         exec_meta = proj.meta.get("execution", {})
         self.assertEqual(exec_meta.get("current_role"), "repair_strategist")
         self.assertGreaterEqual(int(exec_meta.get("repair_attempts") or 0), 1)
+
+    def test_collaboration_role_recorded_folds_meta(self) -> None:
+        proj = TaskProjection(
+            task_id="t_collab_role",
+            status=TaskStatus.RUNNING,
+            channel="cli",
+            seq_applied=0,
+        )
+        fold_projection(
+            proj,
+            EventType.COLLABORATION_ROLE_RECORDED,
+            {
+                "collab_id": "col_r1",
+                "role": "repair_strategist",
+                "model": "test-model",
+                "ok": True,
+            },
+        )
+        collab = proj.meta.get("collaboration", {})
+        self.assertEqual(collab.get("last_collaboration_role"), "repair_strategist")
+        self.assertGreaterEqual(int(collab.get("role_event_count") or 0), 1)

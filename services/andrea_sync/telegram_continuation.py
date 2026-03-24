@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import os
 import time
+import uuid
 from typing import Any, Dict, Optional, Tuple
 
 from .adapters.telegram import MENTION_RE
 from .projector import project_task_dict
 from .schema import TaskStatus
 from .store import (
+    get_task_principal_id,
     get_task_updated_at,
     list_recent_telegram_task_ids,
     list_telegram_task_ids_for_chat,
@@ -228,4 +230,47 @@ def attach_continuation_if_applicable(conn: Any, cmd: Dict[str, Any]) -> bool:
         payload["telegram_continuation_anchor_message_id"] = anchor_mid
     cmd["task_id"] = tid
     cmd["payload"] = payload
+    try:
+        from .schema import EventType
+        from .store import append_event, insert_continuation_record
+
+        cid = f"cont-{int(now * 1000)}-{uuid.uuid4().hex[:10]}"
+        principal_id = str(get_task_principal_id(conn, tid) or "")
+        insert_continuation_record(
+            conn,
+            continuation_id=cid,
+            principal_id=principal_id,
+            source_channel="telegram",
+            source_task_id="",
+            linked_task_id=tid,
+            reason="telegram_thread_continuation",
+            confidence_band="heuristic_v1",
+            payload={
+                "chat_id": chat_id,
+                "anchor_message_id": anchor_mid,
+            },
+        )
+        append_event(
+            conn,
+            tid,
+            EventType.CONTINUATION_RECORDED,
+            {
+                "continuation_id": cid,
+                "linked_task_id": tid,
+                "principal_id": principal_id,
+                "reason": "telegram_thread_continuation",
+                "confidence_band": "heuristic_v1",
+                "source_channel": "telegram",
+            },
+        )
+        try:
+            from .assistant_followthrough import on_telegram_continuation_recorded
+
+            on_telegram_continuation_recorded(
+                conn, task_id=tid, continuation_id=cid, principal_id=principal_id
+            )
+        except Exception:
+            pass
+    except Exception:
+        pass
     return True

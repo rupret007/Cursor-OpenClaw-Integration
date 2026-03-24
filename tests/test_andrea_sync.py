@@ -1608,6 +1608,7 @@ class TestAndreaSync(unittest.TestCase):
         weak = "Tell me what you need."
         domains_guarded = (
             "personal_agenda",
+            "attention_today",
             "external_information",
             "opinion_reflection",
         )
@@ -1620,9 +1621,13 @@ class TestAndreaSync(unittest.TestCase):
                     "What's on the agenda today?"
                     if dom == "personal_agenda"
                     else (
-                        "What's the news today?"
-                        if dom == "external_information"
-                        else "What do you think about that?"
+                        "What do I need to pay attention to today?"
+                        if dom == "attention_today"
+                        else (
+                            "What's the news today?"
+                            if dom == "external_information"
+                            else "What do you think about that?"
+                        )
                     )
                 )
                 r = build_direct_reply(
@@ -1680,6 +1685,131 @@ class TestAndreaSync(unittest.TestCase):
         )
         self.assertIn("calendar", out.reply_text.lower())
         self.assertEqual(out.reason, "domain_agenda_repaired_direct_reply")
+
+    def test_server_repair_swaps_generic_attention_to_state_copy(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.andrea_router import AndreaRouteDecision  # noqa: E402
+        from services.andrea_sync.scenario_registry import SCENARIO_CATALOG  # noqa: E402
+        from services.andrea_sync.scenario_schema import ScenarioResolution  # noqa: E402
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+        from services.andrea_sync.turn_intelligence import build_turn_plan  # noqa: E402
+
+        server = SyncServer()
+        sc = SCENARIO_CATALOG["statusFollowupContinue"]
+        text = "What do I need to pay attention to today?"
+        plan = build_turn_plan(
+            text, scenario_id=sc.scenario_id, projection_has_continuity_state=True
+        )
+        res = ScenarioResolution(
+            scenario_id=sc.scenario_id,
+            confidence=0.9,
+            support_level=sc.support_level,
+            reason="test",
+            goal_id="",
+            needs_plan=False,
+            suggested_lane="direct_assistant",
+            action_class=sc.action_class,
+            proof_class=sc.proof_class,
+            approval_mode=sc.approval_mode,
+        )
+        bad = AndreaRouteDecision(
+            mode="direct",
+            reason="short_general_request",
+            reply_text=(
+                "I'm here. Say a bit more about what you want and I'll take it from there."
+            ),
+        )
+        out = server._maybe_repair_direct_reply_from_continuity(
+            "nonexistent_task",
+            classify_text=text,
+            decision=bad,
+            resolution=res,
+            turn_plan=plan,
+            history=[],
+            memory_notes=[],
+        )
+        low = out.reply_text.lower()
+        self.assertTrue(
+            "nothing urgent" in low or "reminders" in low or "follow-through" in low,
+            msg=out.reply_text,
+        )
+        self.assertEqual(out.reason, "domain_attention_repaired_direct_reply")
+
+    def test_composer_repairs_false_completion_when_followthrough_pending(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.andrea_router import AndreaRouteDecision  # noqa: E402
+        from services.andrea_sync.scenario_registry import SCENARIO_CATALOG  # noqa: E402
+        from services.andrea_sync.scenario_schema import ScenarioResolution  # noqa: E402
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+        from services.andrea_sync.turn_intelligence import build_turn_plan  # noqa: E402
+
+        r0 = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "ft-false-done-1",
+                "payload": {
+                    "text": "hello",
+                    "routing_text": "hello",
+                    "chat_id": 66100,
+                    "message_id": 1,
+                    "from_user": 600,
+                },
+            },
+        )
+        tid = r0["task_id"]
+        link_task_principal(self.conn, tid, "pri_ft_false", channel="telegram")
+        gid = create_goal(self.conn, "pri_ft_false", "Rollout beta", channel="telegram")
+        link_task_to_goal(self.conn, tid, gid)
+        append_event(
+            self.conn,
+            tid,
+            EventType.CLOSURE_DECISION_RECORDED,
+            {
+                "closure_state": "awaiting_user",
+                "reason": "Waiting on your go/no-go for the rollout.",
+                "decision_id": "d-ft-1",
+            },
+        )
+        server = SyncServer()
+        sc = SCENARIO_CATALOG["statusFollowupContinue"]
+        text = "Where are we with the rollout?"
+        plan = build_turn_plan(
+            text, scenario_id=sc.scenario_id, projection_has_continuity_state=True
+        )
+        res = ScenarioResolution(
+            scenario_id=sc.scenario_id,
+            confidence=0.9,
+            support_level=sc.support_level,
+            reason="test",
+            goal_id=gid,
+            needs_plan=False,
+            suggested_lane="direct_assistant",
+            action_class=sc.action_class,
+            proof_class=sc.proof_class,
+            approval_mode=sc.approval_mode,
+        )
+        bad = AndreaRouteDecision(
+            mode="direct",
+            reason="balanced_default_direct",
+            reply_text="You are all caught up — nothing pending on my side.",
+        )
+        out = server._maybe_repair_direct_reply_from_continuity(
+            tid,
+            classify_text=text,
+            decision=bad,
+            resolution=res,
+            turn_plan=plan,
+            history=[],
+            memory_notes=[],
+        )
+        low = out.reply_text.lower()
+        self.assertIn("follow-through", low)
+        self.assertIn("rollout", low)
+        self.assertEqual(out.reason, "continuity_state_repaired_direct_reply")
 
     def test_ranking_working_on_prefers_linked_goal(self) -> None:
         os.environ["OPENAI_API_ENABLED"] = "0"

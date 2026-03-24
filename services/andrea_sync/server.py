@@ -21,13 +21,11 @@ from typing import Any, Callable, Dict, Optional
 from .adapters import alexa as alexa_adapt
 from .adapters import telegram as tg_adapt
 from .alexa_request_verify import verify_alexa_http_request
-from .andrea_router import (
-    AndreaRouteDecision,
-    DIRECT_AGENDA_NO_CALENDAR_REPLY,
-    _contextual_fallback,
-    _heuristic_reply,
-    is_generic_direct_reply,
-    route_message,
+from .andrea_router import AndreaRouteDecision, route_message
+from .assistant_answer_composer import (
+    bounded_composer_repair,
+    merge_goal_reply_with_followthrough,
+    try_composer_early_short_circuit,
 )
 from .goal_runtime import (
     build_goal_continuity_reply,
@@ -1344,6 +1342,59 @@ class SyncServer:
                 scenario_id=pre_resolution.scenario_id,
                 projection_has_continuity_state=self._projection_has_continuity_state(task_id),
             )
+            route_memory_notes = (
+                self._principal_memory_notes(task_id)
+                if pre_turn_plan.inject_durable_memory
+                else []
+            )
+            early = self.with_lock(
+                lambda c: try_composer_early_short_circuit(
+                    c,
+                    task_id,
+                    classify_text,
+                    pre_turn_plan,
+                    pre_resolution.scenario_id,
+                    effective_history,
+                    route_memory_notes,
+                )
+            )
+            if early:
+                early_text, early_reason = early
+                gid = self.with_lock(lambda c: get_goal_id_for_task(c, task_id) or "")
+                self._append_task_event(
+                    task_id,
+                    EventType.SCENARIO_RESOLVED,
+                    pre_resolution.to_event_payload(),
+                )
+                decision = AndreaRouteDecision(
+                    mode="direct",
+                    reason=early_reason,
+                    reply_text=early_text,
+                    collaboration_mode=str(
+                        user_payload.get("collaboration_mode")
+                        or principal_prefs.get("collaboration_mode")
+                        or "auto"
+                    ),
+                )
+                applied = self._append_task_event(
+                    task_id,
+                    EventType.ASSISTANT_REPLIED,
+                    {
+                        "text": decision.reply_text,
+                        "route": "direct",
+                        "reason": decision.reason,
+                    },
+                )
+                if applied:
+                    self.with_lock(lambda c: set_meta(c, marker, str(time.time())))
+                    self._record_daily_assistant_receipt_after_direct_reply(
+                        task_id,
+                        pre_resolution.to_event_payload(),
+                        decision.reply_text,
+                        route="direct",
+                        reason=decision.reason,
+                    )
+                return decision, applied
             goal_nl = self.with_lock(
                 lambda c: try_goal_status_nl_reply(c, task_id, classify_text)
             )
@@ -1365,6 +1416,12 @@ class SyncServer:
                         )
                     elif pre_turn_plan.domain == "approval_state":
                         goal_nl = "There are no pending approvals right now."
+            if goal_nl:
+                goal_nl = self.with_lock(
+                    lambda c: merge_goal_reply_with_followthrough(
+                        c, task_id, classify_text, goal_nl
+                    )
+                )
             if goal_nl:
                 gid = self.with_lock(lambda c: get_goal_id_for_task(c, task_id) or "")
                 sc = SCENARIO_CATALOG["statusFollowupContinue"]
@@ -1437,11 +1494,6 @@ class SyncServer:
                         task_id, decision.reply_text, decision.reason
                     )
                 return decision, applied
-            route_memory_notes = (
-                self._principal_memory_notes(task_id)
-                if pre_turn_plan.inject_durable_memory
-                else []
-            )
             if pre_turn_plan.force_delegate:
                 decision = AndreaRouteDecision(
                     mode="delegate",
@@ -2064,7 +2116,16 @@ class SyncServer:
             else {}
         )
         meta = projection.get("meta") if isinstance(projection.get("meta"), dict) else {}
-        for key in ("goal", "plan", "approval", "daily_assistant_pack", "followthrough"):
+        for key in (
+            "goal",
+            "plan",
+            "approval",
+            "daily_assistant_pack",
+            "followthrough",
+            "telegram",
+            "proactive",
+            "outcome",
+        ):
             section = meta.get(key)
             if isinstance(section, dict) and section:
                 return True
@@ -2086,79 +2147,43 @@ class SyncServer:
         reply_text = str(decision.reply_text or "").strip()
         if not reply_text:
             return decision
-        generic = is_generic_direct_reply(reply_text) or str(decision.reason or "") in {
-            "short_general_request",
-            "balanced_default_direct",
-        }
         continuity_ask = bool(CONTINUITY_HINT_RE.search(str(classify_text or "")))
         continuity_state = self._projection_has_continuity_state(task_id)
-        scenario_continuity = (
-            str(getattr(resolution, "scenario_id", "") or "") == "statusFollowupContinue"
+        composed = self.with_lock(
+            lambda c: bounded_composer_repair(
+                c,
+                task_id,
+                classify_text=classify_text,
+                decision_reply=reply_text,
+                decision_reason=str(decision.reason or ""),
+                resolution=resolution,
+                turn_plan=turn_plan,
+                history=history,
+                memory_notes=memory_notes,
+                continuity_ask=continuity_ask,
+                continuity_state=continuity_state,
+            )
         )
-        plan_prefers_state = bool(turn_plan and turn_plan.prefer_state_reply)
-        plan_repairs_generic = bool(turn_plan and turn_plan.should_repair_generic)
-        allow_goal = bool(turn_plan and turn_plan.allow_goal_continuity_repair)
-        inject_mem = bool(turn_plan and turn_plan.inject_durable_memory)
-        domain = str((turn_plan.domain if turn_plan else "") or "").strip()
-        mem_ctx = list(memory_notes or []) if inject_mem else []
-
-        if allow_goal:
-            if not (
-                scenario_continuity
-                or plan_prefers_state
-                or ((generic and plan_repairs_generic) and (continuity_ask or continuity_state))
-            ):
-                return decision
-            continuity_reply = self.with_lock(
-                lambda c: build_goal_continuity_reply(
-                    c, task_id, user_text=classify_text
-                )
-            )
-            if not continuity_reply:
-                if generic and domain == "project_status":
-                    continuity_reply = (
-                        "I do not see active tracked work right now. "
-                        "If you want, I can start a fresh task and track it from here."
-                    )
-                elif generic and domain == "approval_state":
-                    continuity_reply = "There are no pending approvals right now."
-                else:
-                    return decision
-            return AndreaRouteDecision(
-                mode="direct",
-                reason="continuity_state_repaired_direct_reply",
-                reply_text=continuity_reply,
-                collaboration_mode=decision.collaboration_mode,
-            )
-
-        if not (generic and plan_repairs_generic):
+        if not composed:
             return decision
-        if domain == "personal_agenda":
-            return AndreaRouteDecision(
-                mode="direct",
-                reason="domain_agenda_repaired_direct_reply",
-                reply_text=DIRECT_AGENDA_NO_CALENDAR_REPLY,
-                collaboration_mode=decision.collaboration_mode,
-            )
-        if domain == "opinion_reflection":
-            repaired = _contextual_fallback(
-                classify_text, history=history, memory_notes=mem_ctx
-            )
-            return AndreaRouteDecision(
-                mode="direct",
-                reason="domain_opinion_thread_repaired_direct_reply",
-                reply_text=repaired,
-                collaboration_mode=decision.collaboration_mode,
-            )
-        if domain == "external_information":
-            repaired = _heuristic_reply(classify_text, history=history)
-            return AndreaRouteDecision(
-                mode="direct",
-                reason="domain_external_world_repaired_direct_reply",
-                reply_text=repaired,
-                collaboration_mode=decision.collaboration_mode,
-            )
-        return decision
+        text, tag = composed
+        reason_map = {
+            "agenda_state": "domain_agenda_repaired_direct_reply",
+            "attention_state": "domain_attention_repaired_direct_reply",
+            "opinion_contextual": "domain_opinion_thread_repaired_direct_reply",
+            "external_heuristic": "domain_external_world_repaired_direct_reply",
+            "goal_continuity": "continuity_state_repaired_direct_reply",
+            "state_rich_goal": "continuity_state_repaired_direct_reply",
+            "followthrough_goal": "continuity_state_repaired_direct_reply",
+            "followthrough_only": "continuity_state_repaired_direct_reply",
+        }
+        reason = reason_map.get(tag, f"state_composer_repair:{tag}")
+        return AndreaRouteDecision(
+            mode="direct",
+            reason=reason,
+            reply_text=text,
+            collaboration_mode=decision.collaboration_mode,
+        )
 
     def _extract_cursor_prompt(self, task_id: str) -> str:
         snapshot = self._task_snapshot(task_id)

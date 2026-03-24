@@ -179,6 +179,23 @@ class BlueprintPlatformTests(unittest.TestCase):
         self.assertFalse(plan_agenda.prefer_state_reply)
         self.assertFalse(plan_agenda.allow_goal_continuity_repair)
 
+        plan_planned_today = build_turn_plan(
+            "What's planned today?",
+            scenario_id="statusFollowupContinue",
+            projection_has_continuity_state=True,
+        )
+        self.assertEqual(plan_planned_today.domain, "personal_agenda")
+        self.assertEqual(plan_planned_today.context_boundary, "personal_agenda_state")
+
+        plan_attention = build_turn_plan(
+            "What do I need to pay attention to today?",
+            scenario_id="statusFollowupContinue",
+            projection_has_continuity_state=True,
+        )
+        self.assertEqual(plan_attention.domain, "attention_today")
+        self.assertEqual(plan_attention.context_boundary, "attention_and_triage_state")
+        self.assertFalse(plan_attention.allow_goal_continuity_repair)
+
         plan_opinion = build_turn_plan(
             "What do you think about that?",
             scenario_id="statusFollowupContinue",

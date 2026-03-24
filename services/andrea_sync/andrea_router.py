@@ -165,6 +165,11 @@ DIRECT_AGENDA_NO_CALENDAR_REPLY = (
     "I don't have a connected calendar view in this chat, so I can't see your real schedule here. "
     "Tell me what you're trying to get done today, or ask for reminders or status on something specific."
 )
+# Attention/triage lane: honest no-signal copy (router + composer empty-state).
+DIRECT_ATTENTION_NO_STATE_REPLY = (
+    "Nothing urgent is surfacing from current reminders and follow-through right now. "
+    "I can check a specific project or help you plan the rest of today."
+)
 
 OPINION_OR_TAKE_RE = re.compile(
     r"\b("
@@ -592,6 +597,11 @@ def _openai_direct_reply(
             " This turn is personal-agenda or schedule: do not substitute project goals, sprint status, "
             "or approvals for the user's calendar or day plan; if you lack schedule data, say so clearly."
         )
+    elif domain == "attention_today":
+        boundary_extra = (
+            " This turn is attention/triage for today: prioritize user-action items, due or at-risk work, "
+            "and reminders over passive project summaries; do not substitute unrelated memory or history."
+        )
     elif domain == "opinion_reflection":
         boundary_extra = (
             " This turn asks for an opinion or reflection: ground the answer in the recent thread when "
@@ -737,6 +747,8 @@ def build_direct_reply(
         return "Pretty good, thanks for asking. How are you doing?"
     if domain == "personal_agenda" and is_generic_direct_reply(reply):
         return DIRECT_AGENDA_NO_CALENDAR_REPLY
+    if domain == "attention_today" and is_generic_direct_reply(reply):
+        return DIRECT_ATTENTION_NO_STATE_REPLY
     if domain == "opinion_reflection" and is_generic_direct_reply(reply):
         return _finalize_direct_surface_reply(
             _contextual_fallback(text, history=history, memory_notes=mem_ctx),

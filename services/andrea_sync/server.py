@@ -121,6 +121,9 @@ def default_db_path() -> Path:
 
 TERMINAL_CURSOR_STATUSES = frozenset({"FINISHED", "FAILED", "CANCELLED", "STOPPED", "EXPIRED"})
 
+# Sentinel for SyncServer's async queue worker shutdown (tests / in-process harnesses).
+_QUEUE_WORKER_STOP = object()
+
 
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
@@ -413,12 +416,34 @@ class SyncServer:
                 fn = self.queue.get(timeout=0.5)
             except Empty:
                 continue
+            if fn is _QUEUE_WORKER_STOP:
+                self.queue.task_done()
+                return
             try:
                 fn()
             except Exception as e:  # noqa: BLE001
                 print(f"andrea_sync worker error: {e}", flush=True)
             finally:
                 self.queue.task_done()
+
+    def shutdown_queue_worker(self, join_timeout: float = 30.0) -> None:
+        """Stop the background queue consumer thread (best-effort).
+
+        Long-lived in-process servers (production) normally keep this worker
+        running for the process lifetime. Unit tests and ``ExperienceHarness``
+        create many ``SyncServer`` instances in one process; without joining
+        this thread before closing SQLite, stale workers accumulate and cause
+        intermittent cross-test failures.
+        """
+
+        worker = getattr(self, "_worker", None)
+        if worker is None or not worker.is_alive():
+            return
+        try:
+            self.queue.put(_QUEUE_WORKER_STOP)
+        except Exception:
+            return
+        worker.join(timeout=max(0.1, float(join_timeout)))
 
     def _expected_webhook_url(self) -> str:
         return tg_adapt.build_webhook_url(

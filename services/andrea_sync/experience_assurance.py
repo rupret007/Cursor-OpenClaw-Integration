@@ -78,6 +78,37 @@ DELEGATED_FINAL_LEAK_TERMS = (
     "plugins.entries",
     "channels.",
 )
+def _drain_sync_server_queue(server: SyncServer, *, timeout: float) -> None:
+    """Wait until SyncServer's async worker queue is idle (best-effort).
+
+    SyncServer closes SQLite from the harness thread while a daemon worker may
+    still be running `_handle_task_followups` jobs queued during HTTP handling.
+    Closing the connection first causes intermittent failures under full unittest
+    discovery (timing/order dependent).
+
+    Python 3.12+ stdlib ``queue.Queue`` exposes ``unfinished_tasks``/``join`` (merged
+    from the old ``JoinableQueue``); older Pythons used a separate ``JoinableQueue``.
+    """
+
+    deadline = time.time() + max(0.1, timeout)
+    q = server.queue
+    while time.time() < deadline:
+        try:
+            unfinished = getattr(q, "unfinished_tasks", None)
+            if unfinished is not None:
+                if unfinished == 0 and q.empty():
+                    time.sleep(0.05)
+                    if q.unfinished_tasks == 0 and q.empty():
+                        return
+            elif q.empty():
+                time.sleep(0.05)
+                if q.empty():
+                    return
+        except Exception:
+            return
+        time.sleep(0.02)
+
+
 DELEGATED_FINAL_LIFECYCLE_TERMS = (
     "what happens next:",
     "queued it for cursor",
@@ -132,8 +163,27 @@ class ExperienceHarness:
         self.httpd: ThreadingHTTPServer | None = None
         self.port = 0
         self._thread: threading.Thread | None = None
+        self._leaked_env_backup: Dict[str, str] = {}
 
     def __enter__(self) -> "ExperienceHarness":
+        # Strip leaked process env from other unittest modules; patch.dict(..., clear=False)
+        # cannot delete keys, so leftovers would still affect SyncServer.
+        self._leaked_env_backup.clear()
+        for key in list(os.environ.keys()):
+            if (
+                key.startswith("ANDREA_")
+                or key.startswith("OPENAI_")
+                or key.startswith("GEMINI_")
+                or key in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "CURSOR_API_KEY")
+            ):
+                self._leaked_env_backup[key] = os.environ.pop(key)
+
+        def _restore_process_env() -> None:
+            for name, value in self._leaked_env_backup.items():
+                os.environ[name] = value
+
+        self._stack.callback(_restore_process_env)
+
         env_patch = {
             "ANDREA_SYNC_DB": str(self.db_path),
             "ANDREA_SYNC_TELEGRAM_SECRET": "experience-secret",
@@ -142,6 +192,8 @@ class ExperienceHarness:
             "ANDREA_SYNC_BACKGROUND_ENABLED": "0",
             "ANDREA_SYNC_BACKGROUND_OPTIMIZER_ENABLED": "0",
             "ANDREA_SYNC_BACKGROUND_INCIDENT_REPAIR_ENABLED": "0",
+            "ANDREA_SYNC_DELEGATED_EXECUTION_ENABLED": "0",
+            "ANDREA_SYNC_TELEGRAM_AUTO_CURSOR": "0",
             "ANDREA_SYNC_PROACTIVE_SWEEP_ENABLED": "0",
             "ANDREA_SYNC_TELEGRAM_NOTIFIER": "0",
             "ANDREA_SYNC_TELEGRAM_WEBHOOK_AUTOFIX": "0",
@@ -149,6 +201,23 @@ class ExperienceHarness:
             "TELEGRAM_CHAT_ID": "",
             "ANDREA_SYNC_PUBLIC_BASE": "",
             "OPENAI_API_ENABLED": "0",
+            "OPENAI_API_KEY": "",
+            # Unittest modules mutate process env; patch.dict(..., clear=False) would otherwise
+            # inherit leaked ANDREA_* keys and make experience runs order/flaky across discovery.
+            "ANDREA_SYNC_COLLABORATION_LAYER": "1",
+            "ANDREA_SYNC_STRICT_VERIFICATION": "0",
+            "ANDREA_SYNC_FORCE_DELEGATE_APPROVAL": "0",
+            "ANDREA_SYNC_COLLAB_PROMOTION_ENABLED": "0",
+            "ANDREA_SYNC_COLLAB_RUNTIME_ENABLED": "0",
+            "ANDREA_SYNC_COLLAB_ACTION_ENABLED": "0",
+            "ANDREA_SYNC_COLLAB_ADVISORY_ONLY": "1",
+            "ANDREA_SYNC_COLLAB_OPERATOR_ACTION_PROMOTION": "0",
+            "ANDREA_SYNC_COLLAB_POLICY_SHADOW_ONLY": "1",
+            "ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS": "180",
+            "ANDREA_FOLLOWTHROUGH_ENABLED": "1",
+            "ANDREA_FOLLOWTHROUGH_PACK_STATUS": "shadow_followthrough",
+            "ANDREA_QUIET_FOLLOWTHROUGH_AUTO_EXEC": "0",
+            "ANDREA_FOLLOWTHROUGH_COLLAB_ON_REPAIR": "0",
         }
         self._stack.enter_context(mock.patch.dict(os.environ, env_patch, clear=False))
         self.server = SyncServer()
@@ -162,7 +231,11 @@ class ExperienceHarness:
         if self.httpd is not None:
             self.httpd.shutdown()
             self.httpd.server_close()
+        if self._thread is not None:
+            self._thread.join(timeout=30.0)
         if self.server is not None:
+            _drain_sync_server_queue(self.server, timeout=45.0)
+            self.server.shutdown_queue_worker()
             self.server.conn.close()
         self._stack.close()
         self.db_path.unlink(missing_ok=True)
@@ -1719,28 +1792,29 @@ def _scenario_bluebubbles_truth(harness: ExperienceHarness, scenario: Experience
 
 def _scenario_notes_followup(harness: ExperienceHarness, scenario: ExperienceScenario) -> ExperienceCheckResult:
     started = time.time()
-    result = handle_command(
-        harness.server.conn,
-        {
-            "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
-            "channel": "telegram",
-            "external_id": "experience-notes",
-            "payload": {
-                "text": "remember that I prefer full dialogue for repo work",
-                "routing_text": "remember that I prefer full dialogue for repo work",
-                "chat_id": 1,
-                "message_id": 904,
-                "from_user": 12,
-            },
+    env = {
+        "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+        "channel": "telegram",
+        "external_id": "experience-notes",
+        "payload": {
+            "text": "remember that I prefer full dialogue for repo work",
+            "routing_text": "remember that I prefer full dialogue for repo work",
+            "chat_id": 1,
+            "message_id": 904,
+            "from_user": 12,
         },
-    )
+    }
+    result = harness.server.with_lock(lambda c: handle_command(c, env))
     with mock.patch.object(
         harness.server,
         "_resolve_runtime_skill",
         return_value={"truth": {"status": "verified_available"}},
     ):
         harness.server._handle_task_followups(result["task_id"])
-    proj = project_task_dict(harness.server.conn, result["task_id"], "telegram")
+    tid = str(result["task_id"])
+    proj = harness.server.with_lock(
+        lambda c: project_task_dict(c, tid, "telegram"),
+    )
     meta = proj.get("meta") if isinstance(proj.get("meta"), dict) else {}
     assistant = meta.get("assistant") if isinstance(meta.get("assistant"), dict) else {}
     identity = meta.get("identity") if isinstance(meta.get("identity"), dict) else {}
@@ -1786,7 +1860,7 @@ def _scenario_notes_followup(harness: ExperienceHarness, scenario: ExperienceSce
         scenario,
         observations,
         output_excerpt=reply,
-        metadata={"task_id": result["task_id"], "principal_id": identity.get("principal_id")},
+        metadata={"task_id": tid, "principal_id": identity.get("principal_id")},
         started_at=started,
         completed_at=time.time(),
     )
@@ -1794,28 +1868,29 @@ def _scenario_notes_followup(harness: ExperienceHarness, scenario: ExperienceSce
 
 def _scenario_reminders_followup(harness: ExperienceHarness, scenario: ExperienceScenario) -> ExperienceCheckResult:
     started = time.time()
-    result = handle_command(
-        harness.server.conn,
-        {
-            "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
-            "channel": "telegram",
-            "external_id": "experience-reminders",
-            "payload": {
-                "text": "Remind me to review the StoryLiner repo tomorrow morning.",
-                "routing_text": "remind me to review the StoryLiner repo tomorrow morning",
-                "chat_id": 1,
-                "message_id": 905,
-                "from_user": 11,
-            },
+    env = {
+        "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+        "channel": "telegram",
+        "external_id": "experience-reminders",
+        "payload": {
+            "text": "Remind me to review the StoryLiner repo tomorrow morning.",
+            "routing_text": "remind me to review the StoryLiner repo tomorrow morning",
+            "chat_id": 1,
+            "message_id": 905,
+            "from_user": 11,
         },
-    )
+    }
+    result = harness.server.with_lock(lambda c: handle_command(c, env))
     with mock.patch.object(
         harness.server,
         "_resolve_runtime_skill",
         return_value={"truth": {"status": "verified_available"}},
     ):
         harness.server._handle_task_followups(result["task_id"])
-    proj = project_task_dict(harness.server.conn, result["task_id"], "telegram")
+    tid = str(result["task_id"])
+    proj = harness.server.with_lock(
+        lambda c: project_task_dict(c, tid, "telegram"),
+    )
     meta = proj.get("meta") if isinstance(proj.get("meta"), dict) else {}
     assistant = meta.get("assistant") if isinstance(meta.get("assistant"), dict) else {}
     proactive = meta.get("proactive") if isinstance(meta.get("proactive"), dict) else {}
@@ -1862,7 +1937,7 @@ def _scenario_reminders_followup(harness: ExperienceHarness, scenario: Experienc
         scenario,
         observations,
         output_excerpt=reply,
-        metadata={"task_id": result["task_id"]},
+        metadata={"task_id": tid},
         started_at=started,
         completed_at=time.time(),
     )

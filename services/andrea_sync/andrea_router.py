@@ -29,7 +29,10 @@ def _env_int(name: str, default: int) -> int:
 
 
 def _normalize(text: str) -> str:
-    return re.sub(r"\s+", " ", str(text or "").strip()).lower()
+    raw = str(text or "").strip()
+    # Normalize smart apostrophes so regexes match common mobile punctuation.
+    raw = raw.replace("’", "'").replace("`", "'")
+    return re.sub(r"\s+", " ", raw).lower()
 
 
 GREETING_RE = re.compile(
@@ -671,7 +674,7 @@ def build_direct_reply(
             history=history,
         )
     try:
-        return _finalize_direct_surface_reply(
+        reply = _finalize_direct_surface_reply(
             _openai_direct_reply(
                 text,
                 history=history,
@@ -683,11 +686,15 @@ def build_direct_reply(
             history=history,
         )
     except Exception:
-        return _finalize_direct_surface_reply(
+        reply = _finalize_direct_surface_reply(
             _contextual_fallback(text, history=history, memory_notes=memory_notes),
             user_seed=text,
             history=history,
         )
+    # Domain-aware guardrail: never emit the weak generic fallback for casual turns.
+    if str(turn_domain or "").strip() == "casual_conversation" and is_generic_direct_reply(reply):
+        return "Pretty good, thanks for asking. How are you doing?"
+    return reply
 
 
 def route_message(

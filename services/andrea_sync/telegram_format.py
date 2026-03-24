@@ -10,6 +10,20 @@ from .user_surface import (
     surface_similarity_key,
 )
 
+SOFT_FAILURE_SUMMARY_RE = re.compile(
+    r"\b("
+    r"unable\s+to\s+hand\s+off|"
+    r"could\s+not\s+hand\s+off|"
+    r"failed\s+to\s+hand\s+off|"
+    r"unable\s+to\s+delegate|"
+    r"could\s+not\s+delegate|"
+    r"could\s+not\s+complete|"
+    r"unable\s+to\s+complete|"
+    r"did\s+not\s+complete"
+    r")\b",
+    re.I,
+)
+
 
 def _clip(value: Any, limit: int) -> str:
     text = str(value or "").strip()
@@ -398,7 +412,13 @@ def format_final_message(
     if worker_label == "OpenClaw and Cursor" or delegated_to_cursor:
         result_label = speaker_label
     if completed:
-        if pr_url:
+        soft_failure_summary = bool(SOFT_FAILURE_SUMMARY_RE.search(summary_sentence or summary_excerpt))
+        if soft_failure_summary:
+            andrea_line = (
+                "I could not complete your request successfully, "
+                "but I captured the safe failure summary below."
+            )
+        elif pr_url:
             if worker_label == "OpenClaw and Cursor" or delegated_to_cursor:
                 andrea_line = "I finished your request and there is a PR ready to review."
             elif worker_label == "OpenClaw":

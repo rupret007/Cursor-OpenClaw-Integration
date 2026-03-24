@@ -19,6 +19,7 @@ from .store import (
     get_task_principal_id,
     link_task_to_goal,
     list_goals_for_principal,
+    list_pending_goal_approvals_for_task,
     list_tasks_for_goal,
 )
 
@@ -26,6 +27,15 @@ _GOAL_STATUS_PATTERNS = re.compile(
     r"(?i)\b("
     r"status|what'?s\s+the\s+status|where\s+are\s+we|what\s+happened|"
     r"continue|follow\s*up|any\s+update|progress|"
+    r"what\s+are\s+we\s+working\s+on(?:\s+right\s+now|\s+with\s+andrea)?|"
+    r"working\s+on\s+right\s+now|working\s+on\s+with\s+andrea|"
+    r"needs?\s+(my|our)\s+approval|awaiting\s+(my|our)\s+approval|"
+    r"pending\s+(my|our)\s+approval|waiting\s+on\s+(my|our)\s+approval|"
+    r"what\s+still\s+needs\s+(my|our)\s+approval"
+    r")\b"
+)
+_APPROVAL_STATUS_PATTERNS = re.compile(
+    r"(?i)\b("
     r"needs?\s+(my|our)\s+approval|awaiting\s+(my|our)\s+approval|"
     r"pending\s+(my|our)\s+approval|waiting\s+on\s+(my|our)\s+approval|"
     r"what\s+still\s+needs\s+(my|our)\s+approval"
@@ -44,12 +54,14 @@ def try_goal_status_nl_reply(
     """
     if not user_text or not _GOAL_STATUS_PATTERNS.search(user_text):
         return None
-    return build_goal_continuity_reply(conn, task_id)
+    return build_goal_continuity_reply(conn, task_id, user_text=user_text)
 
 
 def build_goal_continuity_reply(
     conn: Any,
     task_id: str,
+    *,
+    user_text: str = "",
 ) -> Optional[str]:
     """
     Build a compact continuity/status answer from goal + plan + projection state.
@@ -78,6 +90,19 @@ def build_goal_continuity_reply(
             + (f": {summary}" if summary else "")
             + " — no execution tasks linked yet."
         )
+    approval_ask = bool(_APPROVAL_STATUS_PATTERNS.search(str(user_text or "")))
+    if approval_ask:
+        pending = list_pending_goal_approvals_for_task(conn, exec_task)
+        if pending:
+            top = pending[0]
+            aid = str(top.get("approval_id") or "").strip() or "approval"
+            rationale = str(top.get("rationale") or "").strip()
+            lines = [
+                f"Pending approvals for tracked task `{exec_task}`: **{len(pending)}**.",
+                f"Top pending approval: `{aid}`" + (f" — {rationale}" if rationale else "."),
+            ]
+            return "\n".join(lines)
+        return f"There are no pending approvals right now for tracked task `{exec_task}`."
     channel = get_task_channel(conn, exec_task) or "cli"
     projection = project_task_dict(conn, exec_task, channel)
     meta = projection.get("meta") if isinstance(projection.get("meta"), dict) else {}

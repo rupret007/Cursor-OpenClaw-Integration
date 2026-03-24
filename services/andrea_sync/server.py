@@ -2073,10 +2073,19 @@ class SyncServer:
         ):
             return decision
         continuity_reply = self.with_lock(
-            lambda c: build_goal_continuity_reply(c, task_id)
+            lambda c: build_goal_continuity_reply(c, task_id, user_text=classify_text)
         )
         if not continuity_reply:
-            return decision
+            domain = str((turn_plan.domain if turn_plan else "") or "").strip()
+            if generic and domain == "project_status":
+                continuity_reply = (
+                    "I do not see active tracked work right now. "
+                    "If you want, I can start a fresh task and track it from here."
+                )
+            elif generic and domain == "approval_state":
+                continuity_reply = "There are no pending approvals right now."
+            else:
+                return decision
         return AndreaRouteDecision(
             mode="direct",
             reason="continuity_state_repaired_direct_reply",

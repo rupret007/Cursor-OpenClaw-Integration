@@ -146,6 +146,16 @@ class TestScenarioRuntime(unittest.TestCase):
         self.assertEqual(r.scenario_id, "statusFollowupContinue")
         self.assertEqual(r.reason, "status_or_followup_language")
 
+    def test_status_followup_matches_working_on_language(self) -> None:
+        for text in (
+            "What are we working on right now?",
+            "What are we working on with Andrea?",
+        ):
+            d = route_message(text, history=[], routing_hint="auto")
+            r, _c = resolve_scenario(text, route_decision=d)
+            self.assertEqual(r.scenario_id, "statusFollowupContinue")
+            self.assertEqual(r.reason, "status_or_followup_language")
+
 
 class TestScenarioPlanPersistence(unittest.TestCase):
     def setUp(self) -> None:

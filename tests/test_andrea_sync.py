@@ -25,6 +25,7 @@ from services.andrea_sync.store import (  # noqa: E402
     SYSTEM_TASK_ID,
     append_event,
     connect,
+    create_goal_approval,
     get_meta,
     list_tasks,
     list_telegram_task_ids_for_chat,
@@ -1226,6 +1227,15 @@ class TestAndreaSync(unittest.TestCase):
         self.assertNotIn("bring in cursor", low)
         self.assertNotIn("i can help with that directly", low)
 
+    def test_router_casual_checkin_smart_apostrophe_is_natural_without_cursor(self) -> None:
+        os.environ["OPENAI_API_ENABLED"] = "0"
+        os.environ.pop("OPENAI_API_KEY", None)
+        decision = route_message("How’s it going?")
+        self.assertEqual(decision.mode, "direct")
+        low = decision.reply_text.lower()
+        self.assertNotIn("say a bit more about what you want", low)
+        self.assertNotIn("i can help with that directly", low)
+
     def test_router_agenda_today_soft_limit_without_cursor(self) -> None:
         os.environ["OPENAI_API_ENABLED"] = "0"
         os.environ.pop("OPENAI_API_KEY", None)
@@ -1808,6 +1818,18 @@ class TestAndreaSync(unittest.TestCase):
         )
         self.assertIn("OpenClaw and Cursor did not complete this task successfully", text)
 
+    def test_telegram_final_message_completed_soft_failure_summary_does_not_claim_finish(self) -> None:
+        text = format_final_message(
+            "tsk_demo",
+            status="completed",
+            summary=(
+                "I apologize, but I am currently unable to hand off this troubleshooting task to Cursor."
+            ),
+            worker_label="OpenClaw",
+        )
+        self.assertNotIn("I finished your request.", text)
+        self.assertIn("could not complete your request", text.lower())
+
     def test_server_followups_route_greeting_direct(self) -> None:
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
         os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
@@ -1916,9 +1938,189 @@ class TestAndreaSync(unittest.TestCase):
         proj = project_task_dict(server.conn, task_id, "telegram")
         assistant = (proj.get("meta") or {}).get("assistant") or {}
         text = str(assistant.get("last_reply") or "")
-        self.assertEqual(assistant.get("reason"), "continuity_state_repaired_direct_reply")
+        self.assertIn(
+            assistant.get("reason"),
+            {"continuity_state_repaired_direct_reply", "goal_runtime_status"},
+        )
         self.assertIn(goal_id, text)
         self.assertNotIn("say a bit more", text.lower())
+
+    def test_server_followups_status_right_now_without_active_work_is_graceful(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        os.environ["OPENAI_API_ENABLED"] = "0"
+        os.environ.pop("OPENAI_API_KEY", None)
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        result = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-status-right-now",
+                "payload": {
+                    "text": "What are we working on right now?",
+                    "chat_id": 92002,
+                    "message_id": 1,
+                },
+            },
+        )
+        task_id = str(result["task_id"])
+        server._handle_task_followups(task_id)
+        proj = project_task_dict(server.conn, task_id, "telegram")
+        assistant = (proj.get("meta") or {}).get("assistant") or {}
+        text = str(assistant.get("last_reply") or "").lower()
+        self.assertNotIn("say a bit more about what you want", text)
+        self.assertIn("do not see active tracked work right now", text)
+
+    def test_server_followups_status_with_andrea_phrase_without_active_work_is_graceful(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        os.environ["OPENAI_API_ENABLED"] = "0"
+        os.environ.pop("OPENAI_API_KEY", None)
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        result = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-status-with-andrea",
+                "payload": {
+                    "text": "What are we working on with Andrea?",
+                    "chat_id": 92003,
+                    "message_id": 1,
+                },
+            },
+        )
+        task_id = str(result["task_id"])
+        server._handle_task_followups(task_id)
+        proj = project_task_dict(server.conn, task_id, "telegram")
+        assistant = (proj.get("meta") or {}).get("assistant") or {}
+        text = str(assistant.get("last_reply") or "").lower()
+        self.assertNotIn("say a bit more about what you want", text)
+        self.assertIn("do not see active tracked work right now", text)
+
+    def test_server_followups_approval_prefers_pending_rows_over_stale_context(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        os.environ["OPENAI_API_ENABLED"] = "0"
+        os.environ.pop("OPENAI_API_KEY", None)
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        submit = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-approval-ranking",
+                "payload": {
+                    "text": "What still needs my approval?",
+                    "chat_id": 92004,
+                    "message_id": 1,
+                },
+            },
+        )
+        task_id = str(submit["task_id"])
+        pre = project_task_dict(server.conn, task_id, "telegram")
+        principal_id = str(((pre.get("meta") or {}).get("identity") or {}).get("principal_id") or "")
+        created = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.CREATE_GOAL.value,
+                "channel": "internal",
+                "payload": {"principal_id": principal_id, "summary": "Approval queue validation"},
+            },
+        )
+        goal_id = str(created.get("goal_id") or "")
+        handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.LINK_TASK_TO_GOAL.value,
+                "channel": "internal",
+                "task_id": task_id,
+                "payload": {"task_id": task_id, "goal_id": goal_id},
+            },
+        )
+        approval_id = create_goal_approval(
+            server.conn,
+            goal_id,
+            task_id,
+            rationale="Waiting on your sign-off for execution.",
+        )
+        server._handle_task_followups(task_id)
+        proj = project_task_dict(server.conn, task_id, "telegram")
+        assistant = (proj.get("meta") or {}).get("assistant") or {}
+        text = str(assistant.get("last_reply") or "")
+        self.assertIn("Pending approvals for tracked task", text)
+        self.assertIn(approval_id, text)
+        self.assertNotIn("OpenClaw run:", text)
+
+    def test_server_followups_approval_none_pending_is_explicit(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        os.environ["OPENAI_API_ENABLED"] = "0"
+        os.environ.pop("OPENAI_API_KEY", None)
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        submit = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-approval-none",
+                "payload": {
+                    "text": "What still needs my approval?",
+                    "chat_id": 92005,
+                    "message_id": 1,
+                },
+            },
+        )
+        task_id = str(submit["task_id"])
+        server._handle_task_followups(task_id)
+        proj = project_task_dict(server.conn, task_id, "telegram")
+        assistant = (proj.get("meta") or {}).get("assistant") or {}
+        text = str(assistant.get("last_reply") or "").lower()
+        self.assertIn("no pending approvals right now", text)
+        self.assertNotIn("say a bit more about what you want", text)
+
+    def test_server_followups_common_intents_do_not_emit_generic_fallback(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        os.environ["OPENAI_API_ENABLED"] = "0"
+        os.environ.pop("OPENAI_API_KEY", None)
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        prompts = [
+            ("tg-intent-casual", "How’s it going?"),
+            ("tg-intent-status", "What are we working on right now?"),
+            ("tg-intent-approval", "What still needs my approval?"),
+        ]
+        for external_id, text in prompts:
+            submit = handle_command(
+                server.conn,
+                {
+                    "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                    "channel": "telegram",
+                    "external_id": external_id,
+                    "payload": {
+                        "text": text,
+                        "chat_id": 92100,
+                        "message_id": 1,
+                    },
+                },
+            )
+            task_id = str(submit["task_id"])
+            server._handle_task_followups(task_id)
+            proj = project_task_dict(server.conn, task_id, "telegram")
+            assistant = (proj.get("meta") or {}).get("assistant") or {}
+            reply = str(assistant.get("last_reply") or "").lower()
+            self.assertNotIn("say a bit more about what you want", reply)
 
     def test_server_followups_cli_skips_routing_when_auto_route_disabled(self) -> None:
         prev_cli_auto = os.environ.get("ANDREA_SYNC_CLI_SUBMIT_AUTO_ROUTE")

@@ -1,4 +1,4 @@
-# Deployment model
+# Deployment: `main` as the stable baseline
 
 ## Branch strategy
 

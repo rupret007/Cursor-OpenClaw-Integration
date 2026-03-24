@@ -1,6 +1,6 @@
-# Cursor-OpenClaw-Integration
+# Cursor x OpenClaw: Cloud Agents Integration Toolkit
 
-Hardened **Cursor Cloud Agents** integration toolkit for **OpenClaw**, shell workflows, and the **Andrea** lockstep assistant stack across Telegram and Alexa.
+A production-ready toolkit for running **Cursor Cloud Agents** from **OpenClaw** (with safe CLI fallbacks), plus the **Andrea** lockstep stack that keeps Telegram/Alexa workflows consistent, auditable, and resilient.
 
 **Deployment:** use the **`main`** branch as the default production-style baseline. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 

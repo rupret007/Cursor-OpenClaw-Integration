@@ -841,6 +841,162 @@ class TestAndreaSyncHTTP(unittest.TestCase):
         self.assertEqual(detail["task"]["status"], "queued")
         self.assertEqual(detail["task"]["meta"]["execution"]["lane"], "openclaw_hybrid")
 
+    def test_report_cursor_completion_emits_collaboration_events_on_verify_fail(self) -> None:
+        prev_collab = os.environ.get("ANDREA_SYNC_COLLABORATION_LAYER")
+        prev_strict = os.environ.get("ANDREA_SYNC_STRICT_VERIFICATION")
+        os.environ["ANDREA_SYNC_COLLABORATION_LAYER"] = "1"
+        os.environ["ANDREA_SYNC_STRICT_VERIFICATION"] = "1"
+        try:
+            body = json.dumps(
+                {
+                    "session": {"sessionId": "alexa-session-collab-smoke"},
+                    "request": {
+                        "type": "IntentRequest",
+                        "requestId": "alexa-request-collab-smoke",
+                        "intent": {
+                            "name": "AndreaCaptureIntent",
+                            "slots": {
+                                "utterance": {
+                                    "value": "please inspect the repo and fix the failing tests"
+                                }
+                            },
+                        },
+                    },
+                }
+            ).encode("utf-8")
+            req = urllib.request.Request(
+                self._url("/v1/alexa"),
+                data=body,
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                self.assertEqual(resp.status, 200)
+
+            detail = None
+            for _ in range(80):
+                req_tasks = urllib.request.Request(self._url("/v1/tasks?limit=30"), method="GET")
+                with urllib.request.urlopen(req_tasks, timeout=5) as resp_tasks:
+                    tasks = json.loads(resp_tasks.read().decode("utf-8"))["tasks"]
+                alexa_tasks = [t for t in tasks if t["channel"] == "alexa"]
+                for task in alexa_tasks:
+                    req_task = urllib.request.Request(
+                        self._url(f"/v1/tasks/{task['task_id']}"), method="GET"
+                    )
+                    with urllib.request.urlopen(req_task, timeout=5) as resp_task:
+                        candidate = json.loads(resp_task.read().decode("utf-8"))
+                    meta = candidate["task"].get("meta", {})
+                    if meta.get("alexa", {}).get("request_id") != "alexa-request-collab-smoke":
+                        continue
+                    plan_meta = meta.get("plan", {}) if isinstance(meta.get("plan"), dict) else {}
+                    if (
+                        candidate["task"]["status"] == "queued"
+                        and plan_meta.get("plan_id")
+                        and plan_meta.get("execute_step_id")
+                    ):
+                        detail = candidate
+                        break
+                if detail is not None:
+                    break
+                time.sleep(0.05)
+            self.assertIsNotNone(detail)
+            assert detail is not None
+            task_id = detail["task"]["task_id"]
+            self.assertEqual(detail["task"]["meta"]["plan"]["scenario_id"], "repoHelpVerified")
+
+            started_body = json.dumps(
+                {
+                    "command_type": "ReportCursorEvent",
+                    "channel": "cursor",
+                    "task_id": task_id,
+                    "payload": {
+                        "event_type": "JobStarted",
+                        "payload": {
+                            "backend": "cursor",
+                            "runner": "cursor",
+                            "execution_lane": "cursor",
+                            "cursor_agent_id": "http-collab-smoke-agent",
+                            "status": "STARTED",
+                        },
+                    },
+                }
+            ).encode("utf-8")
+            started_req = urllib.request.Request(
+                self._url("/v1/commands"),
+                data=started_body,
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(started_req, timeout=5) as started_resp:
+                self.assertEqual(started_resp.status, 200)
+
+            completed_body = json.dumps(
+                {
+                    "command_type": "ReportCursorEvent",
+                    "channel": "cursor",
+                    "task_id": task_id,
+                    "payload": {
+                        "event_type": "JobCompleted",
+                        "payload": {
+                            "summary": "reported terminal completion without proof",
+                            "backend": "cursor",
+                            "runner": "cursor",
+                            "execution_lane": "cursor",
+                            "cursor_agent_id": "http-collab-smoke-agent",
+                            "status": "FINISHED",
+                        },
+                    },
+                }
+            ).encode("utf-8")
+            completed_req = urllib.request.Request(
+                self._url("/v1/commands"),
+                data=completed_body,
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(completed_req, timeout=5) as completed_resp:
+                self.assertEqual(completed_resp.status, 200)
+
+            req_task = urllib.request.Request(self._url(f"/v1/tasks/{task_id}"), method="GET")
+            with urllib.request.urlopen(req_task, timeout=5) as resp_task:
+                final_detail = json.loads(resp_task.read().decode("utf-8"))
+
+            self.assertEqual(final_detail["task"]["status"], "failed")
+            event_types = [event["event_type"] for event in final_detail["events"]]
+            self.assertIn("VerificationRecorded", event_types)
+            self.assertIn("CollaborationRecorded", event_types)
+            self.assertIn("JobFailed", event_types)
+
+            verification_event = next(
+                event for event in final_detail["events"] if event["event_type"] == "VerificationRecorded"
+            )
+            self.assertEqual(verification_event["payload"]["verdict"], "fail")
+            collab_event = next(
+                event for event in final_detail["events"] if event["event_type"] == "CollaborationRecorded"
+            )
+            self.assertEqual(collab_event["payload"]["trigger"], "verify_fail")
+            self.assertTrue(str(collab_event["payload"].get("repair_strategy") or "").strip())
+
+            meta = final_detail["task"]["meta"]
+            self.assertEqual(meta["execution"]["verification_state"], "fail")
+            self.assertGreaterEqual(int(meta["execution"].get("repair_attempts") or 0), 1)
+            self.assertEqual(
+                meta["plan"]["repair_state"], collab_event["payload"]["repair_strategy"]
+            )
+            self.assertEqual(
+                meta["collaboration"]["last_repair_strategy"],
+                collab_event["payload"]["repair_strategy"],
+            )
+        finally:
+            if prev_collab is None:
+                os.environ.pop("ANDREA_SYNC_COLLABORATION_LAYER", None)
+            else:
+                os.environ["ANDREA_SYNC_COLLABORATION_LAYER"] = prev_collab
+            if prev_strict is None:
+                os.environ.pop("ANDREA_SYNC_STRICT_VERIFICATION", None)
+            else:
+                os.environ["ANDREA_SYNC_STRICT_VERIFICATION"] = prev_strict
+
     def test_alexa_requires_edge_token_when_configured(self) -> None:
         prev = self._srv.alexa_edge_token
         self._srv.alexa_edge_token = "edge-secret"

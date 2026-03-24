@@ -11,6 +11,7 @@
 #   SKIP_GIT=1                    skip git pull
 #   SKIP_GATEWAY_RESTART=1        skip openclaw gateway restart
 #   SKIP_COMM_SMOKE=1             skip andrea_communication_smoke.sh
+#   RUN_COLLAB_SMOKE=1            run andrea_collaboration_smoke.py after restart
 #   SKIP_KILL_DRILL=1             skip kill-switch engage/503/200 drill
 #   SKIP_TELEGRAM_E2E=1           skip Telegram webhook-info / wait
 #
@@ -34,6 +35,7 @@ die() { echo "[andrea_full_cycle] FAIL: $*" >&2; exit 1; }
 [[ -f scripts/andrea_sync_publish_capabilities.py ]] || die "missing scripts/andrea_sync_publish_capabilities.py"
 [[ -f scripts/andrea_kill_switch.sh ]] || die "missing scripts/andrea_kill_switch.sh"
 [[ -f scripts/andrea_communication_smoke.sh ]] || die "missing scripts/andrea_communication_smoke.sh"
+[[ -f scripts/andrea_collaboration_smoke.py ]] || die "missing scripts/andrea_collaboration_smoke.py"
 [[ -f scripts/andrea_lockstep_telegram_e2e.py ]] || die "missing scripts/andrea_lockstep_telegram_e2e.py"
 [[ -f scripts/andrea_services.sh ]] || die "missing scripts/andrea_services.sh"
 
@@ -98,6 +100,13 @@ if [[ "${SKIP_COMM_SMOKE:-0}" != "1" ]]; then
   bash scripts/andrea_communication_smoke.sh || die "communication smoke failed"
 else
   say "skip communication smoke (SKIP_COMM_SMOKE=1)"
+fi
+
+if [[ "${RUN_COLLAB_SMOKE:-0}" == "1" ]]; then
+  say "andrea_collaboration_smoke.py"
+  python3 scripts/andrea_collaboration_smoke.py || die "collaboration smoke failed"
+else
+  say "skip collaboration smoke (set RUN_COLLAB_SMOKE=1)"
 fi
 
 if [[ "${SKIP_KILL_DRILL:-0}" != "1" ]]; then

@@ -33,6 +33,7 @@ from .store import (
     ensure_system_task,
     get_goal,
     get_principal_recent_telegram_chat_id,
+    get_task_channel,
     get_task_principal_id,
     get_workflow,
     link_principal_identity,
@@ -627,6 +628,123 @@ def _handle_cursor_stop(conn: sqlite3.Connection, env: CommandEnvelope) -> Dict[
     return {"ok": True, "task_id": tid}
 
 
+def _finalize_reported_cursor_completion(
+    conn: sqlite3.Connection, task_id: str, payload: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    from .plan_runtime import (
+        finalize_execute_step_verification,
+        record_verification_event_payload,
+    )
+    from .projector import project_task_dict
+    from .user_surface import sanitize_user_surface_text
+
+    channel = get_task_channel(conn, task_id)
+    if not channel:
+        return None
+    proj = project_task_dict(conn, task_id, channel)
+    meta = proj.get("meta") if isinstance(proj.get("meta"), dict) else {}
+    plan_meta = meta.get("plan") if isinstance(meta.get("plan"), dict) else {}
+    execution_meta = (
+        meta.get("execution") if isinstance(meta.get("execution"), dict) else {}
+    )
+    plan_id = str(plan_meta.get("plan_id") or "").strip()
+    step_id = str(plan_meta.get("execute_step_id") or "").strip()
+    if not plan_id or not step_id:
+        return None
+    if (
+        str(plan_meta.get("last_verified_step_id") or "").strip() == step_id
+        and str(plan_meta.get("last_verification_id") or "").strip()
+    ):
+        return None
+
+    lane = str(payload.get("execution_lane") or execution_meta.get("lane") or "").strip()
+    agent_url = str(payload.get("agent_url") or "").strip()
+    pr_url = str(payload.get("pr_url") or "").strip()
+    terminal_status = str(payload.get("status") or "FINISHED").strip() or "FINISHED"
+    fv = finalize_execute_step_verification(
+        conn,
+        task_id=task_id,
+        plan_id=plan_id,
+        execute_step_id=step_id,
+        terminal_status=terminal_status,
+        pr_url=pr_url,
+        agent_url=agent_url,
+        lane=lane,
+    )
+    verification_id = str(fv.get("verification_id") or "").strip()
+    if not verification_id:
+        return None
+
+    _append(
+        conn,
+        task_id,
+        EventType.VERIFICATION_RECORDED,
+        record_verification_event_payload(
+            plan_id=plan_id,
+            step_id=step_id,
+            verification_id=verification_id,
+            verdict=str(fv.get("verdict") or ""),
+            summary=str(fv.get("summary") or ""),
+            method="cursor_report",
+        ),
+    )
+    collab_payload = fv.get("collaboration_event_payload")
+    if isinstance(collab_payload, dict) and collab_payload:
+        _append(conn, task_id, EventType.COLLABORATION_RECORDED, collab_payload)
+
+    if not fv.get("should_complete_job", True):
+        scen_rx = str(fv.get("scenario_user_receipt") or "").strip()
+        collab_note = str(fv.get("collaboration_user_note") or "").strip()
+        fallback = "The execution reported finished, but verification did not accept the outcome."
+        user_safe_error = (
+            sanitize_user_surface_text(scen_rx, fallback=fallback, limit=1200) or fallback
+        )
+        if collab_note:
+            user_safe_error = (
+                sanitize_user_surface_text(
+                    f"{user_safe_error}\n\n{collab_note}",
+                    fallback=user_safe_error,
+                    limit=1400,
+                )
+                or user_safe_error
+            )
+        fail_payload: Dict[str, Any] = {
+            "error": "verification_failed",
+            "message": str(fv.get("summary") or "")[:1500],
+            "user_safe_error": user_safe_error,
+            "cursor_agent_id": payload.get("cursor_agent_id"),
+            "agent_url": agent_url or None,
+            "pr_url": pr_url or None,
+            "backend": str(payload.get("backend") or "cursor"),
+            "runner": str(payload.get("runner") or "cursor"),
+            "execution_lane": lane or str(execution_meta.get("lane") or "cursor"),
+        }
+        if payload.get("attempt_id"):
+            fail_payload["attempt_id"] = payload.get("attempt_id")
+        _append(conn, task_id, EventType.JOB_FAILED, fail_payload)
+        return {
+            "ok": True,
+            "task_id": task_id,
+            "verification_id": verification_id,
+            "verification_failed": True,
+        }
+
+    completed_payload = dict(payload)
+    if "backend" not in completed_payload:
+        completed_payload["backend"] = "cursor"
+    if "runner" not in completed_payload:
+        completed_payload["runner"] = "cursor"
+    if lane and "execution_lane" not in completed_payload:
+        completed_payload["execution_lane"] = lane
+    _append(conn, task_id, EventType.JOB_COMPLETED, completed_payload)
+    return {
+        "ok": True,
+        "task_id": task_id,
+        "verification_id": verification_id,
+        "verification_failed": False,
+    }
+
+
 def _handle_cursor_report(conn: sqlite3.Connection, env: CommandEnvelope, idem: str) -> Dict[str, Any]:
     """Internal: map cursor_openclaw lifecycle JSON into events."""
     tid = env.task_id or env.payload.get("task_id")
@@ -666,6 +784,10 @@ def _handle_cursor_report(conn: sqlite3.Connection, env: CommandEnvelope, idem: 
         )
         return {"ok": True, "task_id": tid, "deduped": True}
     _append(conn, tid, EventType.COMMAND_RECEIVED, {"command_type": "ReportCursorEvent"})
+    if cet == EventType.JOB_COMPLETED:
+        finalized = _finalize_reported_cursor_completion(conn, tid, inner)
+        if finalized is not None:
+            return finalized
     _append(conn, tid, cet, inner)
     return {"ok": True, "task_id": tid}
 

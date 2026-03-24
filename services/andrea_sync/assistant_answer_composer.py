@@ -168,10 +168,41 @@ _CURSOR_THREAD_RECALL_RE = re.compile(
     r"\b("
     r"what\s+did\s+cursor\s+(?:say|do)|"
     r"what\s+happened\s+in\s+(?:the\s+)?cursor\s+thread|"
+    r"what\s+happened\s+there|what\s+happened\s+with\s+that(?!\s+task\b)|"
+    r"what\s+about\s+that\s+one|what\s+was\s+the\s+result|"
     r"what\s+did\s+openclaw\s+do"
     r")\b",
     re.I,
 )
+
+_METADATA_SCAFFOLD_HINTS = (
+    "task status",
+    "result:",
+    "result kind",
+    "phase:",
+    "where things stand",
+    "current phase",
+)
+
+
+def draft_should_force_continuity_repair(draft: str, user_question: str) -> bool:
+    """
+    True when the direct reply is echoey or mostly bold metadata scaffolding so bounded
+    repair should prefer conductor-style state candidates.
+    """
+    d = str(draft or "").strip()
+    if not d:
+        return False
+    q = str(user_question or "").strip()
+    if q and _is_echo_of_user_question(d, q):
+        return True
+    low = d.lower()
+    bold_chunks = re.findall(r"\*\*[^*]+\*\*", d)
+    if len(bold_chunks) >= 4:
+        meta_hits = sum(1 for tok in _METADATA_SCAFFOLD_HINTS if tok in low)
+        if meta_hits >= 3 and len(d.split()) < 120:
+            return True
+    return False
 
 _GRACE_CURSOR_CONTINUITY = (
     "I'm not finding a strong stored summary from the recent Cursor work yet. "
@@ -1381,10 +1412,15 @@ def bounded_composer_repair(
     if not reply_text:
         return None
 
-    generic = is_generic_direct_reply(reply_text) or str(decision_reason or "") in {
-        "short_general_request",
-        "balanced_default_direct",
-    }
+    mechanical = draft_should_force_continuity_repair(reply_text, classify_text)
+    generic = (
+        is_generic_direct_reply(reply_text)
+        or str(decision_reason or "") in {
+            "short_general_request",
+            "balanced_default_direct",
+        }
+        or mechanical
+    )
     plan_repairs = bool(turn_plan.should_repair_generic)
     allow_goal = bool(turn_plan.allow_goal_continuity_repair)
     scenario_continuity = str(getattr(resolution, "scenario_id", "") or "") == (
@@ -1398,6 +1434,7 @@ def bounded_composer_repair(
         or plan_prefers_state
         or continuity_ask
         or continuity_state
+        or mechanical
         or cf
         in {"blocked_state", "recent_outcome_history", "cursor_followup_heavy_lift"}
     )
@@ -1405,7 +1442,10 @@ def bounded_composer_repair(
     should_run_goal_branch = allow_goal and (
         scenario_continuity
         or plan_prefers_state
-        or ((generic and plan_repairs) and (continuity_ask or continuity_state))
+        or (
+            (generic and plan_repairs)
+            and (continuity_ask or continuity_state or mechanical)
+        )
         or cf
         in {"blocked_state", "recent_outcome_history", "cursor_followup_heavy_lift"}
     )

@@ -248,6 +248,21 @@ class BlueprintPlatformTests(unittest.TestCase):
         self.assertEqual(plan_task_history.domain, "project_status")
         self.assertEqual(plan_task_history.continuity_focus, "recent_outcome_history")
 
+        plan_there = build_turn_plan(
+            "What happened there?",
+            scenario_id="statusFollowupContinue",
+            projection_has_continuity_state=True,
+        )
+        self.assertEqual(plan_there.continuity_focus, "recent_outcome_history")
+        self.assertEqual(classify_continuity_focus("What happened there?"), "recent_outcome_history")
+
+        plan_cursor_task = build_turn_plan(
+            "Continue that cursor task",
+            scenario_id="statusFollowupContinue",
+            projection_has_continuity_state=True,
+        )
+        self.assertEqual(plan_cursor_task.continuity_focus, "cursor_followup_heavy_lift")
+
     @mock.patch("services.andrea_sync.goal_runtime.project_task_dict")
     def test_goal_continuity_surfaces_outcome_and_cursor_delegation(self, m_proj: mock.MagicMock) -> None:
         create_task(self.conn, "tsk_out", "telegram")

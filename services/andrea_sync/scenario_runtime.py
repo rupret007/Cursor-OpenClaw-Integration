@@ -32,7 +32,7 @@ _UNSAFE = re.compile(
 )
 _STATUS = re.compile(
     r"\b("
-    r"what\s+happened|where\s+are\s+we|status(\s+of)?|what'?s\s+the\s+status|"
+    r"what\s+happened|what\s+happened\s+there|where\s+are\s+we|status(\s+of)?|what'?s\s+the\s+status|"
     r"continue(\s+that|\s+this)?|follow[\s-]*up|any\s+update|progress(\s+so\s+far)?|"
     r"what\s+are\s+we\s+working\s+on(?:\s+right\s+now|\s+with\s+andrea)?|"
     r"working\s+on\s+right\s+now|working\s+on\s+with\s+andrea|"

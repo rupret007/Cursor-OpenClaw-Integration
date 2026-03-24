@@ -14,6 +14,8 @@ if str(REPO_ROOT) not in sys.path:
 
 from services.andrea_sync.assistant_answer_composer import (  # noqa: E402
     AnswerCandidate,
+    bounded_composer_repair,
+    draft_should_force_continuity_repair,
     followthrough_corrective_lead,
     followthrough_needs_user_attention,
     gather_repair_candidates,
@@ -34,6 +36,8 @@ from services.andrea_sync.store import (  # noqa: E402
     migrate,
 )
 from services.andrea_sync.projector import project_task_dict  # noqa: E402
+from services.andrea_sync.scenario_registry import SCENARIO_CATALOG  # noqa: E402
+from services.andrea_sync.scenario_schema import ScenarioResolution  # noqa: E402
 
 
 class TestAssistantAnswerComposer(unittest.TestCase):
@@ -264,6 +268,81 @@ class TestAssistantAnswerComposer(unittest.TestCase):
         self.assertIsNotNone(got)
         assert got is not None
         self.assertEqual(got[1], "blocked_state_reply")
+
+    def test_draft_should_force_continuity_repair_detects_metadata_scaffold(self) -> None:
+        thin = (
+            "Where things stand: task status **created**; result: **queued**; "
+            "phase: **pending**; result kind **none**."
+        )
+        self.assertTrue(
+            draft_should_force_continuity_repair(thin, "What did Cursor say?")
+        )
+        self.assertFalse(draft_should_force_continuity_repair("", "hi"))
+
+    def test_bounded_repair_replaces_metadata_heavy_model_draft(self) -> None:
+        r0 = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "comp-mech-1",
+                "payload": {
+                    "text": "hi",
+                    "routing_text": "hi",
+                    "chat_id": 77088,
+                    "message_id": 1,
+                },
+            },
+        )
+        tid = r0["task_id"]
+        link_task_principal(self.conn, tid, "pri_mech", channel="telegram")
+        insert_user_outcome_receipt(
+            self.conn,
+            receipt_id="rcpt_mech_1",
+            task_id=tid,
+            goal_id="",
+            receipt_kind="outcome",
+            summary="Merged the hotfix and tagged v1.2.3.",
+        )
+        plan = build_turn_plan(
+            "What happened there?",
+            scenario_id="statusFollowupContinue",
+            projection_has_continuity_state=True,
+        )
+        self.assertEqual(plan.continuity_focus, "recent_outcome_history")
+        sc = SCENARIO_CATALOG["statusFollowupContinue"]
+        resolution = ScenarioResolution(
+            scenario_id=sc.scenario_id,
+            confidence=0.9,
+            support_level=sc.support_level,
+            reason="test",
+            goal_id="",
+            needs_plan=False,
+            suggested_lane="direct_assistant",
+            action_class=sc.action_class,
+            proof_class=sc.proof_class,
+            approval_mode=sc.approval_mode,
+        )
+        mechanical = (
+            "Where things stand: task status **created**; result: **queued**; "
+            "phase: **pending**; result kind **none**."
+        )
+        repaired = bounded_composer_repair(
+            self.conn,
+            tid,
+            classify_text="What happened there?",
+            decision_reply=mechanical,
+            decision_reason="balanced_default_direct",
+            resolution=resolution,
+            turn_plan=plan,
+            history=[],
+            memory_notes=[],
+            continuity_ask=False,
+            continuity_state=False,
+        )
+        self.assertIsNotNone(repaired)
+        assert repaired is not None
+        self.assertIn("v1.2.3", repaired[0])
 
     def test_gather_repair_recent_outcome_prefers_receipts_over_no_active_work(self) -> None:
         r0 = handle_command(

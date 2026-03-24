@@ -80,17 +80,22 @@ _RECENT_OUTCOME_HISTORY_RE = re.compile(
     r"\b("
     r"what\s+happened\s+with\s+(?:that\s+)?task|what\s+happened\s+to\s+that\s+task|"
     r"what\s+happened\s+with\s+that\s+work|"
+    r"what\s+happened\s+there|what\s+happened\s+with\s+that\b|"
+    r"what\s+about\s+that\s+one|what\s+was\s+the\s+result|"
     r"last\s+task|that\s+task\s+earlier|task\s+earlier|"
     r"what\s+was\s+the\s+outcome|what\s+did\s+cursor\s+say|what\s+did\s+cursor\s+do|"
     r"what\s+happened\s+in\s+(?:the\s+)?cursor\s+thread|"
     r"what\s+did\s+openclaw\s+do|"
-    r"recap\s+(?:that\s+)?task|outcome\s+of\s+that"
+    r"recap\s+(?:that\s+)?task|outcome\s+of\s+that|recap\s+that"
     r")\b",
     re.I,
 )
 # Heavy-lift / Cursor thread follow-ups (orchestration language, not raw plumbing).
 _CURSOR_FOLLOWUP_HEAVY_RE = re.compile(
     r"@cursor|\bopenclaw\b|"
+    r"continue\s+(?:that|the|this)\s+cursor\s+task|"
+    r"continue\s+(?:the\s+)?cursor\s+task|"
+    r"resume\s+(?:the\s+)?cursor\s+task|"
     r"continue\s+(?:that|the|this)\s+(?:cursor|heavy)[\s-]?(?:run|task|work)?|"
     r"heavy[\s-]?lift|repo[\s-]?wide",
     re.I,

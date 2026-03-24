@@ -81,6 +81,7 @@ from .scenario_runtime import (
 )
 from .scenario_schema import UNSUPPORTED, ScenarioResolution
 from .schema import EventType
+from .semantic_continuity import resolve_semantic_continuity_patch
 from .telegram_continuation import attach_continuation_if_applicable
 from .turn_intelligence import TurnPlan, build_turn_plan
 from .store import (
@@ -206,7 +207,8 @@ CONTINUITY_HINT_RE = re.compile(
     r"blocked|blocker|blocking|stuck|"
     r"approval|awaiting|pending|waiting on|"
     r"working on|still needs attention|"
-    r"cursor|openclaw|heavy lift|outcome|that task"
+    r"cursor|openclaw|heavy lift|outcome|that task|there|"
+    r"texts|messages|recap|result"
     r")\b",
     re.I,
 )
@@ -238,6 +240,23 @@ RECENT_TEXT_ASSISTANT_REASONS = frozenset(
 )
 # Shorthand follow-ups (e.g. "from today?") only after a successful structured recent-text turn.
 RECENT_TEXT_SHORTHAND_CONTEXT_REASONS = frozenset({"recent_text_messages_ready"})
+# Broader lane carry (e.g. "summarize my texts too?") after a recent-text structured turn.
+RECENT_TEXT_LANE_CARRY_REASONS = frozenset(
+    {
+        "recent_text_messages_ready",
+        "recent_text_messages_failed",
+        "recent_text_messages_failed_contaminated",
+    }
+)
+RECENT_TEXT_SUMMARIZE_CARRY_RE = re.compile(
+    r"^\s*(?:"
+    r"(?:(?:can\s+you|could\s+you|please)\s+)?(?:also\s+)?(?:summarize|summarise)\s+(?:my\s+)?(?:texts?|messages?)(?:\s+too)?|"
+    r"(?:what|how)\s+about\s+(?:my\s+)?(?:texts?|messages?)(?:\s+too)?|"
+    r"(?:and\s+)?(?:the\s+)?(?:texts?|messages?)\s+too|"
+    r"same\s+for\s+(?:my\s+)?(?:texts?|messages?)"
+    r")\s*[?.!]*\s*$",
+    re.I,
+)
 OUTBOUND_SEND_PATTERNS = (
     re.compile(
         r"^\s*(?:(?:please|can you|could you)\s+)?send\s+(?:a\s+)?(?:message|text)\s+to\s+(?P<target>.+?)(?:\s+(?:that|saying|saying that)\s+(?P<body>.+))?\s*$",
@@ -1357,6 +1376,9 @@ class SyncServer:
         try:
             user_payload = self._latest_user_message_payload(task_id)
             classify_text = self._routing_classification_text(task_id)
+            expanded_route = self._expand_recent_text_messages_shorthand(task_id, classify_text)
+            if expanded_route:
+                classify_text = str(expanded_route).strip()
             execution_prompt = self._extract_cursor_prompt(task_id)
             principal_prefs = self._principal_preferences(task_id)
             effective_history = history if history is not None else self._recent_task_history(task_id)
@@ -1373,10 +1395,36 @@ class SyncServer:
                 scenario_id=pre_resolution.scenario_id,
                 projection_has_continuity_state=self._projection_has_continuity_state(task_id),
             )
+            cont_patch = self.with_lock(
+                lambda c: resolve_semantic_continuity_patch(
+                    c,
+                    task_id,
+                    classify_text,
+                    scenario_id=pre_resolution.scenario_id,
+                    base_focus=pre_turn_plan.continuity_focus,
+                    projection_has_continuity_state=self._projection_has_continuity_state(
+                        task_id
+                    ),
+                )
+            )
             effective_turn_plan = pre_turn_plan
+            if cont_patch.continuity_focus_override is not None:
+                effective_turn_plan = replace(
+                    effective_turn_plan,
+                    continuity_focus=cont_patch.continuity_focus_override,
+                )
+            if cont_patch.force_prefer_state_reply:
+                ch = self.with_lock(lambda c: get_task_channel(c, task_id))
+                if ch == "telegram" and effective_turn_plan.domain in (
+                    "project_status",
+                    "approval_state",
+                ):
+                    effective_turn_plan = replace(
+                        effective_turn_plan, prefer_state_reply=True
+                    )
             if (
-                pre_turn_plan.domain == "project_status"
-                and pre_turn_plan.continuity_focus
+                effective_turn_plan.domain == "project_status"
+                and effective_turn_plan.continuity_focus
                 in (
                     "recent_outcome_history",
                     "cursor_followup_heavy_lift",
@@ -1385,7 +1433,9 @@ class SyncServer:
             ):
                 ch = self.with_lock(lambda c: get_task_channel(c, task_id))
                 if ch == "telegram":
-                    effective_turn_plan = replace(pre_turn_plan, prefer_state_reply=True)
+                    effective_turn_plan = replace(
+                        effective_turn_plan, prefer_state_reply=True
+                    )
             _decision_profile = build_decision_profile(
                 classify_text,
                 turn_domain=pre_turn_plan.domain,
@@ -2520,7 +2570,14 @@ class SyncServer:
         only when the last assistant turn was already on that lane.
         """
         clean = str(text or "").strip()
-        if not clean or not RECENT_TEXT_SHORTHAND_FOLLOWUP_RE.match(clean):
+        if not clean:
+            return None
+        if RECENT_TEXT_SUMMARIZE_CARRY_RE.match(clean):
+            prev = self._recent_text_lane_context_reason(task_id)
+            if prev in RECENT_TEXT_LANE_CARRY_REASONS:
+                return "Summarize my recent text messages from today."
+            return None
+        if not RECENT_TEXT_SHORTHAND_FOLLOWUP_RE.match(clean):
             return None
         prev = self._recent_text_lane_context_reason(task_id)
         if prev not in RECENT_TEXT_SHORTHAND_CONTEXT_REASONS:

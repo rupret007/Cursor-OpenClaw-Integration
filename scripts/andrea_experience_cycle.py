@@ -101,7 +101,11 @@ def main() -> int:
             conversation_eval_options=conversation_eval_options if suite == "conversation_core" else None,
         )
         print(json.dumps(payload, indent=2, ensure_ascii=False))
-        return 0 if payload.get("ok") and payload.get("verification_report", {}).get("passed") else 1
+        report = payload.get("verification_report", {}) or {}
+        passed = bool(report.get("passed"))
+        if str(suite or "").strip().lower() == "conversation_core":
+            passed = bool((report.get("metadata") or {}).get("quality_passed", passed))
+        return 0 if payload.get("ok") and passed else 1
     finally:
         conn.close()
 

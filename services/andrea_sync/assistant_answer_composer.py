@@ -618,6 +618,50 @@ def _execution_recall_context_lines(conn: Any, task_id: str) -> List[str]:
     return ["Delegated execution (tracked): " + ", ".join(parts) + "."]
 
 
+def _strip_recall_label(text: str) -> str:
+    t = str(text or "").strip()
+    if not t:
+        return ""
+    low = t.lower()
+    for prefix in (
+        "latest useful result:",
+        "last assistant update on this task:",
+        "recorded summary:",
+        "recent receipt:",
+        "continuation context:",
+    ):
+        if low.startswith(prefix):
+            return t.split(":", 1)[-1].strip()
+    return t
+
+
+def _pick_cursor_recap_lead(
+    *,
+    narrative_lines: Sequence[str],
+    assistant_lines: Sequence[str],
+    receipt_substantive: Sequence[str],
+    cont_line: str,
+) -> str:
+    """One concise recap sentence that can safely lead recall-shaped answers."""
+    for line in narrative_lines:
+        clean = sanitize_user_surface_text(_strip_recall_label(line), limit=360)
+        if clean:
+            return clean
+    for line in assistant_lines:
+        clean = sanitize_user_surface_text(_strip_recall_label(line), limit=360)
+        if clean:
+            return clean
+    for line in receipt_substantive:
+        clean = sanitize_user_surface_text(_strip_recall_label(line), limit=360)
+        if clean:
+            return clean
+    if cont_line:
+        clean = sanitize_user_surface_text(_strip_recall_label(cont_line), limit=320)
+        if clean:
+            return clean
+    return ""
+
+
 def _state_snapshot_is_low_information_only(
     status: str,
     result_kind: str,
@@ -721,13 +765,30 @@ def build_cursor_continuity_recall_reply_from_state(
     )
     if recall_shaped:
         lines = []
-        lines.extend(narrative_lines)
-        lines.extend(receipt_substantive)
-        if cont_line:
+        recap_lead = _pick_cursor_recap_lead(
+            narrative_lines=narrative_lines,
+            assistant_lines=assistant_lines,
+            receipt_substantive=receipt_substantive,
+            cont_line=cont_line,
+        )
+        if recap_lead:
+            lines.append(f"Cursor recap: {recap_lead}")
+
+        if cont_line and _strip_recall_label(cont_line) not in recap_lead:
             lines.append(cont_line)
-        lines.extend(assistant_lines)
-        lines.extend(receipt_generic)
-        lines.extend(exec_lines)
+
+        # Include at most one extra substantive corroboration line for brevity.
+        for line in list(narrative_lines) + list(receipt_substantive) + list(assistant_lines):
+            if len(lines) >= (3 if recap_lead else 2):
+                break
+            if _strip_recall_label(line) == recap_lead:
+                continue
+            lines.append(line)
+
+        lines.extend(receipt_generic[:1])
+        if not recap_lead or _user_message_asks_explicit_status(um):
+            lines.extend(exec_lines)
+
         has_narrative = bool(
             narrative_lines
             or receipt_substantive
@@ -736,7 +797,8 @@ def build_cursor_continuity_recall_reply_from_state(
             or receipt_generic
         )
         show_where = bool(state_bits) and (
-            has_substantive_recap or _user_message_asks_explicit_status(um)
+            (has_substantive_recap and bool(recap_lead))
+            or _user_message_asks_explicit_status(um)
         )
         if state_bits and show_where:
             lines.append("Where things stand: " + "; ".join(state_bits) + ".")

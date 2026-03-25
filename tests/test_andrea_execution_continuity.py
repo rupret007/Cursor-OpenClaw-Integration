@@ -209,7 +209,7 @@ class ExecutionContinuityTests(unittest.TestCase):
             self.conn, "tsk_recall", user_message="What did Cursor do?"
         )
         self.assertIn("Implemented the continuity", text)
-        self.assertIn("Latest useful result", text)
+        self.assertIn("Cursor recap:", text)
 
     def test_cursor_followup_fallback_picks_ranked_same_chat_delegated_task(self) -> None:
         """Thin current task + richer older same-chat delegated task yields continuation context."""

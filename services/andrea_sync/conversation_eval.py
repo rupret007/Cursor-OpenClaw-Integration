@@ -81,6 +81,16 @@ _TEXT_LANE_REPLY_MARKERS_RE = re.compile(
     r"\b(?:text|message|messages|inbox|imessage|bluebubbles|sms)\b",
     re.I,
 )
+_TEXT_LANE_ASSISTANT_REASONS = frozenset(
+    {
+        "recent_text_messages_ready",
+        "recent_text_messages_failed",
+        "recent_text_messages_failed_contaminated",
+        "recent_text_messages_unavailable",
+        "messaging_capability_read_answer",
+        "messaging_capability_answer",
+    }
+)
 _OUTBOUND_ONLY_CAPABILITY_BOILERPLATE_RE = re.compile(
     r"draft\s+the\s+message|confirmation\s+before\s+sending",
     re.I,
@@ -299,6 +309,7 @@ def run_deterministic_detectors(
         hits = sum(1 for w in topic_tokens if w and w in low)
         prior_l = prior_user_turn.lower()
         user_l = (user or "").lower()
+        assistant_reason = str(capture.get("assistant_reason") or "").strip()
         messaging_lane_prior = bool(_TOOL_TEXT_LANE_PRIOR_RE.search(prior_l))
         summarize_follow = bool(_TEXT_SUMMARIZE_FOLLOWUP_RE.search(user_l))
         if messaging_lane_prior and summarize_follow:
@@ -315,7 +326,11 @@ def run_deterministic_detectors(
                         "detail": "read/summarize follow-up met with outbound-only capability copy",
                     }
                 )
-            elif not _TEXT_LANE_REPLY_MARKERS_RE.search(low) and len(text) > 0:
+            elif (
+                assistant_reason not in _TEXT_LANE_ASSISTANT_REASONS
+                and not _TEXT_LANE_REPLY_MARKERS_RE.search(low)
+                and len(text) > 0
+            ):
                 findings.append(
                     {
                         "family": "followup_carryover_failure",
@@ -800,6 +815,7 @@ def run_conversation_case(
 
     high = [f for f in all_findings if f.get("severity") == "high"]
     med = [f for f in all_findings if f.get("severity") == "medium"]
+    quality_state = "fail" if high else ("weak_pass" if med else "full_pass")
 
     observations: List[ExperienceObservation] = [
         ExperienceObservation(
@@ -863,6 +879,9 @@ def run_conversation_case(
         "behavior_family": case.behavior_family,
         "captures": captures,
         "failure_families": sorted({str(f.get("family")) for f in all_findings}),
+        "deterministic_findings_high_count": len(high),
+        "deterministic_findings_medium_count": len(med),
+        "quality_state": quality_state,
         "llm_eval": llm_eval,
         "semantic_adjudication": adjudication,
         "harness_timings": harness_timings,
@@ -883,8 +902,8 @@ def run_conversation_case(
             title=result.title,
             category=result.category,
             passed=result.passed,
-            score=max(75, result.score),
-            summary=result.summary,
+            score=min(84, result.score),
+            summary="Weak pass: medium-severity semantic issues detected.",
             output_excerpt=result.output_excerpt,
             observations=result.observations,
             tags=result.tags,
@@ -1165,9 +1184,11 @@ def conversation_core_scenarios(conversation_eval_options: Mapping[str, Any] | N
 def cluster_failed_checks(checks: Iterable[ExperienceCheckResult]) -> List[Dict[str, Any]]:
     buckets: Dict[str, Dict[str, Any]] = {}
     for row in checks:
-        if row.passed:
+        meta = row.metadata if isinstance(row.metadata, dict) else {}
+        qstate = str(meta.get("quality_state") or ("fail" if not row.passed else "full_pass"))
+        if row.passed and qstate == "full_pass":
             continue
-        fams = row.metadata.get("failure_families") if isinstance(row.metadata, dict) else None
+        fams = meta.get("failure_families")
         if not isinstance(fams, list) or not fams:
             fams = ["unknown"]
         for fam in fams:
@@ -1190,7 +1211,12 @@ def build_cursor_fix_brief(
 ) -> Dict[str, Any]:
     """Bounded fix brief for human/Cursor; does not apply code changes."""
     fam = str(cluster.get("failure_family") or "unknown")
-    related = [c for c in checks if not c.passed and fam in (c.metadata.get("failure_families") or [])]
+    related = []
+    for c in checks:
+        cmeta = c.metadata if isinstance(c.metadata, dict) else {}
+        cstate = str(cmeta.get("quality_state") or ("fail" if not c.passed else "full_pass"))
+        if cstate != "full_pass" and fam in (cmeta.get("failure_families") or []):
+            related.append(c)
     prompts: List[str] = []
     for c in related[:5]:
         caps = c.metadata.get("captures") if isinstance(c.metadata, dict) else None

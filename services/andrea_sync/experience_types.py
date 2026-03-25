@@ -238,6 +238,32 @@ class ExperienceRun:
                 counts["failed"] += 1
         return counts
 
+    @staticmethod
+    def _quality_state_for_check(row: ExperienceCheckResult) -> str:
+        meta = row.metadata if isinstance(row.metadata, dict) else {}
+        state = str(meta.get("quality_state") or "").strip().lower()
+        if state in {"full_pass", "weak_pass", "fail"}:
+            return state
+        return "fail" if not row.passed else "full_pass"
+
+    @property
+    def quality_counts(self) -> Dict[str, int]:
+        counts = {"full_pass": 0, "weak_pass": 0, "fail": 0}
+        for row in self.checks:
+            state = self._quality_state_for_check(row)
+            counts[state] = int(counts.get(state, 0)) + 1
+        return counts
+
+    @property
+    def quality_passed(self) -> bool:
+        # Required conversation checks should be all full_pass.
+        for row in self.checks:
+            if not row.required:
+                continue
+            if self._quality_state_for_check(row) != "full_pass":
+                return False
+        return True
+
     @property
     def category_counts(self) -> List[Dict[str, Any]]:
         buckets: Dict[str, Dict[str, Any]] = {}
@@ -272,6 +298,8 @@ class ExperienceRun:
                 "average_score": self.average_score,
                 "failed_checks": self.failed_checks,
                 "score_counts": self.score_counts,
+                "quality_counts": self.quality_counts,
+                "quality_passed": self.quality_passed,
                 "category_counts": self.category_counts,
                 **dict(self.metadata),
             },
@@ -293,6 +321,8 @@ class ExperienceRun:
             "failed_checks": self.failed_checks,
             "average_score": self.average_score,
             "score_counts": self.score_counts,
+            "quality_counts": self.quality_counts,
+            "quality_passed": self.quality_passed,
             "category_counts": self.category_counts,
             "checks": [row.as_dict() for row in self.checks],
             "failed_scenarios": [

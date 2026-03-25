@@ -86,6 +86,23 @@ class ConversationEvalDetectorTests(unittest.TestCase):
         codes = {h["issue_code"] for h in hits}
         self.assertIn("conversation_messaging_read_send_capability_mismatch", codes)
 
+    def test_does_not_flag_followup_miss_when_reason_stays_in_text_lane(self) -> None:
+        cap = {
+            "raw_reply_text": "I couldn't retrieve messages right now, but I stayed on the recent-text lookup lane.",
+            "assistant_reason": "recent_text_messages_unavailable",
+            "user_turn": "Can you summarize my texts too?",
+            "turn_plan_domain": "personal_agenda",
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(
+            cap,
+            prior_user_turn="Can you pull text messages from BlueBubbles?",
+            expect_tool_carryover=True,
+        )
+        codes = {h["issue_code"] for h in hits}
+        self.assertNotIn("conversation_followup_carryover_miss", codes)
+
     def test_detects_internal_runtime_leak(self) -> None:
         cap = {
             "raw_reply_text": "session id lockstep_json",
@@ -179,6 +196,35 @@ class ConversationEvalReportTests(unittest.TestCase):
         attach_conversation_eval_report(meta, [chk], prepare_fix_brief=True)
         self.assertIn("conversation_failure_clusters", meta)
         self.assertIn("cursor_fix_briefs", meta)
+
+    def test_attach_report_clusters_weak_pass_quality_checks(self) -> None:
+        meta: dict = {}
+        sc = ExperienceScenario(
+            scenario_id="conversation_core::weak",
+            title="weak",
+            description="d",
+            category="conversation",
+            runner=lambda h, s: ExperienceCheckResult.from_observations(s, []),
+        )
+        weak = ExperienceCheckResult.from_observations(
+            sc,
+            [
+                ExperienceObservation(
+                    description="warn",
+                    expected="no medium warnings",
+                    observed="cursor_recall_thin",
+                    passed=True,
+                    severity="medium",
+                )
+            ],
+            metadata={
+                "failure_families": ["cursor_recall_failure"],
+                "quality_state": "weak_pass",
+            },
+        )
+        attach_conversation_eval_report(meta, [weak], prepare_fix_brief=True)
+        clusters = meta.get("conversation_failure_clusters") or []
+        self.assertTrue(clusters)
 
 
 class ConversationCoreSuitePersistenceTests(unittest.TestCase):

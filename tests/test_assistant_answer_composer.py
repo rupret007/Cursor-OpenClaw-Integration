@@ -433,7 +433,7 @@ class TestAssistantAnswerComposer(unittest.TestCase):
             self.conn, tid, user_message="What did Cursor say?"
         )
         self.assertIn("Refactored", text)
-        self.assertIn("Latest useful result", text)
+        self.assertIn("Cursor recap:", text)
         self.assertNotRegex(text.lower(), r"task status \*\*created\*\*")
 
     def test_cursor_recall_ranks_richer_same_chat_task_over_thin_current(self) -> None:
@@ -525,6 +525,55 @@ class TestAssistantAnswerComposer(unittest.TestCase):
         )
         self.assertIn("Delegated execution (tracked)", text)
         self.assertIn("direct_cursor", text)
+
+    def test_cursor_recall_demotes_execution_scaffold_when_narrative_exists(self) -> None:
+        from services.andrea_sync.assistant_answer_composer import (  # noqa: E402
+            build_cursor_continuity_recall_reply_from_state,
+        )
+
+        r0 = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "comp-recap-priority-1",
+                "payload": {
+                    "text": "hi",
+                    "routing_text": "hi",
+                    "chat_id": 88059,
+                    "message_id": 1,
+                },
+            },
+        )
+        tid = r0["task_id"]
+        link_task_principal(self.conn, tid, "pri_recap_priority", channel="telegram")
+        gid = create_goal(self.conn, "pri_recap_priority", "Track recap", channel="telegram")
+        link_task_to_goal(self.conn, tid, gid)
+        append_event(
+            self.conn,
+            tid,
+            EventType.JOB_COMPLETED,
+            {
+                "summary": "done",
+                "backend": "openclaw",
+                "runner": "openclaw",
+                "user_summary": "Delivered the root-cause recap and implementation plan.",
+            },
+        )
+        create_execution_attempt(
+            self.conn,
+            tid,
+            gid,
+            lane="direct_cursor",
+            backend="cursor",
+            handle_dict={"cursor_agent_id": "ag_recap_priority", "handle_kind": "cursor_agent"},
+        )
+        text = build_cursor_continuity_recall_reply_from_state(
+            self.conn, tid, user_message="What did Cursor say?"
+        )
+        first = text.splitlines()[0] if text else ""
+        self.assertIn("Cursor recap:", first)
+        self.assertNotIn("Delegated execution (tracked)", first)
 
     def test_cursor_recall_skips_echo_projection_summary(self) -> None:
         """Do not surface the user's question as a 'Recorded summary' when it matches."""

@@ -3475,9 +3475,12 @@ def run_experience_assurance(
         started_at=started,
         completed_at=time.time(),
     )
+    qcounts = run.quality_counts
     run.summary = (
         f"{run.passed_checks}/{run.total_checks} experience scenarios passed"
         f" · avg score {run.average_score}"
+        f" · quality: {qcounts.get('full_pass', 0)} full_pass / "
+        f"{qcounts.get('weak_pass', 0)} weak_pass / {qcounts.get('fail', 0)} fail"
     )
     verification_report = run.as_verification_report()
     repair_result: Dict[str, Any] = {}

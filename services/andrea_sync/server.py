@@ -28,6 +28,7 @@ from .assistant_answer_composer import (
     build_blocked_state_reply_from_state,
     build_recent_outcome_history_reply_from_state,
     cursor_followup_context_reply_with_fallback,
+    find_viable_recent_cursor_workstream_reply,
     merge_goal_reply_with_followthrough,
     try_composer_early_short_circuit,
 )
@@ -1614,7 +1615,12 @@ class SyncServer:
                 and effective_turn_plan.allow_goal_continuity_repair
             ):
                 if effective_turn_plan.domain == "project_status":
-                    goal_nl = (
+                    rescue = self.with_lock(
+                        lambda c: find_viable_recent_cursor_workstream_reply(
+                            c, task_id, classify_text
+                        )
+                    )
+                    goal_nl = rescue or (
                         "I do not see active tracked work right now. "
                         "If you want, I can start a fresh task and track it from here."
                     )

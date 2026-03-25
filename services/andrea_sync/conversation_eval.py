@@ -343,6 +343,28 @@ def run_deterministic_detectors(
                 "detail": "recursive recap label duplication",
             }
         )
+    if expect_cursor_substance and is_cursor_thread_recall_question(user):
+        head = text[:1200].lower()
+        if "last assistant update on this task:" in head and "latest useful result:" not in head:
+            if not any(
+                tok in head
+                for tok in (
+                    "phase synthesis:",
+                    "phase execution:",
+                    "phase critique:",
+                    "phase plan:",
+                    "collaboration note:",
+                    "recent receipt",
+                )
+            ):
+                findings.append(
+                    {
+                        "family": "cursor_recall_failure",
+                        "issue_code": "conversation_cursor_recall_derived_surface_led",
+                        "severity": "medium",
+                        "detail": "cursor recall led with assistant-update scaffolding without source-truth openclaw lines",
+                    }
+                )
     if expect_tool_carryover and prior_user_turn:
         topic_tokens = [w for w in re.split(r"\W+", prior_user_turn.lower()) if len(w) > 4][:6]
         hits = sum(1 for w in topic_tokens if w and w in low)
@@ -789,6 +811,106 @@ def _seed_identity_hijack_state(harness: Any) -> None:
                 },
             },
         )
+    )
+
+
+def _seed_source_truth_over_derived_recall(harness: Any) -> None:
+    server = harness.server
+    assert server is not None
+
+    def _cmd(body: Dict[str, Any]) -> Dict[str, Any]:
+        return server.with_lock(lambda c: handle_command(c, body))
+
+    created = _cmd(
+        {
+            "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+            "channel": "telegram",
+            "external_id": "seed-source-truth-derived",
+            "payload": {
+                "text": "Seed source truth vs derived",
+                "routing_text": "Seed source truth vs derived",
+                "chat_id": 77788,
+                "message_id": 6301,
+                "from_user": 99093,
+            },
+        }
+    )
+    task_id = str(created.get("task_id") or "")
+    if not task_id:
+        return
+    _cmd(
+        {
+            "command_type": CommandType.REPORT_CURSOR_EVENT.value,
+            "channel": "cursor",
+            "task_id": task_id,
+            "payload": {
+                "event_type": EventType.JOB_COMPLETED.value,
+                "payload": {
+                    "backend": "openclaw",
+                    "runner": "openclaw",
+                    "summary": (
+                        "Cursor recap: DERIVED_ASSISTANT_RECYCLED_SURFACE_XX "
+                        "last assistant update noise."
+                    ),
+                    "user_summary": "SOURCE_TRUTH_UNIQUE_OPENCLAW_FACT_Z9 anchor for recall lead.",
+                },
+            },
+        }
+    )
+
+
+def _seed_bare_continue_rich_neighbor(harness: Any) -> None:
+    server = harness.server
+    assert server is not None
+
+    def _cmd(body: Dict[str, Any]) -> Dict[str, Any]:
+        return server.with_lock(lambda c: handle_command(c, body))
+
+    rich = _cmd(
+        {
+            "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+            "channel": "telegram",
+            "external_id": "seed-rich-neighbor-a",
+            "payload": {
+                "text": "Seed rich neighbor A",
+                "routing_text": "Seed rich neighbor A",
+                "chat_id": 77789,
+                "message_id": 6401,
+                "from_user": 99094,
+            },
+        }
+    )
+    rid = str(rich.get("task_id") or "")
+    if rid:
+        _cmd(
+            {
+                "command_type": CommandType.REPORT_CURSOR_EVENT.value,
+                "channel": "cursor",
+                "task_id": rid,
+                "payload": {
+                    "event_type": EventType.JOB_COMPLETED.value,
+                    "payload": {
+                        "backend": "openclaw",
+                        "runner": "openclaw",
+                        "summary": "Prior delegated summary.",
+                        "user_summary": "BARE_CONTINUE_RICH_NEIGHBOR_MARKER_Q5 solid recap anchor.",
+                    },
+                },
+            }
+        )
+    _cmd(
+        {
+            "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+            "channel": "telegram",
+            "external_id": "seed-thin-neighbor-b",
+            "payload": {
+                "text": "hey",
+                "routing_text": "hey",
+                "chat_id": 77789,
+                "message_id": 6402,
+                "from_user": 99094,
+            },
+        }
     )
 
 
@@ -1460,6 +1582,34 @@ CONVERSATION_CORE_CASES: tuple[ConversationCaseSpec, ...] = (
         required_reply_markers=("cursor recap:",),
         forbidden_reply_markers=("cursor recap: cursor recap:",),
         expect_cursor_substance=True,
+    ),
+    ConversationCaseSpec(
+        case_id="source_truth_beats_derived_recall",
+        title="Source-truth recall beats derived assistant recap surface",
+        behavior_family="cursor_recall",
+        turns=("What did Cursor say?",),
+        chat_id=77788,
+        from_id=99093,
+        first_update_id=18788,
+        first_message_id=6875,
+        setup_fn=_seed_source_truth_over_derived_recall,
+        required_reply_markers=("SOURCE_TRUTH_UNIQUE_OPENCLAW_FACT_Z9",),
+        forbidden_reply_markers=("DERIVED_ASSISTANT_RECYCLED_SURFACE_XX",),
+        expect_cursor_substance=True,
+    ),
+    ConversationCaseSpec(
+        case_id="bare_continue_rescues_recent_cursor",
+        title="Bare continue finds recent source-rich neighbor",
+        behavior_family="cursor_continuation",
+        turns=("Continue that",),
+        chat_id=77789,
+        from_id=99094,
+        first_update_id=18789,
+        first_message_id=6876,
+        setup_fn=_seed_bare_continue_rich_neighbor,
+        required_reply_markers=("BARE_CONTINUE_RICH_NEIGHBOR_MARKER_Q5",),
+        forbidden_reply_markers=("I do not see active tracked work right now",),
+        wait_policy="routing_smoke",
     ),
     ConversationCaseSpec(
         case_id="agenda_then_opinion",

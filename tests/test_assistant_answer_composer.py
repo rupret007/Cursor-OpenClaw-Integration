@@ -833,6 +833,104 @@ class TestAssistantAnswerComposer(unittest.TestCase):
         )
         self.assertNotIn("Cursor recap: Cursor recap:", text)
 
+    def test_cursor_recall_prefers_openclaw_over_derived_assistant_recap(self) -> None:
+        from services.andrea_sync.assistant_answer_composer import (  # noqa: E402
+            build_cursor_continuity_recall_reply_from_state,
+        )
+
+        created = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "comp-src-truth-derived",
+                "payload": {
+                    "text": "seed",
+                    "routing_text": "seed",
+                    "chat_id": 88133,
+                    "message_id": 1,
+                },
+            },
+        )
+        tid = created["task_id"]
+        append_event(
+            self.conn,
+            tid,
+            EventType.JOB_COMPLETED,
+            {
+                "summary": "Cursor recap: DERIVED_NOISE_MARK_999 should not win the lead.",
+                "backend": "openclaw",
+                "runner": "openclaw",
+                "user_summary": "OPENCLAW_LEAD_MARK_123 primary source-truth narrative.",
+            },
+        )
+        append_event(
+            self.conn,
+            tid,
+            EventType.ASSISTANT_REPLIED,
+            {
+                "text": "Cursor recap: DERIVED_NOISE_MARK_999 should not win the lead.",
+                "route": "direct",
+                "reason": "test",
+            },
+        )
+        text = build_cursor_continuity_recall_reply_from_state(
+            self.conn, tid, user_message="What did Cursor say?"
+        )
+        self.assertIn("OPENCLAW_LEAD_MARK_123", text)
+        self.assertNotIn("DERIVED_NOISE_MARK_999", text)
+
+    def test_find_viable_recent_cursor_workstream_uses_rich_neighbor(self) -> None:
+        from services.andrea_sync.assistant_answer_composer import (  # noqa: E402
+            find_viable_recent_cursor_workstream_reply,
+        )
+
+        rich = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "comp-viable-rich",
+                "payload": {
+                    "text": "first",
+                    "routing_text": "first",
+                    "chat_id": 88134,
+                    "message_id": 1,
+                },
+            },
+        )
+        append_event(
+            self.conn,
+            rich["task_id"],
+            EventType.JOB_COMPLETED,
+            {
+                "summary": "done",
+                "backend": "openclaw",
+                "runner": "openclaw",
+                "user_summary": "VIABLE_NEIGHBOR_RECAP_MARK_77 authoritative recap.",
+            },
+        )
+        thin = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "comp-viable-thin",
+                "payload": {
+                    "text": "hey",
+                    "routing_text": "hey",
+                    "chat_id": 88134,
+                    "message_id": 2,
+                },
+            },
+        )
+        out = find_viable_recent_cursor_workstream_reply(
+            self.conn, thin["task_id"], user_message="What are we doing?"
+        )
+        self.assertIsNotNone(out)
+        assert out is not None
+        self.assertIn("VIABLE_NEIGHBOR_RECAP_MARK_77", out)
+
 
 if __name__ == "__main__":
     unittest.main()

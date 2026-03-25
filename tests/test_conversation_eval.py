@@ -143,6 +143,36 @@ class ConversationEvalDetectorTests(unittest.TestCase):
         codes = {h["issue_code"] for h in hits}
         self.assertIn("conversation_recap_recursion", codes)
 
+    def test_detects_derived_surface_led_cursor_recall(self) -> None:
+        cap = {
+            "raw_reply_text": (
+                "Last assistant update on this task: Cursor shipped a tweak.\n"
+                "Where things stand: task status **running**."
+            ),
+            "user_turn": "What did Cursor say?",
+            "turn_plan_domain": "project_status",
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap, expect_cursor_substance=True)
+        codes = {h["issue_code"] for h in hits}
+        self.assertIn("conversation_cursor_recall_derived_surface_led", codes)
+
+    def test_no_derived_surface_flag_when_latest_useful_result_present(self) -> None:
+        cap = {
+            "raw_reply_text": (
+                "Cursor recap: shipped the fix.\n"
+                "Latest useful result: shipped the fix with tests."
+            ),
+            "user_turn": "What did Cursor say?",
+            "turn_plan_domain": "project_status",
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap, expect_cursor_substance=True)
+        codes = {h["issue_code"] for h in hits}
+        self.assertNotIn("conversation_cursor_recall_derived_surface_led", codes)
+
     def test_approval_inventory_reply_does_not_trip_false_completion(self) -> None:
         cap = {
             "raw_reply_text": "I'm not seeing any approval requests waiting on you right now.",

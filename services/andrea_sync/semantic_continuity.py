@@ -50,6 +50,63 @@ def _meta_for_task(conn: Any, task_id: str) -> dict[str, Any]:
     return meta if isinstance(meta, dict) else {}
 
 
+def source_truth_delegation_score(meta: dict[str, Any]) -> int:
+    """OpenClaw/outcome/delegation strength without assistant.last_reply or projection surfaces."""
+    s = 0
+    oc = meta.get("openclaw") if isinstance(meta.get("openclaw"), dict) else {}
+    if str(oc.get("user_summary") or "").strip():
+        s += 72
+    po = oc.get("phase_outputs")
+    if isinstance(po, dict):
+        for block in po.values():
+            if isinstance(block, dict) and str(block.get("summary") or "").strip():
+                s += 40
+                break
+    ct = oc.get("collaboration_trace")
+    if isinstance(ct, list) and any(str(x).strip() for x in ct[:8]):
+        s += 30
+
+    outcome = meta.get("outcome") if isinstance(meta.get("outcome"), dict) else {}
+    if str(outcome.get("current_phase_summary") or "").strip():
+        s += 42
+    if str(outcome.get("blocked_reason") or "").strip():
+        s += 24
+
+    ex = meta.get("execution") if isinstance(meta.get("execution"), dict) else {}
+    if ex.get("delegated_to_cursor"):
+        s += 54
+
+    cur = meta.get("cursor") if isinstance(meta.get("cursor"), dict) else {}
+    if str(cur.get("cursor_agent_id") or cur.get("agent_id") or "").strip():
+        s += 34
+
+    tg = meta.get("telegram") if isinstance(meta.get("telegram"), dict) else {}
+    cap = str(tg.get("requested_capability") or "").lower()
+    if "cursor" in cap or "openclaw" in cap:
+        s += 15
+    cr = tg.get("continuation_records") if isinstance(tg.get("continuation_records"), list) else []
+    if cr:
+        s += 12
+
+    return s
+
+
+def same_chat_max_source_truth_score(conn: Any, task_id: str) -> int:
+    """Best source-truth delegation signal across this task and recent same-chat Telegram tasks."""
+    meta = _meta_for_task(conn, task_id)
+    tg = meta.get("telegram") if isinstance(meta.get("telegram"), dict) else {}
+    chat_id = tg.get("chat_id")
+    best = source_truth_delegation_score(meta)
+    if chat_id is None or str(chat_id).strip() == "":
+        return best
+    for tid in list_telegram_task_ids_for_chat(conn, chat_id, limit=24):
+        m = _meta_for_task(conn, tid)
+        sc = source_truth_delegation_score(m)
+        if sc > best:
+            best = sc
+    return best
+
+
 def delegation_signal_score(meta: dict[str, Any]) -> int:
     """Heuristic strength of Cursor / OpenClaw delegation on a task projection."""
     score = 0
@@ -151,11 +208,13 @@ def resolve_semantic_continuity_patch(
                 continuity_focus_override="recent_outcome_history",
                 force_prefer_state_reply=True,
             )
-        if user_message_suggests_anaphoric_cursor_continue(clean) and del_score >= 32:
-            return SemanticContinuityPatch(
-                continuity_focus_override="cursor_followup_heavy_lift",
-                force_prefer_state_reply=True,
-            )
+        if user_message_suggests_anaphoric_cursor_continue(clean):
+            st = same_chat_max_source_truth_score(conn, task_id)
+            if del_score >= 28 or st >= 85:
+                return SemanticContinuityPatch(
+                    continuity_focus_override="cursor_followup_heavy_lift",
+                    force_prefer_state_reply=True,
+                )
         return SemanticContinuityPatch()
 
     if (

@@ -340,6 +340,123 @@ def _user_message_asks_explicit_status(user_message: str) -> bool:
     return bool(_EXPLICIT_STATUS_ASK_RE.search(str(user_message or "")))
 
 
+def _ledger_receipt_summary_is_generic_placeholder(summary: str) -> bool:
+    """True for daily-pack ledger rows that repeat route labels instead of substance."""
+    s = str(summary or "").strip().lower()
+    if not s:
+        return False
+    if "status / follow-up reply" in s:
+        return True
+    if "goal continuation summary" in s:
+        return True
+    if "recent messages / lookup" in s:
+        return True
+    if s.startswith("assistant outcome (") and "reply" in s:
+        return True
+    if "note or reminder path" in s:
+        return True
+    return False
+
+
+def _score_source_truth_cursor_recall_signals(
+    conn: Any,
+    task_id: str,
+    user_message: str,
+) -> Tuple[int, int]:
+    """
+    Score using durable delegated / OpenClaw / outcome / execution signals only.
+    Does not use meta.assistant.last_reply or projection.summary.
+    Skips generic ledger receipts for narrative counting.
+    Returns (score, narrative_units).
+    """
+    channel = get_task_channel(conn, task_id) or "cli"
+    proj = project_task_dict(conn, task_id, channel)
+    meta = proj.get("meta") if isinstance(proj.get("meta"), dict) else {}
+    um = str(user_message or "").strip()
+
+    score = 0
+    narrative_units = 0
+
+    oc = meta.get("openclaw") if isinstance(meta.get("openclaw"), dict) else {}
+    us = str(oc.get("user_summary") or "").strip()
+    if us:
+        narrative_units += 1
+        score += 520
+        if _is_echo_of_user_question(us, um):
+            score -= 480
+
+    po = oc.get("phase_outputs")
+    if isinstance(po, dict):
+        for phase in ("synthesis", "execution", "critique", "plan"):
+            block = po.get(phase)
+            if not isinstance(block, dict):
+                continue
+            s = str(block.get("summary") or "").strip()
+            if not s:
+                continue
+            narrative_units += 1
+            score += 200
+            if _is_echo_of_user_question(s, um):
+                score -= 170
+
+    ct = oc.get("collaboration_trace")
+    if isinstance(ct, list) and any(str(x).strip() for x in ct[:8]):
+        narrative_units += 1
+        score += 140
+
+    for row in list_recent_user_outcome_receipts_for_task(conn, task_id, limit=3):
+        try:
+            raw_summ = str(row["summary"] or "")
+            s = raw_summ.strip()
+        except (KeyError, TypeError, IndexError):
+            raw_summ = ""
+            s = ""
+        if not s:
+            continue
+        if _ledger_receipt_summary_is_generic_placeholder(raw_summ):
+            continue
+        narrative_units += 1
+        score += 150
+        if _is_echo_of_user_question(s, um):
+            score -= 120
+
+    tm = _telegram_section(meta)
+    cr = tm.get("continuation_records") if isinstance(tm.get("continuation_records"), list) else []
+    if cr:
+        last = cr[-1]
+        if isinstance(last, dict) and str(last.get("reason") or "").strip():
+            narrative_units += 1
+            score += 170
+
+    outcome = _outcome_section(meta)
+    ps = str(outcome.get("current_phase_summary") or "").strip()
+    if ps:
+        score += 210
+        narrative_units += 1
+        if _is_echo_of_user_question(ps, um):
+            score -= 190
+
+    br = str(outcome.get("blocked_reason") or "").strip()
+    if br and len(br) > 6:
+        score += 95
+        narrative_units += 1
+
+    ex = meta.get("execution") if isinstance(meta.get("execution"), dict) else {}
+    if ex.get("delegated_to_cursor"):
+        score += 230
+
+    cur = meta.get("cursor") if isinstance(meta.get("cursor"), dict) else {}
+    if str(cur.get("cursor_agent_id") or cur.get("agent_id") or "").strip():
+        score += 85
+
+    att = summarize_execution_attempt_for_user(conn, task_id)
+    if isinstance(att, dict) and att.get("ok"):
+        score += 130
+        narrative_units += 1
+
+    return score, narrative_units
+
+
 def _cursor_recall_rank_adjustment(conn: Any, task_id: str) -> int:
     """Recency + active-attempt boost for same-chat Cursor ranking (complements base recall score)."""
     boost = 0
@@ -349,6 +466,8 @@ def _cursor_recall_rank_adjustment(conn: Any, task_id: str) -> int:
     if ts is not None:
         age = max(0.0, time.time() - float(ts))
         boost += int(max(0, 220 - min(age / 3600.0, 120.0) * 1.85))
+    st_boost = _score_source_truth_cursor_recall_signals(conn, task_id, "")[0]
+    boost += min(260, int(st_boost * 0.12))
     return boost
 
 
@@ -390,6 +509,42 @@ def _cursor_recall_composition_is_metadata_led(text: str) -> bool:
     return False
 
 
+def is_derived_assistant_recap_surface(raw: str) -> bool:
+    """
+    True when persisted assistant / projection text is recap scaffolding or recycled labels,
+    not durable delegated facts. Used to keep source-truth OpenClaw/outcome signals primary.
+    """
+    t = str(raw or "").strip()
+    if not t:
+        return False
+    body = _normalize_cursor_recap_lead(_strip_answer_wrappers(t))
+    low = body.lower()
+    if "cursor recap:" in low:
+        return True
+    if low.startswith("cursor recap"):
+        return True
+    scaffolding_markers = (
+        "latest useful result:",
+        "phase synthesis:",
+        "phase execution:",
+        "phase critique:",
+        "phase plan:",
+        "collaboration note:",
+        "recent receipt:",
+        "continuation context:",
+        "where things stand:",
+        "delegated execution (tracked)",
+        "last assistant update on this task:",
+        "recorded summary:",
+    )
+    hits = sum(1 for m in scaffolding_markers if m in low)
+    if hits >= 2:
+        return True
+    if hits == 1 and len(low) < 260:
+        return True
+    return False
+
+
 def _score_cursor_recall_candidate(
     conn: Any,
     task_id: str,
@@ -398,99 +553,65 @@ def _score_cursor_recall_candidate(
     """
     Narrative-first score for ranking Cursor recall / delegated selection.
     Second return is True when there is durable human-readable signal beyond thin metadata.
+    Source-truth (OpenClaw / outcome / non-generic receipts) dominates; assistant surfaces
+    are demoted when source-truth exists.
     """
     channel = get_task_channel(conn, task_id) or "cli"
     proj = project_task_dict(conn, task_id, channel)
     meta = proj.get("meta") if isinstance(proj.get("meta"), dict) else {}
     um = str(user_message or "").strip()
 
-    score = 0
-    narrative_units = 0
-
-    oc = meta.get("openclaw") if isinstance(meta.get("openclaw"), dict) else {}
-    us = str(oc.get("user_summary") or "").strip()
-    if us:
-        narrative_units += 1
-        score += 520
-        if _is_echo_of_user_question(us, um):
-            score -= 480
-
-    po = oc.get("phase_outputs")
-    if isinstance(po, dict):
-        for phase in ("synthesis", "execution", "critique", "plan"):
-            block = po.get(phase)
-            if not isinstance(block, dict):
-                continue
-            s = str(block.get("summary") or "").strip()
-            if not s:
-                continue
-            narrative_units += 1
-            score += 200
-            if _is_echo_of_user_question(s, um):
-                score -= 170
-
-    ct = oc.get("collaboration_trace")
-    if isinstance(ct, list) and any(str(x).strip() for x in ct[:8]):
-        narrative_units += 1
-        score += 140
+    st_score, st_units = _score_source_truth_cursor_recall_signals(conn, task_id, um)
+    score = int(st_score)
+    narrative_units = int(st_units)
 
     for row in list_recent_user_outcome_receipts_for_task(conn, task_id, limit=3):
         try:
-            s = str(row["summary"] or "").strip()
+            raw_summ = str(row["summary"] or "")
+            s = raw_summ.strip()
         except (KeyError, TypeError, IndexError):
+            raw_summ = ""
             s = ""
-        if s:
-            narrative_units += 1
-            score += 150
-            if _is_echo_of_user_question(s, um):
-                score -= 120
-
-    tm = _telegram_section(meta)
-    cr = tm.get("continuation_records") if isinstance(tm.get("continuation_records"), list) else []
-    if cr:
-        last = cr[-1]
-        if isinstance(last, dict) and str(last.get("reason") or "").strip():
-            narrative_units += 1
-            score += 170
-
-    outcome = _outcome_section(meta)
-    ps = str(outcome.get("current_phase_summary") or "").strip()
-    if ps:
-        score += 210
-        narrative_units += 1
-        if _is_echo_of_user_question(ps, um):
-            score -= 190
-
-    br = str(outcome.get("blocked_reason") or "").strip()
-    if br and len(br) > 6:
-        score += 95
-
-    ex = meta.get("execution") if isinstance(meta.get("execution"), dict) else {}
-    if ex.get("delegated_to_cursor"):
-        score += 230
-
-    cur = meta.get("cursor") if isinstance(meta.get("cursor"), dict) else {}
-    if str(cur.get("cursor_agent_id") or cur.get("agent_id") or "").strip():
-        score += 85
-
-    att = summarize_execution_attempt_for_user(conn, task_id)
-    if isinstance(att, dict) and att.get("ok"):
-        score += 130
+        if s and _ledger_receipt_summary_is_generic_placeholder(raw_summ):
+            score += 22
 
     asst = _assistant_section(meta)
     lr = str(asst.get("last_reply") or "").strip()
-    if lr and len(lr) > 12 and not _is_echo_of_user_question(lr, um):
-        narrative_units += 1
-        score += 125
-
     summ = str(proj.get("summary") or "").strip()
-    if summ and len(summ) > 12 and not _is_echo_of_user_question(summ, um):
-        narrative_units += 1
-        score += 95
 
-    has_meaningful = narrative_units >= 1 and score >= 120
+    derived_lr = bool(lr and len(lr) > 12 and not _is_echo_of_user_question(lr, um))
+    derived_summ = bool(summ and len(summ) > 12 and not _is_echo_of_user_question(summ, um))
+
+    if st_units >= 1:
+        if derived_lr and not is_derived_assistant_recap_surface(lr):
+            score += 18
+        elif derived_lr and is_derived_assistant_recap_surface(lr):
+            score += 0
+        if derived_summ and not is_derived_assistant_recap_surface(summ):
+            score += 12
+        elif derived_summ and is_derived_assistant_recap_surface(summ):
+            score += 0
+    else:
+        if derived_lr:
+            narrative_units += 1
+            score += 125 if not is_derived_assistant_recap_surface(lr) else 28
+        if derived_summ:
+            narrative_units += 1
+            score += 95 if not is_derived_assistant_recap_surface(summ) else 22
+
+    has_meaningful = bool(
+        (st_units >= 1 and st_score >= 90)
+        or (
+            st_units == 0
+            and narrative_units >= 1
+            and score >= 120
+            and _task_has_delegated_continuity_signal(meta)
+        )
+    )
     if not _task_has_delegated_continuity_signal(meta) and narrative_units == 0:
         return 0, False
+    if not _task_has_delegated_continuity_signal(meta) and st_units == 0:
+        return score, False
 
     return score, has_meaningful
 
@@ -597,24 +718,6 @@ def _openclaw_narrative_lines(meta: Dict[str, Any]) -> List[str]:
         if safe_br:
             lines.append(f"Delegated wait state: {safe_br}")
     return lines
-
-
-def _ledger_receipt_summary_is_generic_placeholder(summary: str) -> bool:
-    """True for daily-pack ledger rows that repeat route labels instead of substance."""
-    s = str(summary or "").strip().lower()
-    if not s:
-        return False
-    if "status / follow-up reply" in s:
-        return True
-    if "goal continuation summary" in s:
-        return True
-    if "recent messages / lookup" in s:
-        return True
-    if s.startswith("assistant outcome (") and "reply" in s:
-        return True
-    if "note or reminder path" in s:
-        return True
-    return False
 
 
 def _execution_recall_context_lines(conn: Any, task_id: str) -> List[str]:
@@ -728,7 +831,7 @@ def _synthesize_partial_cursor_recap(
     blocked_reason: str,
     cont_line: str,
 ) -> str:
-    """Build one recap sentence from two weaker safe fragments."""
+    """Build one recap sentence from two weaker safe fragments (source-truth first)."""
     frags: List[str] = []
 
     def _push(raw: str) -> None:
@@ -740,13 +843,13 @@ def _synthesize_partial_cursor_recap(
             return
         frags.append(clean)
 
-    for line in assistant_lines:
-        _push(line)
-    for line in receipt_substantive:
-        _push(line)
     _push(phase_summary)
     _push(blocked_reason)
     _push(cont_line)
+    for line in receipt_substantive:
+        _push(line)
+    for line in assistant_lines:
+        _push(line)
 
     if len(frags) >= 2:
         return f"{frags[0]} Current note: {frags[1]}"
@@ -851,18 +954,34 @@ def build_cursor_continuity_recall_reply_from_state(
     assistant_lines: List[str] = []
     um = str(user_message or "").strip()
     recall_shaped = is_cursor_thread_recall_question(um)
+    has_source_truth_for_recap = bool(
+        narrative_lines
+        or receipt_substantive
+        or (phase_summary and len(phase_summary.strip()) > 16)
+        or (blocked_reason and len(blocked_reason.strip()) > 6)
+    )
+    added_last_assistant_update_line = False
     if last_reply and len(last_reply) > 12 and not _is_echo_of_user_question(last_reply, um):
-        safe_lr = _normalize_cursor_recap_lead(
-            sanitize_user_surface_text(last_reply, limit=900)
-        )
-        if safe_lr:
-            assistant_lines.append(f"Last assistant update on this task: {safe_lr}")
-    elif summary and len(summary) > 20 and not _is_echo_of_user_question(summary, um):
-        safe_s = _normalize_cursor_recap_lead(
-            sanitize_user_surface_text(summary, limit=900)
-        )
-        if safe_s:
-            assistant_lines.append(f"Recorded summary: {safe_s}")
+        if not (has_source_truth_for_recap and is_derived_assistant_recap_surface(last_reply)):
+            safe_lr = _normalize_cursor_recap_lead(
+                sanitize_user_surface_text(last_reply, limit=900)
+            )
+            if safe_lr:
+                assistant_lines.append(f"Last assistant update on this task: {safe_lr}")
+                added_last_assistant_update_line = True
+    if (
+        summary
+        and len(summary) > 20
+        and not _is_echo_of_user_question(summary, um)
+        and not added_last_assistant_update_line
+        and not (has_source_truth_for_recap and bool(narrative_lines))
+    ):
+        if not (has_source_truth_for_recap and is_derived_assistant_recap_surface(summary)):
+            safe_s = _normalize_cursor_recap_lead(
+                sanitize_user_surface_text(summary, limit=900)
+            )
+            if safe_s:
+                assistant_lines.append(f"Recorded summary: {safe_s}")
 
     state_bits: List[str] = []
     if status:
@@ -999,6 +1118,55 @@ def build_cursor_continuity_recall_reply_from_state(
     if blocked_reason or followthrough_needs_user_attention(_followthrough_section(meta)):
         tail = " Next step: address the open item above when you’re ready."
     return ("\n".join(lines) + tail).strip()
+
+
+def find_viable_recent_cursor_workstream_reply(
+    conn: Any,
+    task_id: str,
+    user_message: str,
+) -> Optional[str]:
+    """
+    When copy would say there is no active tracked work, prefer a recent same-chat recap
+    if source-rich delegated state exists on this task or a recent neighbor task.
+    """
+    um = str(user_message or "").strip()
+    cid = _telegram_chat_id_for_task(conn, task_id)
+
+    def _rich_enough(tid: str) -> bool:
+        st_score, st_units = _score_source_truth_cursor_recall_signals(conn, tid, um)
+        return bool(st_units >= 1 and st_score >= 120)
+
+    def _safe_recap(tid: str) -> Optional[str]:
+        recap = build_cursor_continuity_recall_reply_from_state(conn, tid, user_message=um)
+        if not recap or recap in (_GRACE_CURSOR_CONTINUITY, _GRACE_GENERIC_HISTORY):
+            return None
+        if _cursor_recall_composition_is_metadata_led(recap):
+            return None
+        return recap
+
+    if _rich_enough(task_id):
+        got = _safe_recap(task_id)
+        if got:
+            return got
+
+    if cid is None or str(cid).strip() == "":
+        return None
+
+    alt = find_recent_delegated_cursor_task_id(
+        conn,
+        task_id,
+        chat_id=cid,
+        user_message=um,
+        continuation_boost=True,
+    )
+    if alt and _rich_enough(alt):
+        got = _safe_recap(alt)
+        if got:
+            return (
+                "I don’t see an in-flight tracked lane on this message, but there is recent Cursor "
+                f"context on this chat:\n{got}"
+            )
+    return None
 
 
 def build_recent_outcome_history_reply_from_state(

@@ -140,11 +140,17 @@ class TestScenarioRuntime(unittest.TestCase):
         self.assertFalse(lane_allowed_for_scenario(c, "openclaw_hybrid"))
 
     def test_status_followup_matches_approval_queue_language(self) -> None:
-        text = "What still needs my approval right now?"
-        d = route_message(text, history=[], routing_hint="auto")
-        r, c = resolve_scenario(text, route_decision=d)
-        self.assertEqual(r.scenario_id, "statusFollowupContinue")
-        self.assertEqual(r.reason, "status_or_followup_language")
+        for text in (
+            "What still needs my approval right now?",
+            "What still needs approval right now?",
+            "What is waiting for approval?",
+            "Do I have anything pending approval?",
+            "What approvals are waiting?",
+        ):
+            d = route_message(text, history=[], routing_hint="auto")
+            r, c = resolve_scenario(text, route_decision=d)
+            self.assertEqual(r.scenario_id, "statusFollowupContinue", msg=text)
+            self.assertEqual(r.reason, "status_or_followup_language", msg=text)
 
     def test_status_followup_matches_working_on_language(self) -> None:
         for text in (
@@ -169,6 +175,8 @@ class TestScenarioRuntime(unittest.TestCase):
             "What did it do?",
             "What about that one?",
             "What happened in the Cursor thread?",
+            "What happened to the Cursor thread?",
+            "What happened with Cursor?",
         ):
             d = route_message(text, history=[], routing_hint="auto")
             r, _c = resolve_scenario(text, route_decision=d)

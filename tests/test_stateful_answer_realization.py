@@ -5,6 +5,7 @@ import unittest
 from unittest import mock
 
 from services.andrea_sync.stateful_answer_realization import (
+    _bundle_evidence_for_source,
     maybe_realize_stateful_reply,
 )
 from services.andrea_sync.turn_intelligence import TurnPlan
@@ -43,6 +44,21 @@ class StatefulAnswerRealizationTests(unittest.TestCase):
                 turn_plan=self._turn_plan(),
             )
         self.assertIsNone(out)
+
+    def test_bundle_goal_status_splits_structured_lines(self) -> None:
+        evidence = _bundle_evidence_for_source(
+            conn=object(),
+            task_id="t-evidence",
+            source="goal_status",
+            user_text="What still needs approval?",
+            deterministic_reply=(
+                "Pending approvals for tracked task `tsk_1`: **2**.\n"
+                "Top pending approval: `appr_1` - confirm the deploy window."
+            ),
+        )
+        self.assertGreaterEqual(len(evidence), 2)
+        self.assertTrue(any("pending approvals" in line.lower() for line in evidence))
+        self.assertTrue(any("deploy window" in line.lower() for line in evidence))
 
     @mock.patch("services.andrea_sync.stateful_answer_realization._openai_json_chat")
     def test_uses_grounded_realized_text(self, mock_chat: mock.MagicMock) -> None:

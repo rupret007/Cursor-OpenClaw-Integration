@@ -223,12 +223,19 @@ class BlueprintPlatformTests(unittest.TestCase):
         self.assertTrue(plan_status.allow_goal_continuity_repair)
         self.assertTrue(plan_status.inject_durable_memory)
 
-        plan_approval = build_turn_plan(
+        for text in (
             "What still needs my approval?",
-            scenario_id="statusFollowupContinue",
-            projection_has_continuity_state=True,
-        )
-        self.assertEqual(plan_approval.domain, "approval_state")
+            "What still needs approval?",
+            "What is waiting for approval?",
+            "Do I have anything pending approval?",
+            "What approvals are waiting?",
+        ):
+            plan_approval = build_turn_plan(
+                text,
+                scenario_id="statusFollowupContinue",
+                projection_has_continuity_state=True,
+            )
+            self.assertEqual(plan_approval.domain, "approval_state", msg=text)
 
         plan_exec = build_turn_plan(
             "Please inspect the repo and fix failing tests",
@@ -255,6 +262,24 @@ class BlueprintPlatformTests(unittest.TestCase):
         )
         self.assertEqual(plan_task_history.domain, "project_status")
         self.assertEqual(plan_task_history.continuity_focus, "recent_outcome_history")
+        for text in (
+            "What did Cursor say?",
+            "What did Cursor do?",
+            "What happened in the Cursor thread?",
+            "What happened to the Cursor thread?",
+            "What happened with Cursor?",
+        ):
+            plan_cursor_recall = build_turn_plan(
+                text,
+                scenario_id="statusFollowupContinue",
+                projection_has_continuity_state=True,
+            )
+            self.assertEqual(plan_cursor_recall.domain, "project_status", msg=text)
+            self.assertEqual(
+                plan_cursor_recall.continuity_focus,
+                "recent_outcome_history",
+                msg=text,
+            )
 
         plan_there = build_turn_plan(
             "What happened there?",

@@ -151,6 +151,15 @@ class StatefulRealizationInput:
     evidence_lines: tuple[str, ...]
 
 
+def _split_structured_text_lines(text: str) -> List[str]:
+    out: List[str] = []
+    for raw in re.split(r"[\r\n]+", str(text or "")):
+        clean = str(raw or "").strip().lstrip("-* ").strip()
+        if clean:
+            out.append(clean)
+    return out
+
+
 def _bundle_evidence_for_source(
     conn: Any, task_id: str, *, source: str, user_text: str, deterministic_reply: str
 ) -> List[str]:
@@ -164,12 +173,25 @@ def _bundle_evidence_for_source(
         if pack.outcome_blocked_reason:
             lines.append(f"Blocked reason: {pack.outcome_blocked_reason}")
         lines.extend(list(pack.support_execution_lines)[:1])
+    if source in {
+        "cursor_continuity_recall",
+        "cursor_heavy_lift_context",
+        "blocked_state_reply",
+        "goal_status",
+        "goal_continuity",
+    }:
+        lines.extend(_split_structured_text_lines(deterministic_reply))
+    if not lines:
+        lines.extend(_split_structured_text_lines(deterministic_reply))
     if not lines:
         lines.append(deterministic_reply)
     out: List[str] = []
+    seen: set[str] = set()
     for ln in lines:
         safe = sanitize_user_surface_text(ln, fallback="", limit=340)
-        if safe:
+        key = safe.lower()
+        if safe and key not in seen:
+            seen.add(key)
             out.append(safe)
     return out[:8]
 

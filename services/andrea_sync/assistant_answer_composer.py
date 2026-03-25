@@ -17,7 +17,7 @@ from .andrea_router import (
 )
 from .delegated_lifecycle import build_delegated_lifecycle_contract
 from .execution_runtime import summarize_execution_attempt_for_user
-from .goal_runtime import _APPROVAL_STATUS_PATTERNS, build_goal_continuity_reply
+from .goal_runtime import build_goal_continuity_reply
 from .projector import project_task_dict
 from .semantic_continuity import user_message_suggests_anaphoric_cursor_continue
 from .store import (
@@ -40,7 +40,12 @@ from .user_surface import (
     strip_conversational_soft_failure_boilerplate,
     surface_similarity_key,
 )
-from .turn_intelligence import TurnPlan
+from .turn_intelligence import (
+    TurnPlan,
+    is_approval_state_question,
+    is_cursor_recall_family_question,
+    is_explicit_cursor_recall_question,
+)
 
 _STATUS_SCENARIOS = frozenset({"statusFollowupContinue", "goalContinuationAcrossSessions"})
 
@@ -117,7 +122,7 @@ def _text_looks_like_approval_domain_surface(text: str) -> bool:
     t = str(text or "").strip()
     if not t:
         return False
-    if _APPROVAL_STATUS_PATTERNS.search(t):
+    if is_approval_state_question(t):
         return True
     low = t.lower()
     if "approval requests" in low and ("waiting" in low or "pending" in low):
@@ -496,29 +501,6 @@ def _projection_full(conn: Any, task_id: str) -> Dict[str, Any]:
     return project_task_dict(conn, task_id, channel)
 
 
-_CURSOR_THREAD_RECALL_RE = re.compile(
-    r"\b("
-    r"what\s+did\s+cursor\s+(?:say|do)|"
-    r"what\s+happened\s+in\s+(?:the\s+)?cursor\s+thread|"
-    r"what\s+happened\s+there|what\s+happened\s+with\s+that(?!\s+task\b)|"
-    r"what\s+about\s+that\s+one|what\s+was\s+the\s+result|"
-    r"what\s+did\s+openclaw\s+do|"
-    r"what\s+did\s+it\s+do"
-    r")\b",
-    re.I,
-)
-
-# Subset: explicit Cursor/OpenClaw delegated recap (domain-affinity gate applies).
-_STRICT_CURSOR_DOMAIN_RECALL_RE = re.compile(
-    r"\b("
-    r"what\s+did\s+cursor\s+(?:say|do)|"
-    r"what\s+happened\s+in\s+(?:the\s+)?cursor\s+thread|"
-    r"what\s+did\s+openclaw\s+do|"
-    r"what\s+did\s+it\s+do"
-    r")\b",
-    re.I,
-)
-
 _METADATA_SCAFFOLD_HINTS = (
     "task status",
     "result:",
@@ -604,12 +586,12 @@ def is_continuation_fallback_family_text(text: str) -> bool:
 
 def is_cursor_thread_recall_question(text: str) -> bool:
     """True for Cursor/OpenClaw thread recall phrasing (used for graceful copy)."""
-    return bool(_CURSOR_THREAD_RECALL_RE.search(str(text or "")))
+    return is_cursor_recall_family_question(text, include_anaphora=True)
 
 
 def is_strict_cursor_domain_recall_question(text: str) -> bool:
     """True only for explicit Cursor/OpenClaw thread asks (domain-affinity gate + strict ranking)."""
-    return bool(_STRICT_CURSOR_DOMAIN_RECALL_RE.search(str(text or "")))
+    return is_explicit_cursor_recall_question(text)
 
 
 def _normalize_echo_key(text: str) -> str:
@@ -2394,7 +2376,7 @@ def gather_repair_candidates(
                     )
                 )
         elif domain == "approval_state" and not goal:
-            if _APPROVAL_STATUS_PATTERNS.search(str(classify_text or "")):
+            if is_approval_state_question(classify_text):
                 out.append(
                     AnswerCandidate(
                         source="goal_continuity",

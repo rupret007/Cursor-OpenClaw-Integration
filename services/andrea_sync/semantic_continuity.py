@@ -7,19 +7,7 @@ from typing import Any, Optional
 
 from .projector import project_task_dict
 from .store import get_task_channel, list_telegram_task_ids_for_chat
-from .turn_intelligence import ContinuityFocus
-
-_ANAPHORIC_OUTCOME_RE = re.compile(
-    r"\b("
-    r"what\s+happened\s+there|"
-    r"what\s+happened\s+with\s+that(?!\s+task\b)|"
-    r"what\s+about\s+that\s+one|"
-    r"what\s+did\s+it\s+do|"
-    r"recap\s+that\b|"
-    r"what\s+was\s+the\s+result"
-    r")\b",
-    re.I,
-)
+from .turn_intelligence import ContinuityFocus, is_anaphoric_outcome_recall_question
 
 _ANAPHORIC_CONTINUE_RE = re.compile(
     r"^\s*("
@@ -35,7 +23,7 @@ _ANAPHORIC_CONTINUE_RE = re.compile(
 
 def user_message_suggests_anaphoric_outcome_recall(text: str) -> bool:
     """Short follow-ups that point at the last delegated outcome without naming Cursor."""
-    return bool(_ANAPHORIC_OUTCOME_RE.search(str(text or "")))
+    return is_anaphoric_outcome_recall_question(text)
 
 
 def user_message_suggests_anaphoric_cursor_continue(text: str) -> bool:

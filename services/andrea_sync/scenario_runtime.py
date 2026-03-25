@@ -22,6 +22,7 @@ from .scenario_schema import (
     scenario_blob_for_job_payload,
 )
 from .andrea_router import AndreaRouteDecision
+from .turn_intelligence import is_approval_state_question, is_recent_outcome_history_question
 
 _UNSAFE = re.compile(
     r"\b("
@@ -30,19 +31,13 @@ _UNSAFE = re.compile(
     r")\b",
     re.I,
 )
-_STATUS = re.compile(
+_STATUS_CORE_RE = re.compile(
     r"\b("
-    r"what\s+happened|what\s+happened\s+there|where\s+are\s+we|status(\s+of)?|what'?s\s+the\s+status|"
+    r"what\s+happened|where\s+are\s+we|status(\s+of)?|what'?s\s+the\s+status|"
     r"continue(\s+that|\s+this)?|follow[\s-]*up|any\s+update|progress(\s+so\s+far)?|"
     r"what\s+are\s+we\s+working\s+on(?:\s+right\s+now|\s+with\s+andrea)?|"
     r"working\s+on\s+right\s+now|working\s+on\s+with\s+andrea|"
-    r"what'?s\s+blocked|blocked\s+right\s+now|what\s+is\s+blocking|main\s+blocker|"
-    r"what\s+happened\s+with\s+(?:that\s+)?task|what\s+did\s+cursor\s+say|what\s+did\s+cursor\s+do|"
-    r"what\s+did\s+it\s+do|what\s+about\s+that\s+one|"
-    r"what\s+happened\s+in\s+(?:the\s+)?cursor\s+thread|"
-    r"needs?\s+(my|our)\s+approval|awaiting\s+(my|our)\s+approval|"
-    r"pending\s+(my|our)\s+approval|waiting\s+on\s+(my|our)\s+approval|"
-    r"what\s+still\s+needs\s+(my|our)\s+approval"
+    r"what'?s\s+blocked|blocked\s+right\s+now|what\s+is\s+blocking|main\s+blocker"
     r")\b",
     re.I,
 )
@@ -108,6 +103,15 @@ _PATH = re.compile(r"[/~][\w.\-~/]+|`[^`]+`|\b\w+\.(py|ts|tsx|js|jsx|md|sh|json|
 
 def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", str(text or "").strip()).lower()
+
+
+def _is_status_followup_question(text: str) -> bool:
+    clean = _norm(text)
+    if not clean:
+        return False
+    return bool(_STATUS_CORE_RE.search(clean)) or is_recent_outcome_history_question(
+        clean
+    ) or is_approval_state_question(clean)
 
 
 def resolve_scenario(
@@ -180,7 +184,7 @@ def resolve_scenario(
             c,
         )
 
-    if _STATUS.search(clean):
+    if _is_status_followup_question(clean):
         c = SCENARIO_CATALOG["statusFollowupContinue"]
         return (
             ScenarioResolution(

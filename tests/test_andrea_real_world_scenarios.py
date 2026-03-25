@@ -36,9 +36,13 @@ class TestRealWorldScenarioPack(unittest.TestCase):
     def test_pack_status_followup_approval_queue_phrasing(self) -> None:
         for text in (
             "What still needs my approval right now?",
+            "What still needs approval right now?",
             "What is awaiting my approval?",
+            "What is waiting for approval?",
             "What's pending my approval?",
+            "Do I have anything pending approval?",
             "What is waiting on my approval?",
+            "What approvals are waiting?",
         ):
             with self.subTest(text=text):
                 d = route_message(text, history=[], routing_hint="auto")

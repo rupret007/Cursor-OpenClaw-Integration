@@ -639,6 +639,8 @@ class ConversationCaseSpec:
     required_reply_markers: tuple[str, ...] = ()
     forbidden_reply_markers: tuple[str, ...] = ()
     required_assistant_reasons: tuple[str, ...] = ()
+    required_turn_domains: tuple[str, ...] = ()
+    required_continuity_focuses: tuple[str, ...] = ()
     # terminal_reply: wait for completed/failed (meaningful capture). routing_smoke: allow queued/running.
     wait_policy: str = "terminal_reply"
 
@@ -1451,6 +1453,8 @@ def run_conversation_case(
         final_reply = str(captures[-1].get("raw_reply_text") or "")
         final_reply_l = final_reply.lower()
         final_reason = str(captures[-1].get("assistant_reason") or "")
+        final_domain = str(captures[-1].get("turn_plan_domain") or "")
+        final_focus = str(captures[-1].get("turn_plan_continuity_focus") or "")
         for marker in case.required_reply_markers:
             m = str(marker or "").strip()
             if not m:
@@ -1484,6 +1488,24 @@ def run_conversation_case(
                     "issue_code": "conversation_assistant_reason_mismatch",
                     "severity": "high",
                     "detail": f"assistant_reason={final_reason!r} not in {tuple(case.required_assistant_reasons)!r}",
+                }
+            )
+        if case.required_turn_domains and final_domain not in set(case.required_turn_domains):
+            all_findings.append(
+                {
+                    "family": "wrong_domain_contamination",
+                    "issue_code": "conversation_turn_domain_mismatch",
+                    "severity": "high",
+                    "detail": f"turn_plan_domain={final_domain!r} not in {tuple(case.required_turn_domains)!r}",
+                }
+            )
+        if case.required_continuity_focuses and final_focus not in set(case.required_continuity_focuses):
+            all_findings.append(
+                {
+                    "family": "wrong_domain_contamination",
+                    "issue_code": "conversation_continuity_focus_mismatch",
+                    "severity": "high",
+                    "detail": f"turn_plan_continuity_focus={final_focus!r} not in {tuple(case.required_continuity_focuses)!r}",
                 }
             )
 
@@ -1702,6 +1724,7 @@ CONVERSATION_CORE_CASES: tuple[ConversationCaseSpec, ...] = (
         from_id=99010,
         first_update_id=18010,
         first_message_id=28010,
+        required_turn_domains=("approval_state",),
     ),
     ConversationCaseSpec(
         case_id="blocked_now",
@@ -1733,6 +1756,8 @@ CONVERSATION_CORE_CASES: tuple[ConversationCaseSpec, ...] = (
         first_update_id=18013,
         first_message_id=28013,
         expect_cursor_substance=True,
+        required_turn_domains=("project_status",),
+        required_continuity_focuses=("recent_outcome_history",),
     ),
     ConversationCaseSpec(
         case_id="cursor_did",
@@ -1744,6 +1769,8 @@ CONVERSATION_CORE_CASES: tuple[ConversationCaseSpec, ...] = (
         first_update_id=18014,
         first_message_id=28014,
         expect_cursor_substance=True,
+        required_turn_domains=("project_status",),
+        required_continuity_focuses=("recent_outcome_history",),
     ),
     ConversationCaseSpec(
         case_id="cursor_thread",
@@ -1755,6 +1782,78 @@ CONVERSATION_CORE_CASES: tuple[ConversationCaseSpec, ...] = (
         first_update_id=18015,
         first_message_id=28015,
         expect_cursor_substance=True,
+        required_turn_domains=("project_status",),
+        required_continuity_focuses=("recent_outcome_history",),
+    ),
+    ConversationCaseSpec(
+        case_id="cursor_thread_to",
+        title="Cursor thread to",
+        behavior_family="cursor_recall",
+        turns=("What happened to the Cursor thread?",),
+        chat_id=88022,
+        from_id=99022,
+        first_update_id=18022,
+        first_message_id=28022,
+        expect_cursor_substance=True,
+        required_turn_domains=("project_status",),
+        required_continuity_focuses=("recent_outcome_history",),
+    ),
+    ConversationCaseSpec(
+        case_id="cursor_with",
+        title="Cursor with",
+        behavior_family="cursor_recall",
+        turns=("What happened with Cursor?",),
+        chat_id=88023,
+        from_id=99023,
+        first_update_id=18023,
+        first_message_id=28023,
+        expect_cursor_substance=True,
+        required_turn_domains=("project_status",),
+        required_continuity_focuses=("recent_outcome_history",),
+    ),
+    ConversationCaseSpec(
+        case_id="approval_queue_bare",
+        title="Approval state bare",
+        behavior_family="approval_state",
+        turns=("What still needs approval?",),
+        chat_id=88024,
+        from_id=99024,
+        first_update_id=18024,
+        first_message_id=28024,
+        required_turn_domains=("approval_state",),
+    ),
+    ConversationCaseSpec(
+        case_id="approval_waiting",
+        title="Approval waiting",
+        behavior_family="approval_state",
+        turns=("What is waiting for approval?",),
+        chat_id=88025,
+        from_id=99025,
+        first_update_id=18025,
+        first_message_id=28025,
+        required_turn_domains=("approval_state",),
+    ),
+    ConversationCaseSpec(
+        case_id="approval_pending",
+        title="Approval pending",
+        behavior_family="approval_state",
+        turns=("Do I have anything pending approval?",),
+        chat_id=88026,
+        from_id=99026,
+        first_update_id=18026,
+        first_message_id=28026,
+        required_turn_domains=("approval_state",),
+    ),
+    ConversationCaseSpec(
+        case_id="approval_plural_waiting",
+        title="Approval plural waiting",
+        behavior_family="approval_state",
+        turns=("What approvals are waiting?",),
+        chat_id=88027,
+        from_id=99027,
+        first_update_id=18027,
+        first_message_id=28027,
+        required_turn_domains=("approval_state",),
     ),
     ConversationCaseSpec(
         case_id="continue_cursor",
@@ -1945,6 +2044,8 @@ CONVERSATION_CORE_CASES: tuple[ConversationCaseSpec, ...] = (
             "goal_runtime_status",
         ),
         expect_cursor_substance=False,
+        required_turn_domains=("project_status",),
+        required_continuity_focuses=("recent_outcome_history",),
         wait_policy="routing_smoke",
     ),
     ConversationCaseSpec(
@@ -1964,6 +2065,8 @@ CONVERSATION_CORE_CASES: tuple[ConversationCaseSpec, ...] = (
             "goal_runtime_status",
         ),
         expect_cursor_substance=False,
+        required_turn_domains=("project_status",),
+        required_continuity_focuses=("recent_outcome_history",),
         wait_policy="routing_smoke",
     ),
     ConversationCaseSpec(

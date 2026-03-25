@@ -1891,48 +1891,57 @@ class TestAndreaSync(unittest.TestCase):
         os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
         from services.andrea_sync.server import SyncServer  # noqa: E402
 
-        r0 = handle_command(
-            self.conn,
-            {
-                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
-                "channel": "telegram",
-                "external_id": "rank-apr-1",
-                "payload": {
-                    "text": "hello",
-                    "routing_text": "hello",
-                    "chat_id": 66004,
-                    "message_id": 40,
-                    "from_user": 503,
+        for idx, text in enumerate(
+            (
+                "What still needs my approval?",
+                "What still needs approval?",
+                "What is waiting for approval?",
+                "Do I have anything pending approval?",
+            ),
+            start=41,
+        ):
+            r0 = handle_command(
+                self.conn,
+                {
+                    "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                    "channel": "telegram",
+                    "external_id": f"rank-apr-seed-{idx}",
+                    "payload": {
+                        "text": "hello",
+                        "routing_text": "hello",
+                        "chat_id": 66000 + idx,
+                        "message_id": 40,
+                        "from_user": 503,
+                    },
                 },
-            },
-        )
-        tid = r0["task_id"]
-        link_task_principal(self.conn, tid, "pri_rank_apr", channel="telegram")
-        gid = create_goal(self.conn, "pri_rank_apr", "Side project", channel="telegram")
-        link_task_to_goal(self.conn, tid, gid)
-        handle_command(
-            self.conn,
-            {
-                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
-                "channel": "telegram",
-                "task_id": tid,
-                "external_id": "rank-apr-2",
-                "payload": {
-                    "text": "What still needs my approval?",
-                    "routing_text": "What still needs my approval?",
-                    "chat_id": 66004,
-                    "message_id": 41,
-                    "from_user": 503,
+            )
+            tid = r0["task_id"]
+            link_task_principal(self.conn, tid, "pri_rank_apr", channel="telegram")
+            gid = create_goal(self.conn, "pri_rank_apr", "Side project", channel="telegram")
+            link_task_to_goal(self.conn, tid, gid)
+            handle_command(
+                self.conn,
+                {
+                    "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                    "channel": "telegram",
+                    "task_id": tid,
+                    "external_id": f"rank-apr-{idx}",
+                    "payload": {
+                        "text": text,
+                        "routing_text": text,
+                        "chat_id": 66000 + idx,
+                        "message_id": idx,
+                        "from_user": 503,
+                    },
                 },
-            },
-        )
-        server = SyncServer()
-        decision, _applied = server._route_task_with_decision(
-            tid, history=[], source="test_rank_apr"
-        )
-        self.assertEqual(decision.mode, "direct")
-        low = decision.reply_text.lower()
-        self.assertIn("approval requests waiting", low)
+            )
+            server = SyncServer()
+            decision, _applied = server._route_task_with_decision(
+                tid, history=[], source="test_rank_apr"
+            )
+            self.assertEqual(decision.mode, "direct", msg=text)
+            low = decision.reply_text.lower()
+            self.assertIn("approval requests waiting", low, msg=text)
 
     def test_ranking_agenda_question_uses_calendar_visibility_not_generic(self) -> None:
         os.environ["OPENAI_API_ENABLED"] = "0"
@@ -2816,26 +2825,36 @@ class TestAndreaSync(unittest.TestCase):
         from services.andrea_sync.server import SyncServer  # noqa: E402
 
         server = SyncServer()
-        submit = handle_command(
-            server.conn,
-            {
-                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
-                "channel": "telegram",
-                "external_id": "tg-approval-none",
-                "payload": {
-                    "text": "What still needs my approval?",
-                    "chat_id": 92005,
-                    "message_id": 1,
+        for idx, text in enumerate(
+            (
+                "What still needs my approval?",
+                "What still needs approval?",
+                "What is waiting for approval?",
+                "Do I have anything pending approval?",
+                "What approvals are waiting?",
+            ),
+            start=1,
+        ):
+            submit = handle_command(
+                server.conn,
+                {
+                    "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                    "channel": "telegram",
+                    "external_id": f"tg-approval-none-{idx}",
+                    "payload": {
+                        "text": text,
+                        "chat_id": 92005 + idx,
+                        "message_id": 1,
+                    },
                 },
-            },
-        )
-        task_id = str(submit["task_id"])
-        server._handle_task_followups(task_id)
-        proj = project_task_dict(server.conn, task_id, "telegram")
-        assistant = (proj.get("meta") or {}).get("assistant") or {}
-        text = str(assistant.get("last_reply") or "").lower()
-        self.assertIn("approval requests waiting on you right now", text)
-        self.assertNotIn("say a bit more about what you want", text)
+            )
+            task_id = str(submit["task_id"])
+            server._handle_task_followups(task_id)
+            proj = project_task_dict(server.conn, task_id, "telegram")
+            assistant = (proj.get("meta") or {}).get("assistant") or {}
+            reply = str(assistant.get("last_reply") or "").lower()
+            self.assertIn("approval requests waiting on you right now", reply, msg=text)
+            self.assertNotIn("say a bit more about what you want", reply, msg=text)
 
     def test_server_followups_common_intents_do_not_emit_generic_fallback(self) -> None:
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"

@@ -42,19 +42,24 @@ class SemanticAnswerEngineTests(unittest.TestCase):
             "Goal `g1` is still running with a long status narrative that used to outrank recap."
         )
 
-        result = choose_semantic_state_reply(
-            conn=object(),
-            task_id="t1",
-            user_text="What did Cursor say?",
-            turn_plan=self._turn_plan(focus="recent_outcome_history"),
-            scenario_id="statusFollowupContinue",
-        )
+        for text in (
+            "What did Cursor say?",
+            "What happened to the Cursor thread?",
+            "What happened with Cursor?",
+        ):
+            result = choose_semantic_state_reply(
+                conn=object(),
+                task_id="t1",
+                user_text=text,
+                turn_plan=self._turn_plan(focus="recent_outcome_history"),
+                scenario_id="statusFollowupContinue",
+            )
 
-        self.assertIsNotNone(result)
-        assert result is not None
-        self.assertEqual(result.source, "cursor_continuity_recall")
-        self.assertIn("Cursor recap:", result.reply_text)
-        self.assertGreaterEqual(result.score, 70)
+            self.assertIsNotNone(result, msg=text)
+            assert result is not None
+            self.assertEqual(result.source, "cursor_continuity_recall", msg=text)
+            self.assertIn("Cursor recap:", result.reply_text)
+            self.assertGreaterEqual(result.score, 70)
 
     @mock.patch("services.andrea_sync.semantic_answer_engine.build_goal_continuity_reply")
     @mock.patch("services.andrea_sync.semantic_answer_engine.try_goal_status_nl_reply")

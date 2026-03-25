@@ -22,27 +22,27 @@ from .store import (
     list_pending_goal_approvals_for_task,
     list_tasks_for_goal,
 )
+from .turn_intelligence import is_approval_state_question, is_recent_outcome_history_question
 
-_GOAL_STATUS_PATTERNS = re.compile(
+_GOAL_STATUS_CORE_RE = re.compile(
     r"(?i)\b("
     r"status|what'?s\s+the\s+status|where\s+are\s+we|what\s+happened|"
-    r"what\s+happened\s+with\s+(?:that\s+)?task|what\s+happened\s+earlier|"
+    r"what\s+happened\s+earlier|"
     r"what'?s\s+blocked|blocked\s+right\s+now|"
     r"continue|follow\s*up|any\s+update|progress|"
     r"what\s+are\s+we\s+working\s+on(?:\s+right\s+now|\s+with\s+andrea)?|"
-    r"working\s+on\s+right\s+now|working\s+on\s+with\s+andrea|"
-    r"needs?\s+(my|our)\s+approval|awaiting\s+(my|our)\s+approval|"
-    r"pending\s+(my|our)\s+approval|waiting\s+on\s+(my|our)\s+approval|"
-    r"what\s+still\s+needs\s+(my|our)\s+approval"
+    r"working\s+on\s+right\s+now|working\s+on\s+with\s+andrea"
     r")\b"
 )
-_APPROVAL_STATUS_PATTERNS = re.compile(
-    r"(?i)\b("
-    r"needs?\s+(my|our)\s+approval|awaiting\s+(my|our)\s+approval|"
-    r"pending\s+(my|our)\s+approval|waiting\s+on\s+(my|our)\s+approval|"
-    r"what\s+still\s+needs\s+(my|our)\s+approval"
-    r")\b"
-)
+
+
+def _is_goal_status_question(text: str) -> bool:
+    raw = str(text or "")
+    if not raw:
+        return False
+    return bool(_GOAL_STATUS_CORE_RE.search(raw)) or is_recent_outcome_history_question(
+        raw
+    ) or is_approval_state_question(raw)
 
 
 def try_goal_status_nl_reply(
@@ -54,7 +54,7 @@ def try_goal_status_nl_reply(
     If the user is asking for status/continue-style help and there is an active goal
     for this principal, answer from goal + delegated lifecycle (not chat guesswork).
     """
-    if not user_text or not _GOAL_STATUS_PATTERNS.search(user_text):
+    if not user_text or not _is_goal_status_question(user_text):
         return None
     return build_goal_continuity_reply(conn, task_id, user_text=user_text)
 
@@ -92,7 +92,7 @@ def build_goal_continuity_reply(
             + (f": {summary}" if summary else "")
             + " — no execution tasks linked yet."
         )
-    approval_ask = bool(_APPROVAL_STATUS_PATTERNS.search(str(user_text or "")))
+    approval_ask = is_approval_state_question(user_text)
     if approval_ask:
         pending = list_pending_goal_approvals_for_task(conn, exec_task)
         if pending:

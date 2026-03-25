@@ -26,9 +26,19 @@ TurnDomain = Literal[
 ]
 
 
-_APPROVAL_RE = re.compile(
-    r"\b(needs?\s+(my|our)\s+approval|awaiting\s+(my|our)\s+approval|"
-    r"pending\s+(my|our)\s+approval|waiting\s+on\s+(my|our)\s+approval)\b",
+_APPROVAL_OWNER_FRAGMENT = r"(?:\s+(?:my|our))?"
+_APPROVAL_FAMILY_RE = re.compile(
+    r"\b("
+    r"needs?" + _APPROVAL_OWNER_FRAGMENT + r"\s+approval|"
+    r"awaiting" + _APPROVAL_OWNER_FRAGMENT + r"\s+approval|"
+    r"pending" + _APPROVAL_OWNER_FRAGMENT + r"\s+approval|"
+    r"waiting\s+(?:for|on)" + _APPROVAL_OWNER_FRAGMENT + r"\s+approval|"
+    r"what\s+still\s+needs" + _APPROVAL_OWNER_FRAGMENT + r"\s+approval|"
+    r"what\s+is\s+(?:waiting|awaiting)(?:\s+(?:for|on))?" + _APPROVAL_OWNER_FRAGMENT + r"\s+approval|"
+    r"what(?:'s|s)\s+(?:waiting|awaiting)(?:\s+(?:for|on))?" + _APPROVAL_OWNER_FRAGMENT + r"\s+approval|"
+    r"do\s+i\s+have\s+anything\s+pending" + _APPROVAL_OWNER_FRAGMENT + r"\s+approval|"
+    r"what\s+approvals?\s+are\s+waiting"
+    r")\b",
     re.I,
 )
 # Agenda/day-plan language only — bare "today" alone must not imply personal_agenda
@@ -76,18 +86,29 @@ _BLOCKED_STATE_RE = re.compile(
     re.I,
 )
 # Recent trajectory / outcome — prefer receipts and task history over “no active work”.
-_RECENT_OUTCOME_HISTORY_RE = re.compile(
+_GENERIC_RECENT_OUTCOME_HISTORY_RE = re.compile(
     r"\b("
     r"what\s+happened\s+with\s+(?:that\s+)?task|what\s+happened\s+to\s+that\s+task|"
     r"what\s+happened\s+with\s+that\s+work|"
-    r"what\s+happened\s+there|what\s+happened\s+with\s+that\b|"
-    r"what\s+about\s+that\s+one|what\s+was\s+the\s+result|"
     r"last\s+task|that\s+task\s+earlier|task\s+earlier|"
-    r"what\s+was\s+the\s+outcome|what\s+did\s+cursor\s+say|what\s+did\s+cursor\s+do|"
+    r"what\s+was\s+the\s+outcome|"
+    r"recap\s+(?:that\s+)?task|outcome\s+of\s+that"
+    r")\b",
+    re.I,
+)
+_CURSOR_RECALL_EXPLICIT_RE = re.compile(
+    r"\b("
+    r"what\s+did\s+(?:cursor|openclaw)\s+(?:say|do)|"
+    r"what\s+happened\s+(?:in|to|with)\s+(?:the\s+)?(?:cursor|openclaw)(?:\s+thread)?"
+    r")\b",
+    re.I,
+)
+_ANAPHORIC_OUTCOME_RE = re.compile(
+    r"\b("
+    r"what\s+happened\s+there|what\s+happened\s+with\s+that(?!\s+task\b)|"
+    r"what\s+about\s+that\s+one|what\s+was\s+the\s+result|"
     r"what\s+did\s+it\s+do|"
-    r"what\s+happened\s+in\s+(?:the\s+)?cursor\s+thread|"
-    r"what\s+did\s+openclaw\s+do|"
-    r"recap\s+(?:that\s+)?task|outcome\s+of\s+that|recap\s+that"
+    r"recap\s+that"
     r")\b",
     re.I,
 )
@@ -113,12 +134,43 @@ _CURSOR_FOLLOWUP_HEAVY_RE = re.compile(
 )
 
 
+def is_approval_state_question(text: str) -> bool:
+    """True for approval inventory / pending-approval questions across close paraphrases."""
+    return bool(_APPROVAL_FAMILY_RE.search(str(text or "").strip()))
+
+
+def is_explicit_cursor_recall_question(text: str) -> bool:
+    """True for explicit Cursor/OpenClaw recap asks that should share strict recall rails."""
+    return bool(_CURSOR_RECALL_EXPLICIT_RE.search(str(text or "").strip()))
+
+
+def is_anaphoric_outcome_recall_question(text: str) -> bool:
+    """True for short follow-ups that point at a recent outcome via continuity context."""
+    return bool(_ANAPHORIC_OUTCOME_RE.search(str(text or "").strip()))
+
+
+def is_cursor_recall_family_question(text: str, *, include_anaphora: bool = True) -> bool:
+    """Shared Cursor recall family detector used by routing, ranking, and recall rails."""
+    if is_explicit_cursor_recall_question(text):
+        return True
+    return include_anaphora and is_anaphoric_outcome_recall_question(text)
+
+
+def is_recent_outcome_history_question(text: str) -> bool:
+    """Outcome/history family: generic task history plus Cursor recall variants."""
+    clean = str(text or "").strip()
+    return bool(_GENERIC_RECENT_OUTCOME_HISTORY_RE.search(clean)) or is_cursor_recall_family_question(
+        clean,
+        include_anaphora=True,
+    )
+
+
 def classify_continuity_focus(text: str) -> ContinuityFocus:
     """Sub-intent for status/continuity turns (priority: blocked > history > cursor)."""
     clean = str(text or "").strip()
     if _BLOCKED_STATE_RE.search(clean):
         return "blocked_state"
-    if _RECENT_OUTCOME_HISTORY_RE.search(clean):
+    if is_recent_outcome_history_question(clean):
         return "recent_outcome_history"
     if _TOOLING_IDENTITY_Q_RE.match(clean):
         return "none"
@@ -177,7 +229,7 @@ def build_turn_plan(
             domain = "external_information"
             context_boundary = "external_world_only"
             prefer_state_reply = False
-        elif _APPROVAL_RE.search(clean):
+        elif is_approval_state_question(clean):
             domain = "approval_state"
             context_boundary = "approval_and_plan_state"
         elif _ATTENTION_TODAY_RE.search(clean):
@@ -212,7 +264,7 @@ def build_turn_plan(
         if _STATUS_EXTERNAL_NEWS_RE.search(clean):
             domain = "external_information"
             context_boundary = "external_world_only"
-        elif _APPROVAL_RE.search(clean):
+        elif is_approval_state_question(clean):
             domain = "approval_state"
             context_boundary = "approval_and_plan_state"
             prefer_state_reply = (

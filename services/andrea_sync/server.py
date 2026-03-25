@@ -81,7 +81,10 @@ from .scenario_runtime import (
 )
 from .scenario_schema import UNSUPPORTED, ScenarioResolution
 from .schema import EventType
-from .semantic_continuity import resolve_semantic_continuity_patch
+from .semantic_continuity import (
+    resolve_semantic_continuity_patch,
+    same_chat_max_delegation_score,
+)
 from .telegram_continuation import attach_continuation_if_applicable
 from .turn_intelligence import TurnPlan, build_turn_plan
 from .store import (
@@ -219,7 +222,9 @@ RECENT_TEXT_MESSAGES_RE = re.compile(
     r"\b(?:text(?:s| messages?)?|imessages?|messages?|threads?)\b.*\b(?:from|since)\s+"
     r"(?:today|this\s+morning|this\s+afternoon|tonight)\b|"
     r"\b(?:from|since)\s+(?:today|this\s+morning|this\s+afternoon|tonight)\b.*"
-    r"\b(?:text(?:s| messages?)?|imessages?|messages?)\b"
+    r"\b(?:text(?:s| messages?)?|imessages?|messages?)\b|"
+    r"\bpull\b.*\b(?:text(?:s| messages?)?|imessages?|messages?)\b|"
+    r"\b(?:text(?:s| messages?)?|imessages?|messages?)\b.*\bbluebubbles\b"
     r")",
     re.I,
 )
@@ -246,6 +251,7 @@ RECENT_TEXT_LANE_CARRY_REASONS = frozenset(
         "recent_text_messages_ready",
         "recent_text_messages_failed",
         "recent_text_messages_failed_contaminated",
+        "messaging_capability_answer",
     }
 )
 RECENT_TEXT_SUMMARIZE_CARRY_RE = re.compile(
@@ -1391,10 +1397,14 @@ class SyncServer:
                 goal_id=gid_for_scenario,
                 route_decision=None,
             )
+            del_score = self.with_lock(
+                lambda c: same_chat_max_delegation_score(c, task_id)
+            )
             pre_turn_plan = build_turn_plan(
                 classify_text,
                 scenario_id=pre_resolution.scenario_id,
                 projection_has_continuity_state=self._projection_has_continuity_state(task_id),
+                same_chat_delegation_score=del_score,
             )
             cont_patch = self.with_lock(
                 lambda c: resolve_semantic_continuity_patch(
@@ -2535,6 +2545,8 @@ class SyncServer:
         direct = self._last_assistant_reply_reason(task_id)
         if direct in RECENT_TEXT_ASSISTANT_REASONS:
             return direct
+        if direct == "messaging_capability_answer":
+            return direct
         snapshot = self._task_snapshot(task_id)
         if not snapshot or str(snapshot.get("channel") or "") != "telegram":
             return ""
@@ -2558,6 +2570,8 @@ class SyncServer:
                     continue
                 prior = str(am.get("reason") or "").strip()
                 if prior in RECENT_TEXT_ASSISTANT_REASONS:
+                    return prior
+                if prior == "messaging_capability_answer":
                     return prior
             return ""
 

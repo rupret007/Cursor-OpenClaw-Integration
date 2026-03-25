@@ -163,6 +163,22 @@ class TestScenarioRuntime(unittest.TestCase):
         self.assertEqual(r.scenario_id, "researchSummary")
         self.assertEqual(r.reason, "research_or_web_language")
 
+    def test_status_followup_matches_cursor_thread_and_anaphoric_phrases(self) -> None:
+        for text in (
+            "What did Cursor do?",
+            "What did it do?",
+            "What about that one?",
+            "What happened in the Cursor thread?",
+        ):
+            d = route_message(text, history=[], routing_hint="auto")
+            r, _c = resolve_scenario(text, route_decision=d)
+            self.assertEqual(
+                r.scenario_id,
+                "statusFollowupContinue",
+                msg=f"expected status for {text!r} got {r.scenario_id}",
+            )
+            self.assertEqual(r.reason, "status_or_followup_language")
+
 
 class TestScenarioPlanPersistence(unittest.TestCase):
     def setUp(self) -> None:

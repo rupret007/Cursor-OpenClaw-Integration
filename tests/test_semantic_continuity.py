@@ -33,6 +33,7 @@ class TestSemanticContinuity(unittest.TestCase):
 
     def test_anaphoric_helpers(self) -> None:
         self.assertTrue(user_message_suggests_anaphoric_outcome_recall("What happened there?"))
+        self.assertTrue(user_message_suggests_anaphoric_outcome_recall("What did it do?"))
         self.assertTrue(user_message_suggests_anaphoric_cursor_continue("continue that"))
         self.assertFalse(user_message_suggests_anaphoric_cursor_continue("continue that story"))
 
@@ -115,6 +116,97 @@ class TestSemanticContinuity(unittest.TestCase):
         )
         self.assertIsNone(patch.continuity_focus_override)
         self.assertFalse(patch.force_prefer_state_reply)
+
+    def test_patch_upgrades_continue_that_for_mixed_resource_goal(self) -> None:
+        first = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "semcont-mrg-a",
+                "payload": {
+                    "text": "work",
+                    "routing_text": "work",
+                    "chat_id": 99004,
+                    "message_id": 1,
+                },
+            },
+        )
+        tid_a = first["task_id"]
+        append_event(
+            self.conn,
+            tid_a,
+            EventType.JOB_COMPLETED,
+            {
+                "summary": "done",
+                "backend": "openclaw",
+                "runner": "openclaw",
+                "user_summary": "Prior Cursor pass shipped the API change.",
+            },
+        )
+        second = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "semcont-mrg-b",
+                "payload": {
+                    "text": "continue that",
+                    "routing_text": "continue that",
+                    "chat_id": 99004,
+                    "message_id": 2,
+                },
+            },
+        )
+        tid_b = second["task_id"]
+        patch = resolve_semantic_continuity_patch(
+            self.conn,
+            tid_b,
+            "continue that",
+            scenario_id="mixedResourceGoal",
+            base_focus="none",
+            projection_has_continuity_state=False,
+        )
+        self.assertEqual(patch.continuity_focus_override, "cursor_followup_heavy_lift")
+        self.assertTrue(patch.force_prefer_state_reply)
+
+    def test_patch_force_prefer_when_history_focus_and_high_delegation(self) -> None:
+        r0 = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "semcont-pref",
+                "payload": {
+                    "text": "status ask",
+                    "routing_text": "status ask",
+                    "chat_id": 99005,
+                    "message_id": 1,
+                },
+            },
+        )
+        tid = r0["task_id"]
+        append_event(
+            self.conn,
+            tid,
+            EventType.JOB_COMPLETED,
+            {
+                "summary": "done",
+                "backend": "openclaw",
+                "runner": "openclaw",
+                "user_summary": "Rich enough summary for delegation scoring heuristics here.",
+            },
+        )
+        patch = resolve_semantic_continuity_patch(
+            self.conn,
+            tid,
+            "What did Cursor say?",
+            scenario_id="statusFollowupContinue",
+            base_focus="recent_outcome_history",
+            projection_has_continuity_state=False,
+        )
+        self.assertIsNone(patch.continuity_focus_override)
+        self.assertTrue(patch.force_prefer_state_reply)
 
     def test_patch_skips_non_status_scenario(self) -> None:
         r0 = handle_command(

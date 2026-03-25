@@ -84,6 +84,7 @@ _RECENT_OUTCOME_HISTORY_RE = re.compile(
     r"what\s+about\s+that\s+one|what\s+was\s+the\s+result|"
     r"last\s+task|that\s+task\s+earlier|task\s+earlier|"
     r"what\s+was\s+the\s+outcome|what\s+did\s+cursor\s+say|what\s+did\s+cursor\s+do|"
+    r"what\s+did\s+it\s+do|"
     r"what\s+happened\s+in\s+(?:the\s+)?cursor\s+thread|"
     r"what\s+did\s+openclaw\s+do|"
     r"recap\s+(?:that\s+)?task|outcome\s+of\s+that|recap\s+that"
@@ -144,6 +145,7 @@ def build_turn_plan(
     *,
     scenario_id: str,
     projection_has_continuity_state: bool,
+    same_chat_delegation_score: int = 0,
 ) -> TurnPlan:
     clean = str(text or "").strip()
     sid = str(scenario_id or "").strip()
@@ -189,6 +191,35 @@ def build_turn_plan(
     elif sid in {"noteOrReminderCapture", "recentMessagesOrInboxLookup"}:
         domain = "personal_agenda"
         context_boundary = "personal_runtime_state"
+    elif sid == "mixedResourceGoal":
+        if _STATUS_EXTERNAL_NEWS_RE.search(clean):
+            domain = "external_information"
+            context_boundary = "external_world_only"
+        elif _APPROVAL_RE.search(clean):
+            domain = "approval_state"
+            context_boundary = "approval_and_plan_state"
+            prefer_state_reply = (
+                projection_has_continuity_state or same_chat_delegation_score >= 38
+            )
+        elif _ATTENTION_TODAY_RE.search(clean):
+            domain = "attention_today"
+            context_boundary = "attention_and_triage_state"
+        elif _AGENDA_RE.search(clean):
+            domain = "personal_agenda"
+            context_boundary = "personal_agenda_state"
+        elif _OPINION_RE.search(clean):
+            domain = "opinion_reflection"
+            context_boundary = "recent_thread_only"
+        elif continuity_focus in (
+            "recent_outcome_history",
+            "blocked_state",
+            "cursor_followup_heavy_lift",
+        ) and (
+            projection_has_continuity_state or same_chat_delegation_score >= 38
+        ):
+            domain = "project_status"
+            context_boundary = "project_continuity_state"
+            prefer_state_reply = True
     elif _OPINION_RE.search(clean):
         domain = "opinion_reflection"
         context_boundary = "recent_thread_only"

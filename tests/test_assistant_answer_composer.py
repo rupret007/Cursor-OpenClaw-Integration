@@ -28,6 +28,7 @@ from services.andrea_sync.telegram_format import format_direct_message  # noqa: 
 from services.andrea_sync.store import (  # noqa: E402
     append_event,
     connect,
+    create_execution_attempt,
     create_goal,
     create_reminder,
     insert_user_outcome_receipt,
@@ -487,6 +488,43 @@ class TestAssistantAnswerComposer(unittest.TestCase):
             self.conn, tid_b, user_message="What did Cursor say?"
         )
         self.assertIn("DELEGATED_RICH_SUMMARY_UNIQUE_XYZ", text)
+
+    def test_cursor_recall_includes_active_execution_attempt_line(self) -> None:
+        from services.andrea_sync.assistant_answer_composer import (  # noqa: E402
+            build_cursor_continuity_recall_reply_from_state,
+        )
+
+        r0 = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "comp-exec-recall-1",
+                "payload": {
+                    "text": "hi",
+                    "routing_text": "hi",
+                    "chat_id": 88052,
+                    "message_id": 1,
+                },
+            },
+        )
+        tid = r0["task_id"]
+        link_task_principal(self.conn, tid, "pri_exec_recall", channel="telegram")
+        gid = create_goal(self.conn, "pri_exec_recall", "Track recall", channel="telegram")
+        link_task_to_goal(self.conn, tid, gid)
+        create_execution_attempt(
+            self.conn,
+            tid,
+            gid,
+            lane="direct_cursor",
+            backend="cursor",
+            handle_dict={"cursor_agent_id": "ag_exec_recall", "handle_kind": "cursor_agent"},
+        )
+        text = build_cursor_continuity_recall_reply_from_state(
+            self.conn, tid, user_message="What did Cursor do?"
+        )
+        self.assertIn("Delegated execution (tracked)", text)
+        self.assertIn("direct_cursor", text)
 
     def test_cursor_recall_skips_echo_projection_summary(self) -> None:
         """Do not surface the user's question as a 'Recorded summary' when it matches."""

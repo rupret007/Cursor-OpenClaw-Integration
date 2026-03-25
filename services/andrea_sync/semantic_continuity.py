@@ -14,6 +14,7 @@ _ANAPHORIC_OUTCOME_RE = re.compile(
     r"what\s+happened\s+there|"
     r"what\s+happened\s+with\s+that(?!\s+task\b)|"
     r"what\s+about\s+that\s+one|"
+    r"what\s+did\s+it\s+do|"
     r"recap\s+that\b|"
     r"what\s+was\s+the\s+result"
     r")\b",
@@ -116,8 +117,8 @@ class SemanticContinuityPatch:
     force_prefer_state_reply: bool = False
 
 
-_STATUS_LIKE_SCENARIOS = frozenset(
-    {"statusFollowupContinue", "goalContinuationAcrossSessions"}
+_PATCH_ELIGIBLE_SCENARIOS = frozenset(
+    {"statusFollowupContinue", "goalContinuationAcrossSessions", "mixedResourceGoal"}
 )
 
 
@@ -136,21 +137,30 @@ def resolve_semantic_continuity_patch(
     """
     clean = str(user_text or "").strip()
     sid = str(scenario_id or "").strip()
-    if sid not in _STATUS_LIKE_SCENARIOS or base_focus != "none" or not clean:
+    if sid not in _PATCH_ELIGIBLE_SCENARIOS or not clean:
         return SemanticContinuityPatch()
 
     del_score = same_chat_max_delegation_score(conn, task_id)
     has_projection_continuity = bool(projection_has_continuity_state)
     has_ctx = has_projection_continuity or del_score >= 38
 
-    if user_message_suggests_anaphoric_outcome_recall(clean) and has_ctx:
-        return SemanticContinuityPatch(
-            continuity_focus_override="recent_outcome_history",
-            force_prefer_state_reply=True,
-        )
-    if user_message_suggests_anaphoric_cursor_continue(clean) and del_score >= 32:
-        return SemanticContinuityPatch(
-            continuity_focus_override="cursor_followup_heavy_lift",
-            force_prefer_state_reply=True,
-        )
+    if base_focus == "none":
+        if user_message_suggests_anaphoric_outcome_recall(clean) and has_ctx:
+            return SemanticContinuityPatch(
+                continuity_focus_override="recent_outcome_history",
+                force_prefer_state_reply=True,
+            )
+        if user_message_suggests_anaphoric_cursor_continue(clean) and del_score >= 32:
+            return SemanticContinuityPatch(
+                continuity_focus_override="cursor_followup_heavy_lift",
+                force_prefer_state_reply=True,
+            )
+        return SemanticContinuityPatch()
+
+    if (
+        base_focus == "recent_outcome_history"
+        and not projection_has_continuity_state
+        and del_score >= 38
+    ):
+        return SemanticContinuityPatch(force_prefer_state_reply=True)
     return SemanticContinuityPatch()

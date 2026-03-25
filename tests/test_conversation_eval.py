@@ -36,6 +36,22 @@ from services.andrea_sync.store import connect, get_latest_experience_run, migra
 
 
 class ConversationEvalDetectorTests(unittest.TestCase):
+    def test_detects_text_lane_summarize_carryover_miss(self) -> None:
+        cap = {
+            "raw_reply_text": "Sure, tell me more about what you need.",
+            "user_turn": "Can you summarize my texts too?",
+            "turn_plan_domain": "casual_conversation",
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(
+            cap,
+            prior_user_turn="Can you pull text messages from BlueBubbles?",
+            expect_tool_carryover=True,
+        )
+        codes = {h["issue_code"] for h in hits}
+        self.assertIn("conversation_followup_carryover_miss", codes)
+
     def test_detects_internal_runtime_leak(self) -> None:
         cap = {
             "raw_reply_text": "session id lockstep_json",

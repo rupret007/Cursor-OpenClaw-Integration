@@ -3329,6 +3329,15 @@ class TestAndreaSync(unittest.TestCase):
         text = "Any texts from today?"
         self.assertEqual(server._parse_recent_text_messages_request(text), text)
 
+    def test_parse_recent_text_messages_request_accepts_pull_via_bluebubbles(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        text = "Can you pull text messages from BlueBubbles?"
+        self.assertEqual(server._parse_recent_text_messages_request(text), text)
+
     def test_server_live_news_request_stays_truthful_when_lane_unavailable(self) -> None:
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
         os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"

@@ -32,6 +32,7 @@ from .model_router import model_for_role
 from .projector import project_task_dict
 from .scenario_runtime import resolve_scenario
 from .schema import TaskStatus
+from .semantic_continuity import same_chat_max_delegation_score
 from .store import get_task_channel
 from .turn_intelligence import build_turn_plan
 from .user_surface import is_internal_runtime_text, sanitize_user_surface_text
@@ -64,6 +65,20 @@ MECHANICAL_PHRASES = (
 CURSOR_GRACE_SNIPPETS = (
     "not finding a strong stored summary",
     "don't have enough recorded history",
+    "check the latest tracked state",
+)
+
+_TOOL_TEXT_LANE_PRIOR_RE = re.compile(
+    r"\b(?:bluebubbles|text\s+messages?|imessages?|recent\s+messages?)\b",
+    re.I,
+)
+_TEXT_SUMMARIZE_FOLLOWUP_RE = re.compile(
+    r"\b(?:summarize|summarise)\s+(?:my\s+)?(?:texts?|messages?)\b",
+    re.I,
+)
+_TEXT_LANE_REPLY_MARKERS_RE = re.compile(
+    r"\b(?:text|message|messages|inbox|imessage|bluebubbles|sms)\b",
+    re.I,
 )
 
 
@@ -130,10 +145,15 @@ def build_turn_capture(
     scenario_id = str(scen.get("scenario_id") or "")
     resolution, _ = resolve_scenario(user_text, goal_id="", route_decision=None)
     projection_has_state = bool(meta.get("goal")) or bool(meta.get("plan"))
+    try:
+        del_score = same_chat_max_delegation_score(conn, task_id)
+    except (AttributeError, TypeError, ValueError):
+        del_score = 0
     plan = build_turn_plan(
         user_text,
         scenario_id=scenario_id or resolution.scenario_id,
         projection_has_continuity_state=projection_has_state,
+        same_chat_delegation_score=del_score,
     )
     raw_reply = _task_last_reply(detail)
     sanitized = sanitize_user_surface_text(raw_reply, fallback="", limit=2000)
@@ -251,10 +271,33 @@ def run_deterministic_detectors(
                     "detail": "cursor recall ask met with grace fallback copy",
                 }
             )
+        elif len(text.strip()) < 100 and is_generic_direct_reply(text):
+            findings.append(
+                {
+                    "family": "cursor_recall_failure",
+                    "issue_code": "conversation_cursor_recall_thin",
+                    "severity": "medium",
+                    "detail": "cursor recall ask met with generic short direct reply",
+                }
+            )
     if expect_tool_carryover and prior_user_turn:
         topic_tokens = [w for w in re.split(r"\W+", prior_user_turn.lower()) if len(w) > 4][:6]
         hits = sum(1 for w in topic_tokens if w and w in low)
-        if hits < 1 and len(text) > 0:
+        prior_l = prior_user_turn.lower()
+        user_l = (user or "").lower()
+        messaging_lane_prior = bool(_TOOL_TEXT_LANE_PRIOR_RE.search(prior_l))
+        summarize_follow = bool(_TEXT_SUMMARIZE_FOLLOWUP_RE.search(user_l))
+        if messaging_lane_prior and summarize_follow:
+            if not _TEXT_LANE_REPLY_MARKERS_RE.search(low) and len(text) > 0:
+                findings.append(
+                    {
+                        "family": "followup_carryover_failure",
+                        "issue_code": "conversation_followup_carryover_miss",
+                        "severity": "medium",
+                        "detail": "text-lane summarize follow-up missing messaging-domain reply cues",
+                    }
+                )
+        elif hits < 1 and len(text) > 0:
             findings.append(
                 {
                     "family": "followup_carryover_failure",

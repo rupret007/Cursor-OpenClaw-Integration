@@ -170,7 +170,8 @@ _CURSOR_THREAD_RECALL_RE = re.compile(
     r"what\s+happened\s+in\s+(?:the\s+)?cursor\s+thread|"
     r"what\s+happened\s+there|what\s+happened\s+with\s+that(?!\s+task\b)|"
     r"what\s+about\s+that\s+one|what\s+was\s+the\s+result|"
-    r"what\s+did\s+openclaw\s+do"
+    r"what\s+did\s+openclaw\s+do|"
+    r"what\s+did\s+it\s+do"
     r")\b",
     re.I,
 )
@@ -503,6 +504,49 @@ def _openclaw_narrative_lines(meta: Dict[str, Any]) -> List[str]:
     return lines
 
 
+def _ledger_receipt_summary_is_generic_placeholder(summary: str) -> bool:
+    """True for daily-pack ledger rows that repeat route labels instead of substance."""
+    s = str(summary or "").strip().lower()
+    if not s:
+        return False
+    if "status / follow-up reply" in s:
+        return True
+    if "goal continuation summary" in s:
+        return True
+    if "recent messages / lookup" in s:
+        return True
+    if s.startswith("assistant outcome (") and "reply" in s:
+        return True
+    if "note or reminder path" in s:
+        return True
+    return False
+
+
+def _execution_recall_context_lines(conn: Any, task_id: str) -> List[str]:
+    """User-safe one-liner from active execution attempt when OpenClaw narrative is thin."""
+    att = summarize_execution_attempt_for_user(conn, task_id)
+    if not isinstance(att, dict) or not att.get("ok"):
+        return []
+    st = str(att.get("status") or "").strip()
+    lane = str(att.get("lane") or "").strip()
+    backend = str(att.get("backend") or "").strip()
+    aid = str(att.get("cursor_agent_id") or "").strip()
+    if not st and not lane and not backend and not aid:
+        return []
+    parts: List[str] = []
+    if st and st.lower() not in {"unknown", "n/a", "none", ""}:
+        parts.append(f"status **{st}**")
+    if lane:
+        parts.append(f"lane `{lane}`")
+    if backend:
+        parts.append(f"backend `{backend}`")
+    if aid:
+        parts.append("Cursor agent attached")
+    if not parts:
+        return []
+    return ["Delegated execution (tracked): " + ", ".join(parts) + "."]
+
+
 def _state_snapshot_is_low_information_only(
     status: str,
     result_kind: str,
@@ -550,14 +594,21 @@ def build_cursor_continuity_recall_reply_from_state(
 
     narrative_lines = _openclaw_narrative_lines(meta)
 
-    receipt_lines: List[str] = []
+    receipt_substantive: List[str] = []
+    receipt_generic: List[str] = []
     for row in list_recent_user_outcome_receipts_for_task(conn, use_id, limit=3):
-        summ = sanitize_user_surface_text(str(row["summary"] or ""), limit=400)
+        raw_summ = str(row["summary"] or "")
+        summ = sanitize_user_surface_text(raw_summ, limit=400)
         kind = str(row["receipt_kind"] or "").strip()
-        if summ:
-            receipt_lines.append(
-                f"Recent receipt ({kind}): {summ}" if kind else f"Recent receipt: {summ}"
-            )
+        if not summ:
+            continue
+        line = f"Recent receipt ({kind}): {summ}" if kind else f"Recent receipt: {summ}"
+        if _ledger_receipt_summary_is_generic_placeholder(raw_summ):
+            receipt_generic.append(line)
+        else:
+            receipt_substantive.append(line)
+
+    exec_lines = _execution_recall_context_lines(conn, use_id)
 
     tm = _telegram_section(meta)
     cr = tm.get("continuation_records") if isinstance(tm.get("continuation_records"), list) else []
@@ -592,15 +643,22 @@ def build_cursor_continuity_recall_reply_from_state(
 
     lines: List[str] = []
     lines.extend(narrative_lines)
-    lines.extend(receipt_lines)
+    lines.extend(exec_lines)
+    lines.extend(receipt_substantive)
     if cont_line:
         lines.append(cont_line)
     lines.extend(assistant_lines)
+    lines.extend(receipt_generic)
 
     low_info = _state_snapshot_is_low_information_only(
         status, result_kind, phase_summary, blocked_reason
     )
-    has_narrative = bool(narrative_lines or receipt_lines or cont_line)
+    has_narrative = bool(
+        narrative_lines
+        or receipt_substantive
+        or exec_lines
+        or cont_line
+    )
     if state_bits and (has_narrative or not low_info):
         lines.append("Where things stand: " + "; ".join(state_bits) + ".")
 

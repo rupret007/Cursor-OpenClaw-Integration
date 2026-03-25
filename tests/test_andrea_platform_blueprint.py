@@ -263,6 +263,16 @@ class BlueprintPlatformTests(unittest.TestCase):
         )
         self.assertEqual(plan_cursor_task.continuity_focus, "cursor_followup_heavy_lift")
 
+        plan_mixed_delegation = build_turn_plan(
+            "What did it do?",
+            scenario_id="mixedResourceGoal",
+            projection_has_continuity_state=False,
+            same_chat_delegation_score=60,
+        )
+        self.assertEqual(plan_mixed_delegation.domain, "project_status")
+        self.assertTrue(plan_mixed_delegation.prefer_state_reply)
+        self.assertEqual(plan_mixed_delegation.continuity_focus, "recent_outcome_history")
+
     @mock.patch("services.andrea_sync.goal_runtime.project_task_dict")
     def test_goal_continuity_surfaces_outcome_and_cursor_delegation(self, m_proj: mock.MagicMock) -> None:
         create_task(self.conn, "tsk_out", "telegram")

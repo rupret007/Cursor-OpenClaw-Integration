@@ -274,6 +274,21 @@ def _telegram_chat_id_for_task(conn: Any, task_id: str) -> Any:
     return tg.get("chat_id")
 
 
+def _telegram_thread_id_for_task(conn: Any, task_id: str) -> str:
+    meta = _projection_meta(conn, task_id)
+    tg = _telegram_section(meta)
+    raw = tg.get("message_thread_id")
+    return str(raw).strip() if raw is not None else ""
+
+
+def _same_thread_or_unknown(conn: Any, anchor_task_id: str, candidate_task_id: str) -> bool:
+    anchor = _telegram_thread_id_for_task(conn, anchor_task_id)
+    candidate = _telegram_thread_id_for_task(conn, candidate_task_id)
+    if anchor and candidate:
+        return anchor == candidate
+    return True
+
+
 def _task_has_delegated_continuity_signal(meta: Dict[str, Any]) -> bool:
     oc = meta.get("openclaw") if isinstance(meta.get("openclaw"), dict) else {}
     ex = meta.get("execution") if isinstance(meta.get("execution"), dict) else {}
@@ -490,6 +505,8 @@ def select_best_task_for_cursor_recall(
     cands = _ordered_cursor_chat_candidates(conn, current_task_id, cid)
     rows: List[Tuple[int, bool, int, str]] = []
     for idx, tid in enumerate(cands):
+        if not _same_thread_or_unknown(conn, current_task_id, tid):
+            continue
         base, meaningful = _score_cursor_recall_candidate(conn, tid, user_message)
         total = base + _cursor_recall_rank_adjustment(conn, tid)
         rows.append((total, meaningful, idx, tid))
@@ -525,6 +542,8 @@ def find_recent_delegated_cursor_task_id(
     for idx, tid in enumerate(list_telegram_task_ids_for_chat(conn, chat_id, limit=limit)):
         if tid == current_task_id:
             continue
+        if not _same_thread_or_unknown(conn, current_task_id, tid):
+            continue
         meta = _projection_meta(conn, tid)
         s, meaningful = _score_cursor_recall_candidate(conn, tid, user_message)
         if continuation_boost:
@@ -548,7 +567,9 @@ def find_recent_delegated_cursor_task_id(
 def _openclaw_narrative_lines(meta: Dict[str, Any]) -> List[str]:
     oc = meta.get("openclaw") if isinstance(meta.get("openclaw"), dict) else {}
     lines: List[str] = []
-    us = sanitize_user_surface_text(str(oc.get("user_summary") or ""), limit=900)
+    us = _normalize_cursor_recap_lead(
+        sanitize_user_surface_text(str(oc.get("user_summary") or ""), limit=900)
+    )
     if us:
         lines.append(f"Latest useful result: {us}")
     po = oc.get("phase_outputs")
@@ -557,7 +578,9 @@ def _openclaw_narrative_lines(meta: Dict[str, Any]) -> List[str]:
             block = po.get(phase)
             if not isinstance(block, dict):
                 continue
-            summ = sanitize_user_surface_text(str(block.get("summary") or ""), limit=360)
+            summ = _normalize_cursor_recap_lead(
+                sanitize_user_surface_text(str(block.get("summary") or ""), limit=360)
+            )
             if summ:
                 lines.append(f"Phase {phase}: {summ}")
                 if len(lines) >= 4:
@@ -732,6 +755,13 @@ def _synthesize_partial_cursor_recap(
     return ""
 
 
+def _normalize_cursor_recap_lead(text: str) -> str:
+    clean = str(text or "").strip()
+    while clean.lower().startswith("cursor recap:"):
+        clean = clean[len("cursor recap:") :].strip()
+    return clean
+
+
 def _is_thin_cursor_recap_lead(text: str) -> bool:
     low = str(text or "").strip().lower()
     return low.startswith(
@@ -822,11 +852,15 @@ def build_cursor_continuity_recall_reply_from_state(
     um = str(user_message or "").strip()
     recall_shaped = is_cursor_thread_recall_question(um)
     if last_reply and len(last_reply) > 12 and not _is_echo_of_user_question(last_reply, um):
-        safe_lr = sanitize_user_surface_text(last_reply, limit=900)
+        safe_lr = _normalize_cursor_recap_lead(
+            sanitize_user_surface_text(last_reply, limit=900)
+        )
         if safe_lr:
             assistant_lines.append(f"Last assistant update on this task: {safe_lr}")
     elif summary and len(summary) > 20 and not _is_echo_of_user_question(summary, um):
-        safe_s = sanitize_user_surface_text(summary, limit=900)
+        safe_s = _normalize_cursor_recap_lead(
+            sanitize_user_surface_text(summary, limit=900)
+        )
         if safe_s:
             assistant_lines.append(f"Recorded summary: {safe_s}")
 
@@ -871,6 +905,7 @@ def build_cursor_continuity_recall_reply_from_state(
                 status=status,
                 result_kind=result_kind,
             )
+        recap_lead = _normalize_cursor_recap_lead(recap_lead)
         if (
             allow_same_chat_recap_hop
             and _is_thin_cursor_recap_lead(recap_lead)
@@ -1082,6 +1117,8 @@ def _resolve_cursor_heavy_lift_reply(
     idx_map = {tid: i for i, tid in enumerate(cands)}
     entries: List[Tuple[int, bool, str, str]] = []
     for tid in cands:
+        if not _same_thread_or_unknown(conn, task_id, tid):
+            continue
         reply = build_cursor_heavy_lift_context_reply(conn, tid)
         if not reply:
             continue

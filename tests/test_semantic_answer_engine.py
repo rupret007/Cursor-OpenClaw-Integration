@@ -70,3 +70,21 @@ class SemanticAnswerEngineTests(unittest.TestCase):
             scenario_id="statusFollowupContinue",
         )
         self.assertIsNone(result)
+
+    @mock.patch("services.andrea_sync.semantic_answer_engine.build_goal_continuity_reply")
+    @mock.patch("services.andrea_sync.semantic_answer_engine.try_goal_status_nl_reply")
+    def test_identity_question_bypasses_semantic_state_selection(
+        self,
+        mock_goal_status: mock.MagicMock,
+        mock_goal_cont: mock.MagicMock,
+    ) -> None:
+        mock_goal_status.return_value = "Goal `g1` status: running."
+        mock_goal_cont.return_value = "Tracked task `t1` status: running."
+        result = choose_semantic_state_reply(
+            conn=object(),
+            task_id="t3",
+            user_text="Is this OpenClaw?",
+            turn_plan=self._turn_plan(focus="none"),
+            scenario_id="statusFollowupContinue",
+        )
+        self.assertIsNone(result)

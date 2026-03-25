@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Any, Dict, Optional
 
 from .assistant_answer_composer import (
@@ -12,6 +13,15 @@ from .assistant_answer_composer import (
 from .goal_runtime import build_goal_continuity_reply, try_goal_status_nl_reply
 from .turn_intelligence import TurnPlan
 from .user_surface import sanitize_user_surface_text
+
+_TOOLING_IDENTITY_Q_RE = re.compile(
+    r"^\s*(?:"
+    r"is\s+this\s+openclaw|is\s+this\s+cursor|"
+    r"what\s+is\s+openclaw|what\s+is\s+cursor|"
+    r"are\s+you\s+openclaw|are\s+you\s+cursor"
+    r")\s*\??\s*$",
+    re.I,
+)
 
 
 @dataclass(frozen=True)
@@ -121,6 +131,8 @@ def choose_semantic_state_reply(
         return None
 
     text = str(user_text or "")
+    if _TOOLING_IDENTITY_Q_RE.match(text.strip()):
+        return None
     candidates: Dict[str, str] = {}
 
     if interpretation.continuity_focus == "blocked_state":

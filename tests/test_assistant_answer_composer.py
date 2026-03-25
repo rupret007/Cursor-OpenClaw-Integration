@@ -733,6 +733,106 @@ class TestAssistantAnswerComposer(unittest.TestCase):
         self.assertEqual(got[1], "attention_state")
         self.assertIn("deploy", got[0].lower())
 
+    def test_cursor_recall_respects_message_thread_boundary(self) -> None:
+        from services.andrea_sync.assistant_answer_composer import (  # noqa: E402
+            build_cursor_continuity_recall_reply_from_state,
+        )
+
+        first = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "comp-thread-a",
+                "payload": {
+                    "text": "thread a",
+                    "routing_text": "thread a",
+                    "chat_id": 88110,
+                    "message_id": 1,
+                    "message_thread_id": 701,
+                },
+            },
+        )
+        tid_a = first["task_id"]
+        append_event(
+            self.conn,
+            tid_a,
+            EventType.JOB_COMPLETED,
+            {
+                "summary": "done",
+                "backend": "openclaw",
+                "runner": "openclaw",
+                "user_summary": "THREAD_ALPHA_MARKER richer summary",
+            },
+        )
+        second = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "comp-thread-b",
+                "payload": {
+                    "text": "thread b",
+                    "routing_text": "thread b",
+                    "chat_id": 88110,
+                    "message_id": 2,
+                    "message_thread_id": 702,
+                },
+            },
+        )
+        tid_b = second["task_id"]
+        append_event(
+            self.conn,
+            tid_b,
+            EventType.JOB_COMPLETED,
+            {
+                "summary": "done",
+                "backend": "openclaw",
+                "runner": "openclaw",
+                "user_summary": "THREAD_BETA_MARKER summary",
+            },
+        )
+        text = build_cursor_continuity_recall_reply_from_state(
+            self.conn, tid_b, user_message="What did Cursor say?"
+        )
+        self.assertIn("THREAD_BETA_MARKER", text)
+        self.assertNotIn("THREAD_ALPHA_MARKER", text)
+
+    def test_cursor_recall_strips_recursive_recap_prefix(self) -> None:
+        from services.andrea_sync.assistant_answer_composer import (  # noqa: E402
+            build_cursor_continuity_recall_reply_from_state,
+        )
+
+        created = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "comp-recap-recursive",
+                "payload": {
+                    "text": "seed",
+                    "routing_text": "seed",
+                    "chat_id": 88111,
+                    "message_id": 1,
+                },
+            },
+        )
+        tid = created["task_id"]
+        append_event(
+            self.conn,
+            tid,
+            EventType.ASSISTANT_REPLIED,
+            {
+                "text": "Cursor recap: Cursor recap: fixed the bug and queued verification.",
+                "route": "direct",
+                "reason": "test",
+            },
+        )
+        text = build_cursor_continuity_recall_reply_from_state(
+            self.conn, tid, user_message="What did Cursor say?"
+        )
+        self.assertNotIn("Cursor recap: Cursor recap:", text)
+
 
 if __name__ == "__main__":
     unittest.main()

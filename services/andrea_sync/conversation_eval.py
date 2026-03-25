@@ -24,6 +24,7 @@ from .assistant_answer_composer import (
     draft_should_force_continuity_repair,
     is_cursor_thread_recall_question,
 )
+from .bus import handle_command
 from .experience_assurance import (
     HarnessInfraError,
     experience_progress_enabled,
@@ -32,7 +33,7 @@ from .experience_types import ExperienceCheckResult, ExperienceObservation, Expe
 from .model_router import model_for_role
 from .projector import project_task_dict
 from .scenario_runtime import resolve_scenario
-from .schema import TaskStatus
+from .schema import CommandType, EventType, TaskStatus
 from .semantic_continuity import same_chat_max_delegation_score
 from .store import get_task_channel
 from .turn_intelligence import build_turn_plan
@@ -122,6 +123,21 @@ def _task_assistant_reason(detail: Dict[str, Any]) -> str:
     return str(assistant.get("reason") or "").strip()
 
 
+def _latest_assistant_reply_payload(detail: Dict[str, Any]) -> Dict[str, Any]:
+    events = detail.get("events")
+    if not isinstance(events, list):
+        return {}
+    for row in reversed(events):
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("event_type") or "") != EventType.ASSISTANT_REPLIED.value:
+            continue
+        payload = row.get("payload")
+        if isinstance(payload, dict):
+            return payload
+    return {}
+
+
 def _scenario_meta(detail: Dict[str, Any]) -> Dict[str, Any]:
     meta = detail.get("task", {}).get("meta", {})
     scen = meta.get("scenario") if isinstance(meta.get("scenario"), dict) else {}
@@ -173,6 +189,7 @@ def build_turn_capture(
     raw_reply = _task_last_reply(detail)
     sanitized = sanitize_user_surface_text(raw_reply, fallback="", limit=2000)
     flags = _meta_flags(detail)
+    assistant_payload = _latest_assistant_reply_payload(detail)
     return {
         "user_turn": user_text,
         "raw_reply_text": raw_reply,
@@ -181,6 +198,9 @@ def build_turn_capture(
         "task_status": str(detail.get("task", {}).get("status") or ""),
         "assistant_route": _task_route(detail),
         "assistant_reason": _task_assistant_reason(detail),
+        "assistant_semantic_selection": assistant_payload.get("semantic_selection")
+        if isinstance(assistant_payload.get("semantic_selection"), dict)
+        else {},
         "scenario_id": scenario_id or resolution.scenario_id,
         "scenario_reason": str(scen.get("reason") or resolution.reason),
         "turn_plan_domain": plan.domain,
@@ -314,6 +334,15 @@ def run_deterministic_detectors(
                     "detail": "cursor recall ask met with generic short direct reply",
                 }
             )
+    if "cursor recap: cursor recap:" in low:
+        findings.append(
+            {
+                "family": "thin_summary",
+                "issue_code": "conversation_recap_recursion",
+                "severity": "medium",
+                "detail": "recursive recap label duplication",
+            }
+        )
     if expect_tool_carryover and prior_user_turn:
         topic_tokens = [w for w in re.split(r"\W+", prior_user_turn.lower()) if len(w) > 4][:6]
         hits = sum(1 for w in topic_tokens if w and w in low)
@@ -560,6 +589,11 @@ class ConversationCaseSpec:
     expect_external_domain: bool = False
     expect_cursor_substance: bool = False
     expect_tool_carryover: bool = False
+    setup_fn: Callable[[Any], None] | None = None
+    turn_payload_overrides: tuple[Mapping[str, Any], ...] = ()
+    required_reply_markers: tuple[str, ...] = ()
+    forbidden_reply_markers: tuple[str, ...] = ()
+    required_assistant_reasons: tuple[str, ...] = ()
     # terminal_reply: wait for completed/failed (meaningful capture). routing_smoke: allow queued/running.
     wait_policy: str = "terminal_reply"
 
@@ -628,6 +662,180 @@ def _resolve_skill_patch(server: Any) -> Any:
     )
 
 
+def _merge_turn_message_payload(
+    base_message: Dict[str, Any],
+    *,
+    override: Mapping[str, Any] | None,
+) -> Dict[str, Any]:
+    msg = dict(base_message)
+    if not isinstance(override, Mapping):
+        return msg
+    for key, value in override.items():
+        if key == "reply_to_message_id":
+            if value in (None, ""):
+                continue
+            msg["reply_to_message"] = {"message_id": int(value)}
+            continue
+        if key in {"chat_id", "chat"}:
+            if isinstance(value, Mapping):
+                existing = msg.get("chat") if isinstance(msg.get("chat"), dict) else {}
+                merged = dict(existing)
+                merged.update(value)
+                msg["chat"] = merged
+            else:
+                msg["chat"] = {"id": value}
+            continue
+        if key in {"from_id", "from"}:
+            if isinstance(value, Mapping):
+                existing = msg.get("from") if isinstance(msg.get("from"), dict) else {}
+                merged = dict(existing)
+                merged.update(value)
+                msg["from"] = merged
+            else:
+                msg["from"] = {"id": value}
+            continue
+        msg[key] = value
+    return msg
+
+
+def _seed_multitask_recall_thread_state(harness: Any) -> None:
+    server = harness.server
+    assert server is not None
+
+    def _cmd(body: Dict[str, Any]) -> Dict[str, Any]:
+        return server.with_lock(lambda c: handle_command(c, body))
+
+    # Two same-chat tasks with distinct thread and summary markers.
+    payloads = (
+        ("seed-thread-a", 77781, 6001, 501, "THREAD_ALPHA_UNIQUE_MARKER"),
+        ("seed-thread-b", 77781, 6002, 502, "THREAD_BETA_UNIQUE_MARKER"),
+    )
+    for ext, chat_id, message_id, thread_id, marker in payloads:
+        created = _cmd(
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": ext,
+                "payload": {
+                    "text": f"Seed {marker}",
+                    "routing_text": f"Seed {marker}",
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "from_user": 99090,
+                    "message_thread_id": thread_id,
+                },
+            }
+        )
+        task_id = str(created.get("task_id") or "")
+        if not task_id:
+            continue
+        _cmd(
+            {
+                "command_type": CommandType.REPORT_CURSOR_EVENT.value,
+                "channel": "cursor",
+                "task_id": task_id,
+                "payload": {
+                    "event_type": EventType.JOB_COMPLETED.value,
+                    "payload": {
+                        "backend": "openclaw",
+                        "runner": "openclaw",
+                        "summary": f"Cursor recap: {marker} completed work.",
+                        "user_summary": f"{marker} completed work.",
+                    },
+                },
+            }
+        )
+
+
+def _seed_identity_hijack_state(harness: Any) -> None:
+    server = harness.server
+    assert server is not None
+
+    created = server.with_lock(
+        lambda c: handle_command(
+            c,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "seed-identity-heavy",
+                "payload": {
+                    "text": "Seed heavy status context",
+                    "routing_text": "Seed heavy status context",
+                    "chat_id": 77783,
+                    "message_id": 6101,
+                    "from_user": 99091,
+                },
+            },
+        )
+    )
+    task_id = str(created.get("task_id") or "")
+    if not task_id:
+        return
+    server.with_lock(
+        lambda c: handle_command(
+            c,
+            {
+                "command_type": CommandType.REPORT_CURSOR_EVENT.value,
+                "channel": "cursor",
+                "task_id": task_id,
+                "payload": {
+                    "event_type": EventType.JOB_COMPLETED.value,
+                    "payload": {
+                        "backend": "openclaw",
+                        "runner": "openclaw",
+                        "summary": "Seeded continuity context for identity check.",
+                        "user_summary": "Seeded continuity context for identity check.",
+                    },
+                },
+            },
+        )
+    )
+
+
+def _seed_recap_recursion_state(harness: Any) -> None:
+    server = harness.server
+    assert server is not None
+    created = server.with_lock(
+        lambda c: handle_command(
+            c,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "seed-recap-recursion",
+                "payload": {
+                    "text": "Seed recap recursion",
+                    "routing_text": "Seed recap recursion",
+                    "chat_id": 77784,
+                    "message_id": 6201,
+                    "from_user": 99092,
+                },
+            },
+        )
+    )
+    task_id = str(created.get("task_id") or "")
+    if not task_id:
+        return
+    server.with_lock(
+        lambda c: handle_command(
+            c,
+            {
+                "command_type": CommandType.REPORT_CURSOR_EVENT.value,
+                "channel": "cursor",
+                "task_id": task_id,
+                "payload": {
+                    "event_type": EventType.JOB_COMPLETED.value,
+                    "payload": {
+                        "backend": "openclaw",
+                        "runner": "openclaw",
+                        "summary": "Cursor recap: Cursor recap: resolved the issue cleanly.",
+                        "user_summary": "Cursor recap: Cursor recap: resolved the issue cleanly.",
+                    },
+                },
+            },
+        )
+    )
+
+
 def run_conversation_case(
     harness: Any,
     scenario: ExperienceScenario,
@@ -674,6 +882,8 @@ def run_conversation_case(
         with ExitStack() as stack:
             for p in patches:
                 stack.enter_context(p)
+            if case.setup_fn is not None:
+                case.setup_fn(harness)
             uid = case.first_update_id
             mid = case.first_message_id
             prior_user = ""
@@ -689,17 +899,21 @@ def run_conversation_case(
                     },
                 )
                 try:
-                    harness.submit_telegram_update(
-                        {
-                            "update_id": uid + turn_idx,
-                            "message": {
-                                "text": text,
-                                "message_id": mid + turn_idx,
-                                "chat": {"id": case.chat_id},
-                                "from": {"id": case.from_id},
-                            },
-                        }
+                    override = (
+                        case.turn_payload_overrides[turn_idx]
+                        if turn_idx < len(case.turn_payload_overrides)
+                        else {}
                     )
+                    message = _merge_turn_message_payload(
+                        {
+                            "text": text,
+                            "message_id": mid + turn_idx,
+                            "chat": {"id": case.chat_id},
+                            "from": {"id": case.from_id},
+                        },
+                        override=override,
+                    )
+                    harness.submit_telegram_update({"update_id": uid + turn_idx, "message": message})
                 except HarnessInfraError as exc:
                     raise HarnessInfraError(
                         exc.issue_code,
@@ -823,6 +1037,45 @@ def run_conversation_case(
     all_findings: List[Dict[str, Any]] = []
     for c in captures:
         all_findings.extend(list(c.get("deterministic_findings") or []))
+    if captures:
+        final_reply = str(captures[-1].get("raw_reply_text") or "")
+        final_reply_l = final_reply.lower()
+        final_reason = str(captures[-1].get("assistant_reason") or "")
+        for marker in case.required_reply_markers:
+            m = str(marker or "").strip()
+            if not m:
+                continue
+            if m.lower() not in final_reply_l:
+                all_findings.append(
+                    {
+                        "family": "wrong_context_boundary",
+                        "issue_code": "conversation_missing_required_marker",
+                        "severity": "high",
+                        "detail": f"required marker missing: {m}",
+                    }
+                )
+        for marker in case.forbidden_reply_markers:
+            m = str(marker or "").strip()
+            if not m:
+                continue
+            if m.lower() in final_reply_l:
+                all_findings.append(
+                    {
+                        "family": "wrong_context_boundary",
+                        "issue_code": "conversation_forbidden_context_marker",
+                        "severity": "high",
+                        "detail": f"forbidden marker present: {m}",
+                    }
+                )
+        if case.required_assistant_reasons and final_reason not in set(case.required_assistant_reasons):
+            all_findings.append(
+                {
+                    "family": "wrong_domain_contamination",
+                    "issue_code": "conversation_assistant_reason_mismatch",
+                    "severity": "high",
+                    "detail": f"assistant_reason={final_reason!r} not in {tuple(case.required_assistant_reasons)!r}",
+                }
+            )
 
     high = [f for f in all_findings if f.get("severity") == "high"]
     med = [f for f in all_findings if f.get("severity") == "medium"]
@@ -1150,6 +1403,63 @@ CONVERSATION_CORE_CASES: tuple[ConversationCaseSpec, ...] = (
         from_id=99020,
         first_update_id=18020,
         first_message_id=28020,
+    ),
+    ConversationCaseSpec(
+        case_id="wrong_thread_cursor_recall",
+        title="Wrong-thread Cursor recall boundary",
+        behavior_family="wrong_context_boundary",
+        turns=("What did Cursor say?",),
+        chat_id=77781,
+        from_id=99090,
+        first_update_id=18781,
+        first_message_id=6871,
+        setup_fn=_seed_multitask_recall_thread_state,
+        turn_payload_overrides=({"message_thread_id": 502},),
+        required_reply_markers=("THREAD_BETA_UNIQUE_MARKER",),
+        forbidden_reply_markers=("THREAD_ALPHA_UNIQUE_MARKER",),
+        expect_cursor_substance=True,
+    ),
+    ConversationCaseSpec(
+        case_id="continue_that_wrong_task",
+        title="Continue-that selects correct workstream",
+        behavior_family="wrong_context_boundary",
+        turns=("Continue that",),
+        chat_id=77781,
+        from_id=99090,
+        first_update_id=18782,
+        first_message_id=6872,
+        turn_payload_overrides=({"message_thread_id": 502},),
+        required_reply_markers=("THREAD_BETA_UNIQUE_MARKER",),
+        forbidden_reply_markers=("THREAD_ALPHA_UNIQUE_MARKER",),
+        wait_policy="routing_smoke",
+    ),
+    ConversationCaseSpec(
+        case_id="identity_question_not_hijacked",
+        title="Identity question not continuity-hijacked",
+        behavior_family="wrong_domain_contamination",
+        turns=("Is this OpenClaw?",),
+        chat_id=77783,
+        from_id=99091,
+        first_update_id=18783,
+        first_message_id=6873,
+        setup_fn=_seed_identity_hijack_state,
+        required_assistant_reasons=("stack_or_tooling_question",),
+        required_reply_markers=("openclaw",),
+        forbidden_reply_markers=("goal `", "tracked task `", "where things stand:"),
+    ),
+    ConversationCaseSpec(
+        case_id="cursor_recap_recursion",
+        title="Cursor recap recursion hygiene",
+        behavior_family="thin_summary",
+        turns=("What did Cursor say?",),
+        chat_id=77784,
+        from_id=99092,
+        first_update_id=18784,
+        first_message_id=6874,
+        setup_fn=_seed_recap_recursion_state,
+        required_reply_markers=("cursor recap:",),
+        forbidden_reply_markers=("cursor recap: cursor recap:",),
+        expect_cursor_substance=True,
     ),
     ConversationCaseSpec(
         case_id="agenda_then_opinion",

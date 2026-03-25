@@ -131,6 +131,18 @@ class ConversationEvalDetectorTests(unittest.TestCase):
         codes = {h["issue_code"] for h in hits}
         self.assertIn("conversation_metadata_surface_leak", codes)
 
+    def test_detects_recursive_cursor_recap_label(self) -> None:
+        cap = {
+            "raw_reply_text": "Cursor recap: Cursor recap: fixed the issue cleanly.",
+            "user_turn": "What did Cursor say?",
+            "turn_plan_domain": "project_status",
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap, expect_cursor_substance=True)
+        codes = {h["issue_code"] for h in hits}
+        self.assertIn("conversation_recap_recursion", codes)
+
     def test_approval_inventory_reply_does_not_trip_false_completion(self) -> None:
         cap = {
             "raw_reply_text": "I'm not seeing any approval requests waiting on you right now.",

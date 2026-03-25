@@ -1,0 +1,1209 @@
+"""Conversational quality evaluation: suites, capture, deterministic detectors, LLM roles, fix briefs.
+
+Used by experience assurance when ``suite=conversation_core``. Runtime semantic adjudication
+helpers are gated behind ``ANDREA_RUNTIME_SEMANTIC_ADJUDICATOR``.
+"""
+from __future__ import annotations
+
+import json
+import os
+import random
+import time
+import re
+import urllib.error
+import urllib.request
+from contextlib import ExitStack
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Sequence
+from unittest import mock
+
+from .andrea_router import is_generic_direct_reply
+from .assistant_answer_composer import (
+    draft_implies_false_completion,
+    draft_should_force_continuity_repair,
+    is_cursor_thread_recall_question,
+)
+from .experience_assurance import (
+    HarnessInfraError,
+    experience_progress_enabled,
+)
+from .experience_types import ExperienceCheckResult, ExperienceObservation, ExperienceScenario
+from .model_router import model_for_role
+from .projector import project_task_dict
+from .scenario_runtime import resolve_scenario
+from .schema import TaskStatus
+from .store import get_task_channel
+from .turn_intelligence import build_turn_plan
+from .user_surface import is_internal_runtime_text, sanitize_user_surface_text
+
+# --- Failure taxonomy (families map to issue_code prefixes) ---
+FAILURE_FAMILIES = (
+    "generic_fallback_leak",
+    "question_echo",
+    "metadata_surface_leak",
+    "false_completion",
+    "wrong_domain_contamination",
+    "cursor_recall_failure",
+    "cursor_continuation_failure",
+    "followup_carryover_failure",
+    "wrong_context_boundary",
+    "overly_mechanical_wording",
+    "delegation_miss",
+    "external_info_contamination",
+    "thin_summary",
+)
+
+MECHANICAL_PHRASES = (
+    "as an ai",
+    "i cannot",
+    "i don't have access",
+    "based on the information provided",
+    "let me know if you need anything else",
+)
+
+CURSOR_GRACE_SNIPPETS = (
+    "not finding a strong stored summary",
+    "don't have enough recorded history",
+)
+
+
+def _clip(value: Any, limit: int = 1200) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _task_last_reply(detail: Dict[str, Any]) -> str:
+    meta = detail.get("task", {}).get("meta", {})
+    assistant = meta.get("assistant") if isinstance(meta.get("assistant"), dict) else {}
+    return str(assistant.get("last_reply") or "").strip()
+
+
+def _task_route(detail: Dict[str, Any]) -> str:
+    meta = detail.get("task", {}).get("meta", {})
+    assistant = meta.get("assistant") if isinstance(meta.get("assistant"), dict) else {}
+    return str(assistant.get("route") or "").strip()
+
+
+def _task_assistant_reason(detail: Dict[str, Any]) -> str:
+    meta = detail.get("task", {}).get("meta", {})
+    assistant = meta.get("assistant") if isinstance(meta.get("assistant"), dict) else {}
+    return str(assistant.get("reason") or "").strip()
+
+
+def _scenario_meta(detail: Dict[str, Any]) -> Dict[str, Any]:
+    meta = detail.get("task", {}).get("meta", {})
+    scen = meta.get("scenario") if isinstance(meta.get("scenario"), dict) else {}
+    return scen if isinstance(scen, dict) else {}
+
+
+def _execution_meta(detail: Dict[str, Any]) -> Dict[str, Any]:
+    meta = detail.get("task", {}).get("meta", {})
+    ex = meta.get("execution") if isinstance(meta.get("execution"), dict) else {}
+    return ex if isinstance(ex, dict) else {}
+
+
+def _meta_flags(detail: Dict[str, Any]) -> Dict[str, bool]:
+    meta = detail.get("task", {}).get("meta", {})
+    return {
+        "has_cursor": bool(meta.get("cursor")),
+        "has_openclaw": bool(meta.get("openclaw")),
+        "delegated_to_cursor": bool(_execution_meta(detail).get("delegated_to_cursor")),
+    }
+
+
+def build_turn_capture(
+    *,
+    harness: Any,
+    task_id: str,
+    user_text: str,
+    detail: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Normalize reply + routing metadata for persistence in ExperienceCheckResult.metadata."""
+    server = harness.server
+    conn = harness.conn
+    channel = get_task_channel(conn, task_id) or "telegram"
+    proj = project_task_dict(conn, task_id, channel)
+    meta = proj.get("meta") if isinstance(proj.get("meta"), dict) else {}
+    scen = _scenario_meta(detail)
+    scenario_id = str(scen.get("scenario_id") or "")
+    resolution, _ = resolve_scenario(user_text, goal_id="", route_decision=None)
+    projection_has_state = bool(meta.get("goal")) or bool(meta.get("plan"))
+    plan = build_turn_plan(
+        user_text,
+        scenario_id=scenario_id or resolution.scenario_id,
+        projection_has_continuity_state=projection_has_state,
+    )
+    raw_reply = _task_last_reply(detail)
+    sanitized = sanitize_user_surface_text(raw_reply, fallback="", limit=2000)
+    flags = _meta_flags(detail)
+    return {
+        "user_turn": user_text,
+        "raw_reply_text": raw_reply,
+        "formatted_reply_text": sanitized,
+        "task_id": task_id,
+        "task_status": str(detail.get("task", {}).get("status") or ""),
+        "assistant_route": _task_route(detail),
+        "assistant_reason": _task_assistant_reason(detail),
+        "scenario_id": scenario_id or resolution.scenario_id,
+        "scenario_reason": str(scen.get("reason") or resolution.reason),
+        "turn_plan_domain": plan.domain,
+        "turn_plan_continuity_focus": plan.continuity_focus,
+        "projection_has_continuity_state": projection_has_state,
+        "delegated_to_cursor": flags["delegated_to_cursor"],
+        "meta_cursor_present": flags["has_cursor"],
+        "meta_openclaw_present": flags["has_openclaw"],
+        "leak_echo_or_metadata_scaffold": draft_should_force_continuity_repair(raw_reply, user_text),
+        "leak_internal_runtime": bool(raw_reply) and is_internal_runtime_text(raw_reply),
+        "leak_sanitized_empty": bool(raw_reply) and not bool(sanitized),
+    }
+
+
+def run_deterministic_detectors(
+    capture: Mapping[str, Any],
+    *,
+    prior_user_turn: str = "",
+    expect_tool_carryover: bool = False,
+    expect_cursor_substance: bool = False,
+    expect_external_boundary: bool = False,
+) -> List[Dict[str, Any]]:
+    """Return list of findings: {family, issue_code, severity, detail}."""
+    findings: List[Dict[str, Any]] = []
+    text = str(capture.get("raw_reply_text") or "")
+    user = str(capture.get("user_turn") or "")
+    low = text.lower()
+
+    if capture.get("leak_internal_runtime") or capture.get("leak_sanitized_empty"):
+        findings.append(
+            {
+                "family": "metadata_surface_leak",
+                "issue_code": "conversation_metadata_surface_leak",
+                "severity": "high",
+                "detail": "internal runtime or sanitization-stripped reply",
+            }
+        )
+    if capture.get("leak_echo_or_metadata_scaffold"):
+        if draft_should_force_continuity_repair(text, user):
+            if user and user.strip().lower() in text.strip().lower():
+                findings.append(
+                    {
+                        "family": "question_echo",
+                        "issue_code": "conversation_question_echo",
+                        "severity": "high",
+                        "detail": "reply echoes user question or metadata scaffold",
+                    }
+                )
+            else:
+                findings.append(
+                    {
+                        "family": "metadata_surface_leak",
+                        "issue_code": "conversation_metadata_scaffold",
+                        "severity": "medium",
+                        "detail": "metadata-heavy or echoey scaffold",
+                    }
+                )
+    if text and is_generic_direct_reply(text):
+        findings.append(
+            {
+                "family": "generic_fallback_leak",
+                "issue_code": "conversation_generic_fallback_leak",
+                "severity": "medium",
+                "detail": "generic direct fallback phrasing",
+            }
+        )
+    if draft_implies_false_completion(text) and any(
+        k in low for k in ("blocked", "pending", "approval", "cursor", "task")
+    ):
+        findings.append(
+            {
+                "family": "false_completion",
+                "issue_code": "conversation_false_completion",
+                "severity": "high",
+                "detail": "false completion language with continuity cues",
+            }
+        )
+    if any(p in low for p in MECHANICAL_PHRASES):
+        findings.append(
+            {
+                "family": "overly_mechanical_wording",
+                "issue_code": "conversation_mechanical_wording",
+                "severity": "low",
+                "detail": "templated or mechanical assistant phrasing",
+            }
+        )
+    if expect_external_boundary and capture.get("turn_plan_domain") != "external_information":
+        findings.append(
+            {
+                "family": "external_info_contamination",
+                "issue_code": "conversation_external_domain_mismatch",
+                "severity": "medium",
+                "detail": "expected external_information domain",
+            }
+        )
+    if expect_cursor_substance and is_cursor_thread_recall_question(user):
+        if any(s in low for s in CURSOR_GRACE_SNIPPETS):
+            findings.append(
+                {
+                    "family": "cursor_recall_failure",
+                    "issue_code": "conversation_cursor_recall_thin",
+                    "severity": "medium",
+                    "detail": "cursor recall ask met with grace fallback copy",
+                }
+            )
+    if expect_tool_carryover and prior_user_turn:
+        topic_tokens = [w for w in re.split(r"\W+", prior_user_turn.lower()) if len(w) > 4][:6]
+        hits = sum(1 for w in topic_tokens if w and w in low)
+        if hits < 1 and len(text) > 0:
+            findings.append(
+                {
+                    "family": "followup_carryover_failure",
+                    "issue_code": "conversation_followup_carryover_miss",
+                    "severity": "medium",
+                    "detail": "follow-up did not carry topic from prior turn",
+                }
+            )
+    if "continue" in user.lower() and "cursor" in user.lower() and "cursor" not in low and len(text) < 80:
+        findings.append(
+            {
+                "family": "cursor_continuation_failure",
+                "issue_code": "conversation_cursor_continuation_thin",
+                "severity": "medium",
+                "detail": "cursor continuation ask with thin reply",
+            }
+        )
+    return findings
+
+
+def _env_truthy(name: str, default: bool = False) -> bool:
+    raw = (os.environ.get(name) or "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _openai_json_chat(
+    *,
+    system: str,
+    user: str,
+    model: str,
+    timeout_seconds: int = 45,
+) -> Dict[str, Any]:
+    api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
+    if not api_key:
+        raise RuntimeError("openai_missing_key")
+    payload: Dict[str, Any] = {
+        "model": model,
+        "temperature": 0.2,
+        "max_tokens": 500,
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+    }
+    req = urllib.request.Request(
+        "https://api.openai.com/v1/chat/completions",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as err:
+        raw = err.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"openai_http_{err.code}:{raw[:240]}") from err
+    except urllib.error.URLError as err:
+        raise RuntimeError(f"openai_transport:{err}") from err
+    choices = data.get("choices") if isinstance(data, dict) else None
+    if not isinstance(choices, list) or not choices:
+        raise RuntimeError("openai_no_choices")
+    message = choices[0].get("message") if isinstance(choices[0], dict) else {}
+    content = str(message.get("content") or "").strip()
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"openai_json_decode:{_clip(content, 200)}") from exc
+    if not isinstance(parsed, dict):
+        raise RuntimeError("openai_json_not_object")
+    return parsed
+
+
+def run_llm_evaluator(
+    capture: Mapping[str, Any],
+    *,
+    weak_or_failed: bool,
+    force: bool = False,
+) -> Dict[str, Any] | None:
+    """Post-hoc quality JSON; verifier-class model slot. Returns None if skipped/disabled."""
+    if (
+        not force
+        and not _env_truthy("ANDREA_CONVERSATION_EVAL_LLM", False)
+        and not weak_or_failed
+    ):
+        return None
+    if not (os.environ.get("OPENAI_API_KEY") or "").strip():
+        return None
+    model = model_for_role("verifier")
+    system = (
+        "You are a strict conversation QA judge for assistant Andrea. "
+        "Return ONLY a JSON object with keys: "
+        "satisfied_request (bool), right_domain (bool), useful (bool), too_thin (bool), "
+        "too_mechanical (bool), contaminated_memory (bool), notes (string). "
+        "Be conservative: if unsure, set booleans false except too_thin/too_mechanical."
+    )
+    user = json.dumps(
+        {
+            "user": capture.get("user_turn"),
+            "assistant_reply": capture.get("raw_reply_text"),
+            "route": capture.get("assistant_route"),
+            "reason": capture.get("assistant_reason"),
+            "scenario_id": capture.get("scenario_id"),
+            "turn_domain": capture.get("turn_plan_domain"),
+            "continuity_focus": capture.get("turn_plan_continuity_focus"),
+        },
+        ensure_ascii=False,
+    )
+    try:
+        return {"model": model, "verdict": _openai_json_chat(system=system, user=user, model=model)}
+    except RuntimeError as exc:
+        return {"error": str(exc), "model": model}
+
+
+def run_semantic_adjudicator(
+    *,
+    user_text: str,
+    scenario_id: str,
+    turn_domain: str,
+    continuity_focus: str,
+    confidence: float,
+    history_tail: Sequence[Mapping[str, str]] | None = None,
+) -> Dict[str, Any] | None:
+    """Narrow routing adjudication JSON; router-class slot."""
+    if not (os.environ.get("OPENAI_API_KEY") or "").strip():
+        return None
+    model = model_for_role("router")
+    hist = [
+        {"role": str(h.get("role") or ""), "content": _clip(h.get("content"), 400)}
+        for h in (history_tail or [])
+        if str(h.get("content") or "").strip()
+    ][-6:]
+    system = (
+        "You resolve ambiguous assistant routing for Andrea. Return ONLY JSON with keys: "
+        "next_action (one of: direct_reply, clarify, delegate), "
+        "domain_family (one of: casual_conversation, personal_agenda, attention_today, "
+        "external_information, project_status, approval_state, technical_execution, other), "
+        "continuity_family (one of: none, blocked_state, recent_outcome_history, "
+        "cursor_followup_heavy_lift), "
+        "reuse_recent_delegation (bool), "
+        "clarify_question (string, empty unless next_action is clarify), "
+        "confidence (number 0-1), rationale (string <= 200 chars)."
+    )
+    user = json.dumps(
+        {
+            "user_text": user_text,
+            "resolved_scenario_id": scenario_id,
+            "turn_domain_hint": turn_domain,
+            "continuity_focus_hint": continuity_focus,
+            "scenario_confidence": confidence,
+            "recent_turns": hist,
+        },
+        ensure_ascii=False,
+    )
+    try:
+        return {"model": model, "adjudication": _openai_json_chat(system=system, user=user, model=model)}
+    except RuntimeError as exc:
+        return {"error": str(exc), "model": model}
+
+
+def runtime_adjudication_enabled() -> bool:
+    return _env_truthy("ANDREA_RUNTIME_SEMANTIC_ADJUDICATOR", False)
+
+
+def runtime_adjudication_gate(
+    *,
+    user_text: str,
+    scenario_confidence: float,
+    scenario_id: str,
+    force_delegate: bool,
+) -> bool:
+    if not runtime_adjudication_enabled():
+        return False
+    if force_delegate:
+        return False
+    if scenario_confidence > 0.52:
+        return False
+    clean = str(user_text or "").strip()
+    if len(clean) > 280:
+        return False
+    if scenario_id not in {"statusFollowupContinue", "goalContinuationAcrossSessions", "researchSummary"}:
+        # default / fuzzy classifications only
+        if scenario_confidence > 0.35:
+            return False
+    short = clean.lower()
+    if not re.search(r"\b(that|this|it|those|these|there|one)\b", short) and "?" not in clean:
+        return False
+    return True
+
+
+@dataclass(frozen=True)
+class ConversationCaseSpec:
+    case_id: str
+    title: str
+    behavior_family: str
+    turns: tuple[str, ...]
+    chat_id: int
+    from_id: int
+    first_update_id: int
+    first_message_id: int
+    patch_openclaw_news: bool = False
+    patch_bluebubbles: bool = False
+    expect_external_domain: bool = False
+    expect_cursor_substance: bool = False
+    expect_tool_carryover: bool = False
+    # terminal_reply: wait for completed/failed (meaningful capture). routing_smoke: allow queued/running.
+    wait_policy: str = "terminal_reply"
+
+
+def _wait_statuses_for_policy(wait_policy: str) -> tuple[str, ...]:
+    pol = str(wait_policy or "terminal_reply").strip().lower()
+    if pol == "routing_smoke":
+        return (
+            TaskStatus.COMPLETED.value,
+            TaskStatus.FAILED.value,
+            TaskStatus.QUEUED.value,
+            TaskStatus.RUNNING.value,
+        )
+    return (TaskStatus.COMPLETED.value, TaskStatus.FAILED.value)
+
+
+# Representative subset for fast harness health checks (real webhook + local correlation).
+CONVERSATION_SMOKE_CASE_IDS: tuple[str, ...] = (
+    "hi_andrea",
+    "how_is_it_going",
+    "news_today",
+    "cursor_said",
+    "continue_cursor",
+    "bluebubbles_then_summarize",
+)
+
+
+def _openclaw_news_patch(server: Any) -> Any:
+    return mock.patch.object(
+        server,
+        "_create_openclaw_job",
+        return_value={
+            "ok": True,
+            "user_summary": (
+                "Live news: AI policy and markets moved; regional headlines varied by outlet."
+            ),
+        },
+    )
+
+
+def _openclaw_generic_patch(server: Any, summary: str) -> Any:
+    return mock.patch.object(
+        server,
+        "_create_openclaw_job",
+        return_value={"ok": True, "user_summary": summary},
+    )
+
+
+def _bluebubbles_patch(server: Any) -> Any:
+    return mock.patch.object(
+        server,
+        "_resolve_messaging_capability",
+        return_value={
+            "skill_key": "bluebubbles",
+            "label": "text messaging",
+            "truth": {"status": "verified_available"},
+        },
+    )
+
+
+def _resolve_skill_patch(server: Any) -> Any:
+    return mock.patch.object(
+        server,
+        "_resolve_runtime_skill",
+        return_value={"skill_key": "brave-api-search", "truth": {"status": "verified_available"}},
+    )
+
+
+def run_conversation_case(
+    harness: Any,
+    scenario: ExperienceScenario,
+    case: ConversationCaseSpec,
+) -> ExperienceCheckResult:
+    """Execute multi-turn case via real telegram webhook path; score with detectors (+ optional LLM)."""
+    started = time.time()
+    server = harness.server
+    assert server is not None
+    options: Dict[str, Any] = {}
+    if isinstance(scenario.metadata, dict):
+        options = dict(scenario.metadata.get("conversation_eval_options") or {})
+
+    progress_on = bool(options.get("progress", experience_progress_enabled()))
+    wait_statuses = _wait_statuses_for_policy(case.wait_policy)
+
+    def _log_progress(phase: str, payload: Dict[str, Any]) -> None:
+        if not progress_on:
+            return
+        base = {
+            "scenario": scenario.scenario_id,
+            "case": case.case_id,
+            **payload,
+        }
+        print(f"[conversation_harness] {phase} {json.dumps(base, ensure_ascii=False)}", flush=True)
+
+    patches: List[Any] = []
+    if case.patch_openclaw_news:
+        patches.append(_openclaw_news_patch(server))
+    if case.patch_bluebubbles:
+        patches.append(_bluebubbles_patch(server))
+        patches.append(
+            _openclaw_generic_patch(
+                server,
+                "Recent texts: Alex asked about dinner; Sam shared a link about travel.",
+            )
+        )
+    if case.expect_external_domain and not case.patch_openclaw_news:
+        patches.append(_resolve_skill_patch(server))
+
+    captures: List[Dict[str, Any]] = []
+    harness_timings: List[Dict[str, Any]] = []
+    try:
+        with ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            uid = case.first_update_id
+            mid = case.first_message_id
+            prior_user = ""
+            for turn_idx, text in enumerate(case.turns):
+                t_submit_start = time.time()
+                _log_progress(
+                    "turn_start",
+                    {
+                        "turn_index": turn_idx,
+                        "message_id": mid + turn_idx,
+                        "chat_id": case.chat_id,
+                        "wait_policy": case.wait_policy,
+                    },
+                )
+                try:
+                    harness.submit_telegram_update(
+                        {
+                            "update_id": uid + turn_idx,
+                            "message": {
+                                "text": text,
+                                "message_id": mid + turn_idx,
+                                "chat": {"id": case.chat_id},
+                                "from": {"id": case.from_id},
+                            },
+                        }
+                    )
+                except HarnessInfraError as exc:
+                    raise HarnessInfraError(
+                        exc.issue_code,
+                        str(exc),
+                        phase="submit",
+                        metadata={
+                            **exc.metadata,
+                            "turn_index": turn_idx,
+                            "scenario_id": scenario.scenario_id,
+                            "case_id": case.case_id,
+                        },
+                    ) from exc
+                submit_ms = round((time.time() - t_submit_start) * 1000.0, 2)
+                _log_progress(
+                    "submitted",
+                    {"turn_index": turn_idx, "submit_ms": submit_ms},
+                )
+
+                try:
+                    detail = harness.wait_for_telegram_task(
+                        chat_id=case.chat_id,
+                        message_id=mid + turn_idx,
+                        statuses=wait_statuses,
+                        on_progress=_log_progress,
+                    )
+                except HarnessInfraError as exc:
+                    raise HarnessInfraError(
+                        exc.issue_code,
+                        str(exc),
+                        phase=exc.phase,
+                        metadata={
+                            **exc.metadata,
+                            "turn_index": turn_idx,
+                            "scenario_id": scenario.scenario_id,
+                            "case_id": case.case_id,
+                            "submit_ms": submit_ms,
+                        },
+                    ) from exc
+
+                ht = detail.get("_harness_timing") if isinstance(detail.get("_harness_timing"), dict) else {}
+                harness_timings.append(
+                    {
+                        "turn_index": turn_idx,
+                        "submit_ms": submit_ms,
+                        **ht,
+                    }
+                )
+                detail_for_cap = dict(detail)
+                detail_for_cap.pop("_harness_timing", None)
+                task_id = str(detail_for_cap.get("task", {}).get("task_id") or "")
+                cap = build_turn_capture(
+                    harness=harness, task_id=task_id, user_text=text, detail=detail_for_cap
+                )
+                cap["harness_timing"] = harness_timings[-1]
+                captures.append(cap)
+                findings = run_deterministic_detectors(
+                    cap,
+                    prior_user_turn=prior_user if turn_idx > 0 else "",
+                    expect_tool_carryover=case.expect_tool_carryover and turn_idx > 0,
+                    expect_cursor_substance=case.expect_cursor_substance,
+                    expect_external_boundary=case.expect_external_domain,
+                )
+                cap["deterministic_findings"] = findings
+                prior_user = text
+                last_status = str(detail.get("task", {}).get("status") or "")
+                if case.wait_policy == "terminal_reply" and last_status not in (
+                    TaskStatus.COMPLETED.value,
+                    TaskStatus.FAILED.value,
+                ):
+                    return ExperienceCheckResult.from_observations(
+                        scenario,
+                        [
+                            ExperienceObservation(
+                                description="harness capture waits for terminal task status",
+                                expected="completed or failed for terminal_reply policy",
+                                observed=f"status={last_status!r} (turn {turn_idx})",
+                                passed=False,
+                                issue_code="harness_capture_incomplete",
+                                severity="high",
+                            )
+                        ],
+                        output_excerpt=text,
+                        metadata={
+                            "conversation_case_id": case.case_id,
+                            "harness_infra": True,
+                            "harness_timings": harness_timings,
+                            "captures": captures,
+                            "last_task_status": last_status,
+                        },
+                        started_at=started,
+                        completed_at=time.time(),
+                    )
+    except HarnessInfraError as exc:
+        return ExperienceCheckResult.from_observations(
+            scenario,
+            [
+                ExperienceObservation(
+                    description="conversation harness infrastructure",
+                    expected="webhook submit and local task correlation succeed",
+                    observed=str(exc),
+                    passed=False,
+                    issue_code=exc.issue_code,
+                    severity="high",
+                )
+            ],
+            output_excerpt=str(exc),
+            metadata={
+                "conversation_case_id": case.case_id,
+                "harness_infra": True,
+                "harness_phase": exc.phase,
+                "harness_infra_metadata": exc.metadata,
+                "harness_timings": harness_timings,
+                "captures": captures,
+            },
+            started_at=started,
+            completed_at=time.time(),
+        )
+
+    last_cap = captures[-1] if captures else {}
+    all_findings: List[Dict[str, Any]] = []
+    for c in captures:
+        all_findings.extend(list(c.get("deterministic_findings") or []))
+
+    high = [f for f in all_findings if f.get("severity") == "high"]
+    med = [f for f in all_findings if f.get("severity") == "medium"]
+
+    observations: List[ExperienceObservation] = [
+        ExperienceObservation(
+            description="deterministic conversation detectors",
+            expected="no high-severity conversation failures",
+            observed=_clip(json.dumps(all_findings, ensure_ascii=False), 1200),
+            passed=not bool(high),
+            issue_code="conversation_high_severity" if high else "",
+            severity="high" if high else "low",
+        )
+    ]
+    if med:
+        observations.append(
+            ExperienceObservation(
+                description="deterministic conversation warnings",
+                expected="no medium-severity findings",
+                observed=_clip(json.dumps(med, ensure_ascii=False), 800),
+                passed=True,
+                issue_code="",
+                severity="medium",
+            )
+        )
+
+    weak_or_failed = bool(high or med)
+    llm_eval = None
+    sample_n = int(options.get("sample_pass_evals") or 0)
+    sample_hit = sample_n > 0 and random.randint(1, max(1, sample_n)) == 1
+    if options.get("llm_eval") and (weak_or_failed or sample_hit):
+        llm_eval = run_llm_evaluator(
+            last_cap, weak_or_failed=weak_or_failed, force=bool(options.get("llm_eval"))
+        )
+        if isinstance(llm_eval, dict) and isinstance(llm_eval.get("verdict"), dict):
+            v = llm_eval["verdict"]
+            ok = bool(v.get("satisfied_request")) and bool(v.get("right_domain")) and bool(v.get("useful"))
+            observations.append(
+                ExperienceObservation(
+                    description="llm_evaluator aggregate",
+                    expected="useful on-domain reply",
+                    observed=_clip(json.dumps(v, ensure_ascii=False), 500),
+                    passed=ok,
+                    issue_code="conversation_llm_eval_failed" if not ok else "",
+                    severity="medium",
+                )
+            )
+
+    adjudication = None
+    if options.get("adjudicate_ambiguous") and weak_or_failed:
+        last_user = str(last_cap.get("user_turn") or "")
+        adjudication = run_semantic_adjudicator(
+            user_text=last_user,
+            scenario_id=str(last_cap.get("scenario_id") or ""),
+            turn_domain=str(last_cap.get("turn_plan_domain") or ""),
+            continuity_focus=str(last_cap.get("turn_plan_continuity_focus") or ""),
+            confidence=0.45,
+        )
+
+    excerpt = "\n\n".join(_clip(c.get("raw_reply_text"), 400) for c in captures)
+
+    meta: Dict[str, Any] = {
+        "conversation_case_id": case.case_id,
+        "behavior_family": case.behavior_family,
+        "captures": captures,
+        "failure_families": sorted({str(f.get("family")) for f in all_findings}),
+        "llm_eval": llm_eval,
+        "semantic_adjudication": adjudication,
+        "harness_timings": harness_timings,
+        "wait_policy": case.wait_policy,
+    }
+    result = ExperienceCheckResult.from_observations(
+        scenario,
+        observations,
+        output_excerpt=excerpt,
+        metadata=meta,
+        started_at=started,
+        completed_at=time.time(),
+    )
+    if med and not high:
+        result = ExperienceCheckResult(
+            check_id=result.check_id,
+            scenario_id=result.scenario_id,
+            title=result.title,
+            category=result.category,
+            passed=result.passed,
+            score=max(75, result.score),
+            summary=result.summary,
+            output_excerpt=result.output_excerpt,
+            observations=result.observations,
+            tags=result.tags,
+            suspected_files=result.suspected_files,
+            required=result.required,
+            weight=result.weight,
+            metadata=result.metadata,
+            started_at=result.started_at,
+            completed_at=result.completed_at,
+        )
+    return result
+
+
+def _make_runner(case: ConversationCaseSpec) -> Callable[[Any, ExperienceScenario], ExperienceCheckResult]:
+    def _runner(harness: Any, scenario: ExperienceScenario) -> ExperienceCheckResult:
+        return run_conversation_case(harness, scenario, case)
+
+    return _runner
+
+
+CONVERSATION_CORE_CASES: tuple[ConversationCaseSpec, ...] = (
+    ConversationCaseSpec(
+        case_id="hi_andrea",
+        title="Hi Andrea",
+        behavior_family="casual_conversation",
+        turns=("Hi Andrea",),
+        chat_id=88001,
+        from_id=99001,
+        first_update_id=18001,
+        first_message_id=28001,
+    ),
+    ConversationCaseSpec(
+        case_id="how_is_it_going",
+        title="How's it going?",
+        behavior_family="casual_conversation",
+        turns=("How's it going?",),
+        chat_id=88002,
+        from_id=99002,
+        first_update_id=18002,
+        first_message_id=28002,
+    ),
+    ConversationCaseSpec(
+        case_id="agenda_today",
+        title="What's on the agenda today?",
+        behavior_family="personal_agenda",
+        turns=("What's on the agenda today?",),
+        chat_id=88003,
+        from_id=99003,
+        first_update_id=18003,
+        first_message_id=28003,
+    ),
+    ConversationCaseSpec(
+        case_id="planned_today",
+        title="What's planned today?",
+        behavior_family="personal_agenda",
+        turns=("What's planned today?",),
+        chat_id=88004,
+        from_id=99004,
+        first_update_id=18004,
+        first_message_id=28004,
+    ),
+    ConversationCaseSpec(
+        case_id="attention_today",
+        title="Attention today",
+        behavior_family="attention_today",
+        turns=("What do I need to pay attention to today?",),
+        chat_id=88005,
+        from_id=99005,
+        first_update_id=18005,
+        first_message_id=28005,
+    ),
+    ConversationCaseSpec(
+        case_id="news_today",
+        title="News today",
+        behavior_family="external_information",
+        turns=("What's the news today?",),
+        chat_id=88006,
+        from_id=99006,
+        first_update_id=18006,
+        first_message_id=28006,
+        patch_openclaw_news=True,
+        expect_external_domain=True,
+    ),
+    ConversationCaseSpec(
+        case_id="headlines_today",
+        title="Headlines today",
+        behavior_family="external_information",
+        turns=("What are the headlines today?",),
+        chat_id=88007,
+        from_id=99007,
+        first_update_id=18007,
+        first_message_id=28007,
+        patch_openclaw_news=True,
+        expect_external_domain=True,
+    ),
+    ConversationCaseSpec(
+        case_id="working_on_now",
+        title="What are we working on right now?",
+        behavior_family="project_status",
+        turns=("What are we working on right now?",),
+        chat_id=88008,
+        from_id=99008,
+        first_update_id=18008,
+        first_message_id=28008,
+    ),
+    ConversationCaseSpec(
+        case_id="working_on_with_andrea",
+        title="What are we working on with Andrea?",
+        behavior_family="project_status",
+        turns=("What are we working on with Andrea?",),
+        chat_id=88009,
+        from_id=99009,
+        first_update_id=18009,
+        first_message_id=28009,
+    ),
+    ConversationCaseSpec(
+        case_id="approval_queue",
+        title="Approval state",
+        behavior_family="approval_state",
+        turns=("What still needs my approval?",),
+        chat_id=88010,
+        from_id=99010,
+        first_update_id=18010,
+        first_message_id=28010,
+    ),
+    ConversationCaseSpec(
+        case_id="blocked_now",
+        title="Blocked now",
+        behavior_family="blocked_state",
+        turns=("What's blocked right now?",),
+        chat_id=88011,
+        from_id=99011,
+        first_update_id=18011,
+        first_message_id=28011,
+    ),
+    ConversationCaseSpec(
+        case_id="what_happened_task",
+        title="Recent outcome",
+        behavior_family="recent_outcome_history",
+        turns=("What happened with that task?",),
+        chat_id=88012,
+        from_id=99012,
+        first_update_id=18012,
+        first_message_id=28012,
+    ),
+    ConversationCaseSpec(
+        case_id="cursor_said",
+        title="Cursor said",
+        behavior_family="cursor_recall",
+        turns=("What did Cursor say?",),
+        chat_id=88013,
+        from_id=99013,
+        first_update_id=18013,
+        first_message_id=28013,
+        expect_cursor_substance=True,
+    ),
+    ConversationCaseSpec(
+        case_id="cursor_did",
+        title="Cursor did",
+        behavior_family="cursor_recall",
+        turns=("What did Cursor do?",),
+        chat_id=88014,
+        from_id=99014,
+        first_update_id=18014,
+        first_message_id=28014,
+        expect_cursor_substance=True,
+    ),
+    ConversationCaseSpec(
+        case_id="cursor_thread",
+        title="Cursor thread",
+        behavior_family="cursor_recall",
+        turns=("What happened in the Cursor thread?",),
+        chat_id=88015,
+        from_id=99015,
+        first_update_id=18015,
+        first_message_id=28015,
+        expect_cursor_substance=True,
+    ),
+    ConversationCaseSpec(
+        case_id="continue_cursor",
+        title="Continue Cursor task",
+        behavior_family="cursor_continuation",
+        turns=("Continue that Cursor task",),
+        chat_id=88016,
+        from_id=99016,
+        first_update_id=18016,
+        first_message_id=28016,
+        wait_policy="routing_smoke",
+    ),
+    ConversationCaseSpec(
+        case_id="troubleshoot_cursor",
+        title="Troubleshoot @Cursor",
+        behavior_family="technical_execution",
+        turns=("Help me troubleshoot this issue with @Cursor",),
+        chat_id=88017,
+        from_id=99017,
+        first_update_id=18017,
+        first_message_id=28017,
+        wait_policy="routing_smoke",
+    ),
+    ConversationCaseSpec(
+        case_id="repo_wide_plan",
+        title="Repo-wide plan",
+        behavior_family="technical_execution",
+        turns=("Build a plan for fixing this repo-wide issue",),
+        chat_id=88018,
+        from_id=99018,
+        first_update_id=18018,
+        first_message_id=28018,
+        wait_policy="routing_smoke",
+    ),
+    ConversationCaseSpec(
+        case_id="bluebubbles_then_summarize",
+        title="Tool follow-up carryover",
+        behavior_family="tool_followup_carryover",
+        turns=(
+            "Can you pull text messages from BlueBubbles?",
+            "Can you summarize my texts too?",
+        ),
+        chat_id=88019,
+        from_id=99019,
+        first_update_id=18019,
+        first_message_id=28019,
+        patch_bluebubbles=True,
+        expect_tool_carryover=True,
+    ),
+    ConversationCaseSpec(
+        case_id="anaphoric_sequence",
+        title="Anaphoric follow-up carryover",
+        behavior_family="general_followup_carryover",
+        turns=("What happened there?", "What about that one?", "Continue that"),
+        chat_id=88020,
+        from_id=99020,
+        first_update_id=18020,
+        first_message_id=28020,
+    ),
+    ConversationCaseSpec(
+        case_id="agenda_then_opinion",
+        title="Agenda then opinion boundary",
+        behavior_family="opinion_reflection",
+        turns=("What's on the agenda today?", "What do you think about that?"),
+        chat_id=88021,
+        from_id=99021,
+        first_update_id=18021,
+        first_message_id=28021,
+    ),
+)
+
+
+def conversation_core_scenarios(conversation_eval_options: Mapping[str, Any] | None = None) -> List[ExperienceScenario]:
+    opts = dict(conversation_eval_options or {})
+    smoke = bool(opts.get("smoke"))
+    smoke_ids = set(CONVERSATION_SMOKE_CASE_IDS) if smoke else None
+    out: List[ExperienceScenario] = []
+    for case in CONVERSATION_CORE_CASES:
+        if smoke_ids is not None and case.case_id not in smoke_ids:
+            continue
+        out.append(
+            ExperienceScenario(
+                scenario_id=f"conversation_core::{case.case_id}",
+                title=case.title,
+                description=f"Conversation core eval · {case.behavior_family}",
+                category="conversation",
+                tags=["conversation_eval", "conversation_core", case.behavior_family],
+                suspected_files=[
+                    "services/andrea_sync/server.py",
+                    "services/andrea_sync/andrea_router.py",
+                    "services/andrea_sync/assistant_answer_composer.py",
+                    "services/andrea_sync/turn_intelligence.py",
+                ],
+                runner=_make_runner(case),
+                metadata={"conversation_eval_options": opts},
+            )
+        )
+    return out
+
+
+def cluster_failed_checks(checks: Iterable[ExperienceCheckResult]) -> List[Dict[str, Any]]:
+    buckets: Dict[str, Dict[str, Any]] = {}
+    for row in checks:
+        if row.passed:
+            continue
+        fams = row.metadata.get("failure_families") if isinstance(row.metadata, dict) else None
+        if not isinstance(fams, list) or not fams:
+            fams = ["unknown"]
+        for fam in fams:
+            key = str(fam)
+            b = buckets.setdefault(
+                key,
+                {"failure_family": key, "count": 0, "scenario_ids": []},
+            )
+            b["count"] += 1
+            if row.scenario_id not in b["scenario_ids"]:
+                b["scenario_ids"].append(row.scenario_id)
+    return sorted(buckets.values(), key=lambda x: -int(x.get("count") or 0))
+
+
+def build_cursor_fix_brief(
+    *,
+    cluster: Mapping[str, Any],
+    checks: Sequence[ExperienceCheckResult],
+    planner_model: str | None = None,
+) -> Dict[str, Any]:
+    """Bounded fix brief for human/Cursor; does not apply code changes."""
+    fam = str(cluster.get("failure_family") or "unknown")
+    related = [c for c in checks if not c.passed and fam in (c.metadata.get("failure_families") or [])]
+    prompts: List[str] = []
+    for c in related[:5]:
+        caps = c.metadata.get("captures") if isinstance(c.metadata, dict) else None
+        if isinstance(caps, list) and caps:
+            last = caps[-1] if isinstance(caps[-1], dict) else {}
+            u = last.get("user_turn")
+            r = last.get("raw_reply_text")
+            if u:
+                prompts.append(f"User: {u}\nReply: {_clip(r, 600)}")
+    codes: List[str] = []
+    for c in related:
+        codes.extend(c.issue_codes)
+    brief = {
+        "title": f"Conversation quality fix · {fam}",
+        "failure_family": fam,
+        "deterministic_issue_codes": sorted({str(x) for x in codes}),
+        "failing_prompts": prompts,
+        "likely_files": [
+            "services/andrea_sync/server.py",
+            "services/andrea_sync/andrea_router.py",
+            "services/andrea_sync/assistant_answer_composer.py",
+            "services/andrea_sync/user_surface.py",
+            "services/andrea_sync/turn_intelligence.py",
+        ],
+        "scope_instruction": "Modify 1-3 files; avoid runtime env toggles unless necessary.",
+        "acceptance_criteria": [
+            "conversation_core suite passes deterministic detectors for this family",
+            "no new metadata or echo regressions on casual + status turns",
+        ],
+        "baseline_vs_candidate": {
+            "note": "Re-run scripts/andrea_experience_cycle.py with --suite conversation_core "
+            "and compare verification_report.checks metadata before/after change.",
+            "compare_helper": "services/andrea_sync/repair_executor.py::compare_verification_reports",
+        },
+        "planner_model": planner_model or model_for_role("planner"),
+    }
+    return brief
+
+
+def attach_conversation_eval_report(
+    run_metadata: Dict[str, Any],
+    checks: Sequence[ExperienceCheckResult],
+    *,
+    prepare_fix_brief: bool,
+) -> None:
+    clusters = cluster_failed_checks(checks)
+    run_metadata["conversation_failure_clusters"] = clusters
+    run_metadata["failure_family_counts"] = {
+        str(c.get("failure_family")): int(c.get("count") or 0) for c in clusters
+    }
+    if prepare_fix_brief and clusters:
+        briefs = []
+        for c in clusters[:8]:
+            if str(c.get("failure_family") or "") in {
+                "generic_fallback_leak",
+                "question_echo",
+                "metadata_surface_leak",
+                "thin_summary",
+                "cursor_recall_failure",
+                "cursor_continuation_failure",
+                "followup_carryover_failure",
+                "wrong_context_boundary",
+                "overly_mechanical_wording",
+            }:
+                briefs.append(build_cursor_fix_brief(cluster=c, checks=checks))
+        run_metadata["cursor_fix_briefs"] = briefs
+    else:
+        run_metadata["cursor_fix_briefs"] = []
+
+
+__all__ = [
+    "FAILURE_FAMILIES",
+    "CONVERSATION_SMOKE_CASE_IDS",
+    "attach_conversation_eval_report",
+    "build_cursor_fix_brief",
+    "build_turn_capture",
+    "cluster_failed_checks",
+    "conversation_core_scenarios",
+    "runtime_adjudication_enabled",
+    "runtime_adjudication_gate",
+    "run_conversation_case",
+    "run_deterministic_detectors",
+    "run_llm_evaluator",
+    "run_semantic_adjudicator",
+    "CONVERSATION_CORE_CASES",
+]

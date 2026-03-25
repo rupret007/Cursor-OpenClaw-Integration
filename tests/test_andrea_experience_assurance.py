@@ -12,7 +12,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from services.andrea_sync.experience_assurance import run_experience_assurance  # noqa: E402
+from services.andrea_sync.experience_assurance import (  # noqa: E402
+    _find_telegram_task_id_for_message,
+    ExperienceHarness,
+    run_experience_assurance,
+)
 from services.andrea_sync.experience_types import (  # noqa: E402
     ExperienceCheckResult,
     ExperienceObservation,
@@ -24,6 +28,32 @@ from services.andrea_sync.store import (  # noqa: E402
     get_latest_experience_run,
     migrate,
 )
+
+
+class ExperienceHarnessCorrelationTests(unittest.TestCase):
+    def test_local_correlation_finds_task_without_http_fanout(self) -> None:
+        with ExperienceHarness() as h:
+            server = h.server
+            assert server is not None
+            h.submit_telegram_update(
+                {
+                    "update_id": 501,
+                    "message": {
+                        "text": "Is this OpenClaw?",
+                        "message_id": 901,
+                        "chat": {"id": 601},
+                        "from": {"id": 801},
+                    },
+                }
+            )
+
+            def read(c: object) -> str:
+                return _find_telegram_task_id_for_message(
+                    c, chat_id=601, message_id=901, scan_limit=50
+                )
+
+            tid = server.with_lock(read)
+            self.assertTrue(str(tid).startswith("tsk_"))
 
 
 class AndreaExperienceAssuranceTests(unittest.TestCase):

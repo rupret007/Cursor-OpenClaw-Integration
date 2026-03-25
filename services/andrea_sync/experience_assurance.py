@@ -12,7 +12,7 @@ import urllib.request
 from contextlib import ExitStack
 from http.server import ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Sequence
+from typing import Any, Callable, Dict, Iterable, List, Sequence
 from unittest import mock
 
 from .bus import handle_command
@@ -32,7 +32,11 @@ from .store import (
     create_task,
     ensure_system_task,
     get_execution_plan,
+    get_task_channel,
     link_task_principal,
+    list_recent_telegram_task_ids,
+    list_telegram_task_ids_for_chat,
+    load_events_for_task,
     migrate,
     save_experience_run,
 )
@@ -151,10 +155,107 @@ def _obs(
     )
 
 
+class HarnessInfraError(RuntimeError):
+    """Infrastructure failure in the experience harness (transport, correlation, terminal wait)."""
+
+    def __init__(
+        self,
+        issue_code: str,
+        message: str,
+        *,
+        phase: str = "",
+        metadata: Dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.issue_code = str(issue_code or "").strip() or "harness_infra"
+        self.phase = str(phase or "").strip()
+        self.metadata: Dict[str, Any] = dict(metadata or {})
+
+
+def _float_env(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def experience_http_timeout_seconds() -> float:
+    return max(1.0, _float_env("ANDREA_EXPERIENCE_HTTP_TIMEOUT_SECONDS", 30.0))
+
+
+def experience_task_discovery_timeout_seconds() -> float:
+    return max(0.5, _float_env("ANDREA_EXPERIENCE_TASK_DISCOVERY_TIMEOUT_SECONDS", 30.0))
+
+
+def experience_task_terminal_timeout_seconds() -> float:
+    return max(0.5, _float_env("ANDREA_EXPERIENCE_TASK_TERMINAL_TIMEOUT_SECONDS", 120.0))
+
+
+def experience_poll_interval_seconds() -> float:
+    return max(0.005, _float_env("ANDREA_EXPERIENCE_POLL_INTERVAL_SECONDS", 0.05))
+
+
+def experience_progress_enabled() -> bool:
+    raw = os.environ.get("ANDREA_EXPERIENCE_PROGRESS_ENABLED", "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def _build_task_detail_dict(conn: Any, task_id: str) -> Dict[str, Any]:
+    ch = get_task_channel(conn, task_id) or "telegram"
+    proj = project_task_dict(conn, task_id, ch)
+    events = [
+        {"seq": s, "ts": t, "event_type": et, "payload": p}
+        for s, t, et, p in load_events_for_task(conn, task_id)
+    ]
+    return {"task": proj, "events": events}
+
+
+def _telegram_projection_matches_message(
+    proj: Dict[str, Any],
+    *,
+    chat_id: int,
+    message_id: int,
+) -> bool:
+    meta = proj.get("meta") if isinstance(proj.get("meta"), dict) else {}
+    tg = meta.get("telegram") if isinstance(meta.get("telegram"), dict) else {}
+    return int(tg.get("message_id") or 0) == int(message_id) and int(tg.get("chat_id") or 0) == int(chat_id)
+
+
+def _find_telegram_task_id_for_message(
+    conn: Any,
+    *,
+    chat_id: int,
+    message_id: int,
+    scan_limit: int = 120,
+) -> str:
+    """Resolve task_id by projected telegram meta (same signal as HTTP task detail)."""
+    limit = max(1, min(int(scan_limit), 200))
+    candidates = list_telegram_task_ids_for_chat(conn, chat_id, limit=limit)
+    seen: set[str] = set()
+    for tid in candidates:
+        seen.add(tid)
+        ch = get_task_channel(conn, tid) or "telegram"
+        proj = project_task_dict(conn, tid, ch)
+        if _telegram_projection_matches_message(proj, chat_id=chat_id, message_id=message_id):
+            return tid
+    for tid in list_recent_telegram_task_ids(conn, limit=limit):
+        if tid in seen:
+            continue
+        ch = get_task_channel(conn, tid) or "telegram"
+        proj = project_task_dict(conn, tid, ch)
+        if _telegram_projection_matches_message(proj, chat_id=chat_id, message_id=message_id):
+            return tid
+    return ""
+
+
 class ExperienceHarness:
     """Temporary in-process lockstep server for deterministic experience checks."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, preserve_openai_for_eval: bool = False) -> None:
+        self._preserve_openai_for_eval = bool(preserve_openai_for_eval)
         self._stack = ExitStack()
         self._db_file = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         self.db_path = Path(self._db_file.name)
@@ -166,10 +267,22 @@ class ExperienceHarness:
         self._leaked_env_backup: Dict[str, str] = {}
 
     def __enter__(self) -> "ExperienceHarness":
+        # Preserve operator overrides for harness timeouts before stripping ANDREA_* keys.
+        _exp_harness_env_keys = (
+            "ANDREA_EXPERIENCE_HTTP_TIMEOUT_SECONDS",
+            "ANDREA_EXPERIENCE_TASK_DISCOVERY_TIMEOUT_SECONDS",
+            "ANDREA_EXPERIENCE_TASK_TERMINAL_TIMEOUT_SECONDS",
+            "ANDREA_EXPERIENCE_POLL_INTERVAL_SECONDS",
+            "ANDREA_EXPERIENCE_PROGRESS_ENABLED",
+        )
+        _exp_harness_saved = {k: os.environ.get(k) for k in _exp_harness_env_keys}
+
         # Strip leaked process env from other unittest modules; patch.dict(..., clear=False)
         # cannot delete keys, so leftovers would still affect SyncServer.
         self._leaked_env_backup.clear()
         for key in list(os.environ.keys()):
+            if self._preserve_openai_for_eval and key.startswith("OPENAI_"):
+                continue
             if (
                 key.startswith("ANDREA_")
                 or key.startswith("OPENAI_")
@@ -200,8 +313,6 @@ class ExperienceHarness:
             "TELEGRAM_BOT_TOKEN": "",
             "TELEGRAM_CHAT_ID": "",
             "ANDREA_SYNC_PUBLIC_BASE": "",
-            "OPENAI_API_ENABLED": "0",
-            "OPENAI_API_KEY": "",
             # Unittest modules mutate process env; patch.dict(..., clear=False) would otherwise
             # inherit leaked ANDREA_* keys and make experience runs order/flaky across discovery.
             "ANDREA_SYNC_COLLABORATION_LAYER": "1",
@@ -219,6 +330,23 @@ class ExperienceHarness:
             "ANDREA_QUIET_FOLLOWTHROUGH_AUTO_EXEC": "0",
             "ANDREA_FOLLOWTHROUGH_COLLAB_ON_REPAIR": "0",
         }
+        _exp_defaults = {
+            "ANDREA_EXPERIENCE_HTTP_TIMEOUT_SECONDS": "20",
+            "ANDREA_EXPERIENCE_TASK_DISCOVERY_TIMEOUT_SECONDS": "15",
+            "ANDREA_EXPERIENCE_TASK_TERMINAL_TIMEOUT_SECONDS": "90",
+            "ANDREA_EXPERIENCE_POLL_INTERVAL_SECONDS": "0.05",
+            "ANDREA_EXPERIENCE_PROGRESS_ENABLED": "1",
+        }
+        for key, default in _exp_defaults.items():
+            saved = _exp_harness_saved.get(key)
+            env_patch[key] = (
+                str(saved).strip()
+                if saved is not None and str(saved).strip() != ""
+                else default
+            )
+        if not self._preserve_openai_for_eval:
+            env_patch["OPENAI_API_ENABLED"] = "0"
+            env_patch["OPENAI_API_KEY"] = ""
         self._stack.enter_context(mock.patch.dict(os.environ, env_patch, clear=False))
         self.server = SyncServer()
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.server))
@@ -258,6 +386,7 @@ class ExperienceHarness:
         body: Dict[str, Any] | None = None,
         headers: Dict[str, str] | None = None,
     ) -> Dict[str, Any]:
+        timeout = experience_http_timeout_seconds()
         payload = json.dumps(body or {}).encode("utf-8") if body is not None else None
         req = urllib.request.Request(
             self.url(path),
@@ -265,11 +394,20 @@ class ExperienceHarness:
             method=method,
             headers=headers or {},
         )
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            raw = resp.read().decode("utf-8")
-            return json.loads(raw) if raw.strip() else {}
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read().decode("utf-8")
+                return json.loads(raw) if raw.strip() else {}
+        except Exception as exc:  # noqa: BLE001
+            raise HarnessInfraError(
+                "harness_transport_timeout",
+                f"HTTP {method} {path} failed: {exc}",
+                phase="http",
+                metadata={"path": path, "exception_type": type(exc).__name__},
+            ) from exc
 
     def submit_telegram_update(self, update: Dict[str, Any]) -> None:
+        timeout = experience_http_timeout_seconds()
         body = json.dumps(update).encode("utf-8")
         req = urllib.request.Request(
             self.url("/v1/telegram/webhook"),
@@ -280,9 +418,24 @@ class ExperienceHarness:
                 "X-Telegram-Bot-Api-Secret-Token": "experience-secret",
             },
         )
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            if resp.status != 200:
-                raise RuntimeError(f"telegram webhook returned {resp.status}")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                if resp.status != 200:
+                    raise HarnessInfraError(
+                        "harness_transport_timeout",
+                        f"telegram webhook returned HTTP {resp.status}",
+                        phase="submit",
+                        metadata={"status": resp.status},
+                    )
+        except HarnessInfraError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise HarnessInfraError(
+                "harness_transport_timeout",
+                f"telegram webhook submit failed: {exc}",
+                phase="submit",
+                metadata={"exception_type": type(exc).__name__},
+            ) from exc
 
     def list_tasks(self, *, limit: int = 30) -> List[Dict[str, Any]]:
         payload = self.json_request("GET", f"/v1/tasks?limit={int(limit)}")
@@ -295,28 +448,117 @@ class ExperienceHarness:
     def wait_for_telegram_task(
         self,
         *,
+        chat_id: int,
         message_id: int,
         statuses: Iterable[str],
-        attempts: int = 40,
-        delay_seconds: float = 0.05,
+        discovery_timeout_seconds: float | None = None,
+        terminal_timeout_seconds: float | None = None,
+        poll_seconds: float | None = None,
+        on_progress: Callable[[str, Dict[str, Any]], None] | None = None,
     ) -> Dict[str, Any]:
+        """Correlate via local DB projection under the server lock (avoids HTTP task fanout)."""
+        server = self.server
+        assert server is not None
         desired = {str(item) for item in statuses}
+        disc_deadline = time.time() + float(
+            discovery_timeout_seconds
+            if discovery_timeout_seconds is not None
+            else experience_task_discovery_timeout_seconds()
+        )
+        term_budget = float(
+            terminal_timeout_seconds
+            if terminal_timeout_seconds is not None
+            else experience_task_terminal_timeout_seconds()
+        )
+        poll = float(
+            poll_seconds if poll_seconds is not None else experience_poll_interval_seconds()
+        )
+        t0 = time.time()
+        task_id = ""
+        last_status = ""
+        discovery_ms = 0.0
+        terminal_ms = 0.0
+
+        def _emit(phase: str, extra: Dict[str, Any] | None = None) -> None:
+            if on_progress is None:
+                return
+            payload = {"chat_id": chat_id, "message_id": message_id, **(extra or {})}
+            on_progress(phase, payload)
+
+        while time.time() < disc_deadline:
+            def _find(c: Any) -> str:
+                return _find_telegram_task_id_for_message(
+                    c, chat_id=int(chat_id), message_id=int(message_id)
+                )
+
+            task_id = str(server.with_lock(_find) or "")
+            if task_id:
+                discovery_ms = (time.time() - t0) * 1000.0
+                _emit(
+                    "task_discovered",
+                    {"task_id": task_id, "discovery_ms": round(discovery_ms, 2)},
+                )
+                break
+            time.sleep(poll)
+
+        if not task_id:
+            raise HarnessInfraError(
+                "harness_task_not_created",
+                f"No telegram task correlated for chat_id={chat_id} message_id={message_id} "
+                f"within {experience_task_discovery_timeout_seconds()}s",
+                phase="discovery",
+                metadata={
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "discovery_ms": round((time.time() - t0) * 1000.0, 2),
+                },
+            )
+
+        term_started = time.time()
+        term_deadline = term_started + term_budget
         detail: Dict[str, Any] = {}
-        for _ in range(max(1, int(attempts))):
-            tasks = [row for row in self.list_tasks(limit=40) if str(row.get("channel") or "") == "telegram"]
-            for task in tasks:
-                candidate = self.load_task_detail(str(task.get("task_id") or ""))
-                meta = candidate.get("task", {}).get("meta", {})
-                telegram = meta.get("telegram") if isinstance(meta.get("telegram"), dict) else {}
-                if int(telegram.get("message_id") or 0) == int(message_id):
-                    detail = candidate
-                    break
-            if detail and str(detail.get("task", {}).get("status") or "") in desired:
+        while time.time() < term_deadline:
+
+            def _read(c: Any) -> Dict[str, Any]:
+                return _build_task_detail_dict(c, task_id)
+
+            detail = server.with_lock(_read)
+            last_status = str(detail.get("task", {}).get("status") or "")
+            if last_status in desired:
+                terminal_ms = (time.time() - term_started) * 1000.0
+                _emit(
+                    "terminal_status",
+                    {
+                        "task_id": task_id,
+                        "status": last_status,
+                        "terminal_wait_ms": round(terminal_ms, 2),
+                    },
+                )
+                detail.setdefault("_harness_timing", {})
+                if isinstance(detail["_harness_timing"], dict):
+                    detail["_harness_timing"].update(
+                        {
+                            "discovery_ms": round(discovery_ms, 2),
+                            "terminal_wait_ms": round(terminal_ms, 2),
+                            "total_wait_ms": round((time.time() - t0) * 1000.0, 2),
+                        }
+                    )
                 return detail
-            time.sleep(max(0.01, float(delay_seconds)))
-        if detail:
-            return detail
-        raise RuntimeError(f"Unable to find telegram task for message_id={message_id}")
+            time.sleep(poll)
+
+        raise HarnessInfraError(
+            "harness_task_stuck",
+            f"Task {task_id} did not reach a terminal status in {desired!r}; last_status={last_status!r}",
+            phase="terminal_wait",
+            metadata={
+                "task_id": task_id,
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "last_status": last_status,
+                "desired_statuses": sorted(desired),
+                "terminal_wait_ms": round((time.time() - term_started) * 1000.0, 2),
+            },
+        )
 
     def publish_capability_snapshot(self, rows: List[Dict[str, Any]], *, summary: Dict[str, Any]) -> Dict[str, Any]:
         return self.json_request(
@@ -406,6 +648,7 @@ def _queue_telegram_task(
         }
     )
     return harness.wait_for_telegram_task(
+        chat_id=update_id + 100,
         message_id=message_id,
         statuses=(TaskStatus.QUEUED.value, TaskStatus.RUNNING.value),
     )
@@ -732,6 +975,7 @@ def _run_direct_meta_scenario(
         }
     )
     detail = harness.wait_for_telegram_task(
+        chat_id=update_id + 100,
         message_id=message_id,
         statuses=(TaskStatus.COMPLETED.value,),
     )
@@ -873,6 +1117,7 @@ def _scenario_direct_followups_avoid_history_leak(
             }
         )
         return harness.wait_for_telegram_task(
+            chat_id=1901,
             message_id=message_id,
             statuses=(TaskStatus.COMPLETED.value,),
         )
@@ -1032,6 +1277,7 @@ def _scenario_recent_text_messages_via_bluebubbles(
             }
         )
         detail = harness.wait_for_telegram_task(
+            chat_id=1902,
             message_id=909,
             statuses=(TaskStatus.COMPLETED.value,),
         )
@@ -1128,6 +1374,7 @@ def _scenario_text_messages_from_today_via_bluebubbles(
             }
         )
         detail = harness.wait_for_telegram_task(
+            chat_id=1912,
             message_id=919,
             statuses=(TaskStatus.COMPLETED.value,),
         )
@@ -1219,6 +1466,7 @@ def _scenario_recent_text_shorthand_followup_same_thread(
             }
         )
         first = harness.wait_for_telegram_task(
+            chat_id=1922,
             message_id=929,
             statuses=(TaskStatus.COMPLETED.value,),
         )
@@ -1234,6 +1482,7 @@ def _scenario_recent_text_shorthand_followup_same_thread(
             }
         )
         second = harness.wait_for_telegram_task(
+            chat_id=1922,
             message_id=930,
             statuses=(TaskStatus.COMPLETED.value,),
         )
@@ -1327,6 +1576,7 @@ def _scenario_structured_lookup_rejects_provider_leak_summary(
             }
         )
         detail = harness.wait_for_telegram_task(
+            chat_id=1913,
             message_id=920,
             statuses=(TaskStatus.COMPLETED.value,),
         )
@@ -1378,6 +1628,7 @@ def _scenario_cursor_primary(harness: ExperienceHarness, scenario: ExperienceSce
         }
     )
     detail = harness.wait_for_telegram_task(
+        chat_id=604,
         message_id=904,
         statuses=(TaskStatus.QUEUED.value, TaskStatus.RUNNING.value),
     )
@@ -3124,15 +3375,57 @@ def run_experience_assurance(
     cursor_execute: bool = False,
     source_task_id: str = "",
     write_report: bool = True,
+    suite: str | None = None,
+    conversation_eval_options: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     ensure_system_task(conn)
-    selected = list(scenarios or default_experience_scenarios())
+    selected: List[ExperienceScenario]
+    if str(suite or "").strip().lower() == "conversation_core":
+        from .conversation_eval import conversation_core_scenarios
+
+        selected = conversation_core_scenarios(conversation_eval_options or {})
+    else:
+        selected = list(scenarios or default_experience_scenarios())
     started = time.time()
     checks: List[ExperienceCheckResult] = []
-    with ExperienceHarness() as harness:
+    preserve_openai = bool((conversation_eval_options or {}).get("llm_eval")) or bool(
+        (conversation_eval_options or {}).get("adjudicate_ambiguous")
+    )
+    fail_fast = bool((conversation_eval_options or {}).get("fail_fast"))
+    with ExperienceHarness(preserve_openai_for_eval=preserve_openai) as harness:
         for scenario in selected:
             try:
-                checks.append(scenario.runner(harness, scenario))
+                chk = scenario.runner(harness, scenario)
+                checks.append(chk)
+                if fail_fast and not chk.passed:
+                    break
+            except HarnessInfraError as exc:
+                checks.append(
+                    ExperienceCheckResult.from_observations(
+                        scenario,
+                        [
+                            _obs(
+                                "experience harness infrastructure",
+                                expected="no infra failure (transport, task correlation, terminal wait)",
+                                observed=f"{exc.issue_code}: {exc}",
+                                passed=False,
+                                issue_code=exc.issue_code,
+                                severity="high",
+                            )
+                        ],
+                        output_excerpt=_clip(str(exc)),
+                        metadata={
+                            "exception_type": "HarnessInfraError",
+                            "harness_infra": True,
+                            "harness_phase": exc.phase,
+                            **exc.metadata,
+                        },
+                        started_at=started,
+                        completed_at=time.time(),
+                    )
+                )
+                if fail_fast:
+                    break
             except Exception as exc:  # noqa: BLE001
                 checks.append(
                     ExperienceCheckResult.from_observations(
@@ -3153,17 +3446,32 @@ def run_experience_assurance(
                         completed_at=time.time(),
                     )
                 )
+                if fail_fast:
+                    break
+    run_metadata: Dict[str, Any] = {
+        "repo_path": str(repo_path),
+        "repair_on_fail": bool(repair_on_fail),
+        "scenario_count": len(selected),
+        "scenario_executed": len(checks),
+        "suite": str(suite or "") or "default",
+    }
+    if conversation_eval_options:
+        run_metadata["conversation_eval_options"] = dict(conversation_eval_options)
+    if str(suite or "").strip().lower() == "conversation_core":
+        from .conversation_eval import attach_conversation_eval_report
+
+        attach_conversation_eval_report(
+            run_metadata,
+            checks,
+            prepare_fix_brief=bool((conversation_eval_options or {}).get("prepare_fix_brief")),
+        )
     run = ExperienceRun(
         run_id=new_experience_run_id(),
         actor=str(actor or "script"),
         status="completed",
         checks=checks,
         summary="",
-        metadata={
-            "repo_path": str(repo_path),
-            "repair_on_fail": bool(repair_on_fail),
-            "scenario_count": len(selected),
-        },
+        metadata=run_metadata,
         started_at=started,
         completed_at=time.time(),
     )

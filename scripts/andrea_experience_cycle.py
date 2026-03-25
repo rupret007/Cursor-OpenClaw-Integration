@@ -32,7 +32,58 @@ def main() -> int:
     parser.add_argument("--cursor-execute", action="store_true", default=False)
     parser.add_argument("--no-save", action="store_true", default=False)
     parser.add_argument("--no-write-report", action="store_true", default=False)
+    parser.add_argument(
+        "--suite",
+        default="",
+        help="Experience suite id (e.g. conversation_core for conversational self-eval).",
+    )
+    parser.add_argument(
+        "--llm-eval",
+        action="store_true",
+        default=False,
+        help="When running conversation_core, call verifier-slot LLM on weak/failed turns (needs OPENAI_API_KEY).",
+    )
+    parser.add_argument(
+        "--adjudicate-ambiguous",
+        action="store_true",
+        default=False,
+        help="When running conversation_core, run semantic adjudicator on ambiguous/weak cases.",
+    )
+    parser.add_argument(
+        "--prepare-fix-brief",
+        action="store_true",
+        default=False,
+        help="When running conversation_core, attach gated Cursor fix briefs to run metadata.",
+    )
+    parser.add_argument(
+        "--sample-pass-evals",
+        type=int,
+        default=0,
+        help="When --llm-eval is set, 1/N probability to evaluate passing cases (for calibration).",
+    )
+    parser.add_argument(
+        "--smoke",
+        action="store_true",
+        default=False,
+        help="With --suite conversation_core, run a small smoke subset (fast harness health check).",
+    )
+    parser.add_argument(
+        "--fail-fast",
+        action="store_true",
+        default=False,
+        help="With --suite conversation_core, stop after the first failed scenario.",
+    )
     args = parser.parse_args()
+
+    suite = str(args.suite or "").strip() or None
+    conversation_eval_options = {
+        "llm_eval": bool(args.llm_eval),
+        "adjudicate_ambiguous": bool(args.adjudicate_ambiguous),
+        "prepare_fix_brief": bool(args.prepare_fix_brief),
+        "sample_pass_evals": int(args.sample_pass_evals or 0),
+        "smoke": bool(args.smoke),
+        "fail_fast": bool(args.fail_fast),
+    }
 
     conn = connect(Path(args.db).expanduser())
     try:
@@ -46,6 +97,8 @@ def main() -> int:
             cursor_execute=bool(args.cursor_execute),
             source_task_id=str(args.source_task_id or ""),
             write_report=not bool(args.no_write_report),
+            suite=suite,
+            conversation_eval_options=conversation_eval_options if suite == "conversation_core" else None,
         )
         print(json.dumps(payload, indent=2, ensure_ascii=False))
         return 0 if payload.get("ok") and payload.get("verification_report", {}).get("passed") else 1

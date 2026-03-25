@@ -187,6 +187,24 @@ class ConversationEvalDetectorTests(unittest.TestCase):
         codes = {h["issue_code"] for h in hits}
         self.assertIn("conversation_cursor_recall_approval_domain_contamination", codes)
 
+    def test_detects_stateful_domain_hijack_outside_status_domains(self) -> None:
+        cap = {
+            "raw_reply_text": "I’m not finding a recent clean Cursor result to recap from this thread.",
+            "user_turn": "What's on the agenda today?",
+            "turn_plan_domain": "personal_agenda",
+            "turn_plan_continuity_focus": "none",
+            "assistant_reason": "semantic_state_cursor_continuity_recall",
+            "assistant_semantic_selection": {"source": "cursor_continuity_recall"},
+            "expected_answer_family": "general_status",
+            "expected_answer_sources": ["goal_status", "goal_continuity"],
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap)
+        codes = {h["issue_code"] for h in hits}
+        self.assertIn("conversation_stateful_domain_hijack", codes)
+        self.assertIn("conversation_semantic_source_family_mismatch", codes)
+
     def test_clean_cursor_recall_fallback_not_flagged_as_approval_contamination(self) -> None:
         cap = {
             "raw_reply_text": "I'm not finding a recent clean Cursor result to recap from this thread.",

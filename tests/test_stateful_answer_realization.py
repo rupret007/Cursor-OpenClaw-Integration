@@ -125,3 +125,86 @@ class StatefulAnswerRealizationTests(unittest.TestCase):
             "I’m not finding a recent clean Cursor result to recap from this thread.",
         )
 
+    @mock.patch("services.andrea_sync.stateful_answer_realization._bundle_evidence_for_source")
+    @mock.patch("services.andrea_sync.stateful_answer_realization._openai_json_chat")
+    def test_rejects_fallback_shaped_realization_when_evidence_is_strong(
+        self,
+        mock_chat: mock.MagicMock,
+        mock_bundle: mock.MagicMock,
+    ) -> None:
+        mock_bundle.return_value = [
+            "Latest useful result: Cursor completed rollout and smoke checks cleanly.",
+            "Recent receipt (outcome): Rollout completed with zero regressions in staging.",
+            "Phase summary: Final verification and release notes published.",
+        ]
+        mock_chat.return_value = {
+            "reply": "I’m not finding a recent clean Cursor result to recap from this thread.",
+            "grounded": True,
+            "used_fallback": False,
+        }
+        with mock.patch.dict(
+            os.environ,
+            {
+                "ANDREA_STATEFUL_REALIZATION_ENABLED": "1",
+                "OPENAI_API_ENABLED": "1",
+                "OPENAI_API_KEY": "x",
+            },
+            clear=False,
+        ):
+            out = maybe_realize_stateful_reply(
+                conn=object(),
+                task_id="t1",
+                source="cursor_continuity_recall",
+                deterministic_reply="Cursor recap: rollout and smoke checks completed.",
+                fallback_reply="I’m not finding a recent clean Cursor result to recap from this thread.",
+                user_text="What did Cursor say?",
+                turn_plan=self._turn_plan(),
+            )
+        self.assertIsNone(out)
+
+    @mock.patch("services.andrea_sync.stateful_answer_realization._bundle_evidence_for_source")
+    @mock.patch("services.andrea_sync.stateful_answer_realization._openai_json_chat")
+    def test_approval_realization_must_keep_approval_anchor(
+        self,
+        mock_chat: mock.MagicMock,
+        mock_bundle: mock.MagicMock,
+    ) -> None:
+        mock_bundle.return_value = [
+            "Pending approvals for tracked task `t1`: 2.",
+            "Top pending approval: `appr_1` - confirm deploy window.",
+        ]
+        mock_chat.return_value = {
+            "reply": "Two items are still pending right now.",
+            "grounded": True,
+            "used_fallback": False,
+        }
+        approval_turn_plan = TurnPlan(
+            domain="approval_state",
+            context_boundary="approval_and_plan_state",
+            prefer_state_reply=True,
+            force_delegate=False,
+            should_repair_generic=True,
+            allow_goal_continuity_repair=True,
+            inject_durable_memory=True,
+            continuity_focus="none",
+        )
+        with mock.patch.dict(
+            os.environ,
+            {
+                "ANDREA_STATEFUL_REALIZATION_ENABLED": "1",
+                "OPENAI_API_ENABLED": "1",
+                "OPENAI_API_KEY": "x",
+            },
+            clear=False,
+        ):
+            out = maybe_realize_stateful_reply(
+                conn=object(),
+                task_id="t1",
+                source="goal_status",
+                deterministic_reply="Pending approvals for tracked task `t1`: 2.",
+                fallback_reply="I'm not seeing any approval requests waiting on you right now.",
+                user_text="What still needs approval?",
+                turn_plan=approval_turn_plan,
+            )
+        self.assertIsNone(out)
+

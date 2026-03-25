@@ -15,7 +15,7 @@ from .assistant_answer_composer import (
     is_continuation_fallback_family_text,
     is_strict_cursor_domain_recall_question,
 )
-from .turn_intelligence import TurnPlan
+from .turn_intelligence import TurnPlan, resolve_answer_family_profile
 from .user_surface import sanitize_user_surface_text
 
 _STOP_WORDS = frozenset(
@@ -96,6 +96,35 @@ def _evidence_anchor_overlap(reply: str, evidence_lines: Sequence[str]) -> bool:
     if not anchor:
         return False
     return bool(r & anchor)
+
+
+def _looks_fallback_shaped_reply(text: str) -> bool:
+    low = str(text or "").strip().lower()
+    if not low:
+        return True
+    patterns = (
+        "not finding a recent clean cursor result",
+        "not finding a recent cursor workstream",
+        "i do not see active tracked work right now",
+        "i'm not seeing any approval requests waiting on you right now",
+        "i’m not seeing any approval requests waiting on you right now",
+        "status / follow-up reply",
+    )
+    return any(p in low for p in patterns)
+
+
+def _evidence_strength(evidence_lines: Sequence[str]) -> int:
+    score = 0
+    for ln in evidence_lines:
+        txt = str(ln or "").strip()
+        if not txt:
+            continue
+        score += 1
+        if ":" in txt:
+            score += 1
+        if len(txt) > 48:
+            score += 1
+    return score
 
 
 def _openai_json_chat(*, system: str, user: str, model: str, timeout_seconds: int) -> dict[str, Any]:
@@ -223,6 +252,7 @@ def maybe_realize_stateful_reply(
         continuity_focus=str(turn_plan.continuity_focus or ""),
         evidence_lines=tuple(evidence),
     )
+    family = resolve_answer_family_profile(inp.user_text, turn_plan)
     if not inp.deterministic_reply or not inp.evidence_lines:
         return None
     model = (os.environ.get("ANDREA_DIRECT_OPENAI_MODEL") or "gpt-4o-mini").strip()
@@ -246,6 +276,7 @@ def maybe_realize_stateful_reply(
             "turn_domain": inp.turn_domain,
             "continuity_focus": inp.continuity_focus,
             "candidate_source": inp.source,
+            "answer_family": family.family,
             "deterministic_reply": inp.deterministic_reply,
             "fallback_reply": inp.fallback_reply,
             "evidence_lines": list(inp.evidence_lines),
@@ -275,5 +306,18 @@ def maybe_realize_stateful_reply(
         return None
     if not _evidence_anchor_overlap(safe, inp.evidence_lines):
         return None
+    ev_strength = _evidence_strength(inp.evidence_lines)
+    if ev_strength >= 5 and _looks_fallback_shaped_reply(safe):
+        return None
+    low_safe = safe.lower()
+    low_ev = " ".join(str(x).lower() for x in inp.evidence_lines)
+    if family.family == "approval_state":
+        if "approval" in low_ev and "approval" not in low_safe:
+            return None
+    if family.family == "blocked_state":
+        if ("blocked" in low_ev or "blocker" in low_ev) and (
+            "blocked" not in low_safe and "blocker" not in low_safe and "blocking" not in low_safe
+        ):
+            return None
     return safe
 

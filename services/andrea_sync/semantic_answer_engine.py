@@ -11,12 +11,11 @@ from .assistant_answer_composer import (
     build_blocked_state_reply_from_state,
     build_recent_outcome_history_reply_from_state,
     cursor_followup_context_reply_with_fallback,
-    is_strict_cursor_domain_recall_question,
 )
 from .stateful_answer_realization import maybe_realize_stateful_reply
 from .semantic_continuity import user_message_suggests_anaphoric_cursor_continue
 from .goal_runtime import build_goal_continuity_reply, try_goal_status_nl_reply
-from .turn_intelligence import TurnPlan
+from .turn_intelligence import TurnPlan, build_turn_plan, resolve_answer_family_profile
 from .user_surface import sanitize_user_surface_text
 
 _TOOLING_IDENTITY_Q_RE = re.compile(
@@ -46,6 +45,7 @@ class SemanticAnswerResult:
     source: str
     interpretation: TurnInterpretation
     score: int
+    family: str = "general_status"
 
     def to_metadata(self) -> Dict[str, Any]:
         return {
@@ -58,6 +58,7 @@ class SemanticAnswerResult:
             "prefer_state_reply": self.interpretation.prefer_state_reply,
             "force_delegate": self.interpretation.force_delegate,
             "confidence": self.interpretation.confidence,
+            "answer_family": self.family,
         }
 
 
@@ -130,14 +131,24 @@ def choose_semantic_state_reply(
     )
     if interpretation.force_delegate:
         return None
+    # Family integrity guard: if text itself classifies to a non-stateful domain,
+    # abstain even when upstream context nudges a stateful turn_plan.
+    text = str(user_text or "")
+    raw_text_plan = build_turn_plan(
+        text,
+        scenario_id=str(scenario_id or ""),
+        projection_has_continuity_state=False,
+    )
+    if raw_text_plan.domain not in {"project_status", "approval_state"}:
+        return None
     if interpretation.domain not in {"project_status", "approval_state"}:
         return None
     if not bool(turn_plan.allow_goal_continuity_repair):
         return None
 
-    text = str(user_text or "")
     if _TOOLING_IDENTITY_Q_RE.match(text.strip()):
         return None
+    family = resolve_answer_family_profile(text, turn_plan)
     candidates: Dict[str, str] = {}
 
     if interpretation.continuity_focus == "blocked_state":
@@ -158,16 +169,13 @@ def choose_semantic_state_reply(
     if goal_continuity:
         candidates["goal_continuity"] = goal_continuity
 
-    if interpretation.continuity_focus == "recent_outcome_history" and is_strict_cursor_domain_recall_question(
-        text
-    ):
-        candidates = {
-            k: v for k, v in candidates.items() if k == "cursor_continuity_recall"
-        }
-    elif interpretation.continuity_focus == "cursor_followup_heavy_lift" and user_message_suggests_anaphoric_cursor_continue(
+    if interpretation.continuity_focus == "cursor_followup_heavy_lift" and user_message_suggests_anaphoric_cursor_continue(
         text
     ):
         candidates = {k: v for k, v in candidates.items() if k == "cursor_heavy_lift_context"}
+    if family.allowed_sources:
+        allowed = set(family.allowed_sources)
+        candidates = {k: v for k, v in candidates.items() if k in allowed}
 
     best: Optional[SemanticAnswerResult] = None
     for source, raw_text in candidates.items():
@@ -201,9 +209,10 @@ def choose_semantic_state_reply(
                 source=source,
                 interpretation=interpretation,
                 score=score,
+                family=family.family,
             )
     if best is None:
         return None
-    if best.score < 70:
+    if best.score < max(58, int(family.min_score)):
         return None
     return best

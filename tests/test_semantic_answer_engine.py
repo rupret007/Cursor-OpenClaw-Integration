@@ -127,3 +127,62 @@ class SemanticAnswerEngineTests(unittest.TestCase):
             scenario_id="statusFollowupContinue",
         )
         self.assertIsNone(result)
+
+    @mock.patch("services.andrea_sync.semantic_answer_engine.build_goal_continuity_reply")
+    @mock.patch("services.andrea_sync.semantic_answer_engine.try_goal_status_nl_reply")
+    def test_approval_family_excludes_goal_continuity_source(
+        self,
+        mock_goal_status: mock.MagicMock,
+        mock_goal_cont: mock.MagicMock,
+    ) -> None:
+        approval_turn_plan = TurnPlan(
+            domain="approval_state",
+            context_boundary="approval_and_plan_state",
+            prefer_state_reply=True,
+            force_delegate=False,
+            should_repair_generic=True,
+            allow_goal_continuity_repair=True,
+            inject_durable_memory=False,
+            continuity_focus="none",
+        )
+        mock_goal_status.return_value = "Pending approvals for tracked task `t1`: **2**."
+        mock_goal_cont.return_value = "Goal `g1` — tracked task `t1` status: running."
+        result = choose_semantic_state_reply(
+            conn=object(),
+            task_id="t-approval",
+            user_text="What still needs approval?",
+            turn_plan=approval_turn_plan,
+            scenario_id="statusFollowupContinue",
+        )
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.source, "goal_status")
+        self.assertEqual(result.family, "approval_state")
+
+    @mock.patch("services.andrea_sync.semantic_answer_engine.build_goal_continuity_reply")
+    @mock.patch("services.andrea_sync.semantic_answer_engine.try_goal_status_nl_reply")
+    def test_non_stateful_text_guard_blocks_stateful_hijack(
+        self,
+        mock_goal_status: mock.MagicMock,
+        mock_goal_cont: mock.MagicMock,
+    ) -> None:
+        mock_goal_status.return_value = "Goal `g1` status: running."
+        mock_goal_cont.return_value = "Tracked task `t1` status: running."
+        forced_status_plan = TurnPlan(
+            domain="project_status",
+            context_boundary="project_continuity_state",
+            prefer_state_reply=True,
+            force_delegate=False,
+            should_repair_generic=True,
+            allow_goal_continuity_repair=True,
+            inject_durable_memory=False,
+            continuity_focus="recent_outcome_history",
+        )
+        result = choose_semantic_state_reply(
+            conn=object(),
+            task_id="t-agenda",
+            user_text="What's on the agenda today?",
+            turn_plan=forced_status_plan,
+            scenario_id="statusFollowupContinue",
+        )
+        self.assertIsNone(result)

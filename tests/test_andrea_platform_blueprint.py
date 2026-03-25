@@ -18,7 +18,11 @@ from services.andrea_sync.goal_runtime import (
 from services.andrea_sync.recovery_engine import recovery_plan_from_message
 from services.andrea_sync.resource_router import rank_execution_lanes, routing_explanation
 from services.andrea_sync.schema import CommandType, EventType
-from services.andrea_sync.turn_intelligence import build_turn_plan, classify_continuity_focus
+from services.andrea_sync.turn_intelligence import (
+    build_turn_plan,
+    classify_continuity_focus,
+    resolve_answer_family_profile,
+)
 from services.andrea_sync.store import (
     append_event,
     connect,
@@ -305,6 +309,16 @@ class BlueprintPlatformTests(unittest.TestCase):
         self.assertEqual(plan_mixed_delegation.domain, "project_status")
         self.assertTrue(plan_mixed_delegation.prefer_state_reply)
         self.assertEqual(plan_mixed_delegation.continuity_focus, "recent_outcome_history")
+
+        fam_recall = resolve_answer_family_profile("What did Cursor say?", plan_task_history)
+        self.assertEqual(fam_recall.family, "cursor_recall")
+        self.assertIn("cursor_continuity_recall", fam_recall.allowed_sources)
+        fam_approval = resolve_answer_family_profile(
+            "What still needs approval?",
+            plan_approval,
+        )
+        self.assertEqual(fam_approval.family, "approval_state")
+        self.assertEqual(fam_approval.allowed_sources, ("goal_status",))
 
     @mock.patch("services.andrea_sync.goal_runtime.project_task_dict")
     def test_goal_continuity_surfaces_outcome_and_cursor_delegation(self, m_proj: mock.MagicMock) -> None:

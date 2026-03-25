@@ -13,7 +13,7 @@ import re
 import urllib.error
 import urllib.request
 from contextlib import ExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Sequence
 from unittest import mock
 
@@ -37,9 +37,17 @@ from .model_router import model_for_role
 from .projector import project_task_dict
 from .scenario_runtime import resolve_scenario
 from .schema import CommandType, EventType, TaskStatus
-from .semantic_continuity import same_chat_max_delegation_score
-from .store import append_event, get_task_channel, insert_user_outcome_receipt
-from .turn_intelligence import build_turn_plan
+from .semantic_continuity import resolve_semantic_continuity_patch, same_chat_max_delegation_score
+from .store import (
+    append_event,
+    create_goal,
+    create_goal_approval,
+    get_task_channel,
+    get_task_principal_id,
+    insert_user_outcome_receipt,
+    link_task_to_goal,
+)
+from .turn_intelligence import build_turn_plan, resolve_answer_family_profile
 from .user_surface import is_internal_runtime_text, sanitize_user_surface_text
 
 # --- Failure taxonomy (families map to issue_code prefixes) ---
@@ -189,8 +197,26 @@ def build_turn_capture(
         projection_has_continuity_state=projection_has_state,
         same_chat_delegation_score=del_score,
     )
+    try:
+        cont_patch = resolve_semantic_continuity_patch(
+            conn,
+            task_id,
+            user_text,
+            scenario_id=scenario_id or resolution.scenario_id,
+            base_focus=plan.continuity_focus,
+            projection_has_continuity_state=projection_has_state,
+        )
+    except (AttributeError, TypeError, ValueError):
+        from .semantic_continuity import SemanticContinuityPatch
+
+        cont_patch = SemanticContinuityPatch()
+    if cont_patch.continuity_focus_override is not None:
+        plan = replace(plan, continuity_focus=cont_patch.continuity_focus_override)
+    if cont_patch.force_prefer_state_reply and plan.domain in {"project_status", "approval_state"}:
+        plan = replace(plan, prefer_state_reply=True)
     raw_reply = _task_last_reply(detail)
     sanitized = sanitize_user_surface_text(raw_reply, fallback="", limit=2000)
+    family_profile = resolve_answer_family_profile(user_text, plan)
     flags = _meta_flags(detail)
     assistant_payload = _latest_assistant_reply_payload(detail)
     return {
@@ -208,6 +234,8 @@ def build_turn_capture(
         "scenario_reason": str(scen.get("reason") or resolution.reason),
         "turn_plan_domain": plan.domain,
         "turn_plan_continuity_focus": plan.continuity_focus,
+        "expected_answer_family": family_profile.family,
+        "expected_answer_sources": list(family_profile.allowed_sources),
         "projection_has_continuity_state": projection_has_state,
         "delegated_to_cursor": flags["delegated_to_cursor"],
         "meta_cursor_present": flags["has_cursor"],
@@ -231,6 +259,12 @@ def run_deterministic_detectors(
     text = str(capture.get("raw_reply_text") or "")
     user = str(capture.get("user_turn") or "")
     low = text.lower()
+    expected_family = str(capture.get("expected_answer_family") or "")
+    expected_sources = set(capture.get("expected_answer_sources") or [])
+    semantic_selection = capture.get("assistant_semantic_selection")
+    semantic_source = ""
+    if isinstance(semantic_selection, dict):
+        semantic_source = str(semantic_selection.get("source") or "")
 
     if capture.get("leak_internal_runtime") or capture.get("leak_sanitized_empty"):
         findings.append(
@@ -309,6 +343,28 @@ def run_deterministic_detectors(
                 "detail": "expected external_information domain",
             }
         )
+    if (
+        str(capture.get("assistant_reason") or "").startswith("semantic_state_")
+        and str(capture.get("turn_plan_domain") or "")
+        not in {"project_status", "approval_state"}
+    ):
+        findings.append(
+            {
+                "family": "wrong_domain_contamination",
+                "issue_code": "conversation_stateful_domain_hijack",
+                "severity": "high",
+                "detail": "stateful semantic answer used outside project/approval domain",
+            }
+        )
+    if expected_sources and semantic_source and semantic_source not in expected_sources:
+        findings.append(
+            {
+                "family": "wrong_domain_contamination",
+                "issue_code": "conversation_semantic_source_family_mismatch",
+                "severity": "high",
+                "detail": f"semantic source {semantic_source!r} not in expected family sources {tuple(expected_sources)!r}",
+            }
+        )
     if is_cursor_thread_recall_question(user) and is_continuation_fallback_family_text(text):
         findings.append(
             {
@@ -325,6 +381,24 @@ def run_deterministic_detectors(
                 "issue_code": "conversation_cursor_recall_approval_domain_contamination",
                 "severity": "high",
                 "detail": "cursor recall reply contains approval or status-followup scaffolding",
+            }
+        )
+    if (
+        expected_family == "cursor_recall"
+        and semantic_source == "cursor_continuity_recall"
+        and "not finding a recent clean cursor result" in low
+        and (
+            bool(capture.get("delegated_to_cursor"))
+            or bool(capture.get("meta_cursor_present"))
+            or bool(capture.get("meta_openclaw_present"))
+        )
+    ):
+        findings.append(
+            {
+                "family": "cursor_recall_failure",
+                "issue_code": "conversation_cursor_recall_fallback_under_evidence",
+                "severity": "high",
+                "detail": "cursor recall returned clean fallback despite cursor/openclaw evidence markers",
             }
         )
     if expect_cursor_substance and is_cursor_thread_recall_question(user):
@@ -1054,6 +1128,55 @@ def _seed_recall_rejects_approval_status_sludge_thread(harness: Any) -> None:
     )
 
 
+def _seed_pending_approval_inventory(harness: Any) -> None:
+    """Create an active goal + pending approval for the same Telegram principal."""
+    server = harness.server
+    assert server is not None
+    created = server.with_lock(
+        lambda c: handle_command(
+            c,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "seed-approval-pending",
+                "payload": {
+                    "text": "Seed pending approval inventory",
+                    "routing_text": "Seed pending approval inventory",
+                    "chat_id": 88028,
+                    "message_id": 28999,
+                    "from_user": 99028,
+                },
+            },
+        )
+    )
+    task_id = str(created.get("task_id") or "")
+    if not task_id:
+        return
+    principal_id = server.with_lock(lambda c: get_task_principal_id(c, task_id))
+    if not principal_id:
+        return
+    server.with_lock(
+        lambda c: (
+            lambda gid: (
+                link_task_to_goal(c, task_id, gid),
+                create_goal_approval(
+                    c,
+                    gid,
+                    task_id,
+                    rationale="Confirm deploy window before shipping to production.",
+                ),
+            )
+        )(
+            create_goal(
+                c,
+                principal_id=principal_id,
+                summary="Seed approval goal",
+                channel="telegram",
+            )
+        )
+    )
+
+
 def _seed_continue_prefers_fresher_workstream(harness: Any) -> None:
     """Older verbose delegated task vs newer source-rich workstream on the same chat."""
     server = harness.server
@@ -1516,10 +1639,10 @@ def run_conversation_case(
     observations: List[ExperienceObservation] = [
         ExperienceObservation(
             description="deterministic conversation detectors",
-            expected="no high-severity conversation failures",
+            expected="no high/medium-severity conversation failures",
             observed=_clip(json.dumps(all_findings, ensure_ascii=False), 1200),
-            passed=not bool(high),
-            issue_code="conversation_high_severity" if high else "",
+            passed=not bool(high or med),
+            issue_code="conversation_quality_degraded" if (high or med) else "",
             severity="high" if high else "low",
         )
     ]
@@ -1853,6 +1976,20 @@ CONVERSATION_CORE_CASES: tuple[ConversationCaseSpec, ...] = (
         from_id=99027,
         first_update_id=18027,
         first_message_id=28027,
+        required_turn_domains=("approval_state",),
+    ),
+    ConversationCaseSpec(
+        case_id="approval_pending_inventory",
+        title="Approval pending inventory",
+        behavior_family="approval_state",
+        turns=("What still needs approval?",),
+        chat_id=88028,
+        from_id=99028,
+        first_update_id=18028,
+        first_message_id=28028,
+        setup_fn=_seed_pending_approval_inventory,
+        required_reply_markers=("pending approvals for tracked task",),
+        forbidden_reply_markers=("not seeing any approval requests waiting on you right now",),
         required_turn_domains=("approval_state",),
     ),
     ConversationCaseSpec(

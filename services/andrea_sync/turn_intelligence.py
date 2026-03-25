@@ -25,6 +25,14 @@ TurnDomain = Literal[
     "technical_execution",
 ]
 
+AnswerFamilyName = Literal[
+    "general_status",
+    "cursor_recall",
+    "cursor_continuation",
+    "blocked_state",
+    "approval_state",
+]
+
 
 _APPROVAL_OWNER_FRAGMENT = r"(?:\s+(?:my|our))?"
 _APPROVAL_FAMILY_RE = re.compile(
@@ -204,6 +212,13 @@ class TurnPlan:
     continuity_focus: ContinuityFocus
 
 
+@dataclass(frozen=True)
+class AnswerFamilyProfile:
+    family: AnswerFamilyName
+    allowed_sources: tuple[str, ...]
+    min_score: int = 70
+
+
 def build_turn_plan(
     text: str,
     *,
@@ -312,4 +327,48 @@ def build_turn_plan(
         allow_goal_continuity_repair=allow_goal_continuity_repair,
         inject_durable_memory=inject_durable_memory,
         continuity_focus=continuity_focus,
+    )
+
+
+def resolve_answer_family_profile(text: str, turn_plan: TurnPlan) -> AnswerFamilyProfile:
+    """
+    Compact semantic family profile used by selector/eval as a stable invariant.
+    """
+    clean = str(text or "").strip()
+    domain = str(turn_plan.domain or "")
+    focus = str(turn_plan.continuity_focus or "")
+    if domain == "approval_state" or is_approval_state_question(clean):
+        return AnswerFamilyProfile(
+            family="approval_state",
+            allowed_sources=("goal_status",),
+            min_score=68,
+        )
+    if focus == "blocked_state":
+        return AnswerFamilyProfile(
+            family="blocked_state",
+            allowed_sources=("blocked_state_reply", "goal_status"),
+            min_score=68,
+        )
+    if focus == "cursor_followup_heavy_lift":
+        return AnswerFamilyProfile(
+            family="cursor_continuation",
+            allowed_sources=("cursor_heavy_lift_context",),
+            min_score=70,
+        )
+    if focus == "recent_outcome_history":
+        if is_explicit_cursor_recall_question(clean):
+            return AnswerFamilyProfile(
+                family="cursor_recall",
+                allowed_sources=("cursor_continuity_recall",),
+                min_score=72,
+            )
+        return AnswerFamilyProfile(
+            family="cursor_recall",
+            allowed_sources=("cursor_continuity_recall", "goal_status"),
+            min_score=70,
+        )
+    return AnswerFamilyProfile(
+        family="general_status",
+        allowed_sources=("goal_status", "goal_continuity"),
+        min_score=70,
     )

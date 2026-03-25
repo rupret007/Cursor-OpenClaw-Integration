@@ -30,6 +30,7 @@ from .assistant_answer_composer import (
 from .bus import handle_command
 from .experience_assurance import (
     HarnessInfraError,
+    _render_telegram_final_message,
     experience_progress_enabled,
 )
 from .experience_types import ExperienceCheckResult, ExperienceObservation, ExperienceScenario
@@ -48,6 +49,7 @@ from .store import (
     link_task_to_goal,
 )
 from .turn_intelligence import build_turn_plan, resolve_answer_family_profile
+from .telegram_format import format_direct_message
 from .user_surface import is_internal_runtime_text, sanitize_user_surface_text
 
 # --- Failure taxonomy (families map to issue_code prefixes) ---
@@ -80,6 +82,20 @@ CURSOR_GRACE_SNIPPETS = (
     "don't have enough recorded history",
     "check the latest tracked state",
 )
+
+
+def _looks_fallback_shaped_reply(text: str) -> bool:
+    low = str(text or "").strip().lower()
+    if not low:
+        return True
+    patterns = (
+        "not finding a recent clean cursor result",
+        "not finding a recent cursor workstream",
+        "i do not see active tracked work right now",
+        "i'm not seeing any approval requests waiting on you right now",
+        "status / follow-up reply",
+    )
+    return any(p in low for p in patterns)
 
 _TOOL_TEXT_LANE_PRIOR_RE = re.compile(
     r"\b(?:bluebubbles|text\s+messages?|imessages?|recent\s+messages?)\b",
@@ -147,6 +163,24 @@ def _latest_assistant_reply_payload(detail: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(payload, dict):
             return payload
     return {}
+
+
+def _rendered_reply_text(
+    *,
+    harness: Any,
+    detail: Dict[str, Any],
+    raw_reply: str,
+    assistant_route: str,
+) -> str:
+    task_status = str(detail.get("task", {}).get("status") or "")
+    if assistant_route == "direct":
+        return format_direct_message(raw_reply)
+    if task_status in {TaskStatus.COMPLETED.value, TaskStatus.FAILED.value}:
+        try:
+            return str(_render_telegram_final_message(harness, detail) or "")
+        except Exception:
+            return ""
+    return ""
 
 
 def _scenario_meta(detail: Dict[str, Any]) -> Dict[str, Any]:
@@ -219,17 +253,36 @@ def build_turn_capture(
     family_profile = resolve_answer_family_profile(user_text, plan)
     flags = _meta_flags(detail)
     assistant_payload = _latest_assistant_reply_payload(detail)
+    semantic_selection = (
+        assistant_payload.get("semantic_selection")
+        if isinstance(assistant_payload.get("semantic_selection"), dict)
+        else {}
+    )
+    semantic_contract = (
+        semantic_selection.get("turn_contract")
+        if isinstance(semantic_selection.get("turn_contract"), dict)
+        else {}
+    )
+    assistant_route = _task_route(detail)
+    rendered_reply = _rendered_reply_text(
+        harness=harness,
+        detail=detail,
+        raw_reply=raw_reply,
+        assistant_route=assistant_route,
+    )
+    rendered_sanitized = sanitize_user_surface_text(rendered_reply, fallback="", limit=4000)
     return {
         "user_turn": user_text,
         "raw_reply_text": raw_reply,
         "formatted_reply_text": sanitized,
+        "rendered_reply_text": rendered_reply,
+        "rendered_reply_sanitized": rendered_sanitized,
         "task_id": task_id,
         "task_status": str(detail.get("task", {}).get("status") or ""),
-        "assistant_route": _task_route(detail),
+        "assistant_route": assistant_route,
         "assistant_reason": _task_assistant_reason(detail),
-        "assistant_semantic_selection": assistant_payload.get("semantic_selection")
-        if isinstance(assistant_payload.get("semantic_selection"), dict)
-        else {},
+        "assistant_semantic_selection": semantic_selection,
+        "semantic_turn_contract": semantic_contract,
         "scenario_id": scenario_id or resolution.scenario_id,
         "scenario_reason": str(scen.get("reason") or resolution.reason),
         "turn_plan_domain": plan.domain,
@@ -256,7 +309,9 @@ def run_deterministic_detectors(
 ) -> List[Dict[str, Any]]:
     """Return list of findings: {family, issue_code, severity, detail}."""
     findings: List[Dict[str, Any]] = []
-    text = str(capture.get("raw_reply_text") or "")
+    rendered = str(capture.get("rendered_reply_sanitized") or "")
+    text = rendered or str(capture.get("formatted_reply_text") or capture.get("raw_reply_text") or "")
+    raw_text = str(capture.get("raw_reply_text") or "")
     user = str(capture.get("user_turn") or "")
     low = text.lower()
     expected_family = str(capture.get("expected_answer_family") or "")
@@ -265,6 +320,21 @@ def run_deterministic_detectors(
     semantic_source = ""
     if isinstance(semantic_selection, dict):
         semantic_source = str(semantic_selection.get("source") or "")
+    semantic_contract = capture.get("semantic_turn_contract")
+    contract_family = ""
+    contract_source = ""
+    contract_allowed_sources: set[str] = set()
+    contract_evidence_strength = 0
+    if isinstance(semantic_contract, dict):
+        contract_family = str(semantic_contract.get("family") or "")
+        contract_source = str(semantic_contract.get("source") or "")
+        raw_allowed = semantic_contract.get("allowed_sources")
+        if isinstance(raw_allowed, list):
+            contract_allowed_sources = {str(x) for x in raw_allowed if str(x)}
+        try:
+            contract_evidence_strength = int(semantic_contract.get("evidence_strength") or 0)
+        except (TypeError, ValueError):
+            contract_evidence_strength = 0
 
     if capture.get("leak_internal_runtime") or capture.get("leak_sanitized_empty"):
         findings.append(
@@ -313,7 +383,7 @@ def run_deterministic_detectors(
         )
     )
     if (
-        draft_implies_false_completion(text)
+        draft_implies_false_completion(raw_text)
         and any(k in low for k in ("blocked", "pending", "approval", "cursor", "task"))
         and not approval_inventory_only
     ):
@@ -365,6 +435,42 @@ def run_deterministic_detectors(
                 "detail": f"semantic source {semantic_source!r} not in expected family sources {tuple(expected_sources)!r}",
             }
         )
+    if semantic_source and not isinstance(semantic_contract, dict):
+        findings.append(
+            {
+                "family": "wrong_domain_contamination",
+                "issue_code": "conversation_semantic_contract_missing",
+                "severity": "high",
+                "detail": "semantic selection missing persisted turn contract metadata",
+            }
+        )
+    if contract_family and expected_family and contract_family != expected_family:
+        findings.append(
+            {
+                "family": "wrong_domain_contamination",
+                "issue_code": "conversation_semantic_contract_family_mismatch",
+                "severity": "high",
+                "detail": f"contract family {contract_family!r} does not match expected {expected_family!r}",
+            }
+        )
+    if contract_source and semantic_source and contract_source != semantic_source:
+        findings.append(
+            {
+                "family": "wrong_domain_contamination",
+                "issue_code": "conversation_semantic_contract_source_mismatch",
+                "severity": "high",
+                "detail": f"contract source {contract_source!r} differs from semantic source {semantic_source!r}",
+            }
+        )
+    if semantic_source and contract_allowed_sources and semantic_source not in contract_allowed_sources:
+        findings.append(
+            {
+                "family": "wrong_domain_contamination",
+                "issue_code": "conversation_semantic_contract_allowed_source_mismatch",
+                "severity": "high",
+                "detail": f"semantic source {semantic_source!r} not admitted by contract sources {tuple(contract_allowed_sources)!r}",
+            }
+        )
     if is_cursor_thread_recall_question(user) and is_continuation_fallback_family_text(text):
         findings.append(
             {
@@ -399,6 +505,15 @@ def run_deterministic_detectors(
                 "issue_code": "conversation_cursor_recall_fallback_under_evidence",
                 "severity": "high",
                 "detail": "cursor recall returned clean fallback despite cursor/openclaw evidence markers",
+            }
+        )
+    if contract_evidence_strength >= 5 and _looks_fallback_shaped_reply(text):
+        findings.append(
+            {
+                "family": "thin_summary",
+                "issue_code": "conversation_fallback_shaped_under_contract_evidence",
+                "severity": "high",
+                "detail": "rendered answer stayed fallback-shaped despite strong contract evidence",
             }
         )
     if expect_cursor_substance and is_cursor_thread_recall_question(user):
@@ -602,12 +717,13 @@ def run_llm_evaluator(
     user = json.dumps(
         {
             "user": capture.get("user_turn"),
-            "assistant_reply": capture.get("raw_reply_text"),
+            "assistant_reply": capture.get("rendered_reply_sanitized") or capture.get("raw_reply_text"),
             "route": capture.get("assistant_route"),
             "reason": capture.get("assistant_reason"),
             "scenario_id": capture.get("scenario_id"),
             "turn_domain": capture.get("turn_plan_domain"),
             "continuity_focus": capture.get("turn_plan_continuity_focus"),
+            "semantic_turn_contract": capture.get("semantic_turn_contract"),
         },
         ensure_ascii=False,
     )
@@ -952,6 +1068,49 @@ def _seed_source_truth_over_derived_recall(harness: Any) -> None:
                         "last assistant update noise."
                     ),
                     "user_summary": "SOURCE_TRUTH_UNIQUE_OPENCLAW_FACT_Z9 anchor for recall lead.",
+                },
+            },
+        }
+    )
+
+
+def _seed_source_truth_rich_recall(harness: Any) -> None:
+    server = harness.server
+    assert server is not None
+
+    def _cmd(body: Dict[str, Any]) -> Dict[str, Any]:
+        return server.with_lock(lambda c: handle_command(c, body))
+
+    created = _cmd(
+        {
+            "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+            "channel": "telegram",
+            "external_id": "seed-source-truth-rich-recall",
+            "payload": {
+                "text": "Seed rich source truth recall",
+                "routing_text": "Seed rich source truth recall",
+                "chat_id": 77794,
+                "message_id": 6721,
+                "from_user": 99099,
+            },
+        }
+    )
+    task_id = str(created.get("task_id") or "")
+    if not task_id:
+        return
+    _cmd(
+        {
+            "command_type": CommandType.REPORT_CURSOR_EVENT.value,
+            "channel": "cursor",
+            "task_id": task_id,
+            "payload": {
+                "event_type": EventType.JOB_COMPLETED.value,
+                "payload": {
+                    "backend": "openclaw",
+                    "runner": "openclaw",
+                    "summary": "Cursor recap: finalized API cleanup and regression checks.",
+                    "user_summary": "RICH_RECALL_GROUNDED_FACT_42 API cleanup and regressions verified.",
+                    "delegated_to_cursor": True,
                 },
             },
         }
@@ -1573,7 +1732,12 @@ def run_conversation_case(
     for c in captures:
         all_findings.extend(list(c.get("deterministic_findings") or []))
     if captures:
-        final_reply = str(captures[-1].get("raw_reply_text") or "")
+        final_reply = str(
+            captures[-1].get("rendered_reply_sanitized")
+            or captures[-1].get("formatted_reply_text")
+            or captures[-1].get("raw_reply_text")
+            or ""
+        )
         final_reply_l = final_reply.lower()
         final_reason = str(captures[-1].get("assistant_reason") or "")
         final_domain = str(captures[-1].get("turn_plan_domain") or "")
@@ -1691,7 +1855,9 @@ def run_conversation_case(
             confidence=0.45,
         )
 
-    excerpt = "\n\n".join(_clip(c.get("raw_reply_text"), 400) for c in captures)
+    excerpt = "\n\n".join(
+        _clip(c.get("rendered_reply_sanitized") or c.get("raw_reply_text"), 400) for c in captures
+    )
 
     meta: Dict[str, Any] = {
         "conversation_case_id": case.case_id,
@@ -2207,6 +2373,36 @@ CONVERSATION_CORE_CASES: tuple[ConversationCaseSpec, ...] = (
         wait_policy="routing_smoke",
     ),
     ConversationCaseSpec(
+        case_id="continue_then_approval_no_merge_hijack",
+        title="Continuation merge does not hijack approval turn",
+        behavior_family="wrong_context_boundary",
+        turns=("Continue that", "What still needs approval?"),
+        chat_id=88029,
+        from_id=99029,
+        first_update_id=18029,
+        first_message_id=28029,
+        setup_fn=_seed_pending_approval_inventory,
+        required_turn_domains=("approval_state",),
+        forbidden_reply_markers=("I do not see active tracked work right now",),
+    ),
+    ConversationCaseSpec(
+        case_id="cursor_recall_rich_truth_not_fallback_shaped",
+        title="Rich cursor recall should avoid fallback-shaped rendering",
+        behavior_family="cursor_recall",
+        turns=("What did Cursor say?",),
+        chat_id=77794,
+        from_id=99099,
+        first_update_id=18794,
+        first_message_id=6721,
+        setup_fn=_seed_source_truth_rich_recall,
+        required_reply_markers=("RICH_RECALL_GROUNDED_FACT_42",),
+        forbidden_reply_markers=("recent clean Cursor result",),
+        expect_cursor_substance=True,
+        required_turn_domains=("project_status",),
+        required_continuity_focuses=("recent_outcome_history",),
+        wait_policy="routing_smoke",
+    ),
+    ConversationCaseSpec(
         case_id="agenda_then_opinion",
         title="Agenda then opinion boundary",
         behavior_family="opinion_reflection",
@@ -2289,7 +2485,7 @@ def build_cursor_fix_brief(
         if isinstance(caps, list) and caps:
             last = caps[-1] if isinstance(caps[-1], dict) else {}
             u = last.get("user_turn")
-            r = last.get("raw_reply_text")
+            r = last.get("rendered_reply_sanitized") or last.get("raw_reply_text")
             if u:
                 prompts.append(f"User: {u}\nReply: {_clip(r, 600)}")
     codes: List[str] = []

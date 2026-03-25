@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence
 
 from .assistant_answer_composer import (
     CONTINUATION_NO_VIABLE_WORKSTREAM_FALLBACK,
@@ -46,9 +46,10 @@ class SemanticAnswerResult:
     interpretation: TurnInterpretation
     score: int
     family: str = "general_status"
+    turn_contract: Dict[str, Any] | None = None
 
     def to_metadata(self) -> Dict[str, Any]:
-        return {
+        out: Dict[str, Any] = {
             "source": self.source,
             "score": self.score,
             "reason": self.reason,
@@ -59,6 +60,33 @@ class SemanticAnswerResult:
             "force_delegate": self.interpretation.force_delegate,
             "confidence": self.interpretation.confidence,
             "answer_family": self.family,
+        }
+        if isinstance(self.turn_contract, dict) and self.turn_contract:
+            out["turn_contract"] = dict(self.turn_contract)
+        return out
+
+
+@dataclass(frozen=True)
+class SemanticTurnContract:
+    family: str
+    source: str
+    allowed_sources: tuple[str, ...]
+    required_anchors: tuple[str, ...]
+    evidence_lines: tuple[str, ...]
+    evidence_strength: int
+    min_score: int
+    fallback_policy: str
+
+    def to_metadata(self) -> Dict[str, Any]:
+        return {
+            "family": self.family,
+            "source": self.source,
+            "allowed_sources": list(self.allowed_sources),
+            "required_anchors": list(self.required_anchors),
+            "evidence_lines": list(self.evidence_lines),
+            "evidence_strength": int(self.evidence_strength),
+            "min_score": int(self.min_score),
+            "fallback_policy": self.fallback_policy,
         }
 
 
@@ -108,6 +136,92 @@ def _score_candidate(source: str, text: str) -> int:
     if _looks_metadata_led(text):
         score -= 12
     return score
+
+
+def _split_structured_text_lines(text: str) -> list[str]:
+    out: list[str] = []
+    for raw in re.split(r"[\r\n]+", str(text or "")):
+        clean = str(raw or "").strip().lstrip("-* ").strip()
+        if clean:
+            out.append(clean)
+    return out
+
+
+def _evidence_strength(lines: Sequence[str]) -> int:
+    score = 0
+    for ln in lines:
+        txt = str(ln or "").strip()
+        if not txt:
+            continue
+        score += 1
+        if ":" in txt:
+            score += 1
+        if len(txt) > 48:
+            score += 1
+    return score
+
+
+def _required_anchors_for(family: str, source: str, text: str) -> tuple[str, ...]:
+    low = str(text or "").lower()
+    anchors: list[str] = []
+    if family == "approval_state":
+        anchors.append("approval")
+    elif family == "blocked_state":
+        anchors.append("blocked")
+    elif family == "cursor_recall":
+        anchors.append("cursor")
+        if "latest useful result:" in low:
+            anchors.append("latest useful result")
+    if source == "goal_status" and "pending approvals" in low and "approval" not in anchors:
+        anchors.append("approval")
+    seen: set[str] = set()
+    out: list[str] = []
+    for a in anchors:
+        if a not in seen:
+            seen.add(a)
+            out.append(a)
+    return tuple(out)
+
+
+def _contract_is_admissible(
+    contract: SemanticTurnContract,
+    *,
+    candidate_text: str,
+) -> bool:
+    low = str(candidate_text or "").lower()
+    if not low.strip():
+        return False
+    if contract.required_anchors and contract.evidence_strength >= 3:
+        for anchor in contract.required_anchors:
+            if anchor and anchor not in low:
+                return False
+    return True
+
+
+def _build_turn_contract(
+    *,
+    family: str,
+    allowed_sources: Sequence[str],
+    source: str,
+    candidate_text: str,
+    min_score: int,
+) -> SemanticTurnContract:
+    evidence_lines = tuple(_split_structured_text_lines(candidate_text)[:8]) or (candidate_text,)
+    fallback_policy = (
+        "allow_truthful_fallback_when_evidence_thin"
+        if source in {"cursor_continuity_recall", "cursor_heavy_lift_context"}
+        else "prefer_grounded_specifics_then_truthful_fallback"
+    )
+    return SemanticTurnContract(
+        family=family,
+        source=source,
+        allowed_sources=tuple(str(x) for x in allowed_sources),
+        required_anchors=_required_anchors_for(family, source, candidate_text),
+        evidence_lines=evidence_lines,
+        evidence_strength=_evidence_strength(evidence_lines),
+        min_score=int(min_score),
+        fallback_policy=fallback_policy,
+    )
 
 
 def choose_semantic_state_reply(
@@ -177,10 +291,20 @@ def choose_semantic_state_reply(
         allowed = set(family.allowed_sources)
         candidates = {k: v for k, v in candidates.items() if k in allowed}
 
+    min_score = max(58, int(family.min_score))
     best: Optional[SemanticAnswerResult] = None
     for source, raw_text in candidates.items():
         cleaned = sanitize_user_surface_text(str(raw_text or "").strip(), limit=1200)
         if not cleaned:
+            continue
+        contract = _build_turn_contract(
+            family=family.family,
+            allowed_sources=family.allowed_sources,
+            source=source,
+            candidate_text=cleaned,
+            min_score=min_score,
+        )
+        if not _contract_is_admissible(contract, candidate_text=cleaned):
             continue
         fallback = cleaned
         if source == "cursor_continuity_recall":
@@ -195,6 +319,7 @@ def choose_semantic_state_reply(
             fallback_reply=fallback,
             user_text=text,
             turn_plan=turn_plan,
+            turn_contract=contract.to_metadata(),
         )
         candidate_text = sanitize_user_surface_text(
             str(realized or cleaned).strip(), fallback=cleaned, limit=1200
@@ -210,9 +335,10 @@ def choose_semantic_state_reply(
                 interpretation=interpretation,
                 score=score,
                 family=family.family,
+                turn_contract=contract.to_metadata(),
             )
     if best is None:
         return None
-    if best.score < max(58, int(family.min_score)):
+    if best.score < min_score:
         return None
     return best

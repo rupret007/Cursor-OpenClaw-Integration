@@ -208,3 +208,58 @@ class StatefulAnswerRealizationTests(unittest.TestCase):
             )
         self.assertIsNone(out)
 
+    @mock.patch("services.andrea_sync.stateful_answer_realization._bundle_evidence_for_source")
+    @mock.patch("services.andrea_sync.stateful_answer_realization._openai_json_chat")
+    def test_contract_anchor_requires_reply_or_anchor_usage(
+        self,
+        mock_chat: mock.MagicMock,
+        mock_bundle: mock.MagicMock,
+    ) -> None:
+        mock_bundle.return_value = [
+            "Pending approvals for tracked task `t1`: 2.",
+            "Top pending approval: `appr_1` - confirm deploy window.",
+        ]
+        mock_chat.return_value = {
+            "reply": "Two items are pending right now.",
+            "grounded": True,
+            "used_fallback": False,
+            "anchors_used": ["pending"],
+        }
+        approval_turn_plan = TurnPlan(
+            domain="approval_state",
+            context_boundary="approval_and_plan_state",
+            prefer_state_reply=True,
+            force_delegate=False,
+            should_repair_generic=True,
+            allow_goal_continuity_repair=True,
+            inject_durable_memory=True,
+            continuity_focus="none",
+        )
+        with mock.patch.dict(
+            os.environ,
+            {
+                "ANDREA_STATEFUL_REALIZATION_ENABLED": "1",
+                "OPENAI_API_ENABLED": "1",
+                "OPENAI_API_KEY": "x",
+            },
+            clear=False,
+        ):
+            out = maybe_realize_stateful_reply(
+                conn=object(),
+                task_id="t1",
+                source="goal_status",
+                deterministic_reply="Pending approvals for tracked task `t1`: 2.",
+                fallback_reply="I'm not seeing any approval requests waiting on you right now.",
+                user_text="What still needs approval?",
+                turn_plan=approval_turn_plan,
+                turn_contract={
+                    "family": "approval_state",
+                    "source": "goal_status",
+                    "required_anchors": ["approval"],
+                    "evidence_lines": mock_bundle.return_value,
+                    "evidence_strength": 6,
+                    "fallback_policy": "prefer_grounded_specifics_then_truthful_fallback",
+                },
+            )
+        self.assertIsNone(out)
+

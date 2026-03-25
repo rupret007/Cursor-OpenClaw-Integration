@@ -190,6 +190,7 @@ class ConversationEvalDetectorTests(unittest.TestCase):
     def test_detects_stateful_domain_hijack_outside_status_domains(self) -> None:
         cap = {
             "raw_reply_text": "I’m not finding a recent clean Cursor result to recap from this thread.",
+            "rendered_reply_sanitized": "Andrea:\nI’m not finding a recent clean Cursor result to recap from this thread.",
             "user_turn": "What's on the agenda today?",
             "turn_plan_domain": "personal_agenda",
             "turn_plan_continuity_focus": "none",
@@ -204,6 +205,30 @@ class ConversationEvalDetectorTests(unittest.TestCase):
         codes = {h["issue_code"] for h in hits}
         self.assertIn("conversation_stateful_domain_hijack", codes)
         self.assertIn("conversation_semantic_source_family_mismatch", codes)
+        self.assertIn("conversation_semantic_contract_missing", codes)
+
+    def test_detects_fallback_shaped_rendered_reply_under_strong_contract_evidence(self) -> None:
+        cap = {
+            "raw_reply_text": "I’m not finding a recent clean Cursor result to recap from this thread.",
+            "rendered_reply_sanitized": "Andrea:\nI’m not finding a recent clean Cursor result to recap from this thread.",
+            "user_turn": "What did Cursor say?",
+            "turn_plan_domain": "project_status",
+            "assistant_reason": "semantic_state_cursor_continuity_recall",
+            "assistant_semantic_selection": {"source": "cursor_continuity_recall"},
+            "semantic_turn_contract": {
+                "family": "cursor_recall",
+                "source": "cursor_continuity_recall",
+                "allowed_sources": ["cursor_continuity_recall"],
+                "evidence_strength": 6,
+            },
+            "expected_answer_family": "cursor_recall",
+            "expected_answer_sources": ["cursor_continuity_recall"],
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap, expect_cursor_substance=True)
+        codes = {h["issue_code"] for h in hits}
+        self.assertIn("conversation_fallback_shaped_under_contract_evidence", codes)
 
     def test_clean_cursor_recall_fallback_not_flagged_as_approval_contamination(self) -> None:
         cap = {

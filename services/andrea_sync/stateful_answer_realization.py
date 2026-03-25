@@ -7,7 +7,7 @@ import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from typing import Any, Iterable, List, Sequence
+from typing import Any, Iterable, List, Mapping, Sequence
 
 from .assistant_answer_composer import (
     _cursor_recall_output_should_force_clean_fallback,
@@ -177,6 +177,10 @@ class StatefulRealizationInput:
     user_text: str
     turn_domain: str
     continuity_focus: str
+    family: str
+    required_anchors: tuple[str, ...]
+    evidence_strength: int
+    fallback_policy: str
     evidence_lines: tuple[str, ...]
 
 
@@ -225,6 +229,46 @@ def _bundle_evidence_for_source(
     return out[:8]
 
 
+def _merged_evidence_lines(contract: Mapping[str, Any] | None, bundled: Sequence[str]) -> tuple[str, ...]:
+    contract_lines_raw = contract.get("evidence_lines") if isinstance(contract, Mapping) else None
+    contract_lines = (
+        [str(x).strip() for x in contract_lines_raw if str(x).strip()]
+        if isinstance(contract_lines_raw, list)
+        else []
+    )
+    merged: list[str] = []
+    seen: set[str] = set()
+    for ln in [*contract_lines, *list(bundled)]:
+        safe = sanitize_user_surface_text(ln, fallback="", limit=340)
+        key = safe.lower()
+        if safe and key not in seen:
+            seen.add(key)
+            merged.append(safe)
+    return tuple(merged[:8])
+
+
+def _contract_required_anchors(contract: Mapping[str, Any] | None) -> tuple[str, ...]:
+    raw = contract.get("required_anchors") if isinstance(contract, Mapping) else None
+    if not isinstance(raw, list):
+        return ()
+    out: list[str] = []
+    for val in raw:
+        clean = str(val or "").strip().lower()
+        if clean and clean not in out:
+            out.append(clean)
+    return tuple(out)
+
+
+def _anchors_present_in_reply(reply: str, anchors: Sequence[str]) -> bool:
+    if not anchors:
+        return True
+    low = str(reply or "").lower()
+    for anchor in anchors:
+        if anchor and anchor not in low:
+            return False
+    return True
+
+
 def maybe_realize_stateful_reply(
     conn: Any,
     task_id: str,
@@ -234,14 +278,36 @@ def maybe_realize_stateful_reply(
     fallback_reply: str,
     user_text: str,
     turn_plan: TurnPlan,
+    turn_contract: Mapping[str, Any] | None = None,
 ) -> str | None:
     """Return a naturalized stateful reply or None to keep deterministic output."""
     if not stateful_realization_enabled():
         return None
     if source not in _allowed_sources():
         return None
-    evidence = _bundle_evidence_for_source(
+    bundled = _bundle_evidence_for_source(
         conn, task_id, source=source, user_text=user_text, deterministic_reply=deterministic_reply
+    )
+    evidence = _merged_evidence_lines(turn_contract, bundled)
+    family = resolve_answer_family_profile(str(user_text or "").strip(), turn_plan)
+    contract_family = (
+        str(turn_contract.get("family") or "").strip()
+        if isinstance(turn_contract, Mapping)
+        else ""
+    )
+    effective_family = contract_family or family.family
+    required_anchors = _contract_required_anchors(turn_contract)
+    evidence_strength = (
+        int(turn_contract.get("evidence_strength") or 0)
+        if isinstance(turn_contract, Mapping)
+        else 0
+    )
+    if evidence_strength <= 0:
+        evidence_strength = _evidence_strength(evidence)
+    fallback_policy = (
+        str(turn_contract.get("fallback_policy") or "").strip()
+        if isinstance(turn_contract, Mapping)
+        else ""
     )
     inp = StatefulRealizationInput(
         source=str(source or ""),
@@ -250,9 +316,12 @@ def maybe_realize_stateful_reply(
         user_text=str(user_text or "").strip(),
         turn_domain=str(turn_plan.domain or ""),
         continuity_focus=str(turn_plan.continuity_focus or ""),
+        family=effective_family,
+        required_anchors=required_anchors,
+        evidence_strength=evidence_strength,
+        fallback_policy=fallback_policy,
         evidence_lines=tuple(evidence),
     )
-    family = resolve_answer_family_profile(inp.user_text, turn_plan)
     if not inp.deterministic_reply or not inp.evidence_lines:
         return None
     model = (os.environ.get("ANDREA_DIRECT_OPENAI_MODEL") or "gpt-4o-mini").strip()
@@ -268,7 +337,9 @@ def maybe_realize_stateful_reply(
         "3) Preserve domain intent: recall asks recap; continuation asks continuation.\n"
         "4) If evidence is weak, return the provided fallback.\n"
         "5) Never output runtime internals or configuration names.\n"
-        "Return JSON object with keys: reply (string), grounded (boolean), used_fallback (boolean)."
+        "6) Preserve required anchors and family integrity.\n"
+        "Return JSON object with keys: reply (string), grounded (boolean), used_fallback (boolean), "
+        "family_preserved (boolean), anchors_used (array of strings)."
     )
     user_payload = json.dumps(
         {
@@ -276,9 +347,12 @@ def maybe_realize_stateful_reply(
             "turn_domain": inp.turn_domain,
             "continuity_focus": inp.continuity_focus,
             "candidate_source": inp.source,
-            "answer_family": family.family,
+            "answer_family": inp.family,
             "deterministic_reply": inp.deterministic_reply,
             "fallback_reply": inp.fallback_reply,
+            "required_anchors": list(inp.required_anchors),
+            "evidence_strength": inp.evidence_strength,
+            "fallback_policy": inp.fallback_policy,
             "evidence_lines": list(inp.evidence_lines),
         },
         ensure_ascii=False,
@@ -304,17 +378,25 @@ def maybe_realize_stateful_reply(
             return inp.fallback_reply or None
     if not bool(parsed.get("grounded")):
         return None
+    if parsed.get("family_preserved") is False:
+        return None
     if not _evidence_anchor_overlap(safe, inp.evidence_lines):
         return None
-    ev_strength = _evidence_strength(inp.evidence_lines)
-    if ev_strength >= 5 and _looks_fallback_shaped_reply(safe):
+    if inp.required_anchors and not _anchors_present_in_reply(safe, inp.required_anchors):
+        anchors_used = parsed.get("anchors_used")
+        if not isinstance(anchors_used, list):
+            return None
+        used_low = {str(x).strip().lower() for x in anchors_used if str(x).strip()}
+        if any(a not in used_low for a in inp.required_anchors):
+            return None
+    if inp.evidence_strength >= 5 and _looks_fallback_shaped_reply(safe):
         return None
     low_safe = safe.lower()
     low_ev = " ".join(str(x).lower() for x in inp.evidence_lines)
-    if family.family == "approval_state":
+    if inp.family == "approval_state":
         if "approval" in low_ev and "approval" not in low_safe:
             return None
-    if family.family == "blocked_state":
+    if inp.family == "blocked_state":
         if ("blocked" in low_ev or "blocker" in low_ev) and (
             "blocked" not in low_safe and "blocker" not in low_safe and "blocking" not in low_safe
         ):

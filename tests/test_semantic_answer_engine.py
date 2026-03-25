@@ -89,6 +89,14 @@ class SemanticAnswerEngineTests(unittest.TestCase):
         self.assertIsNotNone(result)
         assert result is not None
         self.assertIn("tightened timeout", result.reply_text)
+        meta = result.to_metadata()
+        self.assertIn("turn_contract", meta)
+        contract = meta.get("turn_contract")
+        self.assertIsInstance(contract, dict)
+        assert isinstance(contract, dict)
+        self.assertEqual(contract.get("family"), "cursor_recall")
+        self.assertEqual(contract.get("source"), "cursor_continuity_recall")
+        self.assertIn("cursor", contract.get("required_anchors") or [])
 
     def test_returns_none_for_non_stateful_domain(self) -> None:
         turn_plan = TurnPlan(
@@ -158,6 +166,40 @@ class SemanticAnswerEngineTests(unittest.TestCase):
         assert result is not None
         self.assertEqual(result.source, "goal_status")
         self.assertEqual(result.family, "approval_state")
+
+    @mock.patch("services.andrea_sync.semantic_answer_engine.build_goal_continuity_reply")
+    @mock.patch("services.andrea_sync.semantic_answer_engine.try_goal_status_nl_reply")
+    def test_approval_contract_carries_required_anchor(
+        self,
+        mock_goal_status: mock.MagicMock,
+        mock_goal_cont: mock.MagicMock,
+    ) -> None:
+        approval_turn_plan = TurnPlan(
+            domain="approval_state",
+            context_boundary="approval_and_plan_state",
+            prefer_state_reply=True,
+            force_delegate=False,
+            should_repair_generic=True,
+            allow_goal_continuity_repair=True,
+            inject_durable_memory=False,
+            continuity_focus="none",
+        )
+        mock_goal_status.return_value = (
+            "Pending approvals for tracked task `t1`: 2.\n"
+            "Top pending item is awaiting final signoff from release owner."
+        )
+        mock_goal_cont.return_value = None
+        result = choose_semantic_state_reply(
+            conn=object(),
+            task_id="t-approval-anchor",
+            user_text="What still needs approval?",
+            turn_plan=approval_turn_plan,
+            scenario_id="statusFollowupContinue",
+        )
+        self.assertIsNotNone(result)
+        assert result is not None
+        contract = result.to_metadata().get("turn_contract") or {}
+        self.assertIn("approval", contract.get("required_anchors") or [])
 
     @mock.patch("services.andrea_sync.semantic_answer_engine.build_goal_continuity_reply")
     @mock.patch("services.andrea_sync.semantic_answer_engine.try_goal_status_nl_reply")

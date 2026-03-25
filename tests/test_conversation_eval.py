@@ -172,6 +172,33 @@ class ConversationEvalDetectorTests(unittest.TestCase):
         codes = {h["issue_code"] for h in hits}
         self.assertIn("conversation_cursor_recall_derived_surface_led", codes)
 
+    def test_detects_cursor_recall_approval_domain_contamination(self) -> None:
+        cap = {
+            "raw_reply_text": (
+                "Cursor recap: I'm not seeing any approval requests waiting on you right now.\n"
+                "Recent receipt (status_followup): Status / follow-up reply (goal_runtime_status)."
+            ),
+            "user_turn": "What did Cursor say?",
+            "turn_plan_domain": "project_status",
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap)
+        codes = {h["issue_code"] for h in hits}
+        self.assertIn("conversation_cursor_recall_approval_domain_contamination", codes)
+
+    def test_clean_cursor_recall_fallback_not_flagged_as_approval_contamination(self) -> None:
+        cap = {
+            "raw_reply_text": "I'm not finding a recent clean Cursor result to recap from this thread.",
+            "user_turn": "What did Cursor say?",
+            "turn_plan_domain": "project_status",
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap)
+        codes = {h["issue_code"] for h in hits}
+        self.assertNotIn("conversation_cursor_recall_approval_domain_contamination", codes)
+
     def test_no_derived_surface_flag_when_latest_useful_result_present(self) -> None:
         cap = {
             "raw_reply_text": (

@@ -20,10 +20,12 @@ from unittest import mock
 from .andrea_router import is_generic_direct_reply
 from .assistant_answer_composer import (
     _cursor_recall_composition_is_metadata_led,
+    _cursor_recall_output_should_force_clean_fallback,
     draft_implies_false_completion,
     draft_should_force_continuity_repair,
     is_continuation_fallback_family_text,
     is_cursor_thread_recall_question,
+    is_strict_cursor_domain_recall_question,
 )
 from .bus import handle_command
 from .experience_assurance import (
@@ -36,7 +38,7 @@ from .projector import project_task_dict
 from .scenario_runtime import resolve_scenario
 from .schema import CommandType, EventType, TaskStatus
 from .semantic_continuity import same_chat_max_delegation_score
-from .store import append_event, get_task_channel
+from .store import append_event, get_task_channel, insert_user_outcome_receipt
 from .turn_intelligence import build_turn_plan
 from .user_surface import is_internal_runtime_text, sanitize_user_surface_text
 
@@ -314,6 +316,15 @@ def run_deterministic_detectors(
                 "issue_code": "conversation_cursor_recall_continuation_family_leak",
                 "severity": "high",
                 "detail": "cursor recall ask answered with continuation / no-active-work fallback phrasing",
+            }
+        )
+    if is_strict_cursor_domain_recall_question(user) and _cursor_recall_output_should_force_clean_fallback(text):
+        findings.append(
+            {
+                "family": "cursor_recall_failure",
+                "issue_code": "conversation_cursor_recall_approval_domain_contamination",
+                "severity": "high",
+                "detail": "cursor recall reply contains approval or status-followup scaffolding",
             }
         )
     if expect_cursor_substance and is_cursor_thread_recall_question(user):
@@ -928,6 +939,115 @@ def _seed_recall_rejects_continuation_assistant_surface(harness: Any) -> None:
             task_id,
             EventType.ASSISTANT_REPLIED,
             {"text": cont_fallback, "route": "direct", "reason": "seed_continuation_fallback"},
+        )
+    )
+
+
+def _seed_recall_rejects_approval_status_sludge(harness: Any) -> None:
+    """
+    Task with approval-shaped assistant.last_reply plus status_followup receipt but no hard
+    Cursor/delegated markers — explicit recall must not echo approval inventory.
+    """
+    server = harness.server
+    assert server is not None
+
+    created = server.with_lock(
+        lambda c: handle_command(
+            c,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "seed-recall-approval-sludge",
+                "payload": {
+                    "text": "Seed approval sludge recall",
+                    "routing_text": "Seed approval sludge recall",
+                    "chat_id": 77792,
+                    "message_id": 6701,
+                    "from_user": 99097,
+                },
+            },
+        )
+    )
+    task_id = str(created.get("task_id") or "")
+    if not task_id:
+        return
+    approval_reply = (
+        "I'm not seeing any approval requests waiting on you right now. "
+        "If you expected one, tell me which goal and I'll re-check."
+    )
+    server.with_lock(
+        lambda c: append_event(
+            c,
+            task_id,
+            EventType.ASSISTANT_REPLIED,
+            {
+                "text": approval_reply,
+                "route": "direct",
+                "reason": "seed_goal_runtime_status",
+            },
+        )
+    )
+    server.with_lock(
+        lambda c: insert_user_outcome_receipt(
+            c,
+            receipt_id="seed-receipt-approval-sludge-1",
+            task_id=task_id,
+            receipt_kind="status_followup",
+            summary="Status / follow-up reply (goal_runtime_status).",
+            proof_refs={"reason": "goal_runtime_status"},
+        )
+    )
+
+
+def _seed_recall_rejects_approval_status_sludge_thread(harness: Any) -> None:
+    """Same sludge pattern as _seed_recall_rejects_approval_status_sludge for thread-shaped recall."""
+    server = harness.server
+    assert server is not None
+
+    created = server.with_lock(
+        lambda c: handle_command(
+            c,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "seed-recall-approval-sludge-thread",
+                "payload": {
+                    "text": "Seed approval sludge thread recall",
+                    "routing_text": "Seed approval sludge thread recall",
+                    "chat_id": 77793,
+                    "message_id": 6710,
+                    "from_user": 99098,
+                },
+            },
+        )
+    )
+    task_id = str(created.get("task_id") or "")
+    if not task_id:
+        return
+    approval_reply = (
+        "I'm not seeing any approval requests waiting on you right now. "
+        "If you expected one, tell me which goal and I'll re-check."
+    )
+    server.with_lock(
+        lambda c: append_event(
+            c,
+            task_id,
+            EventType.ASSISTANT_REPLIED,
+            {
+                "text": approval_reply,
+                "route": "direct",
+                "reason": "seed_goal_runtime_status",
+            },
+        )
+    )
+    server.with_lock(
+        lambda c: insert_user_outcome_receipt(
+            c,
+            receipt_id="seed-receipt-approval-sludge-thread-1",
+            task_id=task_id,
+            receipt_kind="status_followup",
+            summary="Status / follow-up reply (goal_runtime_status).",
+            proof_refs={"reason": "goal_runtime_status"},
         )
     )
 
@@ -1806,6 +1926,44 @@ CONVERSATION_CORE_CASES: tuple[ConversationCaseSpec, ...] = (
         setup_fn=_seed_continue_prefers_fresher_workstream,
         required_reply_markers=("FRESHER_CONTINUE_WORKSTREAM_MARKER_V3",),
         forbidden_reply_markers=("STALE_VERBOSE_CONTINUE_MARKER_OLD", "multi-agent handoff"),
+        wait_policy="routing_smoke",
+    ),
+    ConversationCaseSpec(
+        case_id="recall_rejects_approval_status_sludge",
+        title="Cursor recall rejects approval inventory + status_followup receipt",
+        behavior_family="cursor_recall",
+        turns=("What did Cursor say?",),
+        chat_id=77792,
+        from_id=99097,
+        first_update_id=18792,
+        first_message_id=6701,
+        setup_fn=_seed_recall_rejects_approval_status_sludge,
+        required_reply_markers=("recent clean Cursor result",),
+        forbidden_reply_markers=(
+            "approval requests waiting on you",
+            "Status / follow-up reply",
+            "goal_runtime_status",
+        ),
+        expect_cursor_substance=False,
+        wait_policy="routing_smoke",
+    ),
+    ConversationCaseSpec(
+        case_id="cursor_thread_rejects_approval_status_sludge",
+        title="Cursor thread recall rejects approval/status sludge",
+        behavior_family="cursor_recall",
+        turns=("What happened in the Cursor thread?",),
+        chat_id=77793,
+        from_id=99098,
+        first_update_id=18793,
+        first_message_id=6710,
+        setup_fn=_seed_recall_rejects_approval_status_sludge_thread,
+        required_reply_markers=("recent clean Cursor result",),
+        forbidden_reply_markers=(
+            "approval requests waiting on you",
+            "Status / follow-up reply",
+            "goal_runtime_status",
+        ),
+        expect_cursor_substance=False,
         wait_policy="routing_smoke",
     ),
     ConversationCaseSpec(

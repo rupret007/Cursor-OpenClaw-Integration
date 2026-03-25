@@ -9,7 +9,7 @@ from .assistant_answer_composer import (
     build_blocked_state_reply_from_state,
     build_recent_outcome_history_reply_from_state,
     cursor_followup_context_reply_with_fallback,
-    is_cursor_thread_recall_question,
+    is_strict_cursor_domain_recall_question,
 )
 from .semantic_continuity import user_message_suggests_anaphoric_cursor_continue
 from .goal_runtime import build_goal_continuity_reply, try_goal_status_nl_reply
@@ -155,7 +155,7 @@ def choose_semantic_state_reply(
     if goal_continuity:
         candidates["goal_continuity"] = goal_continuity
 
-    if interpretation.continuity_focus == "recent_outcome_history" and is_cursor_thread_recall_question(
+    if interpretation.continuity_focus == "recent_outcome_history" and is_strict_cursor_domain_recall_question(
         text
     ):
         candidates = {

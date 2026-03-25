@@ -539,6 +539,123 @@ class TestAssistantAnswerComposer(unittest.TestCase):
         )
         self.assertIn("DELEGATED_RICH_SUMMARY_UNIQUE_XYZ", text)
 
+    def test_cursor_recall_rejects_approval_inventory_and_status_followup_receipt(self) -> None:
+        from services.andrea_sync.assistant_answer_composer import (  # noqa: E402
+            build_cursor_continuity_recall_reply_from_state,
+        )
+
+        r0 = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "comp-approval-sludge-1",
+                "payload": {
+                    "text": "check approvals",
+                    "routing_text": "check approvals",
+                    "chat_id": 88063,
+                    "message_id": 1,
+                },
+            },
+        )
+        tid = r0["task_id"]
+        append_event(
+            self.conn,
+            tid,
+            EventType.ASSISTANT_REPLIED,
+            {
+                "text": "I'm not seeing any approval requests waiting on you right now.",
+                "route": "direct",
+                "reason": "goal_runtime_status",
+            },
+        )
+        insert_user_outcome_receipt(
+            self.conn,
+            receipt_id="rcpt-approval-sludge-1",
+            task_id=tid,
+            receipt_kind="status_followup",
+            summary="Status / follow-up reply (goal_runtime_status).",
+            proof_refs={"reason": "goal_runtime_status"},
+        )
+        text = build_cursor_continuity_recall_reply_from_state(
+            self.conn, tid, user_message="What did Cursor say?"
+        )
+        low = text.lower()
+        self.assertIn("not finding a recent clean cursor result", low)
+        self.assertNotIn("approval requests waiting", low)
+        self.assertNotIn("status / follow-up reply", low)
+        self.assertNotIn("goal_runtime_status", low)
+
+    def test_cursor_recall_same_chat_prefers_domain_neighbor_over_approval_sludge(self) -> None:
+        """Same-chat task with hard Cursor markers wins recall over a newer sludge-only task."""
+        from services.andrea_sync.assistant_answer_composer import (  # noqa: E402
+            build_cursor_continuity_recall_reply_from_state,
+        )
+
+        first = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "comp-domain-gate-a",
+                "payload": {
+                    "text": "delegated work a",
+                    "routing_text": "delegated work a",
+                    "chat_id": 88064,
+                    "message_id": 1,
+                },
+            },
+        )
+        tid_a = first["task_id"]
+        append_event(
+            self.conn,
+            tid_a,
+            EventType.JOB_COMPLETED,
+            {
+                "summary": "done",
+                "backend": "openclaw",
+                "runner": "openclaw",
+                "user_summary": "CURSOR_NEIGHBOR_DOMAIN_GATE_99 real delegated recap anchor.",
+            },
+        )
+        second = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "comp-domain-gate-b",
+                "payload": {
+                    "text": "approval noise b",
+                    "routing_text": "approval noise b",
+                    "chat_id": 88064,
+                    "message_id": 2,
+                },
+            },
+        )
+        tid_b = second["task_id"]
+        append_event(
+            self.conn,
+            tid_b,
+            EventType.ASSISTANT_REPLIED,
+            {
+                "text": "I'm not seeing any approval requests waiting on you right now.",
+                "route": "direct",
+            },
+        )
+        insert_user_outcome_receipt(
+            self.conn,
+            receipt_id="rcpt-domain-gate-b",
+            task_id=tid_b,
+            receipt_kind="status_followup",
+            summary="Status / follow-up reply (goal_runtime_status).",
+            proof_refs={"reason": "goal_runtime_status"},
+        )
+        text = build_cursor_continuity_recall_reply_from_state(
+            self.conn, tid_b, user_message="What happened in the Cursor thread?"
+        )
+        self.assertIn("CURSOR_NEIGHBOR_DOMAIN_GATE_99", text)
+        self.assertNotIn("approval requests waiting", text.lower())
+
     def test_cursor_recall_includes_active_execution_attempt_line(self) -> None:
         from services.andrea_sync.assistant_answer_composer import (  # noqa: E402
             build_cursor_continuity_recall_reply_from_state,
@@ -650,9 +767,10 @@ class TestAssistantAnswerComposer(unittest.TestCase):
             self.conn, tid, user_message="What did Cursor say?"
         )
         self.assertNotIn("Recorded summary: What did Cursor say?", text)
-        self.assertIn("don't have a prior cursor result", text.lower())
+        self.assertIn("not finding a recent clean cursor result", text.lower())
 
-    def test_cursor_recall_synthesizes_from_assistant_update_before_grace(self) -> None:
+    def test_cursor_recall_without_domain_markers_falls_back_cleanly(self) -> None:
+        """Assistant-only updates do not satisfy explicit Cursor recall without delegated markers."""
         from services.andrea_sync.assistant_answer_composer import (  # noqa: E402
             build_cursor_continuity_recall_reply_from_state,
         )
@@ -683,9 +801,8 @@ class TestAssistantAnswerComposer(unittest.TestCase):
         text = build_cursor_continuity_recall_reply_from_state(
             self.conn, tid, user_message="What did Cursor say?"
         )
-        self.assertIn("Cursor recap:", text)
-        self.assertIn("Drafted the recap strategy", text)
-        self.assertNotIn("don't have a prior cursor result", text.lower())
+        self.assertIn("not finding a recent clean cursor result", text.lower())
+        self.assertNotIn("Drafted the recap strategy", text)
 
     def test_format_direct_message_strips_soft_failure_boilerplate(self) -> None:
         raw = (

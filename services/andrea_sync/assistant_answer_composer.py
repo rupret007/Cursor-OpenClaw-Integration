@@ -1,6 +1,7 @@
 """State-aware composition for direct assistant replies (ranked candidates from durable state)."""
 from __future__ import annotations
 
+import json
 import re
 import time
 from dataclasses import dataclass
@@ -66,6 +67,124 @@ _FT_PENDING_STATES = frozenset(
     }
 )
 
+_GOAL_RUNTIME_RECEIPT_REASONS = frozenset({"goal_runtime_status", "semantic_state_goal_status"})
+
+
+def _parse_receipt_proof_refs(row: Any) -> Dict[str, Any]:
+    raw = ""
+    try:
+        raw = str(row["proof_refs_json"] or "")
+    except (KeyError, TypeError, IndexError):
+        raw = ""
+    if not raw.strip():
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _receipt_passes_cursor_recall_domain_gate(row: Any) -> bool:
+    """
+    Receipt-level gate for explicit Cursor recall: reject approval/status-followup ledger rows
+    and other non-delegated daily-pack artifacts even when they are not generic placeholders.
+    """
+    try:
+        raw_summ = str(row["summary"] or "")
+    except (KeyError, TypeError, IndexError):
+        raw_summ = ""
+    try:
+        kind = str(row["receipt_kind"] or "").strip().lower()
+    except (KeyError, TypeError, IndexError):
+        kind = ""
+    if _ledger_receipt_summary_is_generic_placeholder(raw_summ):
+        return False
+    if kind == "status_followup":
+        return False
+    low_summ = raw_summ.strip().lower()
+    if low_summ.startswith("status / follow-up reply"):
+        return False
+    refs = _parse_receipt_proof_refs(row)
+    reason = str(refs.get("reason") or refs.get("reply_reason") or "").strip().lower()
+    if reason in _GOAL_RUNTIME_RECEIPT_REASONS:
+        return False
+    return True
+
+
+def _text_looks_like_approval_domain_surface(text: str) -> bool:
+    """True when persisted assistant text is approval-inventory shaped (negative signal for Cursor recall)."""
+    t = str(text or "").strip()
+    if not t:
+        return False
+    if _APPROVAL_STATUS_PATTERNS.search(t):
+        return True
+    low = t.lower()
+    if "approval requests" in low and ("waiting" in low or "pending" in low):
+        return True
+    if "not seeing any approval" in low or "no approval requests" in low:
+        return True
+    if "pending approval" in low or "awaiting your approval" in low:
+        return True
+    return False
+
+
+def _active_cursor_execution_attempt_signal(conn: Any, task_id: str) -> bool:
+    att = summarize_execution_attempt_for_user(conn, task_id)
+    if not isinstance(att, dict) or not att.get("ok"):
+        return False
+    if str(att.get("cursor_agent_id") or "").strip():
+        return True
+    bk = str(att.get("backend") or "").lower()
+    ln = str(att.get("lane") or "").lower()
+    if "cursor" in bk or "openclaw" in bk:
+        return True
+    if "cursor" in ln or "openclaw" in ln:
+        return True
+    return False
+
+
+def _task_has_hard_cursor_domain_affinity(meta: Dict[str, Any], conn: Any, task_id: str) -> bool:
+    """
+    Hard Cursor/delegated domain markers only. Outcome phase_summary alone does not qualify
+    (prevents approval/status-only tasks from ranking as Cursor recall).
+    """
+    oc = meta.get("openclaw") if isinstance(meta.get("openclaw"), dict) else {}
+    ex = meta.get("execution") if isinstance(meta.get("execution"), dict) else {}
+    cur = meta.get("cursor") if isinstance(meta.get("cursor"), dict) else {}
+    if str(oc.get("user_summary") or "").strip():
+        return True
+    po = oc.get("phase_outputs")
+    if isinstance(po, dict):
+        for v in po.values():
+            if isinstance(v, dict) and str(v.get("summary") or "").strip():
+                return True
+    ct = oc.get("collaboration_trace")
+    if isinstance(ct, list) and any(str(x).strip() for x in ct[:8]):
+        return True
+    if ex.get("delegated_to_cursor"):
+        return True
+    if str(cur.get("cursor_agent_id") or cur.get("agent_id") or "").strip():
+        return True
+    return _active_cursor_execution_attempt_signal(conn, task_id)
+
+
+def _cursor_recall_output_should_force_clean_fallback(text: str) -> bool:
+    """Bounded veto: explicit Cursor recap that leaked approval/status-followup scaffolding."""
+    raw = str(text or "").strip()
+    if not raw:
+        return False
+    low = raw.lower()
+    if "cursor recap:" not in low:
+        return False
+    if "status / follow-up reply" in low:
+        return True
+    if "goal_runtime_status" in low or "semantic_state_goal_status" in low:
+        return True
+    if _text_looks_like_approval_domain_surface(raw):
+        return True
+    return False
+
 
 @dataclass(frozen=True)
 class AnswerCandidate:
@@ -130,10 +249,17 @@ def gather_cursor_recall_evidence_pack(
     asst = _assistant_section(meta)
     um = str(user_message or "").strip()
 
+    recall_shaped = is_cursor_thread_recall_question(um)
+    strict_cursor_recall = is_strict_cursor_domain_recall_question(um)
+    hard_dom = _task_has_hard_cursor_domain_affinity(meta, conn, task_id)
+
     summary = strip_conversational_soft_failure_boilerplate(str(proj.get("summary") or "").strip())
     last_reply = strip_conversational_soft_failure_boilerplate(str(asst.get("last_reply") or "").strip())
     phase_summary = sanitize_user_surface_text(str(outcome.get("current_phase_summary") or ""), limit=500)
     blocked_reason = sanitize_user_surface_text(str(outcome.get("blocked_reason") or ""), limit=400)
+    if strict_cursor_recall and not hard_dom:
+        phase_summary = ""
+        blocked_reason = ""
 
     narrative_lines = tuple(_openclaw_narrative_lines(meta))
 
@@ -144,9 +270,14 @@ def gather_cursor_recall_evidence_pack(
         kind = str(row["receipt_kind"] or "").strip()
         if not summ:
             continue
-        line = f"Recent receipt ({kind}): {summ}" if kind else f"Recent receipt: {summ}"
         if _ledger_receipt_summary_is_generic_placeholder(raw_summ):
             continue
+        if strict_cursor_recall:
+            if not hard_dom:
+                continue
+            if not _receipt_passes_cursor_recall_domain_gate(row):
+                continue
+        line = f"Recent receipt ({kind}): {summ}" if kind else f"Recent receipt: {summ}"
         receipt_substantive.append(line)
 
     exec_lines = tuple(_execution_recall_context_lines(conn, task_id))
@@ -161,7 +292,6 @@ def gather_cursor_recall_evidence_pack(
             if r and not is_continuation_fallback_family_text(r):
                 cont_line = f"Continuation context: {r}"
 
-    recall_shaped = is_cursor_thread_recall_question(um)
     has_source_truth_for_recap = bool(
         narrative_lines
         or receipt_substantive
@@ -176,7 +306,10 @@ def gather_cursor_recall_evidence_pack(
         and not _is_echo_of_user_question(last_reply, um)
         and not is_continuation_fallback_family_text(last_reply)
     ):
-        if not (has_source_truth_for_recap and is_derived_assistant_recap_surface(last_reply)):
+        skip_lr = strict_cursor_recall and (
+            not hard_dom or _text_looks_like_approval_domain_surface(last_reply)
+        )
+        if not skip_lr and not (has_source_truth_for_recap and is_derived_assistant_recap_surface(last_reply)):
             safe_lr = _normalize_cursor_recap_lead(sanitize_user_surface_text(last_reply, limit=900))
             if safe_lr:
                 assistant_lines.append(f"Last assistant update on this task: {safe_lr}")
@@ -189,7 +322,8 @@ def gather_cursor_recall_evidence_pack(
         and not added_last_assistant_update_line
         and not (has_source_truth_for_recap and bool(narrative_lines))
     ):
-        if not (has_source_truth_for_recap and is_derived_assistant_recap_surface(summary)):
+        skip_s = strict_cursor_recall and (not hard_dom or _text_looks_like_approval_domain_surface(summary))
+        if not skip_s and not (has_source_truth_for_recap and is_derived_assistant_recap_surface(summary)):
             safe_s = _normalize_cursor_recap_lead(sanitize_user_surface_text(summary, limit=900))
             if safe_s:
                 assistant_lines.append(f"Recorded summary: {safe_s}")
@@ -202,7 +336,7 @@ def gather_cursor_recall_evidence_pack(
         ]
 
     st_score, st_units = _score_source_truth_cursor_recall_signals(
-        conn, task_id, um, recall_primary=recall_shaped
+        conn, task_id, um, recall_primary=strict_cursor_recall
     )
     return CursorRecallEvidencePack(
         task_id=task_id,
@@ -374,6 +508,17 @@ _CURSOR_THREAD_RECALL_RE = re.compile(
     re.I,
 )
 
+# Subset: explicit Cursor/OpenClaw delegated recap (domain-affinity gate applies).
+_STRICT_CURSOR_DOMAIN_RECALL_RE = re.compile(
+    r"\b("
+    r"what\s+did\s+cursor\s+(?:say|do)|"
+    r"what\s+happened\s+in\s+(?:the\s+)?cursor\s+thread|"
+    r"what\s+did\s+openclaw\s+do|"
+    r"what\s+did\s+it\s+do"
+    r")\b",
+    re.I,
+)
+
 _METADATA_SCAFFOLD_HINTS = (
     "task status",
     "result:",
@@ -460,6 +605,11 @@ def is_continuation_fallback_family_text(text: str) -> bool:
 def is_cursor_thread_recall_question(text: str) -> bool:
     """True for Cursor/OpenClaw thread recall phrasing (used for graceful copy)."""
     return bool(_CURSOR_THREAD_RECALL_RE.search(str(text or "")))
+
+
+def is_strict_cursor_domain_recall_question(text: str) -> bool:
+    """True only for explicit Cursor/OpenClaw thread asks (domain-affinity gate + strict ranking)."""
+    return bool(_STRICT_CURSOR_DOMAIN_RECALL_RE.search(str(text or "")))
 
 
 def _normalize_echo_key(text: str) -> str:
@@ -611,6 +761,10 @@ def _score_source_truth_cursor_recall_signals(
     meta = proj.get("meta") if isinstance(proj.get("meta"), dict) else {}
     um = str(user_message or "").strip()
 
+    hard_dom = _task_has_hard_cursor_domain_affinity(meta, conn, task_id)
+    if recall_primary and not hard_dom:
+        return 0, 0
+
     score = 0
     narrative_units = 0
 
@@ -663,6 +817,8 @@ def _score_source_truth_cursor_recall_signals(
         if not s:
             continue
         if _ledger_receipt_summary_is_generic_placeholder(raw_summ):
+            continue
+        if recall_primary and not _receipt_passes_cursor_recall_domain_gate(row):
             continue
         if is_stale_openclaw_narrative(s):
             score += 22
@@ -839,6 +995,9 @@ def _score_cursor_recall_candidate(
     meta = proj.get("meta") if isinstance(proj.get("meta"), dict) else {}
     um = str(user_message or "").strip()
 
+    if recall_primary and not _task_has_hard_cursor_domain_affinity(meta, conn, task_id):
+        return 0, False
+
     st_score, st_units = _score_source_truth_cursor_recall_signals(
         conn, task_id, um, recall_primary=recall_primary
     )
@@ -852,7 +1011,7 @@ def _score_cursor_recall_candidate(
         except (KeyError, TypeError, IndexError):
             raw_summ = ""
             s = ""
-        if s and _ledger_receipt_summary_is_generic_placeholder(raw_summ):
+        if s and _ledger_receipt_summary_is_generic_placeholder(raw_summ) and not recall_primary:
             score += 22
 
     asst = _assistant_section(meta)
@@ -861,6 +1020,11 @@ def _score_cursor_recall_candidate(
 
     derived_lr = bool(lr and len(lr) > 12 and not _is_echo_of_user_question(lr, um))
     derived_summ = bool(summ and len(summ) > 12 and not _is_echo_of_user_question(summ, um))
+    if recall_primary:
+        if derived_lr and _text_looks_like_approval_domain_surface(lr):
+            derived_lr = False
+        if derived_summ and _text_looks_like_approval_domain_surface(summ):
+            derived_summ = False
 
     if st_units >= 1:
         if derived_lr and not is_derived_assistant_recap_surface(lr):
@@ -905,7 +1069,7 @@ def select_best_task_for_cursor_recall(
     cid = _telegram_chat_id_for_task(conn, current_task_id)
     cands = _ordered_cursor_chat_candidates(conn, current_task_id, cid)
     um = str(user_message or "").strip()
-    recall_primary = is_cursor_thread_recall_question(um)
+    recall_primary = is_strict_cursor_domain_recall_question(um)
     rows: List[Tuple[int, bool, int, str]] = []
     for idx, tid in enumerate(cands):
         if not _same_thread_or_unknown(conn, current_task_id, tid):
@@ -936,10 +1100,13 @@ def find_recent_delegated_cursor_task_id(
     limit: int = 18,
     user_message: str = "",
     continuation_boost: bool = True,
+    require_hard_cursor_domain: bool = False,
 ) -> Optional[str]:
     """
     Same-chat Telegram task (excluding current) with delegated Cursor/OpenClaw continuity,
     ranked by narrative strength and optional active-attempt boost.
+    When require_hard_cursor_domain is True (explicit Cursor recall alternate hop), only tasks
+    with hard Cursor/delegated markers qualify—not outcome.phase_summary alone.
     """
     if chat_id is None or str(chat_id).strip() == "":
         return None
@@ -958,7 +1125,12 @@ def find_recent_delegated_cursor_task_id(
         hl = build_cursor_heavy_lift_context_reply(conn, tid)
         if hl is None and v.total_score < 100 and not v.meaningful:
             continue
-        if not _task_has_delegated_continuity_signal(meta) and not v.meaningful:
+        domain_ok = (
+            _task_has_hard_cursor_domain_affinity(meta, conn, tid)
+            if require_hard_cursor_domain
+            else _task_has_delegated_continuity_signal(meta)
+        )
+        if not domain_ok and not v.meaningful:
             continue
         if v.total_score > best_score or (v.total_score == best_score and idx < best_idx):
             best_score = v.total_score
@@ -1111,6 +1283,7 @@ def _fallback_cursor_recap_from_state(
     blocked_reason: str,
     status: str,
     result_kind: str,
+    allow_generic_task_status_lead: bool = True,
 ) -> str:
     """
     Build a human-readable recap sentence when richer narrative lines are unavailable.
@@ -1128,6 +1301,8 @@ def _fallback_cursor_recap_from_state(
         if st and st not in {"unknown", "n/a", "none"}:
             return f"The delegated Cursor run is currently {st}."
         return "The delegated Cursor run is active on the latest workstream."
+    if not allow_generic_task_status_lead:
+        return ""
     st = str(status or "").strip().lower()
     rk = str(result_kind or "").strip().lower()
     if st and st not in {"", "created", "queued"}:
@@ -1194,7 +1369,6 @@ def _is_thin_cursor_recap_lead(text: str) -> bool:
     return low.startswith(
         (
             "latest tracked cursor progress:",
-            "the delegated cursor run",
             "the latest cursor-linked task is currently",
             "the latest cursor-linked result state is",
         )
@@ -1250,6 +1424,11 @@ def build_cursor_continuity_recall_reply_from_state(
     cont_line = pack.support_continuation_line
     assistant_lines = list(pack.derived_assistant_lines)
 
+    recall_shaped = is_cursor_thread_recall_question(um)
+    strict_cursor_recall = is_strict_cursor_domain_recall_question(um)
+    hard_dom = _task_has_hard_cursor_domain_affinity(meta, conn, use_id)
+    allow_generic_status_lead = (not strict_cursor_recall) or hard_dom
+
     receipt_generic: List[str] = []
     for row in list_recent_user_outcome_receipts_for_task(conn, use_id, limit=3):
         raw_summ = str(row["summary"] or "")
@@ -1259,9 +1438,8 @@ def build_cursor_continuity_recall_reply_from_state(
             continue
         line = f"Recent receipt ({kind}): {summ}" if kind else f"Recent receipt: {summ}"
         if _ledger_receipt_summary_is_generic_placeholder(raw_summ):
-            receipt_generic.append(line)
-
-    recall_shaped = is_cursor_thread_recall_question(um)
+            if not strict_cursor_recall:
+                receipt_generic.append(line)
     prefer_truth_lead = pack.has_source_truth_recap_basis()
 
     state_bits: List[str] = []
@@ -1309,8 +1487,11 @@ def build_cursor_continuity_recall_reply_from_state(
                 blocked_reason=blocked_reason,
                 status=status,
                 result_kind=result_kind,
+                allow_generic_task_status_lead=allow_generic_status_lead,
             )
         recap_lead = _normalize_cursor_recap_lead(recap_lead)
+        if strict_cursor_recall and recap_lead and _text_looks_like_approval_domain_surface(recap_lead):
+            recap_lead = ""
         if recall_shaped and recap_lead and not narrative_lines and not receipt_substantive:
             if _is_thin_cursor_recap_lead(recap_lead):
                 recap_lead = ""
@@ -1324,6 +1505,7 @@ def build_cursor_continuity_recall_reply_from_state(
                 use_id,
                 chat_id=cid,
                 user_message=um,
+                require_hard_cursor_domain=strict_cursor_recall,
             )
             if alt and alt != use_id:
                 alt_text = build_cursor_continuity_recall_reply_from_state(
@@ -1358,7 +1540,9 @@ def build_cursor_continuity_recall_reply_from_state(
                 continue
             lines.append(line)
 
-        lines.extend(receipt_generic[:1])
+        if recall_shaped and (not strict_cursor_recall):
+            lines.extend(receipt_generic[:1])
+
         if _user_message_asks_explicit_status(um) or (
             recap_lead.startswith("The delegated Cursor run") and not narrative_lines
         ):
@@ -1434,6 +1618,8 @@ def build_cursor_continuity_recall_reply_from_state(
                 out = f"{RECALL_NO_CLEAN_CURSOR_RECAP_FALLBACK}{tail}".strip()
         else:
             out = f"{RECALL_NO_CLEAN_CURSOR_RECAP_FALLBACK}{tail}".strip()
+    if strict_cursor_recall and _cursor_recall_output_should_force_clean_fallback(out):
+        out = f"{RECALL_NO_CLEAN_CURSOR_RECAP_FALLBACK}{tail}".strip()
     return out
 
 

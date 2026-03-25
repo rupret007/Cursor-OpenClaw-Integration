@@ -52,6 +52,20 @@ class ConversationEvalDetectorTests(unittest.TestCase):
         codes = {h["issue_code"] for h in hits}
         self.assertIn("conversation_followup_carryover_miss", codes)
 
+    def test_detects_cursor_recall_continuation_family_leak(self) -> None:
+        cap = {
+            "raw_reply_text": (
+                "I’m not finding a recent Cursor workstream with enough context to safely continue."
+            ),
+            "user_turn": "What did Cursor say?",
+            "turn_plan_domain": "project_status",
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap, expect_cursor_substance=True)
+        codes = {h["issue_code"] for h in hits}
+        self.assertIn("conversation_cursor_recall_continuation_family_leak", codes)
+
     def test_detects_cursor_recall_metadata_led(self) -> None:
         cap = {
             "raw_reply_text": (

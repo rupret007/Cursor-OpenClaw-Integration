@@ -24,6 +24,7 @@ from .adapters import telegram as tg_adapt
 from .alexa_request_verify import verify_alexa_http_request
 from .andrea_router import AndreaRouteDecision, route_message
 from .assistant_answer_composer import (
+    CONTINUATION_NO_VIABLE_WORKSTREAM_FALLBACK,
     bounded_composer_repair,
     build_blocked_state_reply_from_state,
     build_recent_outcome_history_reply_from_state,
@@ -86,6 +87,7 @@ from .schema import EventType
 from .semantic_continuity import (
     resolve_semantic_continuity_patch,
     same_chat_max_delegation_score,
+    user_message_suggests_anaphoric_cursor_continue,
 )
 from .semantic_answer_engine import choose_semantic_state_reply
 from .telegram_continuation import attach_continuation_if_applicable
@@ -1634,10 +1636,13 @@ class SyncServer:
                             "(resume the run, start a fresh pass, or name a file), and I’ll track it."
                         )
                     else:
-                        goal_nl = (
-                            "I do not see active tracked work right now. "
-                            "If you want, I can start a fresh task and track it from here."
-                        )
+                        if user_message_suggests_anaphoric_cursor_continue(classify_text):
+                            goal_nl = CONTINUATION_NO_VIABLE_WORKSTREAM_FALLBACK
+                        else:
+                            goal_nl = (
+                                "I do not see active tracked work right now. "
+                                "If you want, I can start a fresh task and track it from here."
+                            )
                 elif effective_turn_plan.domain == "approval_state":
                     goal_nl = "I'm not seeing any approval requests waiting on you right now."
             if goal_nl:

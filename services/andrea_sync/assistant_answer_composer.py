@@ -34,6 +34,7 @@ from .store import (
     list_upcoming_reminders_for_principal,
 )
 from .user_surface import (
+    is_stale_openclaw_narrative,
     sanitize_user_surface_text,
     strip_conversational_soft_failure_boilerplate,
     surface_similarity_key,
@@ -157,7 +158,7 @@ def gather_cursor_recall_evidence_pack(
         last = cr[-1]
         if isinstance(last, dict):
             r = sanitize_user_surface_text(str(last.get("reason") or ""), limit=320)
-            if r:
+            if r and not is_continuation_fallback_family_text(r):
                 cont_line = f"Continuation context: {r}"
 
     recall_shaped = is_cursor_thread_recall_question(um)
@@ -169,7 +170,12 @@ def gather_cursor_recall_evidence_pack(
     )
     assistant_lines: List[str] = []
     added_last_assistant_update_line = False
-    if last_reply and len(last_reply) > 12 and not _is_echo_of_user_question(last_reply, um):
+    if (
+        last_reply
+        and len(last_reply) > 12
+        and not _is_echo_of_user_question(last_reply, um)
+        and not is_continuation_fallback_family_text(last_reply)
+    ):
         if not (has_source_truth_for_recap and is_derived_assistant_recap_surface(last_reply)):
             safe_lr = _normalize_cursor_recap_lead(sanitize_user_surface_text(last_reply, limit=900))
             if safe_lr:
@@ -179,6 +185,7 @@ def gather_cursor_recall_evidence_pack(
         summary
         and len(summary) > 20
         and not _is_echo_of_user_question(summary, um)
+        and not is_continuation_fallback_family_text(summary)
         and not added_last_assistant_update_line
         and not (has_source_truth_for_recap and bool(narrative_lines))
     ):
@@ -194,7 +201,9 @@ def gather_cursor_recall_evidence_pack(
             if not is_derived_assistant_recap_surface(_strip_recall_label(ln.split(":", 1)[-1] if ":" in ln else ln))
         ]
 
-    st_score, st_units = _score_source_truth_cursor_recall_signals(conn, task_id, um)
+    st_score, st_units = _score_source_truth_cursor_recall_signals(
+        conn, task_id, um, recall_primary=recall_shaped
+    )
     return CursorRecallEvidencePack(
         task_id=task_id,
         source_truth_narrative_lines=narrative_lines,
@@ -221,7 +230,9 @@ def assess_cursor_workstream_viability(
     base, meaningful = _score_cursor_recall_candidate(conn, task_id, user_message)
     total = int(base)
     if continuation_boost:
-        total += int(_cursor_recall_rank_adjustment(conn, task_id))
+        total += int(
+            _cursor_recall_rank_adjustment(conn, task_id, continuation_mode=True)
+        )
     return CursorWorkstreamViability(total, meaningful, int(st_score), int(st_units))
 
 
@@ -392,6 +403,17 @@ def draft_should_force_continuity_repair(draft: str, user_question: str) -> bool
             return True
     return False
 
+# Truthful recall-specific fallback (must not reuse continuation / no-active-work copy).
+RECALL_NO_CLEAN_CURSOR_RECAP_FALLBACK = (
+    "I’m not finding a recent clean Cursor result to recap from this thread."
+)
+
+# Continuation lane only: safe resume boundary (must not appear as the main recall answer).
+CONTINUATION_NO_VIABLE_WORKSTREAM_FALLBACK = (
+    "I’m not finding a recent Cursor workstream with enough context to safely continue, "
+    "so I’d need to start a new one from your latest instruction."
+)
+
 _GRACE_CURSOR_CONTINUITY = (
     "I don't have a prior Cursor result stored for this thread yet. "
     "If you want, I can start a fresh Cursor pass now and give you a concise recap."
@@ -413,6 +435,26 @@ _EXPLICIT_STATUS_ASK_RE = re.compile(
     r")\b",
     re.I,
 )
+
+# Phrases that belong to continuation / no-active-work fallbacks, not Cursor thread recap facts.
+_CONTINUATION_FALLBACK_SUBSTRINGS = (
+    "safely continue",
+    "enough context to safely continue",
+    "start a new heavy-lift pass",
+    "new heavy-lift pass",
+    "start a new one from your latest instruction",
+    "i do not see active tracked work right now",
+    "not finding a recent cursor workstream with enough context",
+)
+
+
+def is_continuation_fallback_family_text(text: str) -> bool:
+    """True when text is continuation-style boundary copy or generic no-tracked-work boilerplate."""
+    raw = str(text or "").strip()
+    if not raw:
+        return False
+    t = raw.lower().replace("’", "'")
+    return any(s in t for s in _CONTINUATION_FALLBACK_SUBSTRINGS)
 
 
 def is_cursor_thread_recall_question(text: str) -> bool:
@@ -463,6 +505,13 @@ def _telegram_thread_id_for_task(conn: Any, task_id: str) -> str:
     tg = _telegram_section(meta)
     raw = tg.get("message_thread_id")
     return str(raw).strip() if raw is not None else ""
+
+
+def _task_age_hours(conn: Any, task_id: str) -> float:
+    ts = get_task_updated_at(conn, task_id)
+    if ts is None:
+        return 10**6
+    return max(0.0, (time.time() - float(ts)) / 3600.0)
 
 
 def _same_thread_or_unknown(conn: Any, anchor_task_id: str, candidate_task_id: str) -> bool:
@@ -546,11 +595,15 @@ def _score_source_truth_cursor_recall_signals(
     conn: Any,
     task_id: str,
     user_message: str,
+    *,
+    recall_primary: bool = False,
 ) -> Tuple[int, int]:
     """
     Score using durable delegated / OpenClaw / outcome / execution signals only.
     Does not use meta.assistant.last_reply or projection.summary.
     Skips generic ledger receipts for narrative counting.
+    Stale / runtime OpenClaw chatter is demoted before it can inflate ranking.
+    When recall_primary is True, continuation notes and non-status blockers contribute less.
     Returns (score, narrative_units).
     """
     channel = get_task_channel(conn, task_id) or "cli"
@@ -564,10 +617,13 @@ def _score_source_truth_cursor_recall_signals(
     oc = meta.get("openclaw") if isinstance(meta.get("openclaw"), dict) else {}
     us = str(oc.get("user_summary") or "").strip()
     if us:
-        narrative_units += 1
-        score += 520
-        if _is_echo_of_user_question(us, um):
-            score -= 480
+        if is_stale_openclaw_narrative(us):
+            score += 70
+        else:
+            narrative_units += 1
+            score += 520
+            if _is_echo_of_user_question(us, um):
+                score -= 480
 
     po = oc.get("phase_outputs")
     if isinstance(po, dict):
@@ -578,15 +634,24 @@ def _score_source_truth_cursor_recall_signals(
             s = str(block.get("summary") or "").strip()
             if not s:
                 continue
+            if is_stale_openclaw_narrative(s):
+                score += 35
+                continue
             narrative_units += 1
             score += 200
             if _is_echo_of_user_question(s, um):
                 score -= 170
 
     ct = oc.get("collaboration_trace")
-    if isinstance(ct, list) and any(str(x).strip() for x in ct[:8]):
-        narrative_units += 1
-        score += 140
+    if isinstance(ct, list):
+        entries = [str(x).strip() for x in ct[:8] if str(x).strip()]
+        if entries:
+            stale_ct = sum(1 for x in entries if is_stale_openclaw_narrative(x))
+            if stale_ct == len(entries):
+                score += 28
+            else:
+                narrative_units += 1
+                score += 140 if stale_ct == 0 else 95
 
     for row in list_recent_user_outcome_receipts_for_task(conn, task_id, limit=3):
         try:
@@ -599,6 +664,9 @@ def _score_source_truth_cursor_recall_signals(
             continue
         if _ledger_receipt_summary_is_generic_placeholder(raw_summ):
             continue
+        if is_stale_openclaw_narrative(s):
+            score += 22
+            continue
         narrative_units += 1
         score += 150
         if _is_echo_of_user_question(s, um):
@@ -606,24 +674,36 @@ def _score_source_truth_cursor_recall_signals(
 
     tm = _telegram_section(meta)
     cr = tm.get("continuation_records") if isinstance(tm.get("continuation_records"), list) else []
-    if cr:
+    if cr and not recall_primary:
         last = cr[-1]
-        if isinstance(last, dict) and str(last.get("reason") or "").strip():
-            narrative_units += 1
-            score += 170
+        if isinstance(last, dict):
+            rsn = str(last.get("reason") or "").strip()
+            if rsn and not is_continuation_fallback_family_text(rsn):
+                narrative_units += 1
+                score += 170
+            elif rsn:
+                score += 18
 
     outcome = _outcome_section(meta)
     ps = str(outcome.get("current_phase_summary") or "").strip()
     if ps:
-        score += 210
-        narrative_units += 1
-        if _is_echo_of_user_question(ps, um):
-            score -= 190
+        if is_stale_openclaw_narrative(ps):
+            score += 40
+        else:
+            score += 210
+            narrative_units += 1
+            if _is_echo_of_user_question(ps, um):
+                score -= 190
 
     br = str(outcome.get("blocked_reason") or "").strip()
     if br and len(br) > 6:
-        score += 95
-        narrative_units += 1
+        if is_stale_openclaw_narrative(br):
+            score += 25
+        elif recall_primary and not _user_message_asks_explicit_status(um):
+            score += 38
+        else:
+            score += 95
+            narrative_units += 1
 
     ex = meta.get("execution") if isinstance(meta.get("execution"), dict) else {}
     if ex.get("delegated_to_cursor"):
@@ -641,17 +721,32 @@ def _score_source_truth_cursor_recall_signals(
     return score, narrative_units
 
 
-def _cursor_recall_rank_adjustment(conn: Any, task_id: str) -> int:
-    """Recency + active-attempt boost for same-chat Cursor ranking (complements base recall score)."""
+def _cursor_recall_rank_adjustment(
+    conn: Any,
+    task_id: str,
+    *,
+    continuation_mode: bool = False,
+) -> int:
+    """
+    Recency + active-attempt boost for same-chat Cursor ranking.
+    Continuation uses stronger recency and a capped st_boost so stale verbose meta
+    cannot outrank a fresher viable workstream indefinitely.
+    """
     boost = 0
     if get_active_execution_attempt_for_task(conn, task_id):
         boost += 320
     ts = get_task_updated_at(conn, task_id)
     if ts is not None:
         age = max(0.0, time.time() - float(ts))
-        boost += int(max(0, 220 - min(age / 3600.0, 120.0) * 1.85))
+        if continuation_mode:
+            boost += int(max(0, 290 - min(age / 3600.0, 80.0) * 3.15))
+        else:
+            boost += int(max(0, 220 - min(age / 3600.0, 120.0) * 1.85))
     st_boost = _score_source_truth_cursor_recall_signals(conn, task_id, "")[0]
-    boost += min(260, int(st_boost * 0.12))
+    if continuation_mode:
+        boost += min(115, int(st_boost * 0.072))
+    else:
+        boost += min(230, int(st_boost * 0.10))
     return boost
 
 
@@ -696,6 +791,8 @@ def is_derived_assistant_recap_surface(raw: str) -> bool:
     t = str(raw or "").strip()
     if not t:
         return False
+    if is_continuation_fallback_family_text(t):
+        return True
     body = _normalize_cursor_recap_lead(_strip_answer_wrappers(t))
     low = body.lower()
     if "cursor recap:" in low:
@@ -728,6 +825,8 @@ def _score_cursor_recall_candidate(
     conn: Any,
     task_id: str,
     user_message: str,
+    *,
+    recall_primary: bool = False,
 ) -> Tuple[int, bool]:
     """
     Narrative-first score for ranking Cursor recall / delegated selection.
@@ -740,7 +839,9 @@ def _score_cursor_recall_candidate(
     meta = proj.get("meta") if isinstance(proj.get("meta"), dict) else {}
     um = str(user_message or "").strip()
 
-    st_score, st_units = _score_source_truth_cursor_recall_signals(conn, task_id, um)
+    st_score, st_units = _score_source_truth_cursor_recall_signals(
+        conn, task_id, um, recall_primary=recall_primary
+    )
     score = int(st_score)
     narrative_units = int(st_units)
 
@@ -803,12 +904,18 @@ def select_best_task_for_cursor_recall(
     """Pick the strongest same-chat delegated Cursor task for recall-style answers."""
     cid = _telegram_chat_id_for_task(conn, current_task_id)
     cands = _ordered_cursor_chat_candidates(conn, current_task_id, cid)
+    um = str(user_message or "").strip()
+    recall_primary = is_cursor_thread_recall_question(um)
     rows: List[Tuple[int, bool, int, str]] = []
     for idx, tid in enumerate(cands):
         if not _same_thread_or_unknown(conn, current_task_id, tid):
             continue
-        base, meaningful = _score_cursor_recall_candidate(conn, tid, user_message)
-        total = base + _cursor_recall_rank_adjustment(conn, tid)
+        base, meaningful = _score_cursor_recall_candidate(
+            conn, tid, user_message, recall_primary=recall_primary
+        )
+        total = base + _cursor_recall_rank_adjustment(
+            conn, tid, continuation_mode=False
+        )
         rows.append((total, meaningful, idx, tid))
     if not rows:
         return current_task_id
@@ -1173,13 +1280,14 @@ def build_cursor_continuity_recall_reply_from_state(
     has_substantive_recap = bool(
         narrative_lines or receipt_substantive or cont_line or assistant_lines
     )
+    cont_for_recall = "" if recall_shaped else cont_line
     if recall_shaped:
         lines = []
         recap_lead = _pick_cursor_recap_lead(
             narrative_lines=narrative_lines,
             assistant_lines=assistant_lines,
             receipt_substantive=receipt_substantive,
-            cont_line=cont_line,
+            cont_line=cont_for_recall,
             phase_summary=phase_summary,
             blocked_reason=blocked_reason,
             prefer_source_truth_lead=prefer_truth_lead,
@@ -1190,7 +1298,7 @@ def build_cursor_continuity_recall_reply_from_state(
                 receipt_substantive=receipt_substantive,
                 phase_summary=phase_summary,
                 blocked_reason=blocked_reason,
-                cont_line=cont_line,
+                cont_line=cont_for_recall,
                 prefer_source_truth=prefer_truth_lead,
             )
         if not recap_lead:
@@ -1203,6 +1311,9 @@ def build_cursor_continuity_recall_reply_from_state(
                 result_kind=result_kind,
             )
         recap_lead = _normalize_cursor_recap_lead(recap_lead)
+        if recall_shaped and recap_lead and not narrative_lines and not receipt_substantive:
+            if _is_thin_cursor_recap_lead(recap_lead):
+                recap_lead = ""
         if (
             allow_same_chat_recap_hop
             and _is_thin_cursor_recap_lead(recap_lead)
@@ -1223,14 +1334,20 @@ def build_cursor_continuity_recall_reply_from_state(
                 )
                 if (
                     alt_text
-                    and alt_text not in (_GRACE_CURSOR_CONTINUITY, _GRACE_GENERIC_HISTORY)
+                    and alt_text
+                    not in (
+                        _GRACE_CURSOR_CONTINUITY,
+                        _GRACE_GENERIC_HISTORY,
+                        RECALL_NO_CLEAN_CURSOR_RECAP_FALLBACK,
+                    )
                     and not _cursor_recall_composition_is_metadata_led(alt_text)
                 ):
                     return alt_text
         if recap_lead:
             lines.append(f"Cursor recap: {recap_lead}")
 
-        if cont_line and _strip_recall_label(cont_line) not in recap_lead:
+        # Continuation notes must not ride along on explicit Cursor thread recap asks.
+        if (not recall_shaped) and cont_line and _strip_recall_label(cont_line) not in recap_lead:
             lines.append(cont_line)
 
         # Include at most one extra substantive corroboration line for brevity.
@@ -1280,7 +1397,7 @@ def build_cursor_continuity_recall_reply_from_state(
 
     if not lines:
         if is_cursor_thread_recall_question(um):
-            return _GRACE_CURSOR_CONTINUITY
+            return RECALL_NO_CLEAN_CURSOR_RECAP_FALLBACK
         return _GRACE_GENERIC_HISTORY
 
     if (
@@ -1290,12 +1407,34 @@ def build_cursor_continuity_recall_reply_from_state(
         and is_cursor_thread_recall_question(um)
         and not exec_lines
     ):
-        return _GRACE_CURSOR_CONTINUITY
+        return RECALL_NO_CLEAN_CURSOR_RECAP_FALLBACK
 
     tail = ""
     if blocked_reason or followthrough_needs_user_attention(_followthrough_section(meta)):
         tail = " Next step: address the open item above when you’re ready."
-    return ("\n".join(lines) + tail).strip()
+    out = ("\n".join(lines) + tail).strip()
+    if recall_shaped and is_continuation_fallback_family_text(out):
+        if narrative_lines:
+            lead_ln = narrative_lines[0]
+            clean = _normalize_cursor_recap_lead(
+                sanitize_user_surface_text(_strip_recall_label(lead_ln), limit=420)
+            )
+            if clean and not is_continuation_fallback_family_text(clean):
+                out = f"Cursor recap: {clean}{tail}".strip()
+            else:
+                out = f"{RECALL_NO_CLEAN_CURSOR_RECAP_FALLBACK}{tail}".strip()
+        elif receipt_substantive:
+            lead_ln = receipt_substantive[0]
+            clean = _normalize_cursor_recap_lead(
+                sanitize_user_surface_text(_strip_recall_label(lead_ln), limit=420)
+            )
+            if clean:
+                out = f"Cursor recap: {clean}{tail}".strip()
+            else:
+                out = f"{RECALL_NO_CLEAN_CURSOR_RECAP_FALLBACK}{tail}".strip()
+        else:
+            out = f"{RECALL_NO_CLEAN_CURSOR_RECAP_FALLBACK}{tail}".strip()
+    return out
 
 
 def find_viable_recent_cursor_workstream_reply(
@@ -1316,7 +1455,11 @@ def find_viable_recent_cursor_workstream_reply(
 
     def _safe_recap(tid: str) -> Optional[str]:
         recap = build_cursor_continuity_recall_reply_from_state(conn, tid, user_message=um)
-        if not recap or recap in (_GRACE_CURSOR_CONTINUITY, _GRACE_GENERIC_HISTORY):
+        if not recap or recap in (
+            _GRACE_CURSOR_CONTINUITY,
+            _GRACE_GENERIC_HISTORY,
+            RECALL_NO_CLEAN_CURSOR_RECAP_FALLBACK,
+        ):
             return None
         if _cursor_recall_composition_is_metadata_led(recap):
             return None
@@ -1476,6 +1619,20 @@ def _resolve_cursor_heavy_lift_reply(
     anaphoric = user_message_suggests_anaphoric_cursor_continue(um)
     entries.sort(key=lambda e: (-e[0], 0 if e[1] else 1, idx_map.get(e[2], 10**6)))
 
+    if len(entries) >= 2:
+        s0, m0, t0, r0 = entries[0]
+        s1, m1, t1, r1 = entries[1]
+        age0 = _task_age_hours(conn, t0)
+        age1 = _task_age_hours(conn, t1)
+        if (
+            m0
+            and m1
+            and age1 + 1.5 < age0
+            and s1 >= s0 - 110
+            and (s0 - s1) < 200
+        ):
+            entries[0], entries[1] = entries[1], entries[0]
+
     if anaphoric and len(entries) >= 2:
         s0, m0, t0, _r0 = entries[0]
         s1, m1, t1, _r1 = entries[1]
@@ -1523,16 +1680,17 @@ def cursor_followup_context_reply_with_fallback(
         recap = build_cursor_continuity_recall_reply_from_state(
             conn, alt, user_message=user_message
         )
-        if recap not in (_GRACE_GENERIC_HISTORY, _GRACE_CURSOR_CONTINUITY):
+        if recap not in (
+            _GRACE_GENERIC_HISTORY,
+            _GRACE_CURSOR_CONTINUITY,
+            RECALL_NO_CLEAN_CURSOR_RECAP_FALLBACK,
+        ):
             return (
                 "The last Cursor run on this thread already finished. "
                 "I can start a new heavy-lift pass using this as the starting point:\n"
                 f"{recap}"
             )
-    return (
-        "I’m not finding a recent Cursor workstream with enough context to safely continue, "
-        "so I’d need to start a new one from your latest instruction."
-    )
+    return CONTINUATION_NO_VIABLE_WORKSTREAM_FALLBACK
 
 
 def build_cursor_heavy_lift_context_reply(conn: Any, task_id: str) -> Optional[str]:

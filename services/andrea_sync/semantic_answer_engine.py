@@ -9,7 +9,9 @@ from .assistant_answer_composer import (
     build_blocked_state_reply_from_state,
     build_recent_outcome_history_reply_from_state,
     cursor_followup_context_reply_with_fallback,
+    is_cursor_thread_recall_question,
 )
+from .semantic_continuity import user_message_suggests_anaphoric_cursor_continue
 from .goal_runtime import build_goal_continuity_reply, try_goal_status_nl_reply
 from .turn_intelligence import TurnPlan
 from .user_surface import sanitize_user_surface_text
@@ -152,6 +154,17 @@ def choose_semantic_state_reply(
     goal_continuity = build_goal_continuity_reply(conn, task_id, user_text=text)
     if goal_continuity:
         candidates["goal_continuity"] = goal_continuity
+
+    if interpretation.continuity_focus == "recent_outcome_history" and is_cursor_thread_recall_question(
+        text
+    ):
+        candidates = {
+            k: v for k, v in candidates.items() if k == "cursor_continuity_recall"
+        }
+    elif interpretation.continuity_focus == "cursor_followup_heavy_lift" and user_message_suggests_anaphoric_cursor_continue(
+        text
+    ):
+        candidates = {k: v for k, v in candidates.items() if k == "cursor_heavy_lift_context"}
 
     best: Optional[SemanticAnswerResult] = None
     for source, raw_text in candidates.items():

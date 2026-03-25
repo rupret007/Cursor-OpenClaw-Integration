@@ -9,6 +9,8 @@ from unittest import mock
 
 from services.andrea_sync.bus import handle_command
 from services.andrea_sync.assistant_answer_composer import (
+    CONTINUATION_NO_VIABLE_WORKSTREAM_FALLBACK,
+    RECALL_NO_CLEAN_CURSOR_RECAP_FALLBACK,
     build_cursor_continuity_recall_reply_from_state,
     cursor_followup_context_reply_with_fallback,
 )
@@ -210,6 +212,53 @@ class ExecutionContinuityTests(unittest.TestCase):
         )
         self.assertIn("Implemented the continuity", text)
         self.assertIn("Cursor recap:", text)
+
+    def test_cursor_recall_prefers_openclaw_over_continuation_last_reply(self) -> None:
+        create_task(self.conn, "tsk_recall_cont", "telegram")
+        append_event(
+            self.conn,
+            "tsk_recall_cont",
+            EventType.JOB_COMPLETED,
+            {
+                "summary": "done",
+                "backend": "openclaw",
+                "runner": "openclaw",
+                "delegated_to_cursor": True,
+                "user_summary": "RECALL_LEAD_OPENCLAW_FACT_MM9 shipped the rollout.",
+            },
+        )
+        append_event(
+            self.conn,
+            "tsk_recall_cont",
+            EventType.ASSISTANT_REPLIED,
+            {
+                "text": CONTINUATION_NO_VIABLE_WORKSTREAM_FALLBACK,
+                "route": "direct",
+                "reason": "seed",
+            },
+        )
+        text = build_cursor_continuity_recall_reply_from_state(
+            self.conn, "tsk_recall_cont", user_message="What did Cursor say?"
+        )
+        self.assertIn("RECALL_LEAD_OPENCLAW_FACT_MM9", text)
+        self.assertNotIn("safely continue", text.lower())
+
+    def test_cursor_recall_truthful_fallback_when_only_continuation_surface(self) -> None:
+        create_task(self.conn, "tsk_recall_only_cont", "telegram")
+        append_event(
+            self.conn,
+            "tsk_recall_only_cont",
+            EventType.ASSISTANT_REPLIED,
+            {
+                "text": CONTINUATION_NO_VIABLE_WORKSTREAM_FALLBACK,
+                "route": "direct",
+                "reason": "seed",
+            },
+        )
+        text = build_cursor_continuity_recall_reply_from_state(
+            self.conn, "tsk_recall_only_cont", user_message="What did Cursor say?"
+        )
+        self.assertEqual(text.strip(), RECALL_NO_CLEAN_CURSOR_RECAP_FALLBACK.strip())
 
     def test_cursor_followup_fallback_picks_ranked_same_chat_delegated_task(self) -> None:
         """Thin current task + richer older same-chat delegated task yields continuation context."""

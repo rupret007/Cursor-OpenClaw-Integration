@@ -22,6 +22,7 @@ from .assistant_answer_composer import (
     _cursor_recall_composition_is_metadata_led,
     draft_implies_false_completion,
     draft_should_force_continuity_repair,
+    is_continuation_fallback_family_text,
     is_cursor_thread_recall_question,
 )
 from .bus import handle_command
@@ -35,7 +36,7 @@ from .projector import project_task_dict
 from .scenario_runtime import resolve_scenario
 from .schema import CommandType, EventType, TaskStatus
 from .semantic_continuity import same_chat_max_delegation_score
-from .store import get_task_channel
+from .store import append_event, get_task_channel
 from .turn_intelligence import build_turn_plan
 from .user_surface import is_internal_runtime_text, sanitize_user_surface_text
 
@@ -304,6 +305,15 @@ def run_deterministic_detectors(
                 "issue_code": "conversation_external_domain_mismatch",
                 "severity": "medium",
                 "detail": "expected external_information domain",
+            }
+        )
+    if is_cursor_thread_recall_question(user) and is_continuation_fallback_family_text(text):
+        findings.append(
+            {
+                "family": "cursor_recall_failure",
+                "issue_code": "conversation_cursor_recall_continuation_family_leak",
+                "severity": "high",
+                "detail": "cursor recall ask answered with continuation / no-active-work fallback phrasing",
             }
         )
     if expect_cursor_substance and is_cursor_thread_recall_question(user):
@@ -859,6 +869,162 @@ def _seed_source_truth_over_derived_recall(harness: Any) -> None:
             },
         }
     )
+
+
+def _seed_recall_rejects_continuation_assistant_surface(harness: Any) -> None:
+    """OpenClaw source truth present while assistant.last_reply holds continuation fallback copy."""
+    server = harness.server
+    assert server is not None
+
+    created = server.with_lock(
+        lambda c: handle_command(
+            c,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "seed-recall-cont-leak",
+                "payload": {
+                    "text": "Seed recall continuation boundary",
+                    "routing_text": "Seed recall continuation boundary",
+                    "chat_id": 77790,
+                    "message_id": 6501,
+                    "from_user": 99095,
+                },
+            },
+        )
+    )
+    task_id = str(created.get("task_id") or "")
+    if not task_id:
+        return
+    server.with_lock(
+        lambda c: handle_command(
+            c,
+            {
+                "command_type": CommandType.REPORT_CURSOR_EVENT.value,
+                "channel": "cursor",
+                "task_id": task_id,
+                "payload": {
+                    "event_type": EventType.JOB_COMPLETED.value,
+                    "payload": {
+                        "backend": "openclaw",
+                        "runner": "openclaw",
+                        "summary": "done",
+                        "delegated_to_cursor": True,
+                        "user_summary": (
+                            "RECALL_SOURCE_TRUTH_BOUNDARY_77 Cursor actually shipped the auth hardening."
+                        ),
+                    },
+                },
+            },
+        )
+    )
+    cont_fallback = (
+        "I’m not finding a recent Cursor workstream with enough context to safely continue, "
+        "so I’d need to start a new one from your latest instruction."
+    )
+    server.with_lock(
+        lambda c: append_event(
+            c,
+            task_id,
+            EventType.ASSISTANT_REPLIED,
+            {"text": cont_fallback, "route": "direct", "reason": "seed_continuation_fallback"},
+        )
+    )
+
+
+def _seed_continue_prefers_fresher_workstream(harness: Any) -> None:
+    """Older verbose delegated task vs newer source-rich workstream on the same chat."""
+    server = harness.server
+    assert server is not None
+
+    def _cmd(body: Dict[str, Any]) -> Dict[str, Any]:
+        return server.with_lock(lambda c: handle_command(c, body))
+
+    old = _cmd(
+        {
+            "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+            "channel": "telegram",
+            "external_id": "seed-fresh-ws-old",
+            "payload": {
+                "text": "Seed older workstream",
+                "routing_text": "Seed older workstream",
+                "chat_id": 77791,
+                "message_id": 6601,
+                "from_user": 99096,
+            },
+        }
+    )
+    old_id = str(old.get("task_id") or "")
+    if old_id:
+        _cmd(
+            {
+                "command_type": CommandType.REPORT_CURSOR_EVENT.value,
+                "channel": "cursor",
+                "task_id": old_id,
+                "payload": {
+                    "event_type": EventType.JOB_COMPLETED.value,
+                    "payload": {
+                        "backend": "openclaw",
+                        "runner": "openclaw",
+                        "summary": "done",
+                        "delegated_to_cursor": True,
+                        "user_summary": (
+                            "STALE_VERBOSE_CONTINUE_MARKER_OLD delegated the task to a new "
+                            "multi-agent handoff session for the sprint."
+                        ),
+                    },
+                },
+            }
+        )
+    _cmd(
+        {
+            "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+            "channel": "telegram",
+            "external_id": "seed-fresh-ws-new",
+            "payload": {
+                "text": "hey",
+                "routing_text": "hey",
+                "chat_id": 77791,
+                "message_id": 6602,
+                "from_user": 99096,
+            },
+        }
+    )
+    new = _cmd(
+        {
+            "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+            "channel": "telegram",
+            "external_id": "seed-fresh-ws-new2",
+            "payload": {
+                "text": "new shell",
+                "routing_text": "new shell",
+                "chat_id": 77791,
+                "message_id": 6603,
+                "from_user": 99096,
+            },
+        }
+    )
+    new_id = str(new.get("task_id") or "")
+    if new_id:
+        _cmd(
+            {
+                "command_type": CommandType.REPORT_CURSOR_EVENT.value,
+                "channel": "cursor",
+                "task_id": new_id,
+                "payload": {
+                    "event_type": EventType.JOB_COMPLETED.value,
+                    "payload": {
+                        "backend": "openclaw",
+                        "runner": "openclaw",
+                        "summary": "done",
+                        "delegated_to_cursor": True,
+                        "user_summary": (
+                            "FRESHER_CONTINUE_WORKSTREAM_MARKER_V3 landed the payment retry fix."
+                        ),
+                    },
+                },
+            }
+        )
 
 
 def _seed_bare_continue_rich_neighbor(harness: Any) -> None:
@@ -1611,6 +1777,35 @@ CONVERSATION_CORE_CASES: tuple[ConversationCaseSpec, ...] = (
         setup_fn=_seed_bare_continue_rich_neighbor,
         required_reply_markers=("BARE_CONTINUE_RICH_NEIGHBOR_MARKER_Q5",),
         forbidden_reply_markers=("I do not see active tracked work right now",),
+        wait_policy="routing_smoke",
+    ),
+    ConversationCaseSpec(
+        case_id="recall_rejects_continuation_assistant_surface",
+        title="Cursor recall ignores continuation fallback in assistant.last_reply",
+        behavior_family="cursor_recall",
+        turns=("What did Cursor say?",),
+        chat_id=77790,
+        from_id=99095,
+        first_update_id=18790,
+        first_message_id=6501,
+        setup_fn=_seed_recall_rejects_continuation_assistant_surface,
+        required_reply_markers=("RECALL_SOURCE_TRUTH_BOUNDARY_77",),
+        forbidden_reply_markers=("safely continue", "start a new heavy-lift pass"),
+        expect_cursor_substance=True,
+        wait_policy="routing_smoke",
+    ),
+    ConversationCaseSpec(
+        case_id="continue_prefers_fresher_workstream",
+        title="Continuation prefers fresher source-rich workstream over stale neighbor",
+        behavior_family="cursor_continuation",
+        turns=("Continue that",),
+        chat_id=77791,
+        from_id=99096,
+        first_update_id=18791,
+        first_message_id=6603,
+        setup_fn=_seed_continue_prefers_fresher_workstream,
+        required_reply_markers=("FRESHER_CONTINUE_WORKSTREAM_MARKER_V3",),
+        forbidden_reply_markers=("STALE_VERBOSE_CONTINUE_MARKER_OLD", "multi-agent handoff"),
         wait_policy="routing_smoke",
     ),
     ConversationCaseSpec(

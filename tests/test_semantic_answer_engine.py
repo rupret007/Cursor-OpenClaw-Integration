@@ -25,17 +25,19 @@ class SemanticAnswerEngineTests(unittest.TestCase):
     @mock.patch(
         "services.andrea_sync.semantic_answer_engine.build_recent_outcome_history_reply_from_state"
     )
-    def test_prefers_non_thin_recap_over_grace_fallback(
+    def test_explicit_cursor_recall_does_not_lose_to_goal_continuity(
         self,
         mock_recent: mock.MagicMock,
         mock_goal_status: mock.MagicMock,
         mock_goal_cont: mock.MagicMock,
     ) -> None:
         mock_recent.return_value = (
-            "I'm not finding a strong stored summary from the recent Cursor work yet."
+            "Cursor recap: Added retries and fixed timeout handling."
         )
         mock_goal_status.return_value = None
-        mock_goal_cont.return_value = "Cursor recap: Added retries and fixed timeout handling."
+        mock_goal_cont.return_value = (
+            "Goal `g1` is still running with a long status narrative that used to outrank recap."
+        )
 
         result = choose_semantic_state_reply(
             conn=object(),
@@ -47,7 +49,7 @@ class SemanticAnswerEngineTests(unittest.TestCase):
 
         self.assertIsNotNone(result)
         assert result is not None
-        self.assertEqual(result.source, "goal_continuity")
+        self.assertEqual(result.source, "cursor_continuity_recall")
         self.assertIn("Cursor recap:", result.reply_text)
         self.assertGreaterEqual(result.score, 70)
 

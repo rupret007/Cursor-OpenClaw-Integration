@@ -24,6 +24,7 @@ _ANAPHORIC_OUTCOME_RE = re.compile(
 _ANAPHORIC_CONTINUE_RE = re.compile(
     r"^\s*("
     r"continue\s+that(?:\s+(?:cursor\s+)?task)?|"
+    r"continue\s+it\b|"
     r"continue\s+this(?:\s+(?:cursor\s+)?task)?|"
     r"pick\s+up\s+(?:that|this|there)|"
     r"keep\s+going\s+(?:on\s+)?that"

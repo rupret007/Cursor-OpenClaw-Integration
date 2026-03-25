@@ -251,7 +251,9 @@ RECENT_TEXT_LANE_CARRY_REASONS = frozenset(
         "recent_text_messages_ready",
         "recent_text_messages_failed",
         "recent_text_messages_failed_contaminated",
+        "recent_text_messages_unavailable",
         "messaging_capability_answer",
+        "messaging_capability_read_answer",
     }
 )
 RECENT_TEXT_SUMMARIZE_CARRY_RE = re.compile(
@@ -2059,6 +2061,7 @@ class SyncServer:
             "recent_text_messages_failed": "recentMessagesOrInboxLookup",
             "recent_text_messages_unavailable": "recentMessagesOrInboxLookup",
             "messaging_capability_answer": "recentMessagesOrInboxLookup",
+            "messaging_capability_read_answer": "recentMessagesOrInboxLookup",
         }
         sid = structured_daily.get(str(structured_reason or ""))
         if not sid:
@@ -2545,7 +2548,7 @@ class SyncServer:
         direct = self._last_assistant_reply_reason(task_id)
         if direct in RECENT_TEXT_ASSISTANT_REASONS:
             return direct
-        if direct == "messaging_capability_answer":
+        if direct in {"messaging_capability_answer", "messaging_capability_read_answer"}:
             return direct
         snapshot = self._task_snapshot(task_id)
         if not snapshot or str(snapshot.get("channel") or "") != "telegram":
@@ -2571,7 +2574,7 @@ class SyncServer:
                 prior = str(am.get("reason") or "").strip()
                 if prior in RECENT_TEXT_ASSISTANT_REASONS:
                     return prior
-                if prior == "messaging_capability_answer":
+                if prior in {"messaging_capability_answer", "messaging_capability_read_answer"}:
                     return prior
             return ""
 
@@ -2669,7 +2672,66 @@ class SyncServer:
             **self._resolve_runtime_skill(task_id, skill_key=skill_key, actor="server"),
         }
 
+    def _messaging_user_intent_is_read_focused(self, text: str) -> bool:
+        """
+        True when the user is asking about reading / listing / summarizing messages,
+        not outbound send capability (handled separately via draft-and-confirm).
+        """
+        raw = str(text or "").strip()
+        if not raw:
+            return False
+        if self._parse_outbound_message_request(raw) is not None:
+            return False
+        lowered = raw.lower()
+        if not MESSAGING_CAPABILITY_RE.search(raw):
+            return False
+        if re.search(r"\bsend\b", lowered) and not re.search(
+            r"\b("
+            r"pull|retrieve|retrieving|reading|read|fetch|fetching|summarize|summarise|"
+            r"recent|history|inbox|show\s+me|list\s+my|get\s+my|see\s+my"
+            r")\b",
+            lowered,
+        ):
+            return False
+        return bool(
+            re.search(
+                r"\b("
+                r"pull|retrieve|retrieving|reading|read\b|fetch|fetching|"
+                r"summarize|summarise|summary|recent|history|inbox|"
+                r"show\s+me|list\s+my|get\s+my|see\s+my|what\s+are\s+my"
+                r")\b",
+                lowered,
+            )
+        )
+
+    def _messaging_read_capability_reply(self, resolved: Dict[str, Any], text: str) -> str:
+        """User copy for read/list/summarize intent: separate from outbound send workflow."""
+        status = str(resolved.get("truth", {}).get("status") or "")
+        label = str(resolved.get("label") or "messaging").strip()
+        clean = str(text or "").strip().lower()
+        specific = "blue bubbles" in clean or "bluebubbles" in clean
+        lane = "BlueBubbles" if specific else label
+        if status == "verified_available":
+            if specific:
+                return (
+                    "Yes. BlueBubbles is verified here for reading recent iMessage/text activity. "
+                    "I only summarize what retrieval can verify; outbound texts still go through draft-and-confirm."
+                )
+            return (
+                f"Yes. The {lane} lane is verified here for reading recent messages when you ask. "
+                "Outbound personal texts still use draft-first confirmation."
+            )
+        if status == "installed_but_not_eligible":
+            return (
+                f"I found the {lane} lane, but local setup is not complete enough to read recent messages reliably yet."
+            )
+        return (
+            f"I couldn't verify the {lane} lane just now, so I can't rely on reading recent texts yet."
+        )
+
     def _messaging_capability_reply(self, resolved: Dict[str, Any], text: str) -> str:
+        if self._messaging_user_intent_is_read_focused(text):
+            return self._messaging_read_capability_reply(resolved, text)
         status = str(resolved.get("truth", {}).get("status") or "")
         label = str(resolved.get("label") or "messaging").strip()
         clean = str(text or "").strip().lower()
@@ -3088,10 +3150,11 @@ class SyncServer:
 
         if MESSAGING_CAPABILITY_RE.search(text):
             resolved = self._resolve_messaging_capability(task_id, text)
-            return (
-                self._messaging_capability_reply(resolved, text),
-                "messaging_capability_answer",
+            read_focused = self._messaging_user_intent_is_read_focused(text)
+            reason = (
+                "messaging_capability_read_answer" if read_focused else "messaging_capability_answer"
             )
+            return (self._messaging_capability_reply(resolved, text), reason)
 
         memory_note = self._parse_memory_note_request(text)
         if memory_note:

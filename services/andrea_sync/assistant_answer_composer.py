@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -17,10 +18,12 @@ from .delegated_lifecycle import build_delegated_lifecycle_contract
 from .execution_runtime import summarize_execution_attempt_for_user
 from .goal_runtime import _APPROVAL_STATUS_PATTERNS, build_goal_continuity_reply
 from .projector import project_task_dict
+from .semantic_continuity import user_message_suggests_anaphoric_cursor_continue
 from .store import (
     get_active_execution_attempt_for_task,
     get_task_channel,
     get_task_principal_id,
+    get_task_updated_at,
     list_pending_goal_approvals_for_task,
     list_recent_closure_decisions_for_task,
     list_recent_followup_recommendations_for_task,
@@ -214,6 +217,19 @@ _GRACE_GENERIC_HISTORY = (
     "I can still check the latest linked goal or start tracking the next step explicitly."
 )
 
+_AMBIGUOUS_CURSOR_CONTINUE_REPLY = (
+    "I see more than one recent Cursor workstream on this thread that could fit. "
+    "Which one should I continue—the newest run, or the earlier task?"
+)
+
+_EXPLICIT_STATUS_ASK_RE = re.compile(
+    r"\b("
+    r"where\s+are\s+we|status|progress|update|what'?s\s+the\s+state|"
+    r"blocked|blocker|stuck|where\s+things\s+stand"
+    r")\b",
+    re.I,
+)
+
 
 def is_cursor_thread_recall_question(text: str) -> bool:
     """True for Cursor/OpenClaw thread recall phrasing (used for graceful copy)."""
@@ -303,6 +319,59 @@ def _ordered_cursor_chat_candidates(
         seen.add(tid)
         ordered.append(tid)
     return ordered
+
+
+def _user_message_asks_explicit_status(user_message: str) -> bool:
+    return bool(_EXPLICIT_STATUS_ASK_RE.search(str(user_message or "")))
+
+
+def _cursor_recall_rank_adjustment(conn: Any, task_id: str) -> int:
+    """Recency + active-attempt boost for same-chat Cursor ranking (complements base recall score)."""
+    boost = 0
+    if get_active_execution_attempt_for_task(conn, task_id):
+        boost += 320
+    ts = get_task_updated_at(conn, task_id)
+    if ts is not None:
+        age = max(0.0, time.time() - float(ts))
+        boost += int(max(0, 220 - min(age / 3600.0, 120.0) * 1.85))
+    return boost
+
+
+def _continuation_candidate_score(conn: Any, task_id: str, user_message: str) -> Tuple[int, bool]:
+    base, meaningful = _score_cursor_recall_candidate(conn, task_id, user_message)
+    return base + _cursor_recall_rank_adjustment(conn, task_id), meaningful
+
+
+def _cursor_recall_composition_is_metadata_led(text: str) -> bool:
+    """True when recall-shaped output leads with execution scaffolding instead of human recap."""
+    t = str(text or "").strip()
+    if not t:
+        return False
+    low = t.lower()
+    recap_markers = (
+        "latest useful result:",
+        "recent receipt (",
+        "recent receipt:",
+        "phase synthesis:",
+        "phase execution:",
+        "phase critique:",
+        "phase plan:",
+        "collaboration note:",
+        "continuation context:",
+        "last assistant update on this task:",
+        "recorded summary:",
+    )
+    first_recap = min((low.find(m) for m in recap_markers if low.find(m) >= 0), default=10**9)
+    idx_where = low.find("where things stand:")
+    if idx_where >= 0 and first_recap < idx_where:
+        return False
+
+    first_line = low.split("\n")[0][:220]
+    if "delegated execution (tracked)" in first_line:
+        return True
+    if idx_where >= 0 and idx_where <= 320 and first_recap == 10**9:
+        return True
+    return False
 
 
 def _score_cursor_recall_candidate(
@@ -418,15 +487,19 @@ def select_best_task_for_cursor_recall(
     """Pick the strongest same-chat delegated Cursor task for recall-style answers."""
     cid = _telegram_chat_id_for_task(conn, current_task_id)
     cands = _ordered_cursor_chat_candidates(conn, current_task_id, cid)
-    best_id = current_task_id
-    best_score = -10**9
-    best_idx = 10**9
+    rows: List[Tuple[int, bool, int, str]] = []
     for idx, tid in enumerate(cands):
-        s, _ = _score_cursor_recall_candidate(conn, tid, user_message)
-        if s > best_score or (s == best_score and idx < best_idx):
-            best_score = s
-            best_idx = idx
-            best_id = tid
+        base, meaningful = _score_cursor_recall_candidate(conn, tid, user_message)
+        total = base + _cursor_recall_rank_adjustment(conn, tid)
+        rows.append((total, meaningful, idx, tid))
+    if not rows:
+        return current_task_id
+    rows.sort(key=lambda r: (-r[0], 0 if r[1] else 1, r[2]))
+    best_total, best_meaningful, _, best_id = rows[0]
+    if not best_meaningful:
+        for total, meaningful, idx, tid in rows[1:]:
+            if meaningful and (best_total - total) <= 200:
+                return tid
     return best_id
 
 
@@ -454,9 +527,7 @@ def find_recent_delegated_cursor_task_id(
         meta = _projection_meta(conn, tid)
         s, meaningful = _score_cursor_recall_candidate(conn, tid, user_message)
         if continuation_boost:
-            row = get_active_execution_attempt_for_task(conn, tid)
-            if row:
-                s += 420
+            s += _cursor_recall_rank_adjustment(conn, tid)
         hl = build_cursor_heavy_lift_context_reply(conn, tid)
         if hl is None and s < 100 and not meaningful:
             continue
@@ -622,6 +693,7 @@ def build_cursor_continuity_recall_reply_from_state(
 
     assistant_lines: List[str] = []
     um = str(user_message or "").strip()
+    recall_shaped = is_cursor_thread_recall_question(um)
     if last_reply and len(last_reply) > 12 and not _is_echo_of_user_question(last_reply, um):
         safe_lr = sanitize_user_surface_text(last_reply, limit=900)
         if safe_lr:
@@ -641,26 +713,50 @@ def build_cursor_continuity_recall_reply_from_state(
     if blocked_reason:
         state_bits.append(f"blocker: {blocked_reason}")
 
-    lines: List[str] = []
-    lines.extend(narrative_lines)
-    lines.extend(exec_lines)
-    lines.extend(receipt_substantive)
-    if cont_line:
-        lines.append(cont_line)
-    lines.extend(assistant_lines)
-    lines.extend(receipt_generic)
-
     low_info = _state_snapshot_is_low_information_only(
         status, result_kind, phase_summary, blocked_reason
     )
-    has_narrative = bool(
-        narrative_lines
-        or receipt_substantive
-        or exec_lines
-        or cont_line
+    has_substantive_recap = bool(
+        narrative_lines or receipt_substantive or cont_line or assistant_lines
     )
-    if state_bits and (has_narrative or not low_info):
-        lines.append("Where things stand: " + "; ".join(state_bits) + ".")
+    if recall_shaped:
+        lines = []
+        lines.extend(narrative_lines)
+        lines.extend(receipt_substantive)
+        if cont_line:
+            lines.append(cont_line)
+        lines.extend(assistant_lines)
+        lines.extend(receipt_generic)
+        lines.extend(exec_lines)
+        has_narrative = bool(
+            narrative_lines
+            or receipt_substantive
+            or cont_line
+            or assistant_lines
+            or receipt_generic
+        )
+        show_where = bool(state_bits) and (
+            has_substantive_recap or _user_message_asks_explicit_status(um)
+        )
+        if state_bits and show_where:
+            lines.append("Where things stand: " + "; ".join(state_bits) + ".")
+    else:
+        lines = []
+        lines.extend(narrative_lines)
+        lines.extend(exec_lines)
+        lines.extend(receipt_substantive)
+        if cont_line:
+            lines.append(cont_line)
+        lines.extend(assistant_lines)
+        lines.extend(receipt_generic)
+        has_narrative = bool(
+            narrative_lines
+            or receipt_substantive
+            or exec_lines
+            or cont_line
+        )
+        if state_bits and (has_narrative or not low_info):
+            lines.append("Where things stand: " + "; ".join(state_bits) + ".")
 
     if not lines:
         if is_cursor_thread_recall_question(um):
@@ -672,6 +768,7 @@ def build_cursor_continuity_recall_reply_from_state(
         and not has_narrative
         and not assistant_lines
         and is_cursor_thread_recall_question(um)
+        and not exec_lines
     ):
         return _GRACE_CURSOR_CONTINUITY
 
@@ -783,24 +880,44 @@ def _resolve_cursor_heavy_lift_reply(
     user_message: str = "",
 ) -> Tuple[Optional[str], bool]:
     """
-    Prefer the current task; if thin, use the most recent same-chat delegated Cursor task.
+    Rank same-chat Cursor heavy-lift surfaces by recency, active execution, and narrative.
+    Bare anaphoric continuation may ask for clarification when top candidates tie.
     Returns (reply_text, used_alternate_task).
     """
-    cur = build_cursor_heavy_lift_context_reply(conn, task_id)
-    if cur:
-        return cur, False
+    um = str(user_message or "").strip()
     cid = _telegram_chat_id_for_task(conn, task_id)
-    if cid is None:
-        return None, False
-    alt = find_recent_delegated_cursor_task_id(
-        conn, task_id, chat_id=cid, user_message=user_message
+    cands = (
+        _ordered_cursor_chat_candidates(conn, task_id, cid)
+        if cid is not None
+        else [task_id]
     )
-    if not alt:
+    idx_map = {tid: i for i, tid in enumerate(cands)}
+    entries: List[Tuple[int, bool, str, str]] = []
+    for tid in cands:
+        reply = build_cursor_heavy_lift_context_reply(conn, tid)
+        if not reply:
+            continue
+        sc, meaningful = _continuation_candidate_score(conn, tid, um)
+        entries.append((sc, meaningful, tid, reply))
+    if not entries:
         return None, False
-    cur2 = build_cursor_heavy_lift_context_reply(conn, alt)
-    if cur2:
-        return cur2, True
-    return None, False
+
+    anaphoric = user_message_suggests_anaphoric_cursor_continue(um)
+    entries.sort(key=lambda e: (-e[0], 0 if e[1] else 1, idx_map.get(e[2], 10**6)))
+
+    if anaphoric and len(entries) >= 2:
+        s0, m0, t0, _r0 = entries[0]
+        s1, m1, t1, _r1 = entries[1]
+        if m0 and m1 and (s0 - s1) < 130:
+            return _AMBIGUOUS_CURSOR_CONTINUE_REPLY, False
+        cur_e = next((e for e in entries if e[2] == task_id), None)
+        if cur_e and t0 != task_id and m0 and cur_e[1]:
+            if (s0 - cur_e[0]) < 90:
+                return _AMBIGUOUS_CURSOR_CONTINUE_REPLY, False
+
+    _best_s, _best_m, best_t, best_r = entries[0]
+    used_alt = best_t != task_id
+    return best_r, used_alt
 
 
 def cursor_followup_context_reply_with_fallback(
@@ -1389,6 +1506,7 @@ def pick_repair_winner(
     model_reply: str,
     followthrough: Dict[str, Any],
     stateful_goal_ok: bool,
+    classify_text: str = "",
 ) -> Optional[Tuple[str, str]]:
     """
     Choose a non-model candidate when it is safe to override the draft direct reply.
@@ -1397,50 +1515,55 @@ def pick_repair_winner(
         return None
     model = str(model_reply or "").strip()
     ordered = sorted(candidates, key=lambda x: x.priority, reverse=True)
-    winner = ordered[0]
-    if winner.source == "model":
-        return None
-    if winner.text.strip() == model:
-        return None
     generic_model = is_generic_direct_reply(model)
 
-    if winner.source in {
-        "external_heuristic",
-        "opinion_contextual",
-        "agenda_state",
-        "attention_state",
-    }:
-        if generic_model or winner.priority >= 85:
-            return winner.text, winner.source
-        return None
+    for winner in ordered:
+        if winner.source == "model":
+            continue
+        wtext = winner.text.strip()
+        if not wtext or wtext == model:
+            continue
 
-    if winner.source in {
-        "blocked_state_reply",
-        "cursor_continuity_recall",
-        "cursor_heavy_lift_context",
-    }:
-        return winner.text, winner.source
+        if winner.source in {
+            "external_heuristic",
+            "opinion_contextual",
+            "agenda_state",
+            "attention_state",
+        }:
+            if generic_model or winner.priority >= 85:
+                return wtext, winner.source
+            continue
 
-    if winner.source == "followthrough_goal":
-        return winner.text, winner.source
+        if winner.source == "cursor_continuity_recall":
+            if is_cursor_thread_recall_question(classify_text) and _cursor_recall_composition_is_metadata_led(
+                wtext
+            ):
+                continue
+            return wtext, winner.source
 
-    if winner.source == "state_rich_goal":
-        if generic_model or stateful_goal_ok:
-            return winner.text, winner.source
-        if draft_implies_false_completion(model) and followthrough_needs_user_attention(
-            followthrough
-        ):
-            return winner.text, winner.source
-        return None
+        if winner.source in {"blocked_state_reply", "cursor_heavy_lift_context"}:
+            return wtext, winner.source
 
-    if winner.source in {"goal_continuity", "followthrough_only"}:
-        if generic_model or stateful_goal_ok:
-            return winner.text, winner.source
-        if draft_implies_false_completion(model) and followthrough_needs_user_attention(
-            followthrough
-        ):
-            return winner.text, winner.source
-        return None
+        if winner.source == "followthrough_goal":
+            return wtext, winner.source
+
+        if winner.source == "state_rich_goal":
+            if generic_model or stateful_goal_ok:
+                return wtext, winner.source
+            if draft_implies_false_completion(model) and followthrough_needs_user_attention(
+                followthrough
+            ):
+                return wtext, winner.source
+            continue
+
+        if winner.source in {"goal_continuity", "followthrough_only"}:
+            if generic_model or stateful_goal_ok:
+                return wtext, winner.source
+            if draft_implies_false_completion(model) and followthrough_needs_user_attention(
+                followthrough
+            ):
+                return wtext, winner.source
+            continue
 
     return None
 
@@ -1532,4 +1655,5 @@ def bounded_composer_repair(
         model_reply=reply_text,
         followthrough=ft,
         stateful_goal_ok=stateful_goal_ok if should_run_goal_branch else True,
+        classify_text=str(classify_text or ""),
     )

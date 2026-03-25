@@ -52,6 +52,40 @@ class ConversationEvalDetectorTests(unittest.TestCase):
         codes = {h["issue_code"] for h in hits}
         self.assertIn("conversation_followup_carryover_miss", codes)
 
+    def test_detects_cursor_recall_metadata_led(self) -> None:
+        cap = {
+            "raw_reply_text": (
+                "Delegated execution (tracked): status **running**, lane `direct_cursor`.\n"
+                "Where things stand: task status **created**; result: **queued**."
+            ),
+            "user_turn": "What did Cursor say?",
+            "turn_plan_domain": "project_status",
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap, expect_cursor_substance=True)
+        codes = {h["issue_code"] for h in hits}
+        self.assertIn("conversation_cursor_recall_metadata_led", codes)
+
+    def test_detects_read_summarize_followup_vs_outbound_capability_copy(self) -> None:
+        cap = {
+            "raw_reply_text": (
+                "Yes. BlueBubbles is verified and available here. "
+                "For personal outreach, I will draft the message first and wait for your confirmation before sending it."
+            ),
+            "user_turn": "Can you summarize my texts too?",
+            "turn_plan_domain": "personal_agenda",
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(
+            cap,
+            prior_user_turn="Can you pull text messages from BlueBubbles?",
+            expect_tool_carryover=True,
+        )
+        codes = {h["issue_code"] for h in hits}
+        self.assertIn("conversation_messaging_read_send_capability_mismatch", codes)
+
     def test_detects_internal_runtime_leak(self) -> None:
         cap = {
             "raw_reply_text": "session id lockstep_json",

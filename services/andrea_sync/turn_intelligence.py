@@ -92,6 +92,16 @@ _RECENT_OUTCOME_HISTORY_RE = re.compile(
     re.I,
 )
 # Heavy-lift / Cursor thread follow-ups (orchestration language, not raw plumbing).
+# Short identity questions about the tooling — not heavy-lift continuation.
+_TOOLING_IDENTITY_Q_RE = re.compile(
+    r"^\s*(?:"
+    r"is\s+this\s+openclaw|is\s+this\s+cursor|"
+    r"what\s+is\s+openclaw|what\s+is\s+cursor|"
+    r"are\s+you\s+openclaw|are\s+you\s+cursor"
+    r")\s*\??\s*$",
+    re.I,
+)
+
 _CURSOR_FOLLOWUP_HEAVY_RE = re.compile(
     r"@cursor|\bopenclaw\b|"
     r"continue\s+(?:that|the|this)\s+cursor\s+task|"
@@ -110,6 +120,8 @@ def classify_continuity_focus(text: str) -> ContinuityFocus:
         return "blocked_state"
     if _RECENT_OUTCOME_HISTORY_RE.search(clean):
         return "recent_outcome_history"
+    if _TOOLING_IDENTITY_Q_RE.match(clean):
+        return "none"
     if _CURSOR_FOLLOWUP_HEAVY_RE.search(clean):
         return "cursor_followup_heavy_lift"
     return "none"
@@ -190,7 +202,12 @@ def build_turn_plan(
         context_boundary = "external_world_only"
     elif sid in {"noteOrReminderCapture", "recentMessagesOrInboxLookup"}:
         domain = "personal_agenda"
-        context_boundary = "personal_runtime_state"
+        # Inbox / recent-text scenarios should not inherit schedule-oriented agenda hints.
+        context_boundary = (
+            "messaging_read_lane"
+            if sid == "recentMessagesOrInboxLookup"
+            else "personal_runtime_state"
+        )
     elif sid == "mixedResourceGoal":
         if _STATUS_EXTERNAL_NEWS_RE.search(clean):
             domain = "external_information"

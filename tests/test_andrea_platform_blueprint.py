@@ -197,6 +197,14 @@ class BlueprintPlatformTests(unittest.TestCase):
         self.assertEqual(plan_attention.context_boundary, "attention_and_triage_state")
         self.assertFalse(plan_attention.allow_goal_continuity_repair)
 
+        plan_inbox = build_turn_plan(
+            "Can you summarize my recent texts?",
+            scenario_id="recentMessagesOrInboxLookup",
+            projection_has_continuity_state=False,
+        )
+        self.assertEqual(plan_inbox.domain, "personal_agenda")
+        self.assertEqual(plan_inbox.context_boundary, "messaging_read_lane")
+
         plan_opinion = build_turn_plan(
             "What do you think about that?",
             scenario_id="statusFollowupContinue",

@@ -35,6 +35,7 @@ class TestSemanticContinuity(unittest.TestCase):
         self.assertTrue(user_message_suggests_anaphoric_outcome_recall("What happened there?"))
         self.assertTrue(user_message_suggests_anaphoric_outcome_recall("What did it do?"))
         self.assertTrue(user_message_suggests_anaphoric_cursor_continue("continue that"))
+        self.assertTrue(user_message_suggests_anaphoric_cursor_continue("continue it"))
         self.assertFalse(user_message_suggests_anaphoric_cursor_continue("continue that story"))
 
     def test_patch_upgrades_continue_that_with_delegation(self) -> None:

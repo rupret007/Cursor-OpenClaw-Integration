@@ -3079,6 +3079,49 @@ class TestAndreaSync(unittest.TestCase):
         self.assertIn("verified text messaging lane", reply.lower())
         self.assertNotIn("session", reply.lower())
 
+    def test_server_messaging_read_capability_uses_retrieval_oriented_copy(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        result = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-text-read-capability",
+                "payload": {
+                    # Read-focused capability ask (not the structured recent-text fetch path).
+                    "text": "Are you able to read my iMessages through BlueBubbles?",
+                    "chat_id": 9002,
+                    "message_id": 45,
+                },
+            },
+        )
+        with (
+            mock.patch.object(
+                server,
+                "_parse_recent_text_messages_request",
+                return_value=None,
+            ),
+            mock.patch.object(
+                server,
+                "_resolve_messaging_capability",
+                return_value={
+                    "label": "text messaging",
+                    "skill_key": "bluebubbles",
+                    "truth": {"status": "verified_available"},
+                },
+            ),
+        ):
+            server._handle_task_followups(result["task_id"])
+        proj = project_task_dict(server.conn, result["task_id"], "telegram")
+        reply = proj["meta"]["assistant"]["last_reply"]
+        self.assertEqual(proj["meta"]["assistant"]["reason"], "messaging_capability_read_answer")
+        self.assertIn("reading recent", reply.lower())
+        self.assertIn("draft", reply.lower())
+
     def test_server_live_news_request_uses_capability_backed_summary(self) -> None:
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
         os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"

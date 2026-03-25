@@ -19,6 +19,7 @@ from unittest import mock
 
 from .andrea_router import is_generic_direct_reply
 from .assistant_answer_composer import (
+    _cursor_recall_composition_is_metadata_led,
     draft_implies_false_completion,
     draft_should_force_continuity_repair,
     is_cursor_thread_recall_question,
@@ -78,6 +79,10 @@ _TEXT_SUMMARIZE_FOLLOWUP_RE = re.compile(
 )
 _TEXT_LANE_REPLY_MARKERS_RE = re.compile(
     r"\b(?:text|message|messages|inbox|imessage|bluebubbles|sms)\b",
+    re.I,
+)
+_OUTBOUND_ONLY_CAPABILITY_BOILERPLATE_RE = re.compile(
+    r"draft\s+the\s+message|confirmation\s+before\s+sending",
     re.I,
 )
 
@@ -271,6 +276,15 @@ def run_deterministic_detectors(
                     "detail": "cursor recall ask met with grace fallback copy",
                 }
             )
+        elif _cursor_recall_composition_is_metadata_led(text):
+            findings.append(
+                {
+                    "family": "cursor_recall_failure",
+                    "issue_code": "conversation_cursor_recall_metadata_led",
+                    "severity": "medium",
+                    "detail": "cursor recall reply leads with execution/status scaffolding instead of recap",
+                }
+            )
         elif len(text.strip()) < 100 and is_generic_direct_reply(text):
             findings.append(
                 {
@@ -288,7 +302,20 @@ def run_deterministic_detectors(
         messaging_lane_prior = bool(_TOOL_TEXT_LANE_PRIOR_RE.search(prior_l))
         summarize_follow = bool(_TEXT_SUMMARIZE_FOLLOWUP_RE.search(user_l))
         if messaging_lane_prior and summarize_follow:
-            if not _TEXT_LANE_REPLY_MARKERS_RE.search(low) and len(text) > 0:
+            if (
+                _OUTBOUND_ONLY_CAPABILITY_BOILERPLATE_RE.search(low)
+                and "read" not in low
+                and "retriev" not in low
+            ):
+                findings.append(
+                    {
+                        "family": "followup_carryover_failure",
+                        "issue_code": "conversation_messaging_read_send_capability_mismatch",
+                        "severity": "high",
+                        "detail": "read/summarize follow-up met with outbound-only capability copy",
+                    }
+                )
+            elif not _TEXT_LANE_REPLY_MARKERS_RE.search(low) and len(text) > 0:
                 findings.append(
                     {
                         "family": "followup_carryover_failure",

@@ -6,11 +6,14 @@ import re
 from typing import Any, Dict, Optional
 
 from .assistant_answer_composer import (
+    CONTINUATION_NO_VIABLE_WORKSTREAM_FALLBACK,
+    RECALL_NO_CLEAN_CURSOR_RECAP_FALLBACK,
     build_blocked_state_reply_from_state,
     build_recent_outcome_history_reply_from_state,
     cursor_followup_context_reply_with_fallback,
     is_strict_cursor_domain_recall_question,
 )
+from .stateful_answer_realization import maybe_realize_stateful_reply
 from .semantic_continuity import user_message_suggests_anaphoric_cursor_continue
 from .goal_runtime import build_goal_continuity_reply, try_goal_status_nl_reply
 from .turn_intelligence import TurnPlan
@@ -171,10 +174,29 @@ def choose_semantic_state_reply(
         cleaned = sanitize_user_surface_text(str(raw_text or "").strip(), limit=1200)
         if not cleaned:
             continue
-        score = _score_candidate(source, cleaned)
+        fallback = cleaned
+        if source == "cursor_continuity_recall":
+            fallback = RECALL_NO_CLEAN_CURSOR_RECAP_FALLBACK
+        elif source == "cursor_heavy_lift_context":
+            fallback = CONTINUATION_NO_VIABLE_WORKSTREAM_FALLBACK
+        realized = maybe_realize_stateful_reply(
+            conn,
+            task_id,
+            source=source,
+            deterministic_reply=cleaned,
+            fallback_reply=fallback,
+            user_text=text,
+            turn_plan=turn_plan,
+        )
+        candidate_text = sanitize_user_surface_text(
+            str(realized or cleaned).strip(), fallback=cleaned, limit=1200
+        )
+        if not candidate_text:
+            continue
+        score = _score_candidate(source, candidate_text)
         if best is None or score > best.score:
             best = SemanticAnswerResult(
-                reply_text=cleaned,
+                reply_text=candidate_text,
                 reason=f"semantic_state_{source}",
                 source=source,
                 interpretation=interpretation,

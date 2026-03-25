@@ -73,6 +73,190 @@ class AnswerCandidate:
     priority: int
 
 
+@dataclass(frozen=True)
+class CursorRecallEvidencePack:
+    """
+    Typed recall evidence for delegated Cursor/OpenClaw answers.
+    Tiers: durable source-truth (OpenClaw/outcome/receipts), support execution state,
+    and derived assistant/projection surfaces (demoted when source-truth exists).
+    """
+
+    task_id: str
+    source_truth_narrative_lines: Tuple[str, ...]
+    source_truth_receipt_lines: Tuple[str, ...]
+    outcome_phase_summary: str
+    outcome_blocked_reason: str
+    support_execution_lines: Tuple[str, ...]
+    support_continuation_line: str
+    derived_assistant_lines: Tuple[str, ...]
+    st_score: int
+    st_units: int
+
+    def has_source_truth_recap_basis(self) -> bool:
+        if self.st_units >= 1:
+            return True
+        if self.source_truth_narrative_lines or self.source_truth_receipt_lines:
+            return True
+        ps = (self.outcome_phase_summary or "").strip()
+        if ps and len(ps) > 16:
+            return True
+        br = (self.outcome_blocked_reason or "").strip()
+        if br and len(br) > 6:
+            return True
+        return False
+
+
+@dataclass(frozen=True)
+class CursorWorkstreamViability:
+    """Shared viability view for continuation / recent-work rescue."""
+
+    total_score: int
+    meaningful: bool
+    st_score: int
+    st_units: int
+
+
+def gather_cursor_recall_evidence_pack(
+    conn: Any,
+    task_id: str,
+    *,
+    user_message: str = "",
+) -> CursorRecallEvidencePack:
+    """Collect recall evidence into explicit tiers for ranking and recap composition."""
+    meta = _projection_meta(conn, task_id)
+    proj = _projection_full(conn, task_id)
+    outcome = _outcome_section(meta)
+    asst = _assistant_section(meta)
+    um = str(user_message or "").strip()
+
+    summary = strip_conversational_soft_failure_boilerplate(str(proj.get("summary") or "").strip())
+    last_reply = strip_conversational_soft_failure_boilerplate(str(asst.get("last_reply") or "").strip())
+    phase_summary = sanitize_user_surface_text(str(outcome.get("current_phase_summary") or ""), limit=500)
+    blocked_reason = sanitize_user_surface_text(str(outcome.get("blocked_reason") or ""), limit=400)
+
+    narrative_lines = tuple(_openclaw_narrative_lines(meta))
+
+    receipt_substantive: List[str] = []
+    for row in list_recent_user_outcome_receipts_for_task(conn, task_id, limit=3):
+        raw_summ = str(row["summary"] or "")
+        summ = sanitize_user_surface_text(raw_summ, limit=400)
+        kind = str(row["receipt_kind"] or "").strip()
+        if not summ:
+            continue
+        line = f"Recent receipt ({kind}): {summ}" if kind else f"Recent receipt: {summ}"
+        if _ledger_receipt_summary_is_generic_placeholder(raw_summ):
+            continue
+        receipt_substantive.append(line)
+
+    exec_lines = tuple(_execution_recall_context_lines(conn, task_id))
+
+    tm = _telegram_section(meta)
+    cr = tm.get("continuation_records") if isinstance(tm.get("continuation_records"), list) else []
+    cont_line = ""
+    if cr:
+        last = cr[-1]
+        if isinstance(last, dict):
+            r = sanitize_user_surface_text(str(last.get("reason") or ""), limit=320)
+            if r:
+                cont_line = f"Continuation context: {r}"
+
+    recall_shaped = is_cursor_thread_recall_question(um)
+    has_source_truth_for_recap = bool(
+        narrative_lines
+        or receipt_substantive
+        or (phase_summary and len(phase_summary.strip()) > 16)
+        or (blocked_reason and len(blocked_reason.strip()) > 6)
+    )
+    assistant_lines: List[str] = []
+    added_last_assistant_update_line = False
+    if last_reply and len(last_reply) > 12 and not _is_echo_of_user_question(last_reply, um):
+        if not (has_source_truth_for_recap and is_derived_assistant_recap_surface(last_reply)):
+            safe_lr = _normalize_cursor_recap_lead(sanitize_user_surface_text(last_reply, limit=900))
+            if safe_lr:
+                assistant_lines.append(f"Last assistant update on this task: {safe_lr}")
+                added_last_assistant_update_line = True
+    if (
+        summary
+        and len(summary) > 20
+        and not _is_echo_of_user_question(summary, um)
+        and not added_last_assistant_update_line
+        and not (has_source_truth_for_recap and bool(narrative_lines))
+    ):
+        if not (has_source_truth_for_recap and is_derived_assistant_recap_surface(summary)):
+            safe_s = _normalize_cursor_recap_lead(sanitize_user_surface_text(summary, limit=900))
+            if safe_s:
+                assistant_lines.append(f"Recorded summary: {safe_s}")
+
+    if recall_shaped and has_source_truth_for_recap:
+        assistant_lines = [
+            ln
+            for ln in assistant_lines
+            if not is_derived_assistant_recap_surface(_strip_recall_label(ln.split(":", 1)[-1] if ":" in ln else ln))
+        ]
+
+    st_score, st_units = _score_source_truth_cursor_recall_signals(conn, task_id, um)
+    return CursorRecallEvidencePack(
+        task_id=task_id,
+        source_truth_narrative_lines=narrative_lines,
+        source_truth_receipt_lines=tuple(receipt_substantive),
+        outcome_phase_summary=str(phase_summary or ""),
+        outcome_blocked_reason=str(blocked_reason or ""),
+        support_execution_lines=exec_lines,
+        support_continuation_line=cont_line,
+        derived_assistant_lines=tuple(assistant_lines),
+        st_score=int(st_score),
+        st_units=int(st_units),
+    )
+
+
+def assess_cursor_workstream_viability(
+    conn: Any,
+    task_id: str,
+    user_message: str = "",
+    *,
+    continuation_boost: bool = True,
+) -> CursorWorkstreamViability:
+    """Unified viability score for recent-work selection (recall + continuation)."""
+    st_score, st_units = _score_source_truth_cursor_recall_signals(conn, task_id, user_message)
+    base, meaningful = _score_cursor_recall_candidate(conn, task_id, user_message)
+    total = int(base)
+    if continuation_boost:
+        total += int(_cursor_recall_rank_adjustment(conn, task_id))
+    return CursorWorkstreamViability(total, meaningful, int(st_score), int(st_units))
+
+
+def cursor_workstream_meets_continuation_bar(v: CursorWorkstreamViability) -> bool:
+    """True when continuing from this workstream can be grounded in durable truth, not derived-only."""
+    if v.st_units >= 1 and v.st_score >= 120:
+        return True
+    if v.meaningful and v.st_units >= 1:
+        return True
+    if v.meaningful and v.total_score >= 140:
+        return True
+    return False
+
+
+def same_chat_has_cursor_continuation_viability(
+    conn: Any,
+    anchor_task_id: str,
+    user_message: str = "",
+) -> bool:
+    """Any same-chat, same-thread task clears the continuation viability bar."""
+    cid = _telegram_chat_id_for_task(conn, anchor_task_id)
+    candidates: List[str]
+    if cid is None or str(cid).strip() == "":
+        candidates = [anchor_task_id]
+    else:
+        candidates = _ordered_cursor_chat_candidates(conn, anchor_task_id, cid)
+    for tid in candidates:
+        if not _same_thread_or_unknown(conn, anchor_task_id, tid):
+            continue
+        v = assess_cursor_workstream_viability(conn, tid, user_message, continuation_boost=True)
+        if cursor_workstream_meets_continuation_bar(v):
+            return True
+    return False
+
+
 def _projection_meta(conn: Any, task_id: str) -> Dict[str, Any]:
     channel = get_task_channel(conn, task_id) or "cli"
     projection = project_task_dict(conn, task_id, channel)
@@ -471,11 +655,6 @@ def _cursor_recall_rank_adjustment(conn: Any, task_id: str) -> int:
     return boost
 
 
-def _continuation_candidate_score(conn: Any, task_id: str, user_message: str) -> Tuple[int, bool]:
-    base, meaningful = _score_cursor_recall_candidate(conn, task_id, user_message)
-    return base + _cursor_recall_rank_adjustment(conn, task_id), meaningful
-
-
 def _cursor_recall_composition_is_metadata_led(text: str) -> bool:
     """True when recall-shaped output leads with execution scaffolding instead of human recap."""
     t = str(text or "").strip()
@@ -666,16 +845,16 @@ def find_recent_delegated_cursor_task_id(
         if not _same_thread_or_unknown(conn, current_task_id, tid):
             continue
         meta = _projection_meta(conn, tid)
-        s, meaningful = _score_cursor_recall_candidate(conn, tid, user_message)
-        if continuation_boost:
-            s += _cursor_recall_rank_adjustment(conn, tid)
+        v = assess_cursor_workstream_viability(
+            conn, tid, user_message, continuation_boost=continuation_boost
+        )
         hl = build_cursor_heavy_lift_context_reply(conn, tid)
-        if hl is None and s < 100 and not meaningful:
+        if hl is None and v.total_score < 100 and not v.meaningful:
             continue
-        if not _task_has_delegated_continuity_signal(meta) and not meaningful:
+        if not _task_has_delegated_continuity_signal(meta) and not v.meaningful:
             continue
-        if s > best_score or (s == best_score and idx < best_idx):
-            best_score = s
+        if v.total_score > best_score or (v.total_score == best_score and idx < best_idx):
+            best_score = v.total_score
             best_idx = idx
             best_tid = tid
     if best_tid is None:
@@ -768,20 +947,48 @@ def _pick_cursor_recap_lead(
     assistant_lines: Sequence[str],
     receipt_substantive: Sequence[str],
     cont_line: str,
+    phase_summary: str = "",
+    blocked_reason: str = "",
+    prefer_source_truth_lead: bool = False,
 ) -> str:
     """One concise recap sentence that can safely lead recall-shaped answers."""
+
+    def _lead_from_line(line: str, lim: int = 360) -> str:
+        return sanitize_user_surface_text(_strip_recall_label(line), limit=lim)
+
     for line in narrative_lines:
-        clean = sanitize_user_surface_text(_strip_recall_label(line), limit=360)
+        clean = _lead_from_line(line)
         if clean:
             return clean
-    for line in assistant_lines:
-        clean = sanitize_user_surface_text(_strip_recall_label(line), limit=360)
-        if clean:
-            return clean
-    for line in receipt_substantive:
-        clean = sanitize_user_surface_text(_strip_recall_label(line), limit=360)
-        if clean:
-            return clean
+    if prefer_source_truth_lead:
+        for line in receipt_substantive:
+            clean = _lead_from_line(line)
+            if clean:
+                return clean
+        ps = sanitize_user_surface_text(str(phase_summary or ""), limit=360)
+        if ps and len(ps.strip()) > 16:
+            clean = _lead_from_line(ps)
+            if clean:
+                return clean
+        br = str(blocked_reason or "").strip()
+        if br and len(br) > 6:
+            clean = _lead_from_line(blocked_reason)
+            if clean:
+                return clean
+    else:
+        for line in assistant_lines:
+            clean = _lead_from_line(line)
+            if clean:
+                return clean
+        for line in receipt_substantive:
+            clean = _lead_from_line(line)
+            if clean:
+                return clean
+    if prefer_source_truth_lead:
+        for line in assistant_lines:
+            clean = _lead_from_line(line)
+            if clean:
+                return clean
     if cont_line:
         clean = sanitize_user_surface_text(_strip_recall_label(cont_line), limit=320)
         if clean:
@@ -830,6 +1037,7 @@ def _synthesize_partial_cursor_recap(
     phase_summary: str,
     blocked_reason: str,
     cont_line: str,
+    prefer_source_truth: bool = False,
 ) -> str:
     """Build one recap sentence from two weaker safe fragments (source-truth first)."""
     frags: List[str] = []
@@ -843,13 +1051,22 @@ def _synthesize_partial_cursor_recap(
             return
         frags.append(clean)
 
-    _push(phase_summary)
-    _push(blocked_reason)
-    _push(cont_line)
-    for line in receipt_substantive:
-        _push(line)
-    for line in assistant_lines:
-        _push(line)
+    if prefer_source_truth:
+        _push(phase_summary)
+        _push(blocked_reason)
+        _push(cont_line)
+        for line in receipt_substantive:
+            _push(line)
+        for line in assistant_lines:
+            _push(line)
+    else:
+        _push(phase_summary)
+        _push(blocked_reason)
+        _push(cont_line)
+        for line in receipt_substantive:
+            _push(line)
+        for line in assistant_lines:
+            _push(line)
 
     if len(frags) >= 2:
         return f"{frags[0]} Current note: {frags[1]}"
@@ -910,22 +1127,22 @@ def build_cursor_continuity_recall_reply_from_state(
         if cid is not None
         else task_id
     )
+    um = str(user_message or "").strip()
+    pack = gather_cursor_recall_evidence_pack(conn, use_id, user_message=um)
     meta = _projection_meta(conn, use_id)
     proj = _projection_full(conn, use_id)
     outcome = _outcome_section(meta)
-    asst = _assistant_section(meta)
-    summary = strip_conversational_soft_failure_boilerplate(str(proj.get("summary") or "").strip())
-    last_reply = strip_conversational_soft_failure_boilerplate(str(asst.get("last_reply") or "").strip())
     status = str(proj.get("status") or "").strip()
-    phase_summary = sanitize_user_surface_text(
-        str(outcome.get("current_phase_summary") or ""), limit=500
-    )
+    phase_summary = pack.outcome_phase_summary
     result_kind = str(outcome.get("result_kind") or "").strip()
-    blocked_reason = sanitize_user_surface_text(str(outcome.get("blocked_reason") or ""), limit=400)
+    blocked_reason = pack.outcome_blocked_reason
 
-    narrative_lines = _openclaw_narrative_lines(meta)
+    narrative_lines = list(pack.source_truth_narrative_lines)
+    receipt_substantive = list(pack.source_truth_receipt_lines)
+    exec_lines = list(pack.support_execution_lines)
+    cont_line = pack.support_continuation_line
+    assistant_lines = list(pack.derived_assistant_lines)
 
-    receipt_substantive: List[str] = []
     receipt_generic: List[str] = []
     for row in list_recent_user_outcome_receipts_for_task(conn, use_id, limit=3):
         raw_summ = str(row["summary"] or "")
@@ -936,52 +1153,9 @@ def build_cursor_continuity_recall_reply_from_state(
         line = f"Recent receipt ({kind}): {summ}" if kind else f"Recent receipt: {summ}"
         if _ledger_receipt_summary_is_generic_placeholder(raw_summ):
             receipt_generic.append(line)
-        else:
-            receipt_substantive.append(line)
 
-    exec_lines = _execution_recall_context_lines(conn, use_id)
-
-    tm = _telegram_section(meta)
-    cr = tm.get("continuation_records") if isinstance(tm.get("continuation_records"), list) else []
-    cont_line = ""
-    if cr:
-        last = cr[-1]
-        if isinstance(last, dict):
-            r = sanitize_user_surface_text(str(last.get("reason") or ""), limit=320)
-            if r:
-                cont_line = f"Continuation context: {r}"
-
-    assistant_lines: List[str] = []
-    um = str(user_message or "").strip()
     recall_shaped = is_cursor_thread_recall_question(um)
-    has_source_truth_for_recap = bool(
-        narrative_lines
-        or receipt_substantive
-        or (phase_summary and len(phase_summary.strip()) > 16)
-        or (blocked_reason and len(blocked_reason.strip()) > 6)
-    )
-    added_last_assistant_update_line = False
-    if last_reply and len(last_reply) > 12 and not _is_echo_of_user_question(last_reply, um):
-        if not (has_source_truth_for_recap and is_derived_assistant_recap_surface(last_reply)):
-            safe_lr = _normalize_cursor_recap_lead(
-                sanitize_user_surface_text(last_reply, limit=900)
-            )
-            if safe_lr:
-                assistant_lines.append(f"Last assistant update on this task: {safe_lr}")
-                added_last_assistant_update_line = True
-    if (
-        summary
-        and len(summary) > 20
-        and not _is_echo_of_user_question(summary, um)
-        and not added_last_assistant_update_line
-        and not (has_source_truth_for_recap and bool(narrative_lines))
-    ):
-        if not (has_source_truth_for_recap and is_derived_assistant_recap_surface(summary)):
-            safe_s = _normalize_cursor_recap_lead(
-                sanitize_user_surface_text(summary, limit=900)
-            )
-            if safe_s:
-                assistant_lines.append(f"Recorded summary: {safe_s}")
+    prefer_truth_lead = pack.has_source_truth_recap_basis()
 
     state_bits: List[str] = []
     if status:
@@ -1006,6 +1180,9 @@ def build_cursor_continuity_recall_reply_from_state(
             assistant_lines=assistant_lines,
             receipt_substantive=receipt_substantive,
             cont_line=cont_line,
+            phase_summary=phase_summary,
+            blocked_reason=blocked_reason,
+            prefer_source_truth_lead=prefer_truth_lead,
         )
         if not recap_lead:
             recap_lead = _synthesize_partial_cursor_recap(
@@ -1014,6 +1191,7 @@ def build_cursor_continuity_recall_reply_from_state(
                 phase_summary=phase_summary,
                 blocked_reason=blocked_reason,
                 cont_line=cont_line,
+                prefer_source_truth=prefer_truth_lead,
             )
         if not recap_lead:
             recap_lead = _fallback_cursor_recap_from_state(
@@ -1133,8 +1311,8 @@ def find_viable_recent_cursor_workstream_reply(
     cid = _telegram_chat_id_for_task(conn, task_id)
 
     def _rich_enough(tid: str) -> bool:
-        st_score, st_units = _score_source_truth_cursor_recall_signals(conn, tid, um)
-        return bool(st_units >= 1 and st_score >= 120)
+        v = assess_cursor_workstream_viability(conn, tid, um, continuation_boost=False)
+        return cursor_workstream_meets_continuation_bar(v)
 
     def _safe_recap(tid: str) -> Optional[str]:
         recap = build_cursor_continuity_recall_reply_from_state(conn, tid, user_message=um)
@@ -1290,8 +1468,8 @@ def _resolve_cursor_heavy_lift_reply(
         reply = build_cursor_heavy_lift_context_reply(conn, tid)
         if not reply:
             continue
-        sc, meaningful = _continuation_candidate_score(conn, tid, um)
-        entries.append((sc, meaningful, tid, reply))
+        v = assess_cursor_workstream_viability(conn, tid, um, continuation_boost=True)
+        entries.append((v.total_score, v.meaningful, tid, reply))
     if not entries:
         return None, False
 

@@ -436,6 +436,56 @@ class TestAssistantAnswerComposer(unittest.TestCase):
         self.assertIn("Cursor recap:", text)
         self.assertNotRegex(text.lower(), r"task status \*\*created\*\*")
 
+    def test_cursor_recall_lead_prefers_source_truth_over_long_assistant_surface(self) -> None:
+        from services.andrea_sync.assistant_answer_composer import (  # noqa: E402
+            build_cursor_continuity_recall_reply_from_state,
+        )
+
+        r0 = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "comp-src-beat-derived",
+                "payload": {
+                    "text": "hi",
+                    "routing_text": "hi",
+                    "chat_id": 77019,
+                    "message_id": 1,
+                },
+            },
+        )
+        tid = r0["task_id"]
+        append_event(
+            self.conn,
+            tid,
+            EventType.JOB_COMPLETED,
+            {
+                "summary": "done",
+                "backend": "openclaw",
+                "runner": "openclaw",
+                "user_summary": "SHORT_SOURCE_TRUTH_PREFERRED_LEAD.",
+            },
+        )
+        append_event(
+            self.conn,
+            tid,
+            EventType.ASSISTANT_REPLIED,
+            {
+                "text": "LONG_ASSISTANT_BOILERPLATE " * 20 + "more filler here.",
+                "route": "direct",
+                "reason": "test",
+            },
+        )
+        text = build_cursor_continuity_recall_reply_from_state(
+            self.conn, tid, user_message="What did Cursor say?"
+        )
+        self.assertIn("SHORT_SOURCE_TRUTH_PREFERRED_LEAD", text)
+        self.assertIn("Cursor recap:", text)
+        lead_line = text.split("Cursor recap:", 1)[1].split("\n")[0]
+        self.assertIn("SHORT_SOURCE_TRUTH", lead_line)
+        self.assertNotIn("LONG_ASSISTANT_BOILERPLATE", lead_line)
+
     def test_cursor_recall_ranks_richer_same_chat_task_over_thin_current(self) -> None:
         """Older same-chat task with OpenClaw narrative beats a newer thin shell task."""
         from services.andrea_sync.assistant_answer_composer import (  # noqa: E402

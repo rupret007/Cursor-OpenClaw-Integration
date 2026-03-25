@@ -210,7 +210,12 @@ def resolve_semantic_continuity_patch(
             )
         if user_message_suggests_anaphoric_cursor_continue(clean):
             st = same_chat_max_source_truth_score(conn, task_id)
-            if del_score >= 28 or st >= 85:
+            viable_chat = False
+            if del_score < 28 and st < 85:
+                from . import assistant_answer_composer as _aac
+
+                viable_chat = _aac.same_chat_has_cursor_continuation_viability(conn, task_id, clean)
+            if del_score >= 28 or st >= 85 or viable_chat:
                 return SemanticContinuityPatch(
                     continuity_focus_override="cursor_followup_heavy_lift",
                     force_prefer_state_reply=True,

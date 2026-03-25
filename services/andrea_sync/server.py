@@ -30,6 +30,7 @@ from .assistant_answer_composer import (
     cursor_followup_context_reply_with_fallback,
     find_viable_recent_cursor_workstream_reply,
     merge_goal_reply_with_followthrough,
+    same_chat_has_cursor_continuation_viability,
     try_composer_early_short_circuit,
 )
 from .goal_runtime import (
@@ -1620,10 +1621,23 @@ class SyncServer:
                             c, task_id, classify_text
                         )
                     )
-                    goal_nl = rescue or (
-                        "I do not see active tracked work right now. "
-                        "If you want, I can start a fresh task and track it from here."
-                    )
+                    if rescue:
+                        goal_nl = rescue
+                    elif self.with_lock(
+                        lambda c: same_chat_has_cursor_continuation_viability(
+                            c, task_id, classify_text
+                        )
+                    ):
+                        goal_nl = (
+                            "I don’t have enough clean stored Cursor recap detail to quote accurately "
+                            "from the recent work on this chat. Say what you want next "
+                            "(resume the run, start a fresh pass, or name a file), and I’ll track it."
+                        )
+                    else:
+                        goal_nl = (
+                            "I do not see active tracked work right now. "
+                            "If you want, I can start a fresh task and track it from here."
+                        )
                 elif effective_turn_plan.domain == "approval_state":
                     goal_nl = "I'm not seeing any approval requests waiting on you right now."
             if goal_nl:

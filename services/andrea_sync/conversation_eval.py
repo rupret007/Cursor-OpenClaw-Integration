@@ -345,26 +345,28 @@ def run_deterministic_detectors(
         )
     if expect_cursor_substance and is_cursor_thread_recall_question(user):
         head = text[:1200].lower()
-        if "last assistant update on this task:" in head and "latest useful result:" not in head:
-            if not any(
-                tok in head
-                for tok in (
-                    "phase synthesis:",
-                    "phase execution:",
-                    "phase critique:",
-                    "phase plan:",
-                    "collaboration note:",
-                    "recent receipt",
-                )
-            ):
-                findings.append(
-                    {
-                        "family": "cursor_recall_failure",
-                        "issue_code": "conversation_cursor_recall_derived_surface_led",
-                        "severity": "medium",
-                        "detail": "cursor recall led with assistant-update scaffolding without source-truth openclaw lines",
-                    }
-                )
+        _openclaw_source_markers = (
+            "latest useful result:",
+            "phase synthesis:",
+            "phase execution:",
+            "phase critique:",
+            "phase plan:",
+            "collaboration note:",
+            "recent receipt",
+        )
+        has_openclaw_source = any(tok in head for tok in _openclaw_source_markers)
+        derived_lead = ("last assistant update on this task:" in head) or (
+            "recorded summary:" in head and "cursor recap:" in head
+        )
+        if derived_lead and not has_openclaw_source:
+            findings.append(
+                {
+                    "family": "cursor_recall_failure",
+                    "issue_code": "conversation_cursor_recall_derived_surface_led",
+                    "severity": "medium",
+                    "detail": "cursor recall led with assistant/projection scaffolding without source-truth openclaw lines",
+                }
+            )
     if expect_tool_carryover and prior_user_turn:
         topic_tokens = [w for w in re.split(r"\W+", prior_user_turn.lower()) if len(w) > 4][:6]
         hits = sum(1 for w in topic_tokens if w and w in low)

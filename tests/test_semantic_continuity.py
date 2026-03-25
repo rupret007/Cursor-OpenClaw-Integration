@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -15,10 +16,12 @@ from services.andrea_sync.bus import handle_command  # noqa: E402
 from services.andrea_sync.schema import CommandType, EventType  # noqa: E402
 from services.andrea_sync.semantic_continuity import (  # noqa: E402
     resolve_semantic_continuity_patch,
+    same_chat_max_delegation_score,
+    same_chat_max_source_truth_score,
     user_message_suggests_anaphoric_cursor_continue,
     user_message_suggests_anaphoric_outcome_recall,
 )
-from services.andrea_sync.store import append_event, connect, migrate  # noqa: E402
+from services.andrea_sync.store import append_event, connect, insert_user_outcome_receipt, migrate  # noqa: E402
 
 
 class TestSemanticContinuity(unittest.TestCase):
@@ -80,6 +83,61 @@ class TestSemanticContinuity(unittest.TestCase):
             },
         )
         tid_b = second["task_id"]
+        patch = resolve_semantic_continuity_patch(
+            self.conn,
+            tid_b,
+            "continue that",
+            scenario_id="statusFollowupContinue",
+            base_focus="none",
+            projection_has_continuity_state=False,
+        )
+        self.assertEqual(patch.continuity_focus_override, "cursor_followup_heavy_lift")
+        self.assertTrue(patch.force_prefer_state_reply)
+
+    def test_patch_bare_continue_via_same_chat_viability_when_semantic_scores_low(self) -> None:
+        """
+        Composer viability can see durable receipt rows; semantic meta-only scores stay low.
+        Bare continue should still patch to Cursor follow-up.
+        """
+        first = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "semcont-viab-a",
+                "payload": {
+                    "text": "work",
+                    "routing_text": "work",
+                    "chat_id": 99011,
+                    "message_id": 1,
+                },
+            },
+        )
+        tid_a = first["task_id"]
+        insert_user_outcome_receipt(
+            self.conn,
+            receipt_id=str(uuid.uuid4()),
+            task_id=tid_a,
+            receipt_kind="delegated_outcome",
+            summary="Concrete detailed outcome from the Cursor pass with real substance.",
+        )
+        second = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "semcont-viab-b",
+                "payload": {
+                    "text": "continue that",
+                    "routing_text": "continue that",
+                    "chat_id": 99011,
+                    "message_id": 2,
+                },
+            },
+        )
+        tid_b = second["task_id"]
+        self.assertLess(same_chat_max_source_truth_score(self.conn, tid_b), 85)
+        self.assertLess(same_chat_max_delegation_score(self.conn, tid_b), 28)
         patch = resolve_semantic_continuity_patch(
             self.conn,
             tid_b,

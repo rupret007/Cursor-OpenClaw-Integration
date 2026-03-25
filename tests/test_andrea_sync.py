@@ -2684,7 +2684,12 @@ class TestAndreaSync(unittest.TestCase):
         text = str(assistant.get("last_reply") or "")
         self.assertIn(
             assistant.get("reason"),
-            {"continuity_state_repaired_direct_reply", "goal_runtime_status"},
+            {
+                "continuity_state_repaired_direct_reply",
+                "goal_runtime_status",
+                "semantic_state_goal_status",
+                "semantic_state_goal_continuity",
+            },
         )
         self.assertIn(goal_id, text)
         self.assertNotIn("say a bit more", text.lower())

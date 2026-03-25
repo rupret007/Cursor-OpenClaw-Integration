@@ -85,6 +85,7 @@ from .semantic_continuity import (
     resolve_semantic_continuity_patch,
     same_chat_max_delegation_score,
 )
+from .semantic_answer_engine import choose_semantic_state_reply
 from .telegram_continuation import attach_continuation_if_applicable
 from .turn_intelligence import TurnPlan, build_turn_plan
 from .store import (
@@ -1510,6 +1511,63 @@ class SyncServer:
                     self._record_daily_assistant_receipt_after_direct_reply(
                         task_id,
                         pre_resolution.to_event_payload(),
+                        decision.reply_text,
+                        route="direct",
+                        reason=decision.reason,
+                    )
+                return decision, applied
+            semantic_state = self.with_lock(
+                lambda c: choose_semantic_state_reply(
+                    c,
+                    task_id,
+                    user_text=classify_text,
+                    turn_plan=effective_turn_plan,
+                    scenario_id=pre_resolution.scenario_id,
+                )
+            )
+            if semantic_state is not None:
+                scen_res = ScenarioResolution(
+                    scenario_id=pre_resolution.scenario_id,
+                    confidence=max(pre_resolution.confidence, 0.9),
+                    support_level=pre_resolution.support_level,
+                    reason=semantic_state.reason,
+                    goal_id=pre_resolution.goal_id,
+                    needs_plan=False,
+                    suggested_lane="direct_assistant",
+                    action_class=pre_resolution.action_class,
+                    proof_class=pre_resolution.proof_class,
+                    approval_mode=pre_resolution.approval_mode,
+                )
+                self._append_task_event(
+                    task_id,
+                    EventType.SCENARIO_RESOLVED,
+                    scen_res.to_event_payload(),
+                )
+                decision = AndreaRouteDecision(
+                    mode="direct",
+                    reason=semantic_state.reason,
+                    reply_text=semantic_state.reply_text,
+                    collaboration_mode=str(
+                        user_payload.get("collaboration_mode")
+                        or principal_prefs.get("collaboration_mode")
+                        or "auto"
+                    ),
+                )
+                applied = self._append_task_event(
+                    task_id,
+                    EventType.ASSISTANT_REPLIED,
+                    {
+                        "text": decision.reply_text,
+                        "route": "direct",
+                        "reason": decision.reason,
+                        "semantic_selection": semantic_state.to_metadata(),
+                    },
+                )
+                if applied:
+                    self.with_lock(lambda c: set_meta(c, marker, str(time.time())))
+                    self._record_daily_assistant_receipt_after_direct_reply(
+                        task_id,
+                        scen_res.to_event_payload(),
                         decision.reply_text,
                         route="direct",
                         reason=decision.reason,

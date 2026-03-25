@@ -1561,7 +1561,7 @@ class SyncServer:
                         "If you want, I can start a fresh task and track it from here."
                     )
                 elif effective_turn_plan.domain == "approval_state":
-                    goal_nl = "There are no pending approvals right now."
+                    goal_nl = "I'm not seeing any approval requests waiting on you right now."
             if goal_nl:
                 goal_nl = self.with_lock(
                     lambda c: merge_goal_reply_with_followthrough(

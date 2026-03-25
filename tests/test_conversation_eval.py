@@ -67,6 +67,22 @@ class ConversationEvalDetectorTests(unittest.TestCase):
         codes = {h["issue_code"] for h in hits}
         self.assertIn("conversation_cursor_recall_metadata_led", codes)
 
+    def test_cursor_recap_lead_does_not_trip_metadata_led_detector(self) -> None:
+        cap = {
+            "raw_reply_text": (
+                "Cursor recap: Drafted the implementation recap and queued the tests.\n"
+                "Where things stand: task status **running**; result: **in_progress**."
+            ),
+            "user_turn": "What did Cursor say?",
+            "turn_plan_domain": "project_status",
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap, expect_cursor_substance=True)
+        codes = {h["issue_code"] for h in hits}
+        self.assertNotIn("conversation_cursor_recall_metadata_led", codes)
+        self.assertNotIn("conversation_cursor_recall_thin", codes)
+
     def test_detects_read_summarize_followup_vs_outbound_capability_copy(self) -> None:
         cap = {
             "raw_reply_text": (
@@ -114,6 +130,18 @@ class ConversationEvalDetectorTests(unittest.TestCase):
         hits = run_deterministic_detectors(cap)
         codes = {h["issue_code"] for h in hits}
         self.assertIn("conversation_metadata_surface_leak", codes)
+
+    def test_approval_inventory_reply_does_not_trip_false_completion(self) -> None:
+        cap = {
+            "raw_reply_text": "I'm not seeing any approval requests waiting on you right now.",
+            "user_turn": "What still needs my approval?",
+            "turn_plan_domain": "approval_state",
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap)
+        codes = {h["issue_code"] for h in hits}
+        self.assertNotIn("conversation_false_completion", codes)
 
     def test_runtime_gate_respects_env(self) -> None:
         prev = os.environ.get("ANDREA_RUNTIME_SEMANTIC_ADJUDICATOR")

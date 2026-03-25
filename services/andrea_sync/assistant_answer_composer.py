@@ -209,8 +209,8 @@ def draft_should_force_continuity_repair(draft: str, user_question: str) -> bool
     return False
 
 _GRACE_CURSOR_CONTINUITY = (
-    "I'm not finding a strong stored summary from the recent Cursor work yet. "
-    "I can check the latest tracked state or start a fresh heavy-lift pass from the last known context."
+    "I don't have a prior Cursor result stored for this thread yet. "
+    "If you want, I can start a fresh Cursor pass now and give you a concise recap."
 )
 _GRACE_GENERIC_HISTORY = (
     "I don't have enough recorded history on the current task to say that confidently. "
@@ -349,6 +349,7 @@ def _cursor_recall_composition_is_metadata_led(text: str) -> bool:
         return False
     low = t.lower()
     recap_markers = (
+        "cursor recap:",
         "latest useful result:",
         "recent receipt (",
         "recent receipt:",
@@ -662,6 +663,87 @@ def _pick_cursor_recap_lead(
     return ""
 
 
+def _fallback_cursor_recap_from_state(
+    conn: Any,
+    task_id: str,
+    *,
+    phase_summary: str,
+    blocked_reason: str,
+    status: str,
+    result_kind: str,
+) -> str:
+    """
+    Build a human-readable recap sentence when richer narrative lines are unavailable.
+    This is intentionally user-facing (not lane/backend metadata).
+    """
+    ps = sanitize_user_surface_text(str(phase_summary or ""), limit=320)
+    if ps and len(ps) >= 8:
+        return f"Latest tracked Cursor progress: {ps}"
+    br = sanitize_user_surface_text(str(blocked_reason or ""), limit=280)
+    if br and len(br) >= 8:
+        return f"Cursor is currently blocked on: {br}"
+    att = summarize_execution_attempt_for_user(conn, task_id)
+    if isinstance(att, dict) and att.get("ok"):
+        st = str(att.get("status") or "").strip().lower()
+        if st and st not in {"unknown", "n/a", "none"}:
+            return f"The delegated Cursor run is currently {st}."
+        return "The delegated Cursor run is active on the latest workstream."
+    st = str(status or "").strip().lower()
+    rk = str(result_kind or "").strip().lower()
+    if st and st not in {"", "created", "queued"}:
+        return f"The latest Cursor-linked task is currently {st}."
+    if rk and rk not in {"", "created", "queued"}:
+        return f"The latest Cursor-linked result state is {rk}."
+    return ""
+
+
+def _synthesize_partial_cursor_recap(
+    *,
+    assistant_lines: Sequence[str],
+    receipt_substantive: Sequence[str],
+    phase_summary: str,
+    blocked_reason: str,
+    cont_line: str,
+) -> str:
+    """Build one recap sentence from two weaker safe fragments."""
+    frags: List[str] = []
+
+    def _push(raw: str) -> None:
+        clean = sanitize_user_surface_text(_strip_recall_label(raw), limit=220)
+        key = surface_similarity_key(clean)
+        if not clean or not key:
+            return
+        if any(key == surface_similarity_key(prev) for prev in frags):
+            return
+        frags.append(clean)
+
+    for line in assistant_lines:
+        _push(line)
+    for line in receipt_substantive:
+        _push(line)
+    _push(phase_summary)
+    _push(blocked_reason)
+    _push(cont_line)
+
+    if len(frags) >= 2:
+        return f"{frags[0]} Current note: {frags[1]}"
+    if len(frags) == 1:
+        return frags[0]
+    return ""
+
+
+def _is_thin_cursor_recap_lead(text: str) -> bool:
+    low = str(text or "").strip().lower()
+    return low.startswith(
+        (
+            "latest tracked cursor progress:",
+            "the delegated cursor run",
+            "the latest cursor-linked task is currently",
+            "the latest cursor-linked result state is",
+        )
+    )
+
+
 def _state_snapshot_is_low_information_only(
     status: str,
     result_kind: str,
@@ -683,6 +765,7 @@ def build_cursor_continuity_recall_reply_from_state(
     task_id: str,
     *,
     user_message: str = "",
+    allow_same_chat_recap_hop: bool = True,
 ) -> str:
     """
     Human-facing recall from delegated OpenClaw narrative, receipts, and outcome state.
@@ -742,7 +825,7 @@ def build_cursor_continuity_recall_reply_from_state(
         safe_lr = sanitize_user_surface_text(last_reply, limit=900)
         if safe_lr:
             assistant_lines.append(f"Last assistant update on this task: {safe_lr}")
-    elif summary and len(summary) > 12 and not _is_echo_of_user_question(summary, um):
+    elif summary and len(summary) > 20 and not _is_echo_of_user_question(summary, um):
         safe_s = sanitize_user_surface_text(summary, limit=900)
         if safe_s:
             assistant_lines.append(f"Recorded summary: {safe_s}")
@@ -771,6 +854,47 @@ def build_cursor_continuity_recall_reply_from_state(
             receipt_substantive=receipt_substantive,
             cont_line=cont_line,
         )
+        if not recap_lead:
+            recap_lead = _synthesize_partial_cursor_recap(
+                assistant_lines=assistant_lines,
+                receipt_substantive=receipt_substantive,
+                phase_summary=phase_summary,
+                blocked_reason=blocked_reason,
+                cont_line=cont_line,
+            )
+        if not recap_lead:
+            recap_lead = _fallback_cursor_recap_from_state(
+                conn,
+                use_id,
+                phase_summary=phase_summary,
+                blocked_reason=blocked_reason,
+                status=status,
+                result_kind=result_kind,
+            )
+        if (
+            allow_same_chat_recap_hop
+            and _is_thin_cursor_recap_lead(recap_lead)
+            and cid is not None
+        ):
+            alt = find_recent_delegated_cursor_task_id(
+                conn,
+                use_id,
+                chat_id=cid,
+                user_message=um,
+            )
+            if alt and alt != use_id:
+                alt_text = build_cursor_continuity_recall_reply_from_state(
+                    conn,
+                    alt,
+                    user_message=user_message,
+                    allow_same_chat_recap_hop=False,
+                )
+                if (
+                    alt_text
+                    and alt_text not in (_GRACE_CURSOR_CONTINUITY, _GRACE_GENERIC_HISTORY)
+                    and not _cursor_recall_composition_is_metadata_led(alt_text)
+                ):
+                    return alt_text
         if recap_lead:
             lines.append(f"Cursor recap: {recap_lead}")
 
@@ -786,7 +910,9 @@ def build_cursor_continuity_recall_reply_from_state(
             lines.append(line)
 
         lines.extend(receipt_generic[:1])
-        if not recap_lead or _user_message_asks_explicit_status(um):
+        if _user_message_asks_explicit_status(um) or (
+            recap_lead.startswith("The delegated Cursor run") and not narrative_lines
+        ):
             lines.extend(exec_lines)
 
         has_narrative = bool(
@@ -1545,7 +1671,7 @@ def gather_repair_candidates(
                 out.append(
                     AnswerCandidate(
                         source="goal_continuity",
-                        text="There are no pending approvals right now.",
+                        text="I'm not seeing any approval requests waiting on you right now.",
                         priority=72,
                     )
                 )

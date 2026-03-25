@@ -1932,7 +1932,7 @@ class TestAndreaSync(unittest.TestCase):
         )
         self.assertEqual(decision.mode, "direct")
         low = decision.reply_text.lower()
-        self.assertIn("no pending", low)
+        self.assertIn("approval requests waiting", low)
 
     def test_ranking_agenda_question_uses_calendar_visibility_not_generic(self) -> None:
         os.environ["OPENAI_API_ENABLED"] = "0"
@@ -2829,7 +2829,7 @@ class TestAndreaSync(unittest.TestCase):
         proj = project_task_dict(server.conn, task_id, "telegram")
         assistant = (proj.get("meta") or {}).get("assistant") or {}
         text = str(assistant.get("last_reply") or "").lower()
-        self.assertIn("no pending approvals right now", text)
+        self.assertIn("approval requests waiting on you right now", text)
         self.assertNotIn("say a bit more about what you want", text)
 
     def test_server_followups_common_intents_do_not_emit_generic_fallback(self) -> None:

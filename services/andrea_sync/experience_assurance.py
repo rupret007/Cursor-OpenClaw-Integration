@@ -229,9 +229,10 @@ def _find_telegram_task_id_for_message(
     *,
     chat_id: int,
     message_id: int,
+    update_id: int | None = None,
     scan_limit: int = 120,
 ) -> str:
-    """Resolve task_id by projected telegram meta (same signal as HTTP task detail)."""
+    """Resolve task_id by projected telegram meta, then persisted USER_MESSAGE fallback."""
     limit = max(1, min(int(scan_limit), 200))
     candidates = list_telegram_task_ids_for_chat(conn, chat_id, limit=limit)
     seen: set[str] = set()
@@ -248,6 +249,46 @@ def _find_telegram_task_id_for_message(
         proj = project_task_dict(conn, tid, ch)
         if _telegram_projection_matches_message(proj, chat_id=chat_id, message_id=message_id):
             return tid
+    # Fallback: projection meta may lag, but USER_MESSAGE payload is persisted at ingest time.
+    # Prefer same-chat recent tasks first for deterministic anaphoric turn correlation.
+    ordered_scan = list(candidates)
+    for tid in list_recent_telegram_task_ids(conn, limit=limit):
+        if tid in seen:
+            continue
+        seen.add(tid)
+        ordered_scan.append(tid)
+    for tid in ordered_scan:
+        try:
+            events = load_events_for_task(conn, tid)
+        except Exception:
+            continue
+        for _seq, _ts, event_type, payload in reversed(events):
+            if str(event_type or "") != EventType.USER_MESSAGE.value:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            if int(payload.get("chat_id") or 0) != int(chat_id):
+                continue
+            if int(payload.get("message_id") or 0) != int(message_id):
+                continue
+            return tid
+    if update_id is not None:
+        ref = str(update_id).strip()
+        if ref:
+            for tid in ordered_scan:
+                try:
+                    events = load_events_for_task(conn, tid)
+                except Exception:
+                    continue
+                for _seq, _ts, event_type, payload in reversed(events):
+                    if str(event_type or "") != EventType.EXTERNAL_REF.value:
+                        continue
+                    if not isinstance(payload, dict):
+                        continue
+                    if str(payload.get("kind") or "").strip() != "telegram_update":
+                        continue
+                    if str(payload.get("ref") or "").strip() == ref:
+                        return tid
     return ""
 
 
@@ -450,6 +491,7 @@ class ExperienceHarness:
         *,
         chat_id: int,
         message_id: int,
+        update_id: int | None = None,
         statuses: Iterable[str],
         discovery_timeout_seconds: float | None = None,
         terminal_timeout_seconds: float | None = None,
@@ -482,13 +524,21 @@ class ExperienceHarness:
         def _emit(phase: str, extra: Dict[str, Any] | None = None) -> None:
             if on_progress is None:
                 return
-            payload = {"chat_id": chat_id, "message_id": message_id, **(extra or {})}
+            payload = {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                **({"update_id": update_id} if update_id is not None else {}),
+                **(extra or {}),
+            }
             on_progress(phase, payload)
 
         while time.time() < disc_deadline:
             def _find(c: Any) -> str:
                 return _find_telegram_task_id_for_message(
-                    c, chat_id=int(chat_id), message_id=int(message_id)
+                    c,
+                    chat_id=int(chat_id),
+                    message_id=int(message_id),
+                    update_id=int(update_id) if update_id is not None else None,
                 )
 
             task_id = str(server.with_lock(_find) or "")
@@ -510,6 +560,7 @@ class ExperienceHarness:
                 metadata={
                     "chat_id": chat_id,
                     "message_id": message_id,
+                    **({"update_id": update_id} if update_id is not None else {}),
                     "discovery_ms": round((time.time() - t0) * 1000.0, 2),
                 },
             )

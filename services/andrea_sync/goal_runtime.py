@@ -104,7 +104,7 @@ def build_goal_continuity_reply(
                 f"Top pending approval: `{aid}`" + (f" — {rationale}" if rationale else "."),
             ]
             return "\n".join(lines)
-        return f"There are no pending approvals right now for tracked task `{exec_task}`."
+        return f"I don't see approval requests waiting right now for tracked task `{exec_task}`."
     channel = get_task_channel(conn, exec_task) or "cli"
     projection = project_task_dict(conn, exec_task, channel)
     meta = projection.get("meta") if isinstance(projection.get("meta"), dict) else {}

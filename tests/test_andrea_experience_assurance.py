@@ -55,6 +55,62 @@ class ExperienceHarnessCorrelationTests(unittest.TestCase):
             tid = server.with_lock(read)
             self.assertTrue(str(tid).startswith("tsk_"))
 
+    def test_correlation_falls_back_to_user_message_event_when_projection_misses(self) -> None:
+        with ExperienceHarness() as h:
+            server = h.server
+            assert server is not None
+            h.submit_telegram_update(
+                {
+                    "update_id": 502,
+                    "message": {
+                        "text": "Continue that",
+                        "message_id": 902,
+                        "chat": {"id": 602},
+                        "from": {"id": 802},
+                    },
+                }
+            )
+
+            def read(c: object) -> str:
+                with mock.patch(
+                    "services.andrea_sync.experience_assurance._telegram_projection_matches_message",
+                    return_value=False,
+                ):
+                    return _find_telegram_task_id_for_message(
+                        c, chat_id=602, message_id=902, scan_limit=50
+                    )
+
+            tid = server.with_lock(read)
+            self.assertTrue(str(tid).startswith("tsk_"))
+
+    def test_correlation_falls_back_to_external_ref_update_id(self) -> None:
+        with ExperienceHarness() as h:
+            server = h.server
+            assert server is not None
+            h.submit_telegram_update(
+                {
+                    "update_id": 503,
+                    "message": {
+                        "text": "What happened there?",
+                        "message_id": 903,
+                        "chat": {"id": 603},
+                        "from": {"id": 803},
+                    },
+                }
+            )
+
+            def read(c: object) -> str:
+                return _find_telegram_task_id_for_message(
+                    c,
+                    chat_id=603,
+                    message_id=999,  # force miss on projection + USER_MESSAGE matching
+                    update_id=503,
+                    scan_limit=50,
+                )
+
+            tid = server.with_lock(read)
+            self.assertTrue(str(tid).startswith("tsk_"))
+
 
 class AndreaExperienceAssuranceTests(unittest.TestCase):
     def setUp(self) -> None:

@@ -600,7 +600,42 @@ class TestAssistantAnswerComposer(unittest.TestCase):
             self.conn, tid, user_message="What did Cursor say?"
         )
         self.assertNotIn("Recorded summary: What did Cursor say?", text)
-        self.assertIn("not finding a strong", text.lower())
+        self.assertIn("don't have a prior cursor result", text.lower())
+
+    def test_cursor_recall_synthesizes_from_assistant_update_before_grace(self) -> None:
+        from services.andrea_sync.assistant_answer_composer import (  # noqa: E402
+            build_cursor_continuity_recall_reply_from_state,
+        )
+
+        r0 = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "comp-phase-summary-1",
+                "payload": {
+                    "text": "Status please",
+                    "routing_text": "Status please",
+                    "chat_id": 88061,
+                    "message_id": 1,
+                },
+            },
+        )
+        tid = r0["task_id"]
+        append_event(
+            self.conn,
+            tid,
+            EventType.ASSISTANT_REPLIED,
+            {
+                "text": "Drafted the recap strategy and queued targeted tests.",
+            },
+        )
+        text = build_cursor_continuity_recall_reply_from_state(
+            self.conn, tid, user_message="What did Cursor say?"
+        )
+        self.assertIn("Cursor recap:", text)
+        self.assertIn("Drafted the recap strategy", text)
+        self.assertNotIn("don't have a prior cursor result", text.lower())
 
     def test_format_direct_message_strips_soft_failure_boilerplate(self) -> None:
         raw = (

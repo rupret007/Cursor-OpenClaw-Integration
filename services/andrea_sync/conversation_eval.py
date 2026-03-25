@@ -247,8 +247,18 @@ def run_deterministic_detectors(
                 "detail": "generic direct fallback phrasing",
             }
         )
-    if draft_implies_false_completion(text) and any(
-        k in low for k in ("blocked", "pending", "approval", "cursor", "task")
+    approval_inventory_only = bool(
+        str(capture.get("turn_plan_domain") or "") == "approval_state"
+        and (
+            "approval requests waiting on you right now" in low
+            or "approval requests waiting right now" in low
+            or "no pending approvals right now" in low
+        )
+    )
+    if (
+        draft_implies_false_completion(text)
+        and any(k in low for k in ("blocked", "pending", "approval", "cursor", "task"))
+        and not approval_inventory_only
     ):
         findings.append(
             {
@@ -712,6 +722,7 @@ def run_conversation_case(
                     detail = harness.wait_for_telegram_task(
                         chat_id=case.chat_id,
                         message_id=mid + turn_idx,
+                        update_id=uid + turn_idx,
                         statuses=wait_statuses,
                         on_progress=_log_progress,
                     )

@@ -1225,6 +1225,137 @@ def list_recent_user_outcome_receipts(
         return []
 
 
+def list_recent_user_outcome_receipts_for_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    limit: int = 8,
+) -> List[sqlite3.Row]:
+    """Recent user-facing outcome receipts for a single task (composer / attention views)."""
+    tid = str(task_id or "").strip()
+    if not tid:
+        return []
+    try:
+        lim = max(1, int(limit))
+        return list(
+            conn.execute(
+                """
+                SELECT * FROM user_outcome_receipts
+                WHERE task_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (tid, lim),
+            ).fetchall()
+        )
+    except sqlite3.OperationalError:
+        return []
+
+
+def list_recent_open_loop_records_for_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    limit: int = 8,
+) -> List[sqlite3.Row]:
+    tid = str(task_id or "").strip()
+    if not tid:
+        return []
+    try:
+        lim = max(1, int(limit))
+        return list(
+            conn.execute(
+                """
+                SELECT * FROM open_loop_records
+                WHERE task_id = ?
+                ORDER BY opened_at DESC
+                LIMIT ?
+                """,
+                (tid, lim),
+            ).fetchall()
+        )
+    except sqlite3.OperationalError:
+        return []
+
+
+def list_recent_stale_task_indicators_for_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    limit: int = 6,
+) -> List[sqlite3.Row]:
+    tid = str(task_id or "").strip()
+    if not tid:
+        return []
+    try:
+        lim = max(1, int(limit))
+        return list(
+            conn.execute(
+                """
+                SELECT * FROM stale_task_indicators
+                WHERE task_id = ?
+                ORDER BY detected_at DESC
+                LIMIT ?
+                """,
+                (tid, lim),
+            ).fetchall()
+        )
+    except sqlite3.OperationalError:
+        return []
+
+
+def list_recent_closure_decisions_for_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    limit: int = 6,
+) -> List[sqlite3.Row]:
+    tid = str(task_id or "").strip()
+    if not tid:
+        return []
+    try:
+        lim = max(1, int(limit))
+        return list(
+            conn.execute(
+                """
+                SELECT * FROM closure_decisions
+                WHERE task_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (tid, lim),
+            ).fetchall()
+        )
+    except sqlite3.OperationalError:
+        return []
+
+
+def list_recent_followup_recommendations_for_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    limit: int = 6,
+) -> List[sqlite3.Row]:
+    tid = str(task_id or "").strip()
+    if not tid:
+        return []
+    try:
+        lim = max(1, int(limit))
+        return list(
+            conn.execute(
+                """
+                SELECT * FROM followup_recommendations
+                WHERE task_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (tid, lim),
+            ).fetchall()
+        )
+    except sqlite3.OperationalError:
+        return []
+
+
 def count_user_outcome_receipts_window(
     conn: sqlite3.Connection,
     *,
@@ -2572,6 +2703,48 @@ def list_due_reminders(
         LIMIT ?
         """,
         (ts, max(1, int(limit))),
+    ).fetchall()
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        raw_meta = item.get("metadata_json")
+        try:
+            item["metadata"] = json.loads(raw_meta) if raw_meta else {}
+        except Exception:
+            item["metadata"] = {}
+        out.append(item)
+    return out
+
+
+def list_upcoming_reminders_for_principal(
+    conn: sqlite3.Connection,
+    principal_id: str,
+    *,
+    now_ts: Optional[float] = None,
+    horizon_seconds: float = 86400 * 7,
+    limit: int = 12,
+) -> List[Dict[str, Any]]:
+    """
+    Scheduled reminders for a principal due within the horizon (inclusive of overdue).
+    Used for personal-agenda / day-plan style answers without a full calendar integration.
+    """
+    pid = str(principal_id or "").strip()
+    if not pid:
+        return []
+    ts = float(now_ts or time.time())
+    horizon_end = ts + max(60.0, float(horizon_seconds))
+    rows = conn.execute(
+        """
+        SELECT reminder_id, principal_id, channel, delivery_target, message, due_at, status,
+               source_task_id, metadata_json, created_at, updated_at
+        FROM reminders
+        WHERE principal_id = ?
+          AND status IN ('scheduled', 'awaiting_delivery_channel')
+          AND due_at <= ?
+        ORDER BY due_at ASC, created_at ASC
+        LIMIT ?
+        """,
+        (pid, horizon_end, max(1, int(limit))),
     ).fetchall()
     out: List[Dict[str, Any]] = []
     for row in rows:

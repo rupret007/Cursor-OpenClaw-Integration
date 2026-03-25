@@ -330,7 +330,8 @@ class SyncServer:
         self.conn = connect(self.db_path)
         migrate(self.conn)
         ensure_system_task(self.conn)
-        self.lock = threading.Lock()
+        # RLock avoids self-deadlock if a with_lock callback re-enters the server on the same thread.
+        self.lock = threading.RLock()
         self._routing_inflight: set[str] = set()
         self._notification_inflight: set[str] = set()
         self.queue: Queue[Callable[[], None]] = Queue()

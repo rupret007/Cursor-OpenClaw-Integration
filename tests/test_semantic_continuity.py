@@ -93,6 +93,8 @@ class TestSemanticContinuity(unittest.TestCase):
         )
         self.assertEqual(patch.continuity_focus_override, "cursor_followup_heavy_lift")
         self.assertTrue(patch.force_prefer_state_reply)
+        self.assertEqual(patch.family_override, "cursor_continuation")
+        self.assertEqual(patch.allowed_sources_override, ("cursor_heavy_lift_context",))
 
     def test_patch_bare_continue_via_same_chat_viability_when_semantic_scores_low(self) -> None:
         """
@@ -148,6 +150,7 @@ class TestSemanticContinuity(unittest.TestCase):
         )
         self.assertEqual(patch.continuity_focus_override, "cursor_followup_heavy_lift")
         self.assertTrue(patch.force_prefer_state_reply)
+        self.assertEqual(patch.family_override, "cursor_continuation")
 
     def test_patch_empty_without_delegation_signal(self) -> None:
         r0 = handle_command(
@@ -228,6 +231,7 @@ class TestSemanticContinuity(unittest.TestCase):
         )
         self.assertEqual(patch.continuity_focus_override, "cursor_followup_heavy_lift")
         self.assertTrue(patch.force_prefer_state_reply)
+        self.assertEqual(patch.family_override, "cursor_continuation")
 
     def test_patch_force_prefer_when_history_focus_and_high_delegation(self) -> None:
         r0 = handle_command(
@@ -266,6 +270,8 @@ class TestSemanticContinuity(unittest.TestCase):
         )
         self.assertIsNone(patch.continuity_focus_override)
         self.assertTrue(patch.force_prefer_state_reply)
+        self.assertEqual(patch.family_override, "cursor_recall")
+        self.assertEqual(patch.allowed_sources_override, ("cursor_continuity_recall",))
 
     def test_patch_skips_non_status_scenario(self) -> None:
         r0 = handle_command(
@@ -292,6 +298,33 @@ class TestSemanticContinuity(unittest.TestCase):
             projection_has_continuity_state=True,
         )
         self.assertIsNone(patch.continuity_focus_override)
+
+    def test_patch_marks_opinion_turn_as_non_stateful(self) -> None:
+        r0 = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "semcont-opinion",
+                "payload": {
+                    "text": "What do you think about that?",
+                    "routing_text": "What do you think about that?",
+                    "chat_id": 99006,
+                    "message_id": 1,
+                },
+            },
+        )
+        tid = r0["task_id"]
+        patch = resolve_semantic_continuity_patch(
+            self.conn,
+            tid,
+            "What do you think about that?",
+            scenario_id="statusFollowupContinue",
+            base_focus="none",
+            projection_has_continuity_state=True,
+        )
+        self.assertFalse(patch.stateful_allowed)
+        self.assertIn("non_stateful_turn", patch.binding_reason)
 
 
 if __name__ == "__main__":

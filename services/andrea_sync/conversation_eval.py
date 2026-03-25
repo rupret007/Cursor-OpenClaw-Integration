@@ -204,6 +204,27 @@ def _meta_flags(detail: Dict[str, Any]) -> Dict[str, bool]:
     }
 
 
+def _projection_has_continuity_state(meta: Mapping[str, Any], summary: Any) -> bool:
+    for key in (
+        "goal",
+        "plan",
+        "approval",
+        "daily_assistant_pack",
+        "followthrough",
+        "telegram",
+        "proactive",
+        "outcome",
+        "execution",
+        "assistant",
+        "openclaw",
+        "cursor",
+    ):
+        section = meta.get(key) if isinstance(meta, Mapping) else None
+        if isinstance(section, dict) and section:
+            return True
+    return len(str(summary or "").strip()) > 8
+
+
 def build_turn_capture(
     *,
     harness: Any,
@@ -220,7 +241,7 @@ def build_turn_capture(
     scen = _scenario_meta(detail)
     scenario_id = str(scen.get("scenario_id") or "")
     resolution, _ = resolve_scenario(user_text, goal_id="", route_decision=None)
-    projection_has_state = bool(meta.get("goal")) or bool(meta.get("plan"))
+    projection_has_state = _projection_has_continuity_state(meta, proj.get("summary"))
     try:
         del_score = same_chat_max_delegation_score(conn, task_id)
     except (AttributeError, TypeError, ValueError):
@@ -248,9 +269,18 @@ def build_turn_capture(
         plan = replace(plan, continuity_focus=cont_patch.continuity_focus_override)
     if cont_patch.force_prefer_state_reply and plan.domain in {"project_status", "approval_state"}:
         plan = replace(plan, prefer_state_reply=True)
+    if cont_patch.stateful_allowed is False:
+        plan = replace(
+            plan,
+            continuity_focus="none",
+            prefer_state_reply=False,
+            allow_goal_continuity_repair=False,
+        )
     raw_reply = _task_last_reply(detail)
     sanitized = sanitize_user_surface_text(raw_reply, fallback="", limit=2000)
     family_profile = resolve_answer_family_profile(user_text, plan)
+    expected_family = str(cont_patch.family_override or family_profile.family)
+    expected_sources = list(cont_patch.allowed_sources_override or family_profile.allowed_sources)
     flags = _meta_flags(detail)
     assistant_payload = _latest_assistant_reply_payload(detail)
     semantic_selection = (
@@ -287,8 +317,12 @@ def build_turn_capture(
         "scenario_reason": str(scen.get("reason") or resolution.reason),
         "turn_plan_domain": plan.domain,
         "turn_plan_continuity_focus": plan.continuity_focus,
-        "expected_answer_family": family_profile.family,
-        "expected_answer_sources": list(family_profile.allowed_sources),
+        "expected_answer_family": expected_family,
+        "expected_answer_sources": expected_sources,
+        "continuity_binding_reason": cont_patch.binding_reason,
+        "continuity_stateful_allowed": cont_patch.stateful_allowed,
+        "continuity_family_override": cont_patch.family_override,
+        "continuity_allowed_sources_override": list(cont_patch.allowed_sources_override),
         "projection_has_continuity_state": projection_has_state,
         "delegated_to_cursor": flags["delegated_to_cursor"],
         "meta_cursor_present": flags["has_cursor"],
@@ -424,6 +458,18 @@ def run_deterministic_detectors(
                 "issue_code": "conversation_stateful_domain_hijack",
                 "severity": "high",
                 "detail": "stateful semantic answer used outside project/approval domain",
+            }
+        )
+    if (
+        str(capture.get("assistant_reason") or "") == "goal_runtime_status"
+        and str(capture.get("turn_plan_domain") or "") in {"opinion_reflection", "casual_conversation"}
+    ):
+        findings.append(
+            {
+                "family": "wrong_domain_contamination",
+                "issue_code": "conversation_stateful_domain_hijack",
+                "severity": "high",
+                "detail": "goal-runtime status reply used on non-stateful opinion/casual turn",
             }
         )
     if expected_sources and semantic_source and semantic_source not in expected_sources:
@@ -2213,8 +2259,10 @@ CONVERSATION_CORE_CASES: tuple[ConversationCaseSpec, ...] = (
         turns=("What happened there?", "What about that one?", "Continue that"),
         chat_id=88020,
         from_id=99020,
-        first_update_id=18020,
-        first_message_id=28020,
+        first_update_id=19020,
+        first_message_id=29020,
+        required_turn_domains=("project_status",),
+        forbidden_reply_markers=("recent clean Cursor result",),
     ),
     ConversationCaseSpec(
         case_id="wrong_thread_cursor_recall",
@@ -2409,8 +2457,10 @@ CONVERSATION_CORE_CASES: tuple[ConversationCaseSpec, ...] = (
         turns=("What's on the agenda today?", "What do you think about that?"),
         chat_id=88021,
         from_id=99021,
-        first_update_id=18021,
-        first_message_id=28021,
+        first_update_id=19121,
+        first_message_id=29121,
+        required_turn_domains=("opinion_reflection",),
+        forbidden_reply_markers=("recent clean Cursor result",),
     ),
 )
 

@@ -207,6 +207,23 @@ class ConversationEvalDetectorTests(unittest.TestCase):
         self.assertIn("conversation_semantic_source_family_mismatch", codes)
         self.assertIn("conversation_semantic_contract_missing", codes)
 
+    def test_detects_goal_runtime_status_hijack_on_opinion_turn(self) -> None:
+        cap = {
+            "raw_reply_text": "Goal `g1` status: running with pending checks.",
+            "rendered_reply_sanitized": "Andrea:\nGoal `g1` status: running with pending checks.",
+            "user_turn": "What do you think about that?",
+            "turn_plan_domain": "opinion_reflection",
+            "assistant_reason": "goal_runtime_status",
+            "assistant_semantic_selection": {},
+            "expected_answer_family": "general_status",
+            "expected_answer_sources": ["goal_status", "goal_continuity"],
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap)
+        codes = {h["issue_code"] for h in hits}
+        self.assertIn("conversation_stateful_domain_hijack", codes)
+
     def test_detects_fallback_shaped_rendered_reply_under_strong_contract_evidence(self) -> None:
         cap = {
             "raw_reply_text": "I’m not finding a recent clean Cursor result to recap from this thread.",

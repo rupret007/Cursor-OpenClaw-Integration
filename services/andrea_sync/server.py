@@ -1440,6 +1440,13 @@ class SyncServer:
                     effective_turn_plan = replace(
                         effective_turn_plan, prefer_state_reply=True
                     )
+            if cont_patch.stateful_allowed is False:
+                effective_turn_plan = replace(
+                    effective_turn_plan,
+                    prefer_state_reply=False,
+                    allow_goal_continuity_repair=False,
+                    continuity_focus="none",
+                )
             if (
                 effective_turn_plan.domain == "project_status"
                 and effective_turn_plan.continuity_focus
@@ -1527,8 +1534,20 @@ class SyncServer:
                     user_text=classify_text,
                     turn_plan=effective_turn_plan,
                     scenario_id=pre_resolution.scenario_id,
+                    family_override=cont_patch.family_override,
+                    allowed_sources_override=cont_patch.allowed_sources_override,
+                    stateful_allowed=cont_patch.stateful_allowed,
+                    binding_reason=cont_patch.binding_reason,
                 )
             )
+            if semantic_state is not None:
+                if cont_patch.family_override and semantic_state.family != cont_patch.family_override:
+                    semantic_state = None
+                elif (
+                    cont_patch.allowed_sources_override
+                    and semantic_state.source not in set(cont_patch.allowed_sources_override)
+                ):
+                    semantic_state = None
             if semantic_state is not None:
                 scen_res = ScenarioResolution(
                     scenario_id=pre_resolution.scenario_id,
@@ -1578,7 +1597,10 @@ class SyncServer:
                     )
                 return decision, applied
             goal_nl = None
+            stateful_allowed = cont_patch.stateful_allowed is not False
             if (
+                stateful_allowed
+                and
                 effective_turn_plan.prefer_state_reply
                 and effective_turn_plan.allow_goal_continuity_repair
             ):
@@ -1598,12 +1620,13 @@ class SyncServer:
                             c, task_id, user_message=classify_text
                         )
                     )
-            if not goal_nl:
+            if not goal_nl and stateful_allowed:
                 goal_nl = self.with_lock(
                     lambda c: try_goal_status_nl_reply(c, task_id, classify_text)
                 )
             if (
                 not goal_nl
+                and stateful_allowed
                 and effective_turn_plan.prefer_state_reply
                 and effective_turn_plan.allow_goal_continuity_repair
             ):
@@ -1614,6 +1637,7 @@ class SyncServer:
                 )
             if (
                 not goal_nl
+                and stateful_allowed
                 and effective_turn_plan.prefer_state_reply
                 and effective_turn_plan.allow_goal_continuity_repair
             ):

@@ -3,11 +3,15 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 from .projector import project_task_dict
 from .store import get_task_channel, list_telegram_task_ids_for_chat
-from .turn_intelligence import ContinuityFocus, is_anaphoric_outcome_recall_question
+from .turn_intelligence import (
+    ContinuityFocus,
+    build_turn_plan,
+    is_anaphoric_outcome_recall_question,
+)
 
 _ANAPHORIC_CONTINUE_RE = re.compile(
     r"^\s*("
@@ -161,6 +165,36 @@ class SemanticContinuityPatch:
 
     continuity_focus_override: Optional[ContinuityFocus] = None
     force_prefer_state_reply: bool = False
+    family_override: str = ""
+    allowed_sources_override: tuple[str, ...] = ()
+    binding_reason: str = ""
+    stateful_allowed: Optional[bool] = None
+
+
+def _non_stateful_turn_domain(domain: str) -> bool:
+    return str(domain or "") in {
+        "casual_conversation",
+        "personal_agenda",
+        "attention_today",
+        "external_information",
+        "opinion_reflection",
+    }
+
+
+def _patch_with_binding(
+    *,
+    focus: ContinuityFocus,
+    family: str,
+    allowed_sources: Sequence[str],
+    reason: str,
+) -> SemanticContinuityPatch:
+    return SemanticContinuityPatch(
+        continuity_focus_override=focus,
+        force_prefer_state_reply=True,
+        family_override=str(family or "").strip(),
+        allowed_sources_override=tuple(str(x).strip() for x in allowed_sources if str(x).strip()),
+        binding_reason=str(reason or "").strip(),
+    )
 
 
 _PATCH_ELIGIBLE_SCENARIOS = frozenset(
@@ -189,12 +223,28 @@ def resolve_semantic_continuity_patch(
     del_score = same_chat_max_delegation_score(conn, task_id)
     has_projection_continuity = bool(projection_has_continuity_state)
     has_ctx = has_projection_continuity or del_score >= 38
+    raw_plan = build_turn_plan(
+        clean,
+        scenario_id=sid,
+        projection_has_continuity_state=False,
+        same_chat_delegation_score=0,
+    )
+    if _non_stateful_turn_domain(raw_plan.domain) and not (
+        user_message_suggests_anaphoric_outcome_recall(clean)
+        or user_message_suggests_anaphoric_cursor_continue(clean)
+    ):
+        return SemanticContinuityPatch(
+            stateful_allowed=False,
+            binding_reason=f"non_stateful_turn:{raw_plan.domain}",
+        )
 
     if base_focus == "none":
         if user_message_suggests_anaphoric_outcome_recall(clean) and has_ctx:
-            return SemanticContinuityPatch(
-                continuity_focus_override="recent_outcome_history",
-                force_prefer_state_reply=True,
+            return _patch_with_binding(
+                focus="recent_outcome_history",
+                family="cursor_recall",
+                allowed_sources=("cursor_continuity_recall",),
+                reason="anaphoric_outcome_same_chat",
             )
         if user_message_suggests_anaphoric_cursor_continue(clean):
             st = same_chat_max_source_truth_score(conn, task_id)
@@ -204,9 +254,11 @@ def resolve_semantic_continuity_patch(
 
                 viable_chat = _aac.same_chat_has_cursor_continuation_viability(conn, task_id, clean)
             if del_score >= 28 or st >= 85 or viable_chat:
-                return SemanticContinuityPatch(
-                    continuity_focus_override="cursor_followup_heavy_lift",
-                    force_prefer_state_reply=True,
+                return _patch_with_binding(
+                    focus="cursor_followup_heavy_lift",
+                    family="cursor_continuation",
+                    allowed_sources=("cursor_heavy_lift_context",),
+                    reason="anaphoric_continue_same_chat",
                 )
         return SemanticContinuityPatch()
 
@@ -215,5 +267,10 @@ def resolve_semantic_continuity_patch(
         and not projection_has_continuity_state
         and del_score >= 38
     ):
-        return SemanticContinuityPatch(force_prefer_state_reply=True)
+        return SemanticContinuityPatch(
+            force_prefer_state_reply=True,
+            family_override="cursor_recall",
+            allowed_sources_override=("cursor_continuity_recall",),
+            binding_reason="recent_outcome_with_delegation",
+        )
     return SemanticContinuityPatch()

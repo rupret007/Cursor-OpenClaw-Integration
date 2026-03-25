@@ -76,6 +76,7 @@ class SemanticTurnContract:
     evidence_strength: int
     min_score: int
     fallback_policy: str
+    binding_reason: str = ""
 
     def to_metadata(self) -> Dict[str, Any]:
         return {
@@ -87,6 +88,7 @@ class SemanticTurnContract:
             "evidence_strength": int(self.evidence_strength),
             "min_score": int(self.min_score),
             "fallback_policy": self.fallback_policy,
+            "binding_reason": self.binding_reason,
         }
 
 
@@ -205,6 +207,7 @@ def _build_turn_contract(
     source: str,
     candidate_text: str,
     min_score: int,
+    binding_reason: str = "",
 ) -> SemanticTurnContract:
     evidence_lines = tuple(_split_structured_text_lines(candidate_text)[:8]) or (candidate_text,)
     fallback_policy = (
@@ -221,6 +224,7 @@ def _build_turn_contract(
         evidence_strength=_evidence_strength(evidence_lines),
         min_score=int(min_score),
         fallback_policy=fallback_policy,
+        binding_reason=str(binding_reason or "").strip(),
     )
 
 
@@ -231,6 +235,10 @@ def choose_semantic_state_reply(
     user_text: str,
     turn_plan: TurnPlan,
     scenario_id: str,
+    family_override: str = "",
+    allowed_sources_override: Sequence[str] = (),
+    stateful_allowed: bool | None = None,
+    binding_reason: str = "",
 ) -> Optional[SemanticAnswerResult]:
     """
     Choose a direct state-backed answer for bounded conversational status turns.
@@ -244,6 +252,8 @@ def choose_semantic_state_reply(
         force_delegate=bool(turn_plan.force_delegate),
     )
     if interpretation.force_delegate:
+        return None
+    if stateful_allowed is False:
         return None
     # Family integrity guard: if text itself classifies to a non-stateful domain,
     # abstain even when upstream context nudges a stateful turn_plan.
@@ -263,6 +273,11 @@ def choose_semantic_state_reply(
     if _TOOLING_IDENTITY_Q_RE.match(text.strip()):
         return None
     family = resolve_answer_family_profile(text, turn_plan)
+    effective_family = str(family_override or "").strip() or family.family
+    effective_allowed_sources = (
+        tuple(str(x).strip() for x in allowed_sources_override if str(x).strip())
+        or family.allowed_sources
+    )
     candidates: Dict[str, str] = {}
 
     if interpretation.continuity_focus == "blocked_state":
@@ -287,8 +302,8 @@ def choose_semantic_state_reply(
         text
     ):
         candidates = {k: v for k, v in candidates.items() if k == "cursor_heavy_lift_context"}
-    if family.allowed_sources:
-        allowed = set(family.allowed_sources)
+    if effective_allowed_sources:
+        allowed = set(effective_allowed_sources)
         candidates = {k: v for k, v in candidates.items() if k in allowed}
 
     min_score = max(58, int(family.min_score))
@@ -298,11 +313,12 @@ def choose_semantic_state_reply(
         if not cleaned:
             continue
         contract = _build_turn_contract(
-            family=family.family,
-            allowed_sources=family.allowed_sources,
+            family=effective_family,
+            allowed_sources=effective_allowed_sources,
             source=source,
             candidate_text=cleaned,
             min_score=min_score,
+            binding_reason=binding_reason,
         )
         if not _contract_is_admissible(contract, candidate_text=cleaned):
             continue
@@ -334,7 +350,7 @@ def choose_semantic_state_reply(
                 source=source,
                 interpretation=interpretation,
                 score=score,
-                family=family.family,
+                family=effective_family,
                 turn_contract=contract.to_metadata(),
             )
     if best is None:

@@ -228,3 +228,47 @@ class SemanticAnswerEngineTests(unittest.TestCase):
             scenario_id="statusFollowupContinue",
         )
         self.assertIsNone(result)
+
+    @mock.patch("services.andrea_sync.semantic_answer_engine.build_goal_continuity_reply")
+    @mock.patch("services.andrea_sync.semantic_answer_engine.try_goal_status_nl_reply")
+    @mock.patch(
+        "services.andrea_sync.semantic_answer_engine.build_recent_outcome_history_reply_from_state"
+    )
+    def test_family_override_and_allowed_sources_bind_anaphoric_selection(
+        self,
+        mock_recent: mock.MagicMock,
+        mock_goal_status: mock.MagicMock,
+        mock_goal_cont: mock.MagicMock,
+    ) -> None:
+        mock_recent.return_value = "Cursor recap: changed the migration ordering and fixed retries."
+        mock_goal_status.return_value = "Goal `g1` status: running."
+        mock_goal_cont.return_value = "Goal continuity details."
+        result = choose_semantic_state_reply(
+            conn=object(),
+            task_id="t-anaphor",
+            user_text="What happened there?",
+            turn_plan=self._turn_plan(focus="recent_outcome_history"),
+            scenario_id="statusFollowupContinue",
+            family_override="cursor_recall",
+            allowed_sources_override=("cursor_continuity_recall",),
+            binding_reason="anaphoric_outcome_same_chat",
+        )
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.source, "cursor_continuity_recall")
+        contract = result.to_metadata().get("turn_contract") or {}
+        self.assertEqual(contract.get("family"), "cursor_recall")
+        self.assertEqual(contract.get("allowed_sources"), ["cursor_continuity_recall"])
+        self.assertEqual(contract.get("binding_reason"), "anaphoric_outcome_same_chat")
+
+    def test_stateful_allowed_false_abstains_even_with_stateful_turn_plan(self) -> None:
+        result = choose_semantic_state_reply(
+            conn=object(),
+            task_id="t-veto",
+            user_text="What do you think about that?",
+            turn_plan=self._turn_plan(focus="recent_outcome_history"),
+            scenario_id="statusFollowupContinue",
+            stateful_allowed=False,
+            binding_reason="non_stateful_turn:opinion_reflection",
+        )
+        self.assertIsNone(result)

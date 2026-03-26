@@ -11,6 +11,7 @@ from typing import Any, Iterable, List, Mapping, Sequence
 
 from .assistant_answer_composer import (
     _cursor_recall_output_should_force_clean_fallback,
+    build_stateful_summary_bundle,
     gather_cursor_recall_evidence_pack,
     is_continuation_fallback_family_text,
     is_strict_cursor_domain_recall_question,
@@ -263,6 +264,9 @@ class StatefulRealizationInput:
     uncertainty_mode: str
     next_step_options: tuple[str, ...]
     guidance_class: str = ""
+    primary_finding: str = ""
+    supporting_evidence_lines: tuple[str, ...] = ()
+    uncertainty_boundary: str = ""
     utility_goal: str = "concise_grounded_summary"
     brevity_max_words_soft: int = 115
 
@@ -328,6 +332,30 @@ def _merged_evidence_lines(contract: Mapping[str, Any] | None, bundled: Sequence
             seen.add(key)
             merged.append(safe)
     return tuple(merged[:8])
+
+
+def _contract_string(contract: Mapping[str, Any] | None, key: str, limit: int = 420) -> str:
+    if not isinstance(contract, Mapping):
+        return ""
+    return sanitize_user_surface_text(str(contract.get(key) or ""), fallback="", limit=limit).strip()
+
+
+def _contract_string_tuple(contract: Mapping[str, Any] | None, key: str, limit: int = 420) -> tuple[str, ...]:
+    raw = contract.get(key) if isinstance(contract, Mapping) else None
+    if not isinstance(raw, list):
+        return ()
+    out: list[str] = []
+    seen: set[str] = set()
+    for val in raw:
+        clean = sanitize_user_surface_text(str(val or ""), fallback="", limit=limit).strip()
+        if not clean:
+            continue
+        low = clean.lower()
+        if low in seen:
+            continue
+        seen.add(low)
+        out.append(clean)
+    return tuple(out[:4])
 
 
 def _contract_required_anchors(contract: Mapping[str, Any] | None) -> tuple[str, ...]:
@@ -434,6 +462,28 @@ def maybe_realize_stateful_reply(
     bundled = _bundle_evidence_for_source(
         conn, task_id, source=source, user_text=user_text, deterministic_reply=deterministic_reply
     )
+    bundle_primary = ""
+    bundle_supporting: tuple[str, ...] = ()
+    bundle_uncertainty = ""
+    if conn is not None and str(task_id or "").strip():
+        try:
+            sb = build_stateful_summary_bundle(
+                conn,
+                str(task_id),
+                source=str(source),
+                user_message=str(user_text or ""),
+                deterministic_reply=str(deterministic_reply or ""),
+            )
+            if sb.primary_finding:
+                bundle_primary = str(sb.primary_finding)
+            if sb.secondary_evidence_lines:
+                bundle_supporting = tuple(str(x) for x in sb.secondary_evidence_lines)
+            if sb.uncertainty_boundary:
+                bundle_uncertainty = str(sb.uncertainty_boundary)
+            if sb.evidence_lines:
+                bundled = [*list(sb.evidence_lines), *list(bundled)]
+        except Exception:
+            pass
     evidence = _merged_evidence_lines(turn_contract, bundled)
     family = resolve_answer_family_profile(str(user_text or "").strip(), turn_plan)
     contract_family = (
@@ -524,6 +574,13 @@ def maybe_realize_stateful_reply(
             if isinstance(turn_contract, Mapping)
             else ""
         ),
+        primary_finding=_contract_string(turn_contract, "primary_finding", 420) or bundle_primary,
+        supporting_evidence_lines=(
+            _contract_string_tuple(turn_contract, "supporting_evidence_lines", 420)
+            or bundle_supporting
+        ),
+        uncertainty_boundary=_contract_string(turn_contract, "uncertainty_boundary", 280)
+        or bundle_uncertainty,
         utility_goal=utility_goal,
         brevity_max_words_soft=int(brevity_max_words_soft),
     )
@@ -558,6 +615,7 @@ def maybe_realize_stateful_reply(
         "1) Use ONLY facts from EVIDENCE_LINES.\n"
         "2) Do NOT invent entities, files, IDs, approvals, blockers, or outcomes.\n"
         "3) Preserve domain intent: recall asks recap; continuation asks continuation.\n"
+        "3b) Lead with PRIMARY_FINDING when present; use SUPPORTING_EVIDENCE_LINES only as short corroboration.\n"
         "4) If evidence is weak, return the provided fallback.\n"
         "5) Never output runtime internals or configuration names.\n"
         "6) Preserve required anchors and family integrity.\n"
@@ -576,6 +634,9 @@ def maybe_realize_stateful_reply(
             "answer_mode": inp.answer_mode,
             "uncertainty_mode": inp.uncertainty_mode,
             "guidance_class": inp.guidance_class,
+            "primary_finding": inp.primary_finding,
+            "supporting_evidence_lines": list(inp.supporting_evidence_lines),
+            "uncertainty_boundary": inp.uncertainty_boundary,
             "utility_goal": inp.utility_goal,
             "brevity_max_words_soft": inp.brevity_max_words_soft,
             "next_step_options": list(inp.next_step_options),

@@ -106,7 +106,8 @@ def _receipt_passes_cursor_recall_domain_gate(row: Any) -> bool:
         kind = str(row["receipt_kind"] or "").strip().lower()
     except (KeyError, TypeError, IndexError):
         kind = ""
-    if _ledger_receipt_summary_is_generic_placeholder(raw_summ):
+    excerpt = _receipt_reply_excerpt(row)
+    if _ledger_receipt_summary_is_generic_placeholder(raw_summ) and not excerpt:
         return False
     if kind == "status_followup":
         return False
@@ -244,6 +245,203 @@ class CursorWorkstreamViability:
     st_units: int
 
 
+@dataclass(frozen=True)
+class StatefulSummaryBundle:
+    """Compact, source-ranked state bundle for stateful summary realization."""
+
+    source: str
+    primary_finding: str
+    secondary_evidence_lines: Tuple[str, ...]
+    uncertainty_boundary: str
+    evidence_lines: Tuple[str, ...]
+    evidence_strength: int
+
+
+def _receipt_reply_excerpt(row: Any) -> str:
+    refs = _parse_receipt_proof_refs(row)
+    return sanitize_user_surface_text(str(refs.get("reply_excerpt") or ""), limit=380).strip()
+
+
+def _build_stateful_summary_bundle_from_lines(
+    *,
+    source: str,
+    primary_finding: str,
+    supporting_lines: Sequence[str],
+    uncertainty_boundary: str = "",
+) -> StatefulSummaryBundle:
+    primary = sanitize_user_surface_text(str(primary_finding or "").strip(), fallback="", limit=420).strip()
+    support: List[str] = []
+    seen: set[str] = set()
+    for ln in supporting_lines:
+        clean = sanitize_user_surface_text(str(ln or "").strip(), fallback="", limit=420).strip()
+        if not clean:
+            continue
+        key = clean.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        if not primary:
+            primary = clean
+            continue
+        if clean.lower() == primary.lower():
+            continue
+        support.append(clean)
+    evidence: List[str] = []
+    if primary:
+        evidence.append(primary)
+    evidence.extend(support[:6])
+    strength = 0
+    for ln in evidence:
+        strength += 1
+        if ":" in ln:
+            strength += 1
+        if len(ln) > 48:
+            strength += 1
+    return StatefulSummaryBundle(
+        source=str(source or "").strip(),
+        primary_finding=primary,
+        secondary_evidence_lines=tuple(support[:4]),
+        uncertainty_boundary=sanitize_user_surface_text(
+            str(uncertainty_boundary or "").strip(),
+            fallback="",
+            limit=280,
+        ).strip(),
+        evidence_lines=tuple(evidence[:8]),
+        evidence_strength=int(strength),
+    )
+
+
+def _structured_lines(text: str) -> List[str]:
+    out: List[str] = []
+    for raw in re.split(r"[\r\n]+", str(text or "")):
+        clean = str(raw or "").strip().lstrip("-* ").strip()
+        if clean:
+            out.append(clean)
+    return out
+
+
+def build_stateful_summary_bundle(
+    conn: Any,
+    task_id: str,
+    *,
+    source: str,
+    user_message: str = "",
+    deterministic_reply: str = "",
+) -> StatefulSummaryBundle:
+    """
+    Build first-class stateful summary evidence for blocker/recap/continuation lanes.
+    Keeps source selection deterministic and user-safe.
+    """
+    src = str(source or "").strip()
+    um = str(user_message or "").strip()
+    det_lines = [ln for ln in _structured_lines(deterministic_reply) if ln]
+    if src == "cursor_continuity_recall":
+        pack = gather_cursor_recall_evidence_pack(conn, task_id, user_message=um)
+        primary = _pick_cursor_recap_lead(
+            narrative_lines=pack.source_truth_narrative_lines,
+            assistant_lines=pack.derived_assistant_lines,
+            receipt_substantive=pack.source_truth_receipt_lines,
+            cont_line=pack.support_continuation_line,
+            phase_summary=pack.outcome_phase_summary,
+            blocked_reason=pack.outcome_blocked_reason,
+            prefer_source_truth_lead=True,
+        )
+        uncertainty = ""
+        if not pack.has_source_truth_recap_basis():
+            uncertainty = (
+                "I can only verify partial tracked context for this thread, so this recap may be incomplete."
+            )
+        return _build_stateful_summary_bundle_from_lines(
+            source=src,
+            primary_finding=primary,
+            supporting_lines=[
+                *list(pack.source_truth_narrative_lines)[:3],
+                *list(pack.source_truth_receipt_lines)[:2],
+                *( [f"Phase summary: {pack.outcome_phase_summary}"] if pack.outcome_phase_summary else [] ),
+                *( [f"Blocked reason: {pack.outcome_blocked_reason}"] if pack.outcome_blocked_reason else [] ),
+                *( [pack.support_continuation_line] if pack.support_continuation_line else [] ),
+                *det_lines,
+            ],
+            uncertainty_boundary=uncertainty,
+        )
+    if src == "blocked_state_reply":
+        meta = _projection_meta(conn, task_id)
+        outcome = _outcome_section(meta)
+        ft = _followthrough_section(meta)
+        blocked_reason = sanitize_user_surface_text(str(outcome.get("blocked_reason") or ""), limit=360).strip()
+        phase_summary = sanitize_user_surface_text(
+            str(outcome.get("current_phase_summary") or outcome.get("current_phase") or ""),
+            limit=360,
+        ).strip()
+        pack = gather_cursor_recall_evidence_pack(conn, task_id, user_message=um)
+        pending = list_pending_goal_approvals_for_task(conn, task_id)
+        primary = blocked_reason
+        if not primary:
+            if pending:
+                top = pending[0]
+                aid = str(top.get("approval_id") or "").strip() or "approval"
+                rationale = sanitize_user_surface_text(str(top.get("rationale") or ""), limit=220).strip()
+                primary = (
+                    f"Main blocker: pending approval `{aid}`"
+                    + (f" ({rationale})" if rationale else "")
+                )
+            elif followthrough_needs_user_attention(ft):
+                reason = sanitize_user_surface_text(
+                    str(ft.get("last_closure_reason") or ft.get("last_open_loop_state") or ""),
+                    limit=240,
+                ).strip()
+                primary = reason or "Main blocker: waiting on user input or confirmation."
+        uncertainty = ""
+        if not primary:
+            uncertainty = "I do not have a single durable blocker reason yet."
+        return _build_stateful_summary_bundle_from_lines(
+            source=src,
+            primary_finding=primary,
+            supporting_lines=[
+                *list(pack.source_truth_narrative_lines)[:2],
+                *list(pack.source_truth_receipt_lines)[:1],
+                *( [f"Phase summary: {phase_summary}"] if phase_summary else [] ),
+                *( [f"Blocked reason: {blocked_reason}"] if blocked_reason else [] ),
+                *det_lines,
+            ],
+            uncertainty_boundary=uncertainty,
+        )
+    if src == "cursor_heavy_lift_context":
+        pack = gather_cursor_recall_evidence_pack(conn, task_id, user_message=um)
+        v = assess_cursor_workstream_viability(conn, task_id, um, continuation_boost=True)
+        primary = _pick_cursor_recap_lead(
+            narrative_lines=pack.source_truth_narrative_lines,
+            assistant_lines=pack.derived_assistant_lines,
+            receipt_substantive=pack.source_truth_receipt_lines,
+            cont_line=pack.support_continuation_line,
+            phase_summary=pack.outcome_phase_summary,
+            blocked_reason=pack.outcome_blocked_reason,
+            prefer_source_truth_lead=True,
+        )
+        uncertainty = ""
+        if not cursor_workstream_meets_continuation_bar(v):
+            uncertainty = (
+                "I can see nearby context but cannot safely bind a unique in-flight workstream yet."
+            )
+        return _build_stateful_summary_bundle_from_lines(
+            source=src,
+            primary_finding=primary,
+            supporting_lines=[
+                *( [pack.support_continuation_line] if pack.support_continuation_line else [] ),
+                *list(pack.source_truth_narrative_lines)[:2],
+                *list(pack.source_truth_receipt_lines)[:1],
+                *( [f"Phase summary: {pack.outcome_phase_summary}"] if pack.outcome_phase_summary else [] ),
+                *det_lines,
+            ],
+            uncertainty_boundary=uncertainty,
+        )
+    return _build_stateful_summary_bundle_from_lines(
+        source=src,
+        primary_finding=det_lines[0] if det_lines else deterministic_reply,
+        supporting_lines=det_lines[1:] if len(det_lines) > 1 else [],
+    )
+
+
 def gather_cursor_recall_evidence_pack(
     conn: Any,
     task_id: str,
@@ -274,18 +472,20 @@ def gather_cursor_recall_evidence_pack(
     receipt_substantive: List[str] = []
     for row in list_recent_user_outcome_receipts_for_task(conn, task_id, limit=3):
         raw_summ = str(row["summary"] or "")
-        summ = sanitize_user_surface_text(raw_summ, limit=400)
+        summ = sanitize_user_surface_text(raw_summ, limit=400).strip()
+        excerpt = _receipt_reply_excerpt(row)
         kind = str(row["receipt_kind"] or "").strip()
-        if not summ:
-            continue
         if _ledger_receipt_summary_is_generic_placeholder(raw_summ):
+            summ = excerpt
+        if not summ:
             continue
         if strict_cursor_recall:
             if not hard_dom:
                 continue
             if not _receipt_passes_cursor_recall_domain_gate(row):
                 continue
-        line = f"Recent receipt ({kind}): {summ}" if kind else f"Recent receipt: {summ}"
+        label = "Recent receipt excerpt" if excerpt and summ == excerpt else "Recent receipt"
+        line = f"{label} ({kind}): {summ}" if kind else f"{label}: {summ}"
         receipt_substantive.append(line)
 
     exec_lines = tuple(_execution_recall_context_lines(conn, task_id))

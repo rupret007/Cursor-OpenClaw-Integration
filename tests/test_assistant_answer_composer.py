@@ -14,10 +14,12 @@ if str(REPO_ROOT) not in sys.path:
 
 from services.andrea_sync.assistant_answer_composer import (  # noqa: E402
     AnswerCandidate,
+    build_stateful_summary_bundle,
     bounded_composer_repair,
     draft_should_force_continuity_repair,
     followthrough_corrective_lead,
     followthrough_needs_user_attention,
+    gather_cursor_recall_evidence_pack,
     gather_repair_candidates,
     pick_repair_winner,
 )
@@ -269,6 +271,74 @@ class TestAssistantAnswerComposer(unittest.TestCase):
         self.assertIsNotNone(got)
         assert got is not None
         self.assertEqual(got[1], "blocked_state_reply")
+
+    def test_recall_pack_uses_receipt_reply_excerpt_when_summary_placeholder(self) -> None:
+        r0 = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "comp-rcpt-excerpt-1",
+                "payload": {
+                    "text": "hi",
+                    "routing_text": "hi",
+                    "chat_id": 77013,
+                    "message_id": 1,
+                },
+            },
+        )
+        tid = r0["task_id"]
+        insert_user_outcome_receipt(
+            self.conn,
+            receipt_id="rcpt_excerpt_1",
+            task_id=tid,
+            receipt_kind="status",
+            summary="Status / follow-up reply (goal_runtime_status).",
+            proof_refs={"reply_excerpt": "Cursor fixed retry policy and reran smoke tests cleanly."},
+        )
+        pack = gather_cursor_recall_evidence_pack(
+            self.conn,
+            tid,
+            user_message="Where are we on the project overall?",
+        )
+        lines = " ".join(pack.source_truth_receipt_lines)
+        self.assertIn("receipt excerpt", lines.lower())
+        self.assertIn("retry policy", lines.lower())
+
+    def test_blocked_bundle_surfaces_primary_blocker_detail(self) -> None:
+        r0 = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "comp-blocked-bundle-1",
+                "payload": {
+                    "text": "status",
+                    "routing_text": "status",
+                    "chat_id": 77014,
+                    "message_id": 1,
+                },
+            },
+        )
+        tid = r0["task_id"]
+        with mock.patch(
+            "services.andrea_sync.assistant_answer_composer._projection_meta"
+        ) as mock_meta:
+            mock_meta.return_value = {
+                "outcome": {
+                    "blocked_reason": "Staging credentials are missing for deploy validation.",
+                    "current_phase_summary": "Waiting on deploy verification",
+                }
+            }
+            bundle = build_stateful_summary_bundle(
+                self.conn,
+                tid,
+                source="blocked_state_reply",
+                user_message="What is OpenClaw blocked on?",
+                deterministic_reply="The main blocker right now is: waiting.",
+            )
+        self.assertIn("staging credentials", bundle.primary_finding.lower())
+        self.assertGreaterEqual(bundle.evidence_strength, 3)
 
     def test_pick_repair_blocks_openclaw_blocker_on_identity_turn(self) -> None:
         cands = [

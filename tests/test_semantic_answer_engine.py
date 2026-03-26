@@ -107,6 +107,7 @@ class SemanticAnswerEngineTests(unittest.TestCase):
 
     @mock.patch("services.andrea_sync.semantic_answer_engine.build_goal_continuity_reply")
     @mock.patch("services.andrea_sync.semantic_answer_engine.try_goal_status_nl_reply")
+    @mock.patch("services.andrea_sync.semantic_answer_engine.build_stateful_summary_bundle")
     @mock.patch("services.andrea_sync.semantic_answer_engine.gather_cursor_recall_evidence_pack")
     @mock.patch(
         "services.andrea_sync.semantic_answer_engine.build_recent_outcome_history_reply_from_state"
@@ -117,6 +118,7 @@ class SemanticAnswerEngineTests(unittest.TestCase):
         mock_realize: mock.MagicMock,
         mock_recent: mock.MagicMock,
         mock_pack: mock.MagicMock,
+        mock_bundle: mock.MagicMock,
         mock_goal_status: mock.MagicMock,
         mock_goal_cont: mock.MagicMock,
     ) -> None:
@@ -124,6 +126,13 @@ class SemanticAnswerEngineTests(unittest.TestCase):
         mock_recent.return_value = "Cursor recap: Fixed retries."
         mock_goal_status.return_value = None
         mock_goal_cont.return_value = None
+        mock_bundle.return_value = mock.Mock(
+            primary_finding="Cursor finalized retries with bounded backoff.",
+            secondary_evidence_lines=("Recent receipt excerpt: retries were validated in staging.",),
+            uncertainty_boundary="",
+            evidence_lines=("Cursor finalized retries with bounded backoff.",),
+            evidence_strength=6,
+        )
         mock_pack.return_value = mock.Mock(
             source_truth_narrative_lines=("Latest useful result: SOURCE_TRUTH_DETAIL_A.",),
             source_truth_receipt_lines=("Recent receipt: SOURCE_TRUTH_DETAIL_B.",),
@@ -144,6 +153,8 @@ class SemanticAnswerEngineTests(unittest.TestCase):
         lines = [str(x) for x in (contract.get("evidence_lines") or [])]
         self.assertTrue(any("SOURCE_TRUTH_DETAIL_A" in ln for ln in lines))
         self.assertTrue(any("SOURCE_TRUTH_DETAIL_B" in ln for ln in lines))
+        self.assertIn("Cursor finalized retries", str(contract.get("primary_finding") or ""))
+        self.assertIsInstance(contract.get("supporting_evidence_lines"), list)
 
     def test_returns_none_for_non_stateful_domain(self) -> None:
         turn_plan = TurnPlan(

@@ -10,6 +10,7 @@ from .assistant_answer_composer import (
     RECALL_NO_CLEAN_CURSOR_RECAP_FALLBACK,
     build_blocked_state_reply_from_state,
     build_recent_outcome_history_reply_from_state,
+    build_stateful_summary_bundle,
     cursor_followup_context_reply_with_fallback,
     derive_stateful_next_step_options,
     gather_cursor_recall_evidence_pack,
@@ -80,6 +81,9 @@ class SemanticTurnContract:
     answer_mode: str = "strong_evidence_answer"
     uncertainty_mode: str = "clear"
     guidance_class: str = ""
+    primary_finding: str = ""
+    supporting_evidence_lines: tuple[str, ...] = ()
+    uncertainty_boundary: str = ""
     next_step_options: tuple[str, ...] = ()
     utility_goal: str = "concise_grounded_summary"
     brevity_max_words_soft: int = 115
@@ -98,6 +102,9 @@ class SemanticTurnContract:
             "answer_mode": self.answer_mode,
             "uncertainty_mode": self.uncertainty_mode,
             "guidance_class": self.guidance_class,
+            "primary_finding": self.primary_finding,
+            "supporting_evidence_lines": list(self.supporting_evidence_lines),
+            "uncertainty_boundary": self.uncertainty_boundary,
             "next_step_options": list(self.next_step_options),
             "utility_goal": self.utility_goal,
             "brevity_max_words_soft": int(self.brevity_max_words_soft),
@@ -252,6 +259,27 @@ def _build_turn_contract(
     user_text: str = "",
 ) -> SemanticTurnContract:
     lines = list(_split_structured_text_lines(candidate_text)[:8]) or [candidate_text]
+    primary_finding = ""
+    supporting_evidence_lines: tuple[str, ...] = ()
+    uncertainty_boundary = ""
+    bundle_strength = 0
+    if conn is not None and str(task_id or "").strip():
+        try:
+            b = build_stateful_summary_bundle(
+                conn,
+                str(task_id),
+                source=str(source),
+                user_message=str(user_text or ""),
+                deterministic_reply=str(candidate_text or ""),
+            )
+            if b.evidence_lines:
+                lines = [*list(b.evidence_lines), *lines]
+                primary_finding = str(b.primary_finding or "").strip()
+                supporting_evidence_lines = tuple(str(x) for x in b.secondary_evidence_lines)
+                uncertainty_boundary = str(b.uncertainty_boundary or "").strip()
+                bundle_strength = int(b.evidence_strength or 0)
+        except Exception:
+            pass
     if (
         conn is not None
         and str(task_id or "").strip()
@@ -269,7 +297,7 @@ def _build_turn_contract(
         except Exception:
             pass
     evidence_lines = tuple(_split_structured_text_lines("\n".join(lines))[:8]) or (candidate_text,)
-    ev_strength = _evidence_strength(evidence_lines)
+    ev_strength = max(_evidence_strength(evidence_lines), int(bundle_strength))
     answer_mode, uncertainty_mode = _classify_answer_mode(
         source=source, evidence_strength=ev_strength, candidate_text=candidate_text
     )
@@ -302,6 +330,9 @@ def _build_turn_contract(
         answer_mode=answer_mode,
         uncertainty_mode=uncertainty_mode,
         guidance_class=str(guidance_class or ""),
+        primary_finding=primary_finding,
+        supporting_evidence_lines=supporting_evidence_lines,
+        uncertainty_boundary=uncertainty_boundary,
         next_step_options=next_step_options,
         utility_goal=utility_goal,
         brevity_max_words_soft=int(brevity_max_words_soft),

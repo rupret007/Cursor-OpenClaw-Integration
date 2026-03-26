@@ -187,6 +187,45 @@ class ConversationEvalDetectorTests(unittest.TestCase):
         codes = {h["issue_code"] for h in hits}
         self.assertIn("conversation_cursor_recall_approval_domain_contamination", codes)
 
+    def test_detects_primary_finding_not_surfaced_under_strong_contract(self) -> None:
+        cap = {
+            "raw_reply_text": "The task is blocked right now and waiting.",
+            "user_turn": "What is OpenClaw blocked on?",
+            "turn_plan_domain": "project_status",
+            "assistant_reason": "semantic_state_blocked_state_reply",
+            "semantic_turn_contract": {
+                "family": "blocked_state",
+                "source": "blocked_state_reply",
+                "evidence_strength": 6,
+                "primary_finding": "Staging credentials are missing for deploy validation.",
+            },
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap)
+        codes = {h["issue_code"] for h in hits}
+        self.assertIn("conversation_primary_finding_not_surfaced", codes)
+        self.assertIn("conversation_openclaw_blocker_detail_miss_under_state", codes)
+
+    def test_detects_recap_fallback_under_source_truth_support_lines(self) -> None:
+        cap = {
+            "raw_reply_text": "I’m not finding a recent clean Cursor result to recap from this thread.",
+            "user_turn": "What did Cursor say?",
+            "turn_plan_domain": "project_status",
+            "assistant_reason": "semantic_state_cursor_continuity_recall",
+            "semantic_turn_contract": {
+                "family": "cursor_recall",
+                "source": "cursor_continuity_recall",
+                "evidence_strength": 5,
+                "supporting_evidence_lines": ["Recent receipt excerpt: cursor fixed retries and passed smoke checks."],
+            },
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap)
+        codes = {h["issue_code"] for h in hits}
+        self.assertIn("conversation_recap_fallback_under_source_truth", codes)
+
     def test_detects_stateful_domain_hijack_outside_status_domains(self) -> None:
         cap = {
             "raw_reply_text": "I’m not finding a recent clean Cursor result to recap from this thread.",

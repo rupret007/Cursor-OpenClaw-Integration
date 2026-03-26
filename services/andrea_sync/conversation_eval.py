@@ -397,6 +397,21 @@ def _reply_contains_verbatim_evidence_lines(reply: str, evidence_lines: Sequence
     return hits >= min_hits
 
 
+def _evidence_marker_tokens(text: str) -> set[str]:
+    words = [w for w in re.split(r"\W+", str(text or "").lower()) if len(w) >= 5]
+    return {w for w in words if w not in {"blocker", "blocked", "recent", "cursor", "phase", "summary"}}
+
+
+def _reply_reflects_primary_finding(reply: str, primary_finding: str) -> bool:
+    tokens = _evidence_marker_tokens(primary_finding)
+    if not tokens:
+        return True
+    low = str(reply or "").lower()
+    hits = sum(1 for tok in tokens if tok in low)
+    need = max(1, min(3, len(tokens) // 2))
+    return hits >= need
+
+
 def run_deterministic_detectors(
     capture: Mapping[str, Any],
     *,
@@ -431,12 +446,18 @@ def run_deterministic_detectors(
     contract_utility_goal = ""
     contract_brevity_max_words_soft = 0
     contract_guidance_class = ""
+    contract_primary_finding = ""
+    contract_supporting_lines: list[str] = []
     if isinstance(semantic_contract, dict):
         contract_family = str(semantic_contract.get("family") or "")
         contract_source = str(semantic_contract.get("source") or "")
         contract_answer_mode = str(semantic_contract.get("answer_mode") or "").strip()
         contract_utility_goal = str(semantic_contract.get("utility_goal") or "").strip()
         contract_guidance_class = str(semantic_contract.get("guidance_class") or "").strip()
+        contract_primary_finding = str(semantic_contract.get("primary_finding") or "").strip()
+        c_support = semantic_contract.get("supporting_evidence_lines")
+        if isinstance(c_support, list):
+            contract_supporting_lines = [str(x).strip() for x in c_support if str(x).strip()]
         try:
             contract_brevity_max_words_soft = int(semantic_contract.get("brevity_max_words_soft") or 0)
         except (TypeError, ValueError):
@@ -1139,6 +1160,19 @@ def run_deterministic_detectors(
                 "detail": "anaphoric continue ask returned fallback-shaped continuation surface",
             }
         )
+    if (
+        contract_primary_finding
+        and contract_evidence_strength >= 5
+        and not _reply_reflects_primary_finding(text, contract_primary_finding)
+    ):
+        findings.append(
+            {
+                "family": "thin_summary",
+                "issue_code": "conversation_primary_finding_not_surfaced",
+                "severity": "high",
+                "detail": "strong semantic contract carried a primary finding but reply did not surface it clearly",
+            }
+        )
     if is_openclaw_collaboration_state_question(user):
         low_user = user.lower()
         blocker_ask = any(tok in low_user for tok in ("block", "blocked", "blocker", "holding", "stuck"))
@@ -1160,7 +1194,7 @@ def run_deterministic_detectors(
                         "detail": "explicit OpenClaw blocker ask returned continuation/no-work fallback wording",
                     }
                 )
-            elif ("blocker" not in low and "blocked" not in low) and len(text.strip()) < 160:
+            elif ("blocker" not in low and "blocked" not in low and "blocking" not in low) and len(text.strip()) < 160:
                 findings.append(
                     {
                         "family": "thin_summary",
@@ -1169,6 +1203,25 @@ def run_deterministic_detectors(
                         "detail": "explicit OpenClaw blocker ask stayed vague despite collaboration-state context",
                     }
                 )
+            elif contract_primary_finding and not _reply_reflects_primary_finding(text, contract_primary_finding):
+                findings.append(
+                    {
+                        "family": "thin_summary",
+                        "issue_code": "conversation_openclaw_blocker_detail_miss_under_state",
+                        "severity": "high",
+                        "detail": "explicit OpenClaw blocker ask missed the strongest stored blocker detail in contract evidence",
+                    }
+                )
+        recap_ask = any(tok in low_user for tok in ("what happened", "what did cursor say", "cursor thread", "summary", "recap"))
+        if recap_ask and contract_supporting_lines and _looks_fallback_shaped_reply(text):
+            findings.append(
+                {
+                    "family": "thin_summary",
+                    "issue_code": "conversation_recap_fallback_under_source_truth",
+                    "severity": "high",
+                    "detail": "recap ask returned fallback-shaped summary despite supporting source-truth lines",
+                }
+            )
     return findings
 
 

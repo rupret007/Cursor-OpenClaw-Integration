@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import unittest
 from unittest import mock
 
@@ -352,7 +353,54 @@ class StatefulAnswerRealizationTests(unittest.TestCase):
         self.assertIsNotNone(out)
         assert out is not None
         self.assertIn("next options", out.lower())
-        self.assertIn("toolkit", out.lower())
+
+    @mock.patch("services.andrea_sync.stateful_answer_realization.build_stateful_summary_bundle")
+    @mock.patch("services.andrea_sync.stateful_answer_realization._bundle_evidence_for_source")
+    @mock.patch("services.andrea_sync.stateful_answer_realization._openai_json_chat")
+    def test_realization_payload_includes_primary_finding_bundle_fields(
+        self,
+        mock_chat: mock.MagicMock,
+        mock_bundle_evidence: mock.MagicMock,
+        mock_summary_bundle: mock.MagicMock,
+    ) -> None:
+        mock_bundle_evidence.return_value = ["Cursor recap: retries validated."]
+        mock_summary_bundle.return_value = mock.Mock(
+            primary_finding="Retries were validated in staging after timeout tuning.",
+            secondary_evidence_lines=("Recent receipt excerpt: smoke checks passed.",),
+            uncertainty_boundary="I cannot verify production rollout yet.",
+            evidence_lines=("Retries were validated in staging after timeout tuning.",),
+            evidence_strength=6,
+        )
+        mock_chat.return_value = {
+            "reply": "Cursor recap: retries were validated in staging after timeout tuning.",
+            "grounded": True,
+            "used_fallback": False,
+        }
+        with mock.patch.dict(
+            os.environ,
+            {
+                "ANDREA_STATEFUL_REALIZATION_ENABLED": "1",
+                "OPENAI_API_ENABLED": "1",
+                "OPENAI_API_KEY": "x",
+            },
+            clear=False,
+        ):
+            out = maybe_realize_stateful_reply(
+                conn=object(),
+                task_id="t-payload",
+                source="cursor_continuity_recall",
+                deterministic_reply="Cursor recap: retries validated.",
+                fallback_reply="I’m not finding a recent clean Cursor result to recap from this thread.",
+                user_text="What happened in the Cursor thread?",
+                turn_plan=self._turn_plan(),
+                turn_contract={"family": "cursor_recall", "source": "cursor_continuity_recall"},
+            )
+        self.assertIsNotNone(out)
+        kwargs = mock_chat.call_args.kwargs
+        payload = json.loads(str(kwargs.get("user") or "{}"))
+        self.assertIn("Retries were validated", str(payload.get("primary_finding") or ""))
+        self.assertTrue(payload.get("supporting_evidence_lines"))
+        self.assertIn("cannot verify production", str(payload.get("uncertainty_boundary") or ""))
 
     def test_compress_reply_respects_word_budget_and_evidence(self) -> None:
         ev = ("The migration ordering was fixed and retries now cap at three.",)

@@ -270,6 +270,60 @@ class TestAssistantAnswerComposer(unittest.TestCase):
         assert got is not None
         self.assertEqual(got[1], "blocked_state_reply")
 
+    def test_pick_repair_blocks_openclaw_blocker_on_identity_turn(self) -> None:
+        cands = [
+            AnswerCandidate(source="model", text="Sure.", priority=12),
+            AnswerCandidate(
+                source="blocked_state_reply",
+                text=(
+                    "The main blocker right now is: I hit an internal collaboration limitation while trying to pass work between reasoning lanes."
+                ),
+                priority=99,
+            ),
+        ]
+        turn_plan = build_turn_plan(
+            "Is this OpenClaw?",
+            scenario_id="statusFollowupContinue",
+            projection_has_continuity_state=True,
+        )
+        got = pick_repair_winner(
+            cands,
+            model_reply="Sure.",
+            followthrough={},
+            stateful_goal_ok=True,
+            classify_text="Is this OpenClaw?",
+            turn_plan=turn_plan,
+        )
+        self.assertIsNone(got)
+
+    def test_pick_repair_allows_openclaw_blocker_when_explicitly_asked(self) -> None:
+        cands = [
+            AnswerCandidate(source="model", text="I can check that.", priority=12),
+            AnswerCandidate(
+                source="blocked_state_reply",
+                text=(
+                    "The main blocker right now is: I hit an internal collaboration limitation while trying to pass work between reasoning lanes."
+                ),
+                priority=99,
+            ),
+        ]
+        turn_plan = build_turn_plan(
+            "Why was OpenClaw blocked?",
+            scenario_id="statusFollowupContinue",
+            projection_has_continuity_state=True,
+        )
+        got = pick_repair_winner(
+            cands,
+            model_reply="I can check that.",
+            followthrough={},
+            stateful_goal_ok=True,
+            classify_text="Why was OpenClaw blocked?",
+            turn_plan=turn_plan,
+        )
+        self.assertIsNotNone(got)
+        assert got is not None
+        self.assertEqual(got[1], "blocked_state_reply")
+
     def test_stateful_next_steps_are_error_specific_for_cursor_recall(self) -> None:
         from services.andrea_sync.assistant_answer_composer import derive_stateful_next_step_options
 

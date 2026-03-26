@@ -16,18 +16,15 @@ from .assistant_answer_composer import (
 from .stateful_answer_realization import maybe_realize_stateful_reply
 from .semantic_continuity import user_message_suggests_anaphoric_cursor_continue
 from .goal_runtime import build_goal_continuity_reply, try_goal_status_nl_reply
-from .turn_intelligence import TurnPlan, build_turn_plan, resolve_answer_family_profile
-from .user_surface import sanitize_user_surface_text
-
-_TOOLING_IDENTITY_Q_RE = re.compile(
-    r"^\s*(?:"
-    r"is\s+this\s+openclaw|is\s+this\s+cursor|"
-    r"what\s+is\s+openclaw|what\s+is\s+cursor|"
-    r"are\s+you\s+openclaw|are\s+you\s+cursor"
-    r")\s*\??\s*$",
-    re.I,
+from .turn_intelligence import (
+    TurnPlan,
+    build_turn_plan,
+    is_casual_social_only_turn,
+    is_tooling_identity_question,
+    openclaw_role_relevance_for_turn,
+    resolve_answer_family_profile,
 )
-
+from .user_surface import sanitize_user_surface_text
 
 @dataclass(frozen=True)
 class TurnInterpretation:
@@ -330,7 +327,7 @@ def choose_semantic_state_reply(
     if not bool(turn_plan.allow_goal_continuity_repair):
         return None
 
-    if _TOOLING_IDENTITY_Q_RE.match(text.strip()):
+    if is_casual_social_only_turn(text) or is_tooling_identity_question(text):
         return None
     family = resolve_answer_family_profile(text, turn_plan)
     effective_family = str(family_override or "").strip() or family.family
@@ -372,6 +369,14 @@ def choose_semantic_state_reply(
         cleaned = sanitize_user_surface_text(str(raw_text or "").strip(), limit=1200)
         if not cleaned:
             continue
+        relevance = openclaw_role_relevance_for_turn(
+            source=source,
+            candidate_text=cleaned,
+            user_text=text,
+            turn_plan=turn_plan,
+        )
+        if relevance == "exclude":
+            continue
         contract = _build_turn_contract(
             family=effective_family,
             allowed_sources=effective_allowed_sources,
@@ -406,6 +411,8 @@ def choose_semantic_state_reply(
         if not candidate_text:
             continue
         score = _score_candidate(source, candidate_text)
+        if relevance == "demote":
+            score -= 24
         if best is None or score > best.score:
             best = SemanticAnswerResult(
                 reply_text=candidate_text,

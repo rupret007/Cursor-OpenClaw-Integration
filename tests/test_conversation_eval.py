@@ -224,6 +224,44 @@ class ConversationEvalDetectorTests(unittest.TestCase):
         codes = {h["issue_code"] for h in hits}
         self.assertIn("conversation_stateful_domain_hijack", codes)
 
+    def test_detects_openclaw_role_carryover_hijack_on_casual_turn(self) -> None:
+        cap = {
+            "raw_reply_text": (
+                "The main blocker right now is: I hit an internal collaboration limitation while trying to pass work between reasoning lanes."
+            ),
+            "rendered_reply_sanitized": (
+                "Andrea: The main blocker right now is: I hit an internal collaboration limitation while trying to pass work between reasoning lanes."
+            ),
+            "user_turn": "Hi",
+            "turn_plan_domain": "project_status",
+            "assistant_reason": "semantic_state_blocked_state_reply",
+            "meta_openclaw_present": True,
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap)
+        codes = {h["issue_code"] for h in hits}
+        self.assertIn("conversation_openclaw_role_carryover_hijack", codes)
+
+    def test_detects_openclaw_identity_state_hijack(self) -> None:
+        cap = {
+            "raw_reply_text": (
+                "The main blocker right now is: I hit an internal collaboration limitation while trying to pass work between reasoning lanes."
+            ),
+            "rendered_reply_sanitized": (
+                "Andrea: The main blocker right now is: I hit an internal collaboration limitation while trying to pass work between reasoning lanes."
+            ),
+            "user_turn": "Is this OpenClaw?",
+            "turn_plan_domain": "project_status",
+            "assistant_reason": "semantic_state_blocked_state_reply",
+            "meta_openclaw_present": True,
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap)
+        codes = {h["issue_code"] for h in hits}
+        self.assertIn("conversation_openclaw_identity_state_hijack", codes)
+
     def test_detects_grounded_research_contract_missing_evidence(self) -> None:
         cap = {
             "raw_reply_text": "Timeout errors are often transient; retries can help.",

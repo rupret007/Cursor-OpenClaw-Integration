@@ -5,6 +5,8 @@ from dataclasses import dataclass
 import re
 from typing import Literal
 
+from .user_surface import is_internal_runtime_text, is_stale_openclaw_narrative
+
 
 ContinuityFocus = Literal[
     "none",
@@ -25,6 +27,16 @@ TurnDomain = Literal[
     "opinion_reflection",
     "technical_execution",
 ]
+
+OpenClawSourceRole = Literal[
+    "non_openclaw",
+    "internal_runtime",
+    "stale_narrative",
+    "collaboration_summary",
+    "collaboration_blocker",
+]
+
+OpenClawRoleDecision = Literal["allow", "demote", "exclude"]
 
 AnswerFamilyName = Literal[
     "general_status",
@@ -142,6 +154,17 @@ _CURSOR_FOLLOWUP_HEAVY_RE = re.compile(
     r"heavy[\s-]?lift|repo[\s-]?wide",
     re.I,
 )
+_OPENCLAW_COLLAB_ASK_RE = re.compile(
+    r"\b("
+    r"what\s+did\s+(?:openclaw|cursor)\s+(?:do|say)|"
+    r"what\s+happened\s+(?:with|to|in)\s+(?:openclaw|cursor)|"
+    r"why\s+(?:is|was)\s+(?:openclaw|cursor)\s+blocked|"
+    r"openclaw\s+(?:blocked|failure|failed|error)|"
+    r"cross[-\s]?model\s+handoff|"
+    r"collaboration\s+(?:state|status|blocked|failure)"
+    r")\b",
+    re.I,
+)
 
 _TECHNICAL_GUIDANCE_RE = re.compile(
     r"\b("
@@ -242,6 +265,92 @@ def is_casual_social_only_turn(text: str) -> bool:
     if not clean:
         return False
     return bool(_CASUAL_SOCIAL_ONLY_RE.match(clean))
+
+
+def is_tooling_identity_question(text: str) -> bool:
+    return bool(_TOOLING_IDENTITY_Q_RE.match(str(text or "").strip()))
+
+
+def is_openclaw_collaboration_state_question(text: str) -> bool:
+    clean = str(text or "").strip()
+    if not clean:
+        return False
+    if _OPENCLAW_COLLAB_ASK_RE.search(clean):
+        return True
+    if "openclaw" in clean.lower() and (
+        "blocked" in clean.lower() or "happened" in clean.lower() or "continue" in clean.lower()
+    ):
+        return True
+    return False
+
+
+def classify_openclaw_source_role(*, source: str, candidate_text: str) -> OpenClawSourceRole:
+    text = str(candidate_text or "").strip()
+    if not text:
+        return "non_openclaw"
+    if is_internal_runtime_text(text):
+        return "internal_runtime"
+    if is_stale_openclaw_narrative(text):
+        return "stale_narrative"
+    src = str(source or "").strip()
+    if src in {"blocked_state_reply"}:
+        return "collaboration_blocker"
+    if src in {"cursor_continuity_recall", "cursor_heavy_lift_context"}:
+        return "collaboration_summary"
+    if src in {"goal_status", "goal_continuity"}:
+        low = text.lower()
+        blocker_markers = (
+            "blocked:",
+            "main blocker",
+            "internal collaboration limitation",
+            "cross-model handoff",
+            "cross lane",
+            "cross-lane",
+        )
+        if any(m in low for m in blocker_markers):
+            return "collaboration_blocker"
+    return "non_openclaw"
+
+
+def openclaw_role_relevance_for_turn(
+    *,
+    source: str,
+    candidate_text: str,
+    user_text: str,
+    turn_plan: "TurnPlan",
+) -> OpenClawRoleDecision:
+    role = classify_openclaw_source_role(source=source, candidate_text=candidate_text)
+    if role == "non_openclaw":
+        return "allow"
+    if role in {"internal_runtime", "stale_narrative"}:
+        return "exclude"
+
+    user = str(user_text or "").strip()
+    domain = str(turn_plan.domain or "")
+    focus = str(turn_plan.continuity_focus or "")
+    explicit_collab = is_openclaw_collaboration_state_question(user)
+    approval_only = is_approval_state_question(user) and "block" not in user.lower() and not explicit_collab
+    if is_casual_social_only_turn(user) or is_tooling_identity_question(user):
+        return "exclude"
+    if domain in {"external_information", "technical_guidance", "personal_agenda", "attention_today"}:
+        return "allow" if explicit_collab else "exclude"
+    if domain == "opinion_reflection":
+        return "exclude"
+    if role == "collaboration_blocker":
+        if explicit_collab or focus == "blocked_state":
+            return "allow"
+        if approval_only:
+            return "demote"
+        if domain == "project_status":
+            return "demote"
+        return "exclude"
+    if role == "collaboration_summary":
+        if explicit_collab or focus in {"recent_outcome_history", "cursor_followup_heavy_lift"}:
+            return "allow"
+        if domain == "project_status":
+            return "demote"
+        return "exclude"
+    return "allow"
 
 
 def is_execution_heavy_or_repo_action(text: str) -> bool:

@@ -46,6 +46,7 @@ from .turn_intelligence import (
     is_approval_state_question,
     is_cursor_recall_family_question,
     is_explicit_cursor_recall_question,
+    openclaw_role_relevance_for_turn,
 )
 
 _STATUS_SCENARIOS = frozenset({"statusFollowupContinue", "goalContinuationAcrossSessions"})
@@ -2543,6 +2544,7 @@ def pick_repair_winner(
     followthrough: Dict[str, Any],
     stateful_goal_ok: bool,
     classify_text: str = "",
+    turn_plan: TurnPlan | None = None,
 ) -> Optional[Tuple[str, str]]:
     """
     Choose a non-model candidate when it is safe to override the draft direct reply.
@@ -2559,6 +2561,15 @@ def pick_repair_winner(
         wtext = winner.text.strip()
         if not wtext or wtext == model:
             continue
+        if turn_plan is not None:
+            rel = openclaw_role_relevance_for_turn(
+                source=winner.source,
+                candidate_text=wtext,
+                user_text=str(classify_text or ""),
+                turn_plan=turn_plan,
+            )
+            if rel != "allow":
+                continue
 
         if winner.source in {
             "external_heuristic",
@@ -2692,4 +2703,5 @@ def bounded_composer_repair(
         followthrough=ft,
         stateful_goal_ok=stateful_goal_ok if should_run_goal_branch else True,
         classify_text=str(classify_text or ""),
+        turn_plan=turn_plan,
     )

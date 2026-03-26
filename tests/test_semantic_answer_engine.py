@@ -8,6 +8,7 @@ from services.andrea_sync.semantic_answer_engine import (
     choose_semantic_state_reply,
 )
 from services.andrea_sync.turn_intelligence import TurnPlan
+from services.andrea_sync.turn_intelligence import openclaw_role_relevance_for_turn
 
 
 class SemanticAnswerEngineTests(unittest.TestCase):
@@ -140,6 +141,40 @@ class SemanticAnswerEngineTests(unittest.TestCase):
             scenario_id="statusFollowupContinue",
         )
         self.assertIsNone(result)
+
+    @mock.patch("services.andrea_sync.semantic_answer_engine.build_goal_continuity_reply")
+    @mock.patch("services.andrea_sync.semantic_answer_engine.try_goal_status_nl_reply")
+    @mock.patch("services.andrea_sync.semantic_answer_engine.build_blocked_state_reply_from_state")
+    def test_casual_greeting_does_not_surface_blocked_state(
+        self,
+        mock_blocked: mock.MagicMock,
+        mock_goal_status: mock.MagicMock,
+        mock_goal_cont: mock.MagicMock,
+    ) -> None:
+        mock_blocked.return_value = (
+            "The main blocker right now is: I hit an internal collaboration limitation while trying to pass work between reasoning lanes."
+        )
+        mock_goal_status.return_value = "Goal `g1` status: running."
+        mock_goal_cont.return_value = "Tracked task `t1` status: running."
+        result = choose_semantic_state_reply(
+            conn=object(),
+            task_id="t-greet",
+            user_text="Hi",
+            turn_plan=self._turn_plan(focus="blocked_state"),
+            scenario_id="statusFollowupContinue",
+        )
+        self.assertIsNone(result)
+
+    def test_openclaw_blocker_role_is_allowed_for_explicit_collaboration_ask(self) -> None:
+        decision = openclaw_role_relevance_for_turn(
+            source="blocked_state_reply",
+            candidate_text=(
+                "The main blocker right now is: I hit an internal collaboration limitation while trying to pass work between reasoning lanes."
+            ),
+            user_text="Why was OpenClaw blocked?",
+            turn_plan=self._turn_plan(focus="blocked_state"),
+        )
+        self.assertEqual(decision, "allow")
 
     @mock.patch("services.andrea_sync.semantic_answer_engine.build_goal_continuity_reply")
     @mock.patch("services.andrea_sync.semantic_answer_engine.try_goal_status_nl_reply")

@@ -52,7 +52,10 @@ from .store import (
 from .turn_intelligence import (
     build_turn_plan,
     is_execution_heavy_or_repo_action,
+    is_casual_social_only_turn,
+    is_openclaw_collaboration_state_question,
     is_substantive_non_social_question,
+    is_tooling_identity_question,
     resolve_answer_family_profile,
 )
 from .telegram_format import format_direct_message
@@ -570,6 +573,56 @@ def run_deterministic_detectors(
             or "no pending approvals right now" in low
         )
     )
+    openclaw_leak_markers = (
+        "internal collaboration limitation",
+        "cross-model handoff",
+        "cross-lane",
+        "main blocker right now",
+        "blocked:",
+    )
+    mentions_openclaw_blocker = any(m in low for m in openclaw_leak_markers)
+    explicit_openclaw_collab_ask = is_openclaw_collaboration_state_question(user)
+    if (
+        bool(capture.get("meta_openclaw_present"))
+        and mentions_openclaw_blocker
+        and not explicit_openclaw_collab_ask
+    ):
+        if is_casual_social_only_turn(user):
+            findings.append(
+                {
+                    "family": "wrong_domain_contamination",
+                    "issue_code": "conversation_openclaw_role_carryover_hijack",
+                    "severity": "high",
+                    "detail": "casual turn surfaced OpenClaw blocker/collaboration carryover",
+                }
+            )
+        elif is_tooling_identity_question(user):
+            findings.append(
+                {
+                    "family": "wrong_domain_contamination",
+                    "issue_code": "conversation_openclaw_identity_state_hijack",
+                    "severity": "high",
+                    "detail": "identity/tooling turn surfaced OpenClaw blocker state",
+                }
+            )
+        elif approval_inventory_only or str(capture.get("turn_plan_domain") or "") == "approval_state":
+            findings.append(
+                {
+                    "family": "wrong_domain_contamination",
+                    "issue_code": "conversation_openclaw_role_carryover_hijack",
+                    "severity": "high",
+                    "detail": "approval turn leaked OpenClaw blocker/collaboration carryover",
+                }
+            )
+        else:
+            findings.append(
+                {
+                    "family": "wrong_domain_contamination",
+                    "issue_code": "conversation_openclaw_extraneous_collab_scaffold",
+                    "severity": "medium",
+                    "detail": "OpenClaw collaboration context surfaced without explicit collaboration intent",
+                }
+            )
     if (
         draft_implies_false_completion(raw_text)
         and any(k in low for k in ("blocked", "pending", "approval", "cursor", "task"))
@@ -1468,6 +1521,63 @@ def _seed_identity_hijack_state(harness: Any) -> None:
                         "runner": "openclaw",
                         "summary": "Seeded continuity context for identity check.",
                         "user_summary": "Seeded continuity context for identity check.",
+                    },
+                },
+            },
+        )
+    )
+
+
+def _seed_openclaw_blocker_carryover_state(harness: Any) -> None:
+    server = harness.server
+    assert server is not None
+
+    created = server.with_lock(
+        lambda c: handle_command(
+            c,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "seed-openclaw-blocker-carryover",
+                "payload": {
+                    "text": "Seed OpenClaw blocker continuity context",
+                    "routing_text": "Seed OpenClaw blocker continuity context",
+                    "chat_id": 88190,
+                    "message_id": 7101,
+                    "from_user": 99290,
+                },
+            },
+        )
+    )
+    task_id = str(created.get("task_id") or "")
+    if not task_id:
+        return
+    server.with_lock(
+        lambda c: handle_command(
+            c,
+            {
+                "command_type": CommandType.REPORT_CURSOR_EVENT.value,
+                "channel": "cursor",
+                "task_id": task_id,
+                "payload": {
+                    "event_type": EventType.JOB_COMPLETED.value,
+                    "payload": {
+                        "backend": "openclaw",
+                        "runner": "openclaw",
+                        "summary": (
+                            "I hit an internal collaboration limitation while trying to pass work between reasoning lanes."
+                        ),
+                        "user_summary": (
+                            "I hit an internal collaboration limitation while trying to pass work between reasoning lanes."
+                        ),
+                        "blocked_reason": (
+                            "I hit an internal collaboration limitation while trying to pass work between reasoning lanes."
+                        ),
+                        "internal_trace": "sessions_spawn.attachments.enabled is disabled.",
+                        "collaboration_trace": [
+                            "OpenClaw prepared the first pass.",
+                            "Andrea kept the fallback calm.",
+                        ],
                     },
                 },
             },
@@ -2828,6 +2938,70 @@ CONVERSATION_CORE_CASES: tuple[ConversationCaseSpec, ...] = (
         required_assistant_reasons=("stack_or_tooling_question",),
         required_reply_markers=("openclaw",),
         forbidden_reply_markers=("goal `", "tracked task `", "where things stand:"),
+    ),
+    ConversationCaseSpec(
+        case_id="openclaw_blocker_not_on_casual_turn",
+        title="OpenClaw blocker does not hijack casual greeting",
+        behavior_family="wrong_domain_contamination",
+        turns=("Hi",),
+        chat_id=88190,
+        from_id=99290,
+        first_update_id=18990,
+        first_message_id=6890,
+        setup_fn=_seed_openclaw_blocker_carryover_state,
+        forbidden_reply_markers=(
+            "internal collaboration limitation",
+            "cross-model handoff",
+            "sessions_spawn",
+            "main blocker right now",
+        ),
+    ),
+    ConversationCaseSpec(
+        case_id="openclaw_blocker_not_on_approval_turn",
+        title="OpenClaw blocker does not hijack approval inventory",
+        behavior_family="wrong_domain_contamination",
+        turns=("What still needs approval?",),
+        chat_id=88190,
+        from_id=99290,
+        first_update_id=18991,
+        first_message_id=6891,
+        setup_fn=_seed_openclaw_blocker_carryover_state,
+        required_turn_domains=("approval_state",),
+        forbidden_reply_markers=(
+            "internal collaboration limitation",
+            "cross-model handoff",
+            "main blocker right now",
+        ),
+    ),
+    ConversationCaseSpec(
+        case_id="openclaw_identity_turn_stays_clean_after_blocker",
+        title="Identity/OpenClaw explanation stays clean after blocker history",
+        behavior_family="wrong_domain_contamination",
+        turns=("Is this OpenClaw?",),
+        chat_id=88190,
+        from_id=99290,
+        first_update_id=18992,
+        first_message_id=6892,
+        setup_fn=_seed_openclaw_blocker_carryover_state,
+        required_assistant_reasons=("stack_or_tooling_question",),
+        required_reply_markers=("openclaw",),
+        forbidden_reply_markers=(
+            "internal collaboration limitation",
+            "main blocker right now",
+            "where things stand:",
+        ),
+    ),
+    ConversationCaseSpec(
+        case_id="openclaw_collaboration_blocker_turn_still_works",
+        title="Explicit OpenClaw blocker question still surfaces collaboration state",
+        behavior_family="blocked_state",
+        turns=("Why was OpenClaw blocked?",),
+        chat_id=88190,
+        from_id=99290,
+        first_update_id=18993,
+        first_message_id=6893,
+        setup_fn=_seed_openclaw_blocker_carryover_state,
+        required_reply_markers=("internal collaboration limitation",),
     ),
     ConversationCaseSpec(
         case_id="cursor_recap_recursion",

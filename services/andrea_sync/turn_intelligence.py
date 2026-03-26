@@ -156,6 +156,52 @@ _TECHNICAL_GUIDANCE_RE = re.compile(
     re.I,
 )
 
+_CASUAL_SOCIAL_ONLY_RE = re.compile(
+    r"^\s*("
+    r"hi|hello|hey|"
+    r"good\s+(?:morning|afternoon|evening)|"
+    r"thanks|thank\s+you|"
+    r"how(?:'s|\s+is)\s+it\s+going|"
+    r"how\s+are\s+things|"
+    r"how(?:'s|\s+is)\s+everything|"
+    r"how\s+are\s+you|how're\s+you"
+    r")\s*[?.!]*\s*$",
+    re.I,
+)
+_DIRECT_SUBSTANTIVE_HINT_RE = re.compile(
+    r"\b("
+    r"how|why|what|which|when|where|"
+    r"error|timeout|warning|issue|failing|crash|"
+    r"configure|configuration|setup|retry|backoff|"
+    r"debug|diagnose|cause|mitigation|"
+    r"tool|system|code|concept|difference|"
+    r"explain|meaning|mean|latest|news|headline|"
+    r"fix|best\s+practice|recommend"
+    r")\b",
+    re.I,
+)
+_EXECUTION_HEAVY_OR_REPO_RE = re.compile(
+    r"\b("
+    r"implement|refactor|migrate|edit\s+file|write\s+code|"
+    r"create\s+pr|open\s+pr|pull\s+request|"
+    r"run\s+tests?|fix\s+the\s+code|debug\s+in\s+repo|"
+    r"apply\s+patch|commit\s+this|"
+    r"restart\s+service|reload\s+service"
+    r")\b",
+    re.I,
+)
+_PATH_OR_FILE_RE = re.compile(
+    r"[/~][\w.\-~/]+|`[^`]+`|\b\w+\.(py|ts|tsx|js|jsx|md|sh|json|yaml|yml)\b",
+    re.I,
+)
+
+
+@dataclass(frozen=True)
+class DirectAnswerPolicy:
+    allow_casual_social_fallback: bool
+    lookup_eligible: bool
+    preferred_lookup_domain: TurnDomain | str
+
 
 def is_approval_state_question(text: str) -> bool:
     """True for approval inventory / pending-approval questions across close paraphrases."""
@@ -185,6 +231,102 @@ def is_recent_outcome_history_question(text: str) -> bool:
     return bool(_GENERIC_RECENT_OUTCOME_HISTORY_RE.search(clean)) or is_cursor_recall_family_question(
         clean,
         include_anaphora=True,
+    )
+
+
+def is_casual_social_only_turn(text: str) -> bool:
+    clean = str(text or "").strip()
+    if not clean:
+        return False
+    return bool(_CASUAL_SOCIAL_ONLY_RE.match(clean))
+
+
+def is_execution_heavy_or_repo_action(text: str) -> bool:
+    clean = str(text or "").strip()
+    if not clean:
+        return False
+    if _PATH_OR_FILE_RE.search(clean):
+        return True
+    return bool(_EXECUTION_HEAVY_OR_REPO_RE.search(clean))
+
+
+def is_substantive_non_social_question(text: str) -> bool:
+    clean = str(text or "").strip()
+    if not clean or is_casual_social_only_turn(clean):
+        return False
+    if is_recent_outcome_history_question(clean):
+        return True
+    if is_approval_state_question(clean):
+        return True
+    if _TECHNICAL_GUIDANCE_RE.search(clean):
+        return True
+    if _STATUS_EXTERNAL_NEWS_RE.search(clean):
+        return True
+    if _TOOLING_IDENTITY_Q_RE.match(clean):
+        return True
+    if _OPINION_RE.search(clean):
+        return True
+    words = clean.split()
+    if len(words) >= 7 and _DIRECT_SUBSTANTIVE_HINT_RE.search(clean):
+        return True
+    if "?" in clean and _DIRECT_SUBSTANTIVE_HINT_RE.search(clean):
+        return True
+    return False
+
+
+def build_direct_answer_policy(
+    text: str,
+    *,
+    scenario_id: str,
+    turn_plan: TurnPlan,
+) -> DirectAnswerPolicy:
+    clean = str(text or "").strip()
+    dom = str(turn_plan.domain or "")
+    sid = str(scenario_id or "")
+    social = is_casual_social_only_turn(clean)
+    if social:
+        return DirectAnswerPolicy(
+            allow_casual_social_fallback=True,
+            lookup_eligible=False,
+            preferred_lookup_domain="",
+        )
+    if bool(turn_plan.force_delegate) or is_execution_heavy_or_repo_action(clean):
+        return DirectAnswerPolicy(
+            allow_casual_social_fallback=False,
+            lookup_eligible=False,
+            preferred_lookup_domain="",
+        )
+    if dom in {"external_information", "technical_guidance"}:
+        return DirectAnswerPolicy(
+            allow_casual_social_fallback=False,
+            lookup_eligible=True,
+            preferred_lookup_domain=dom,
+        )
+    if dom in {"project_status", "approval_state", "attention_today", "personal_agenda"}:
+        return DirectAnswerPolicy(
+            allow_casual_social_fallback=False,
+            lookup_eligible=False,
+            preferred_lookup_domain="",
+        )
+    substantive = is_substantive_non_social_question(clean)
+    if substantive and sid == "researchSummary":
+        preferred = "technical_guidance" if _TECHNICAL_GUIDANCE_RE.search(clean) else "external_information"
+        return DirectAnswerPolicy(
+            allow_casual_social_fallback=False,
+            lookup_eligible=True,
+            preferred_lookup_domain=preferred,
+        )
+    if substantive and (dom in {"casual_conversation", "opinion_reflection"} or sid == "mixedResourceGoal"):
+        preferred = "technical_guidance" if _TECHNICAL_GUIDANCE_RE.search(clean) else "external_information"
+        return DirectAnswerPolicy(
+            allow_casual_social_fallback=False,
+            lookup_eligible=True,
+            preferred_lookup_domain=preferred,
+        )
+    return DirectAnswerPolicy(
+        allow_casual_social_fallback=False if substantive else True,
+        lookup_eligible=False,
+        preferred_lookup_domain="",
     )
 
 

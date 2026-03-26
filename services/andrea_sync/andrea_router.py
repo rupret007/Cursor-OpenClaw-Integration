@@ -753,7 +753,13 @@ def build_direct_reply(
     mem_ctx = memory_notes if inject_durable_memory else []
     # Domain-aware guardrail: never emit the weak generic fallback for these lanes.
     if domain == "casual_conversation" and is_generic_direct_reply(reply):
-        return "Pretty good, thanks for asking. How are you doing?"
+        if is_standalone_casual_social_turn(text):
+            return "Pretty good, thanks for asking. How are you doing?"
+        return _finalize_direct_surface_reply(
+            _contextual_fallback(text, history=history, memory_notes=mem_ctx),
+            user_seed=text,
+            history=history,
+        )
     if domain == "personal_agenda" and is_generic_direct_reply(reply):
         return DIRECT_AGENDA_NO_CALENDAR_REPLY
     if domain == "attention_today" and is_generic_direct_reply(reply):

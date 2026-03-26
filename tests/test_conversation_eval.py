@@ -273,6 +273,35 @@ class ConversationEvalDetectorTests(unittest.TestCase):
         codes = {h["issue_code"] for h in hits}
         self.assertIn("conversation_generic_fallback_despite_lookup", codes)
 
+    def test_detects_substantive_turn_social_collapse(self) -> None:
+        cap = {
+            "raw_reply_text": "Pretty good, thanks for asking. How are you doing?",
+            "rendered_reply_sanitized": "Andrea: Pretty good, thanks for asking. How are you doing?",
+            "user_turn": "What does this timeout error usually mean?",
+            "turn_plan_domain": "casual_conversation",
+            "assistant_route": "direct",
+            "assistant_reason": "greeting_or_social",
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap)
+        codes = {h["issue_code"] for h in hits}
+        self.assertIn("conversation_substantive_turn_social_collapse", codes)
+
+    def test_detects_unnecessary_heavy_lift_escalation(self) -> None:
+        cap = {
+            "raw_reply_text": "Queued for Cursor execution.",
+            "user_turn": "What does this timeout error usually mean?",
+            "turn_plan_domain": "technical_guidance",
+            "assistant_route": "delegate",
+            "assistant_reason": "technical_or_repo_request",
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap, forbid_unnecessary_delegate=True)
+        codes = {h["issue_code"] for h in hits}
+        self.assertIn("conversation_unnecessary_heavy_lift_escalation", codes)
+
     def test_detects_fallback_shaped_rendered_reply_under_strong_contract_evidence(self) -> None:
         cap = {
             "raw_reply_text": "I’m not finding a recent clean Cursor result to recap from this thread.",
@@ -518,6 +547,7 @@ class ConversationCoreScenariosTests(unittest.TestCase):
         self.assertIn("conversation_core::hi_andrea", ids)
         self.assertIn("conversation_core::news_today", ids)
         self.assertIn("conversation_core::technical_guidance_timeout", ids)
+        self.assertIn("conversation_core::short_technical_question_not_social", ids)
 
     def test_conversation_smoke_subset_size(self) -> None:
         rows = conversation_core_scenarios({"smoke": True})

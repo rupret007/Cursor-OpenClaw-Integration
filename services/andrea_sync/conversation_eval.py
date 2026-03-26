@@ -48,7 +48,12 @@ from .store import (
     insert_user_outcome_receipt,
     link_task_to_goal,
 )
-from .turn_intelligence import build_turn_plan, resolve_answer_family_profile
+from .turn_intelligence import (
+    build_turn_plan,
+    is_execution_heavy_or_repo_action,
+    is_substantive_non_social_question,
+    resolve_answer_family_profile,
+)
 from .telegram_format import format_direct_message
 from .user_surface import is_internal_runtime_text, sanitize_user_surface_text
 
@@ -347,6 +352,7 @@ def run_deterministic_detectors(
     expect_tool_carryover: bool = False,
     expect_cursor_substance: bool = False,
     expect_external_boundary: bool = False,
+    forbid_unnecessary_delegate: bool = False,
 ) -> List[Dict[str, Any]]:
     """Return list of findings: {family, issue_code, severity, detail}."""
     findings: List[Dict[str, Any]] = []
@@ -354,6 +360,8 @@ def run_deterministic_detectors(
     text = rendered or str(capture.get("formatted_reply_text") or capture.get("raw_reply_text") or "")
     raw_text = str(capture.get("raw_reply_text") or "")
     user = str(capture.get("user_turn") or "")
+    assistant_reason = str(capture.get("assistant_reason") or "")
+    assistant_route = str(capture.get("assistant_route") or "")
     low = text.lower()
     expected_family = str(capture.get("expected_answer_family") or "")
     expected_sources = set(capture.get("expected_answer_sources") or [])
@@ -432,6 +440,47 @@ def run_deterministic_detectors(
                 "issue_code": "conversation_generic_fallback_leak",
                 "severity": "medium",
                 "detail": "generic direct fallback phrasing",
+            }
+        )
+    substantive_turn = is_substantive_non_social_question(user)
+    if substantive_turn:
+        if assistant_reason == "greeting_or_social" or (
+            "pretty good, thanks for asking" in low and "how are you doing" in low
+        ):
+            findings.append(
+                {
+                    "family": "wrong_domain_contamination",
+                    "issue_code": "conversation_substantive_turn_social_collapse",
+                    "severity": "high",
+                    "detail": "substantive non-social turn collapsed into social check-in fallback",
+                }
+            )
+        if (
+            assistant_route == "direct"
+            and not grounded_source
+            and assistant_reason in {"short_general_request", "balanced_default_direct"}
+            and is_generic_direct_reply(text)
+        ):
+            findings.append(
+                {
+                    "family": "grounded_research_failure",
+                    "issue_code": "conversation_lookup_eligible_direct_miss",
+                    "severity": "high",
+                    "detail": "lookup-eligible substantive turn answered with generic direct fallback",
+                }
+            )
+    if (
+        forbid_unnecessary_delegate
+        and substantive_turn
+        and assistant_route == "delegate"
+        and not is_execution_heavy_or_repo_action(user)
+    ):
+        findings.append(
+            {
+                "family": "delegation_miss",
+                "issue_code": "conversation_unnecessary_heavy_lift_escalation",
+                "severity": "high",
+                "detail": "substantive informational turn escalated to heavy-lift delegate route",
             }
         )
     approval_inventory_only = bool(
@@ -955,6 +1004,7 @@ class ConversationCaseSpec:
     required_assistant_reasons: tuple[str, ...] = ()
     required_turn_domains: tuple[str, ...] = ()
     required_continuity_focuses: tuple[str, ...] = ()
+    forbid_unnecessary_delegate: bool = False
     # terminal_reply: wait for completed/failed (meaningful capture). routing_smoke: allow queued/running.
     wait_policy: str = "terminal_reply"
 
@@ -1797,6 +1847,7 @@ def run_conversation_case(
                     expect_tool_carryover=case.expect_tool_carryover and turn_idx > 0,
                     expect_cursor_substance=case.expect_cursor_substance,
                     expect_external_boundary=case.expect_external_domain,
+                    forbid_unnecessary_delegate=case.forbid_unnecessary_delegate,
                 )
                 cap["deterministic_findings"] = findings
                 prior_user = text
@@ -2126,6 +2177,24 @@ CONVERSATION_CORE_CASES: tuple[ConversationCaseSpec, ...] = (
         ),
         required_assistant_reasons=("grounded_research_lookup",),
         required_turn_domains=("technical_guidance",),
+        forbid_unnecessary_delegate=True,
+    ),
+    ConversationCaseSpec(
+        case_id="short_technical_question_not_social",
+        title="Short technical question avoids social fallback",
+        behavior_family="grounded_research",
+        turns=("Why does this timeout happen?",),
+        chat_id=88071,
+        from_id=99071,
+        first_update_id=18071,
+        first_message_id=28071,
+        patch_openclaw_summary=(
+            "Timeouts are often transient under load; bounded retries with backoff are a common mitigation."
+        ),
+        required_assistant_reasons=("grounded_research_lookup",),
+        required_turn_domains=("technical_guidance",),
+        forbidden_reply_markers=("Pretty good, thanks for asking.",),
+        forbid_unnecessary_delegate=True,
     ),
     ConversationCaseSpec(
         case_id="working_on_now",
@@ -2689,6 +2758,8 @@ def attach_conversation_eval_report(
                 "followup_carryover_failure",
                 "wrong_context_boundary",
                 "overly_mechanical_wording",
+                "grounded_research_failure",
+                "delegation_miss",
             }:
                 briefs.append(build_cursor_fix_brief(cluster=c, checks=checks))
         run_metadata["cursor_fix_briefs"] = briefs

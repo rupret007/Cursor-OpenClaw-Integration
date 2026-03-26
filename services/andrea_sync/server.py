@@ -92,7 +92,13 @@ from .semantic_continuity import (
 from .semantic_answer_engine import choose_semantic_state_reply
 from .stateful_answer_realization import maybe_realize_grounded_technical_reply
 from .telegram_continuation import attach_continuation_if_applicable
-from .turn_intelligence import TurnPlan, build_turn_plan, resolve_answer_family_profile
+from .turn_intelligence import (
+    TurnPlan,
+    build_direct_answer_policy,
+    build_turn_plan,
+    is_execution_heavy_or_repo_action,
+    resolve_answer_family_profile,
+)
 from .store import (
     append_event,
     complete_execution_attempt,
@@ -1462,6 +1468,29 @@ class SyncServer:
                     effective_turn_plan = replace(
                         effective_turn_plan, prefer_state_reply=True
                     )
+            direct_policy = build_direct_answer_policy(
+                classify_text,
+                scenario_id=pre_resolution.scenario_id,
+                turn_plan=effective_turn_plan,
+            )
+            if (
+                str(direct_policy.preferred_lookup_domain or "")
+                in {"technical_guidance", "external_information"}
+                and effective_turn_plan.domain in {"casual_conversation", "opinion_reflection"}
+            ):
+                promoted_domain = str(direct_policy.preferred_lookup_domain)
+                effective_turn_plan = replace(
+                    effective_turn_plan,
+                    domain=promoted_domain,
+                    context_boundary=(
+                        "technical_lookup_guidance"
+                        if promoted_domain == "technical_guidance"
+                        else "external_world_only"
+                    ),
+                    prefer_state_reply=False,
+                    allow_goal_continuity_repair=False,
+                    inject_durable_memory=False,
+                )
             _decision_profile = build_decision_profile(
                 classify_text,
                 turn_domain=pre_turn_plan.domain,
@@ -1852,6 +1881,64 @@ class SyncServer:
                 history=effective_history,
                 memory_notes=route_memory_notes,
             )
+            post_route_grounded_contract: dict[str, Any] | None = None
+            if (
+                decision.mode == "direct"
+                and not direct_policy.allow_casual_social_fallback
+                and self._is_casual_social_fallback_reply(
+                    text=decision.reply_text, reason=decision.reason
+                )
+            ):
+                if direct_policy.lookup_eligible:
+                    retry_plan = effective_turn_plan
+                    preferred_lookup_domain = str(
+                        direct_policy.preferred_lookup_domain or ""
+                    )
+                    if (
+                        preferred_lookup_domain
+                        in {"technical_guidance", "external_information"}
+                        and retry_plan.domain
+                        not in {"technical_guidance", "external_information"}
+                    ):
+                        retry_plan = replace(
+                            retry_plan,
+                            domain=preferred_lookup_domain,
+                            context_boundary=(
+                                "technical_lookup_guidance"
+                                if preferred_lookup_domain == "technical_guidance"
+                                else "external_world_only"
+                            ),
+                            prefer_state_reply=False,
+                            allow_goal_continuity_repair=False,
+                            inject_durable_memory=False,
+                        )
+                    grounded_retry = self._maybe_grounded_research_reply(
+                        task_id,
+                        classify_text=classify_text,
+                        turn_plan=retry_plan,
+                        scenario_id=pre_resolution.scenario_id,
+                    )
+                    if grounded_retry is not None:
+                        grounded_text, grounded_reason, grounded_contract = grounded_retry
+                        decision = AndreaRouteDecision(
+                            mode="direct",
+                            reason=grounded_reason,
+                            reply_text=grounded_text,
+                            collaboration_mode=decision.collaboration_mode,
+                        )
+                        post_route_grounded_contract = grounded_contract
+                if self._is_casual_social_fallback_reply(
+                    text=decision.reply_text, reason=decision.reason
+                ):
+                    decision = AndreaRouteDecision(
+                        mode="direct",
+                        reason="direct_policy_truthful_clarifier",
+                        reply_text=(
+                            "This sounds like a substantive question, and I do not want to answer casually or guess. "
+                            "If you want, I can run a grounded lookup and give a concise answer."
+                        ),
+                        collaboration_mode=decision.collaboration_mode,
+                    )
             self._append_task_event(
                 task_id,
                 EventType.SCENARIO_RESOLVED,
@@ -2067,14 +2154,19 @@ class SyncServer:
                         job_payload,
                     )
             else:
+                direct_payload: Dict[str, Any] = {
+                    "text": decision.reply_text,
+                    "route": "direct",
+                    "reason": decision.reason,
+                }
+                if post_route_grounded_contract is not None:
+                    direct_payload["grounded_research_selection"] = (
+                        post_route_grounded_contract
+                    )
                 applied = self._append_task_event(
                     task_id,
                     EventType.ASSISTANT_REPLIED,
-                    {
-                        "text": decision.reply_text,
-                        "route": "direct",
-                        "reason": decision.reason,
-                    },
+                    direct_payload,
                 )
             if applied:
                 self.with_lock(lambda c: set_meta(c, marker, str(time.time())))
@@ -3045,21 +3137,17 @@ class SyncServer:
         return out
 
     def _looks_execution_heavy_or_repo_action(self, text: str) -> bool:
-        clean = str(text or "").strip()
-        if not clean:
-            return False
-        if re.search(r"[/~][\\w.\\-~/]+|`[^`]+`|\\b\\w+\\.(py|ts|tsx|js|jsx|md|sh|json|yaml|yml)\\b", clean, re.I):
+        return is_execution_heavy_or_repo_action(text)
+
+    def _is_casual_social_fallback_reply(self, *, text: str, reason: str) -> bool:
+        clean = str(text or "").strip().lower()
+        if str(reason or "").strip() == "greeting_or_social":
             return True
-        return bool(
-            re.search(
-                r"\\b("
-                r"implement|refactor|migrate|edit\\s+file|write\\s+code|create\\s+pr|open\\s+pr|"
-                r"run\\s+tests|fix\\s+the\\s+code|debug\\s+in\\s+repo|apply\\s+patch|commit\\s+this"
-                r")\\b",
-                clean,
-                re.I,
-            )
-        )
+        if not clean:
+            return True
+        if clean == "pretty good, thanks for asking. how are you doing?":
+            return True
+        return False
 
     def _maybe_grounded_research_reply(
         self,

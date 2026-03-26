@@ -5161,6 +5161,56 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(contract.get("source"), "grounded_research_lookup")
         self.assertEqual(contract.get("retrieval_source"), "brave-api-search")
 
+    def test_build_direct_reply_does_not_use_social_checkin_for_substantive_turn(self) -> None:
+        from services.andrea_sync.andrea_router import build_direct_reply
+
+        with mock.patch(
+            "services.andrea_sync.andrea_router._openai_direct_reply",
+            side_effect=RuntimeError("disabled"),
+        ):
+            reply = build_direct_reply(
+                "What does this timeout error mean?",
+                history=[],
+                memory_notes=[],
+                turn_domain="casual_conversation",
+            )
+        self.assertNotEqual(reply, "Pretty good, thanks for asking. How are you doing?")
+
+    def test_build_direct_reply_keeps_social_checkin_for_true_social_turn(self) -> None:
+        from services.andrea_sync.andrea_router import build_direct_reply
+
+        with mock.patch(
+            "services.andrea_sync.andrea_router._openai_direct_reply",
+            side_effect=RuntimeError("disabled"),
+        ):
+            reply = build_direct_reply(
+                "How's it going?",
+                history=[],
+                memory_notes=[],
+                turn_domain="casual_conversation",
+            )
+        self.assertEqual(reply, "Pretty good, thanks for asking. How are you doing?")
+
+    def test_build_direct_answer_policy_promotes_substantive_mixed_question(self) -> None:
+        from services.andrea_sync.turn_intelligence import (
+            build_direct_answer_policy,
+            build_turn_plan,
+        )
+
+        plan = build_turn_plan(
+            "Why does this timeout happen?",
+            scenario_id="mixedResourceGoal",
+            projection_has_continuity_state=False,
+        )
+        policy = build_direct_answer_policy(
+            "Why does this timeout happen?",
+            scenario_id="mixedResourceGoal",
+            turn_plan=plan,
+        )
+        self.assertFalse(policy.allow_casual_social_fallback)
+        self.assertTrue(policy.lookup_eligible)
+        self.assertEqual(policy.preferred_lookup_domain, "technical_guidance")
+
 
 if __name__ == "__main__":
     unittest.main()

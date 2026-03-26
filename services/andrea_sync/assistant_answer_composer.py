@@ -1555,6 +1555,12 @@ def build_cursor_continuity_recall_reply_from_state(
     low_info = _state_snapshot_is_low_information_only(
         status, result_kind, phase_summary, blocked_reason
     )
+    has_narrative = bool(
+        narrative_lines
+        or receipt_substantive
+        or exec_lines
+        or cont_line
+    )
     has_substantive_recap = bool(
         narrative_lines or receipt_substantive or cont_line or assistant_lines
     )
@@ -1643,13 +1649,8 @@ def build_cursor_continuity_recall_reply_from_state(
         ):
             lines.extend(exec_lines)
 
-        has_narrative = bool(
-            narrative_lines
-            or receipt_substantive
-            or cont_line
-            or assistant_lines
-            or receipt_generic
-        )
+        # Avoid metadata-led scaffolding when we do not have a substantive recap.
+        # Keep status snapshot for explicit status asks or when it supports a real recap lead.
         show_where = bool(state_bits) and (
             (has_substantive_recap and bool(recap_lead))
             or _user_message_asks_explicit_status(um)
@@ -1665,12 +1666,6 @@ def build_cursor_continuity_recall_reply_from_state(
             lines.append(cont_line)
         lines.extend(assistant_lines)
         lines.extend(receipt_generic)
-        has_narrative = bool(
-            narrative_lines
-            or receipt_substantive
-            or exec_lines
-            or cont_line
-        )
         if state_bits and (has_narrative or not low_info):
             lines.append("Where things stand: " + "; ".join(state_bits) + ".")
 

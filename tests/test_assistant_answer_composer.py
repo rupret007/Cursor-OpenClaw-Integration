@@ -436,6 +436,43 @@ class TestAssistantAnswerComposer(unittest.TestCase):
         self.assertIn("Cursor recap:", text)
         self.assertNotRegex(text.lower(), r"task status \*\*created\*\*")
 
+    def test_cursor_recall_low_info_path_does_not_read_unbound_has_narrative(self) -> None:
+        from services.andrea_sync.assistant_answer_composer import (  # noqa: E402
+            build_cursor_continuity_recall_reply_from_state,
+        )
+
+        created = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "comp-unbound-has-narrative",
+                "payload": {
+                    "text": "seed",
+                    "routing_text": "seed",
+                    "chat_id": 88141,
+                    "message_id": 1,
+                },
+            },
+        )
+        tid = created["task_id"]
+        append_event(
+            self.conn,
+            tid,
+            EventType.JOB_COMPLETED,
+            {
+                "summary": "done",
+                "backend": "openclaw",
+                "runner": "openclaw",
+                "user_summary": "LOW_INFO_RECALL_MARKER_41 delegated recap marker.",
+            },
+        )
+        text = build_cursor_continuity_recall_reply_from_state(
+            self.conn, tid, user_message="What did Cursor say?"
+        )
+        self.assertIn("LOW_INFO_RECALL_MARKER_41", text)
+        self.assertIn("Cursor recap:", text)
+
     def test_cursor_recall_lead_prefers_source_truth_over_long_assistant_surface(self) -> None:
         from services.andrea_sync.assistant_answer_composer import (  # noqa: E402
             build_cursor_continuity_recall_reply_from_state,

@@ -5160,6 +5160,11 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(reason, "grounded_research_lookup")
         self.assertEqual(contract.get("source"), "grounded_research_lookup")
         self.assertEqual(contract.get("retrieval_source"), "brave-api-search")
+        self.assertIn(
+            contract.get("utility_goal"),
+            ("concise_grounded_summary", "partial_helpful_brevity", "truthful_next_steps_brevity"),
+        )
+        self.assertGreater(int(contract.get("brevity_max_words_soft") or 0), 0)
 
     def test_build_direct_reply_does_not_use_social_checkin_for_substantive_turn(self) -> None:
         from services.andrea_sync.andrea_router import build_direct_reply
@@ -5210,6 +5215,64 @@ class TestAndreaSync(unittest.TestCase):
         self.assertFalse(policy.allow_casual_social_fallback)
         self.assertTrue(policy.lookup_eligible)
         self.assertEqual(policy.preferred_lookup_domain, "technical_guidance")
+
+
+class SyncServerGroundedUsefulnessTests(unittest.TestCase):
+    def test_split_grounded_lookup_evidence_lines_prefers_newlines(self) -> None:
+        from services.andrea_sync.server import SyncServer
+
+        server = SyncServer()
+        summary = (
+            "First chunk about timeouts under load.\n"
+            "Second chunk about bounded retries with backoff.\n"
+            "Third chunk about monitoring tail latency."
+        )
+        lines = server._split_grounded_lookup_evidence_lines(summary)
+        self.assertGreaterEqual(len(lines), 2)
+        self.assertTrue(any("timeouts" in ln.lower() for ln in lines))
+        self.assertTrue(any("retries" in ln.lower() for ln in lines))
+
+    def test_grounded_lookup_next_step_options_error_aware(self) -> None:
+        from services.andrea_sync.server import SyncServer
+
+        server = SyncServer()
+        opts = server._grounded_lookup_next_step_options(
+            answer_mode="partial_evidence_helpful_answer",
+            classify_text="What does this ImportError traceback mean?",
+        )
+        self.assertGreaterEqual(len(opts), 1)
+        self.assertTrue(any("paste" in o.lower() or "traceback" in o.lower() for o in opts))
+
+    def test_grounded_research_unavailable_includes_utility_contract_and_next_steps(self) -> None:
+        os.environ["ANDREA_GROUNDED_RESEARCH_ENABLED"] = "1"
+        from services.andrea_sync.server import SyncServer
+        from services.andrea_sync.turn_intelligence import build_turn_plan
+
+        server = SyncServer()
+        plan = build_turn_plan(
+            "What does this SSL error mean?",
+            scenario_id="researchSummary",
+            projection_has_continuity_state=False,
+        )
+        with mock.patch.object(
+            server,
+            "_resolve_runtime_skill",
+            return_value={"skill_key": "brave-api-search", "truth": {"status": "unavailable"}},
+        ):
+            out = server._maybe_grounded_research_reply(
+                "t-unavail",
+                classify_text="What does this SSL error mean?",
+                turn_plan=plan,
+                scenario_id="researchSummary",
+            )
+        self.assertIsNotNone(out)
+        assert out is not None
+        text, reason, contract = out
+        self.assertEqual(reason, "grounded_research_unavailable")
+        self.assertIn("next options", text.lower())
+        self.assertEqual(contract.get("utility_goal"), "truthful_next_steps_brevity")
+        self.assertGreater(int(contract.get("brevity_max_words_soft") or 0), 0)
+        self.assertEqual(contract.get("answer_mode"), "truthful_fallback_with_next_steps")
 
 
 if __name__ == "__main__":

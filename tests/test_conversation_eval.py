@@ -374,6 +374,124 @@ class ConversationEvalDetectorTests(unittest.TestCase):
         codes = {h["issue_code"] for h in hits}
         self.assertIn("conversation_partial_evidence_not_exploited", codes)
 
+    def test_detects_stateful_brevity_contract_violation(self) -> None:
+        long_body = " ".join([f"word{i}" for i in range(220)])
+        cap = {
+            "raw_reply_text": long_body,
+            "rendered_reply_sanitized": long_body,
+            "user_turn": "What did Cursor say?",
+            "turn_plan_domain": "project_status",
+            "assistant_reason": "semantic_state_cursor_continuity_recall",
+            "assistant_semantic_selection": {"source": "cursor_continuity_recall"},
+            "semantic_turn_contract": {
+                "family": "cursor_recall",
+                "source": "cursor_continuity_recall",
+                "answer_mode": "strong_evidence_answer",
+                "brevity_max_words_soft": 115,
+                "evidence_strength": 7,
+            },
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap)
+        codes = {h["issue_code"] for h in hits}
+        self.assertIn("conversation_stateful_exceeds_brevity_contract", codes)
+
+    def test_detects_redundant_where_block_on_cursor_recall(self) -> None:
+        cap = {
+            "raw_reply_text": "Cursor recap: fixed retries.\n\nWhere things stand: task status **running**.",
+            "rendered_reply_sanitized": "Cursor recap: fixed retries.\n\nWhere things stand: task status **running**.",
+            "user_turn": "What did Cursor say?",
+            "turn_plan_domain": "project_status",
+            "assistant_reason": "semantic_state_cursor_continuity_recall",
+            "assistant_semantic_selection": {"source": "cursor_continuity_recall"},
+            "semantic_turn_contract": {
+                "family": "cursor_recall",
+                "source": "cursor_continuity_recall",
+                "utility_goal": "concise_grounded_summary",
+                "answer_mode": "strong_evidence_answer",
+                "evidence_strength": 6,
+            },
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap, expect_cursor_substance=True)
+        codes = {h["issue_code"] for h in hits}
+        self.assertIn("conversation_cursor_recall_redundant_status_scaffold", codes)
+
+    def test_detects_grounded_error_query_with_generic_next_steps(self) -> None:
+        cap = {
+            "raw_reply_text": "Partial note about errors.\n\nNext options:\n• Retry grounded lookup.",
+            "rendered_reply_sanitized": "Partial note about errors.\n\nNext options:\n• Retry grounded lookup.",
+            "user_turn": "What does this error mean?",
+            "assistant_reason": "grounded_research_lookup",
+            "assistant_grounded_research_selection": {
+                "source": "grounded_research_lookup",
+                "family": "grounded_research",
+                "query": "What does this error mean?",
+                "answer_mode": "partial_evidence_helpful_answer",
+                "next_step_options": [
+                    "Retry grounded lookup if you need fresher or broader evidence.",
+                    "Narrow to the exact tool, error string, or version you care about.",
+                ],
+                "evidence_lines": ["Errors often need the exact message to diagnose."],
+                "evidence_strength": 3,
+            },
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap)
+        codes = {h["issue_code"] for h in hits}
+        self.assertIn("conversation_grounded_error_query_generic_next_steps", codes)
+
+    def test_skips_grounded_error_detector_when_options_are_error_specific(self) -> None:
+        cap = {
+            "raw_reply_text": "Partial note.\n\nNext options:\n• Paste the full error text.",
+            "rendered_reply_sanitized": "Partial note.\n\nNext options:\n• Paste the full error text.",
+            "user_turn": "What does this error mean?",
+            "assistant_reason": "grounded_research_lookup",
+            "assistant_grounded_research_selection": {
+                "source": "grounded_research_lookup",
+                "family": "grounded_research",
+                "query": "What does this error mean?",
+                "answer_mode": "partial_evidence_helpful_answer",
+                "next_step_options": [
+                    "Paste the full error text or traceback you’re seeing.",
+                    "Narrow to the exact tool, error string, or version you care about.",
+                ],
+                "evidence_lines": ["Errors often need the exact message to diagnose."],
+                "evidence_strength": 3,
+            },
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap)
+        codes = {h["issue_code"] for h in hits}
+        self.assertNotIn("conversation_grounded_error_query_generic_next_steps", codes)
+
+    def test_detects_grounded_strong_brevity_violation(self) -> None:
+        long_body = " ".join([f"fact{i}" for i in range(200)])
+        cap = {
+            "raw_reply_text": long_body,
+            "rendered_reply_sanitized": long_body,
+            "user_turn": "What does PEP 8 recommend for line length?",
+            "turn_plan_domain": "technical_guidance",
+            "assistant_reason": "grounded_research_lookup",
+            "assistant_grounded_research_selection": {
+                "source": "grounded_research_lookup",
+                "family": "grounded_research",
+                "answer_mode": "strong_evidence_answer",
+                "brevity_max_words_soft": 115,
+                "evidence_strength": 8,
+                "evidence_lines": ["PEP 8 suggests 79 characters for code."],
+            },
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap)
+        codes = {h["issue_code"] for h in hits}
+        self.assertIn("conversation_grounded_lookup_exceeds_brevity_contract", codes)
+
     def test_grounded_unavailable_contract_skips_missing_evidence_line_failure(self) -> None:
         cap = {
             "raw_reply_text": "Could not verify lookup.",
@@ -616,6 +734,9 @@ class ConversationCoreScenariosTests(unittest.TestCase):
         self.assertIn("conversation_core::news_today", ids)
         self.assertIn("conversation_core::technical_guidance_timeout", ids)
         self.assertIn("conversation_core::short_technical_question_not_social", ids)
+        self.assertIn("conversation_core::technical_guidance_lookup_unavailable_next_steps", ids)
+        self.assertIn("conversation_core::technical_guidance_multiline_partial_evidence", ids)
+        self.assertIn("conversation_core::cursor_recall_thin_thread_next_steps", ids)
 
     def test_conversation_smoke_subset_size(self) -> None:
         rows = conversation_core_scenarios({"smoke": True})

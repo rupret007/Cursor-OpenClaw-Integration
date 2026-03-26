@@ -348,6 +348,10 @@ def build_turn_capture(
     }
 
 
+def _eval_reply_word_count(text: str) -> int:
+    return len(re.findall(r"\b\w+\b", str(text or "")))
+
+
 def run_deterministic_detectors(
     capture: Mapping[str, Any],
     *,
@@ -379,10 +383,17 @@ def run_deterministic_detectors(
     contract_evidence_strength = 0
     contract_answer_mode = ""
     contract_next_steps: list[str] = []
+    contract_utility_goal = ""
+    contract_brevity_max_words_soft = 0
     if isinstance(semantic_contract, dict):
         contract_family = str(semantic_contract.get("family") or "")
         contract_source = str(semantic_contract.get("source") or "")
         contract_answer_mode = str(semantic_contract.get("answer_mode") or "").strip()
+        contract_utility_goal = str(semantic_contract.get("utility_goal") or "").strip()
+        try:
+            contract_brevity_max_words_soft = int(semantic_contract.get("brevity_max_words_soft") or 0)
+        except (TypeError, ValueError):
+            contract_brevity_max_words_soft = 0
         raw_ns = semantic_contract.get("next_step_options")
         if isinstance(raw_ns, list):
             contract_next_steps = [str(x).strip() for x in raw_ns if str(x).strip()]
@@ -402,11 +413,20 @@ def run_deterministic_detectors(
     grounded_answer_mode = ""
     grounded_next_steps: list[str] = []
     grounded_fallback_policy = ""
+    grounded_utility_goal = ""
+    grounded_brevity_max_words_soft = 0
+    grounded_query_l = ""
     if isinstance(grounded_selection, dict):
         grounded_source = str(grounded_selection.get("source") or "")
         grounded_family = str(grounded_selection.get("family") or "")
         grounded_answer_mode = str(grounded_selection.get("answer_mode") or "").strip()
         grounded_fallback_policy = str(grounded_selection.get("fallback_policy") or "").strip()
+        grounded_query_l = str(grounded_selection.get("query") or "").strip().lower()
+        grounded_utility_goal = str(grounded_selection.get("utility_goal") or "").strip()
+        try:
+            grounded_brevity_max_words_soft = int(grounded_selection.get("brevity_max_words_soft") or 0)
+        except (TypeError, ValueError):
+            grounded_brevity_max_words_soft = 0
         g_ns = grounded_selection.get("next_step_options")
         if isinstance(g_ns, list):
             grounded_next_steps = [str(x).strip() for x in g_ns if str(x).strip()]
@@ -767,6 +787,77 @@ def run_deterministic_detectors(
                 "detail": "partial grounded evidence with required next steps produced a thin or generic surface",
             }
         )
+    if (
+        grounded_answer_mode == "partial_evidence_helpful_answer"
+        and grounded_source
+        and grounded_next_steps
+        and grounded_query_l
+        and any(k in grounded_query_l for k in ("error", "traceback", "exception", "failed"))
+        and not any(
+            ("paste" in str(o).lower() or "traceback" in str(o).lower())
+            for o in grounded_next_steps[:2]
+        )
+        and next_step_options_reflected_in_reply(text, grounded_next_steps)
+    ):
+        findings.append(
+            {
+                "family": "grounded_research_failure",
+                "issue_code": "conversation_grounded_error_query_generic_next_steps",
+                "severity": "medium",
+                "detail": "error-shaped query used generic grounded next-step options instead of error-specific cues",
+            }
+        )
+    if (
+        contract_answer_mode == "strong_evidence_answer"
+        and contract_brevity_max_words_soft > 0
+        and ar.startswith("semantic_state_")
+        and _eval_reply_word_count(text) > contract_brevity_max_words_soft + 58
+    ):
+        findings.append(
+            {
+                "family": "thin_summary",
+                "issue_code": "conversation_stateful_exceeds_brevity_contract",
+                "severity": "medium",
+                "detail": "semantic state reply exceeded brevity target for strong-evidence contract",
+            }
+        )
+    if (
+        contract_utility_goal == "concise_grounded_summary"
+        and semantic_source == "cursor_continuity_recall"
+        and is_cursor_thread_recall_question(user)
+        and "where things stand:" in low
+        and expect_cursor_substance
+    ):
+        findings.append(
+            {
+                "family": "cursor_recall_failure",
+                "issue_code": "conversation_cursor_recall_redundant_status_scaffold",
+                "severity": "medium",
+                "detail": "cursor recall carried redundant Where-things-stand scaffolding under concise contract",
+            }
+        )
+    if (
+        grounded_answer_mode == "strong_evidence_answer"
+        and grounded_source
+        and (
+            (
+                grounded_brevity_max_words_soft > 0
+                and _eval_reply_word_count(text) > grounded_brevity_max_words_soft + 78
+            )
+            or (
+                grounded_brevity_max_words_soft <= 0
+                and _eval_reply_word_count(text) > 360
+            )
+        )
+    ):
+        findings.append(
+            {
+                "family": "grounded_research_failure",
+                "issue_code": "conversation_grounded_lookup_exceeds_brevity_contract",
+                "severity": "medium",
+                "detail": "grounded lookup reply exceeded brevity target for strong-evidence mode",
+            }
+        )
     if expect_cursor_substance and is_cursor_thread_recall_question(user):
         if any(s in low for s in CURSOR_GRACE_SNIPPETS):
             findings.append(
@@ -1072,6 +1163,7 @@ class ConversationCaseSpec:
     first_message_id: int
     patch_openclaw_news: bool = False
     patch_openclaw_summary: str = ""
+    patch_grounded_lookup_unavailable: bool = False
     patch_bluebubbles: bool = False
     expect_external_domain: bool = False
     expect_cursor_substance: bool = False
@@ -1739,6 +1831,29 @@ def _seed_bare_continue_rich_neighbor(harness: Any) -> None:
     )
 
 
+def _seed_empty_cursor_task_for_recall(harness: Any) -> None:
+    """Same-chat task with no delegated Cursor narrative (thin recall path)."""
+    server = harness.server
+    assert server is not None
+    server.with_lock(
+        lambda c: handle_command(
+            c,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "seed-empty-cursor-recall",
+                "payload": {
+                    "text": "Seed empty cursor recall thread",
+                    "routing_text": "Seed empty cursor recall thread",
+                    "chat_id": 77796,
+                    "message_id": 6729,
+                    "from_user": 99100,
+                },
+            },
+        )
+    )
+
+
 def _seed_recap_recursion_state(harness: Any) -> None:
     server = harness.server
     assert server is not None
@@ -1815,6 +1930,17 @@ def run_conversation_case(
     elif case.patch_openclaw_summary:
         patches.append(_openclaw_generic_patch(server, case.patch_openclaw_summary))
         patches.append(_resolve_skill_patch(server))
+    elif case.patch_grounded_lookup_unavailable:
+        patches.append(
+            mock.patch.object(
+                server,
+                "_resolve_runtime_skill",
+                return_value={
+                    "skill_key": "brave-api-search",
+                    "truth": {"status": "unavailable"},
+                },
+            )
+        )
     if case.patch_bluebubbles:
         patches.append(_bluebubbles_patch(server))
         patches.append(
@@ -2276,6 +2402,56 @@ CONVERSATION_CORE_CASES: tuple[ConversationCaseSpec, ...] = (
         forbid_unnecessary_delegate=True,
     ),
     ConversationCaseSpec(
+        case_id="technical_guidance_lookup_unavailable_next_steps",
+        title="Grounded lookup unavailable still surfaces next-step options",
+        behavior_family="grounded_research",
+        turns=("What does this SSL certificate error mean?",),
+        chat_id=88072,
+        from_id=99072,
+        first_update_id=18072,
+        first_message_id=28072,
+        patch_grounded_lookup_unavailable=True,
+        required_assistant_reasons=("grounded_research_unavailable",),
+        required_turn_domains=("technical_guidance",),
+        required_reply_markers=("Next options",),
+        forbid_unnecessary_delegate=True,
+    ),
+    ConversationCaseSpec(
+        case_id="technical_guidance_multiline_partial_evidence",
+        title="Multiline lookup summary preserves multiple evidence chunks",
+        behavior_family="grounded_research",
+        turns=("Why am I seeing an SSL certificate warning in the browser?",),
+        chat_id=88073,
+        from_id=99073,
+        first_update_id=18073,
+        first_message_id=28073,
+        patch_openclaw_summary=(
+            "Hostname mismatches commonly trigger certificate warnings in browsers.\n"
+            "Incomplete intermediate chains can produce trust errors until the full chain is installed.\n"
+            "Expiry warnings appear when the leaf certificate is past its notAfter date."
+        ),
+        required_assistant_reasons=("grounded_research_lookup",),
+        required_turn_domains=("technical_guidance",),
+        required_reply_markers=("intermediate",),
+        forbid_unnecessary_delegate=True,
+    ),
+    ConversationCaseSpec(
+        case_id="cursor_recall_thin_thread_next_steps",
+        title="Thin Cursor recall offers concise next-step options",
+        behavior_family="cursor_recall",
+        turns=("What did Cursor say?",),
+        chat_id=77796,
+        from_id=99100,
+        first_update_id=18796,
+        first_message_id=6730,
+        setup_fn=_seed_empty_cursor_task_for_recall,
+        expect_cursor_substance=False,
+        required_turn_domains=("project_status",),
+        required_continuity_focuses=("recent_outcome_history",),
+        required_reply_markers=("Next options",),
+        wait_policy="routing_smoke",
+    ),
+    ConversationCaseSpec(
         case_id="working_on_now",
         title="What are we working on right now?",
         behavior_family="project_status",
@@ -2689,7 +2865,7 @@ CONVERSATION_CORE_CASES: tuple[ConversationCaseSpec, ...] = (
         first_message_id=6721,
         setup_fn=_seed_source_truth_rich_recall,
         required_reply_markers=("RICH_RECALL_GROUNDED_FACT_42",),
-        forbidden_reply_markers=("recent clean Cursor result",),
+        forbidden_reply_markers=("recent clean Cursor result", "where things stand:"),
         expect_cursor_substance=True,
         required_turn_domains=("project_status",),
         required_continuity_focuses=("recent_outcome_history",),

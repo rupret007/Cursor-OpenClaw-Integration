@@ -224,6 +224,55 @@ class ConversationEvalDetectorTests(unittest.TestCase):
         codes = {h["issue_code"] for h in hits}
         self.assertIn("conversation_stateful_domain_hijack", codes)
 
+    def test_detects_grounded_research_contract_missing_evidence(self) -> None:
+        cap = {
+            "raw_reply_text": "Timeout errors are often transient; retries can help.",
+            "rendered_reply_sanitized": "Andrea: Timeout errors are often transient; retries can help.",
+            "user_turn": "What does this timeout error usually mean?",
+            "turn_plan_domain": "technical_guidance",
+            "assistant_reason": "grounded_research_lookup",
+            "assistant_grounded_research_selection": {
+                "source": "grounded_research_lookup",
+                "family": "grounded_research",
+                "evidence_strength": 5,
+                "required_anchors": ["timeout", "retries"],
+                "evidence_lines": [],
+            },
+            "expected_answer_family": "grounded_research",
+            "expected_answer_sources": ["grounded_research_lookup"],
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap)
+        codes = {h["issue_code"] for h in hits}
+        self.assertIn("conversation_research_contract_missing", codes)
+
+    def test_detects_generic_fallback_despite_grounded_lookup(self) -> None:
+        cap = {
+            "raw_reply_text": "I can help with that. Tell me more and I can refine it.",
+            "rendered_reply_sanitized": "Andrea: I can help with that. Tell me more and I can refine it.",
+            "user_turn": "How should I configure retries for timeout failures?",
+            "turn_plan_domain": "technical_guidance",
+            "assistant_reason": "grounded_research_lookup",
+            "assistant_grounded_research_selection": {
+                "source": "grounded_research_lookup",
+                "family": "grounded_research",
+                "evidence_strength": 6,
+                "required_anchors": [],
+                "evidence_lines": [
+                    "Timeout failures are often transient.",
+                    "Retries with bounded backoff are a common mitigation.",
+                ],
+            },
+            "expected_answer_family": "grounded_research",
+            "expected_answer_sources": ["grounded_research_lookup"],
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap)
+        codes = {h["issue_code"] for h in hits}
+        self.assertIn("conversation_generic_fallback_despite_lookup", codes)
+
     def test_detects_fallback_shaped_rendered_reply_under_strong_contract_evidence(self) -> None:
         cap = {
             "raw_reply_text": "I’m not finding a recent clean Cursor result to recap from this thread.",
@@ -468,6 +517,7 @@ class ConversationCoreScenariosTests(unittest.TestCase):
         ids = {r.scenario_id for r in rows}
         self.assertIn("conversation_core::hi_andrea", ids)
         self.assertIn("conversation_core::news_today", ids)
+        self.assertIn("conversation_core::technical_guidance_timeout", ids)
 
     def test_conversation_smoke_subset_size(self) -> None:
         rows = conversation_core_scenarios({"smoke": True})

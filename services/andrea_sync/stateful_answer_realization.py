@@ -15,6 +15,7 @@ from .assistant_answer_composer import (
     is_continuation_fallback_family_text,
     is_strict_cursor_domain_recall_question,
 )
+from .model_router import model_for_role
 from .turn_intelligence import TurnPlan, resolve_answer_family_profile
 from .user_surface import sanitize_user_surface_text
 
@@ -402,4 +403,78 @@ def maybe_realize_stateful_reply(
         ):
             return None
     return safe
+
+
+def maybe_realize_grounded_technical_reply(
+    *,
+    user_text: str,
+    answer_family: str,
+    evidence_lines: Sequence[str],
+    fallback_reply: str,
+    required_anchors: Sequence[str] = (),
+    evidence_strength: int = 0,
+) -> str | None:
+    """Bounded synthesis for lookup-backed technical/research answers."""
+    if not stateful_realization_enabled():
+        return None
+    if not _env_truthy("ANDREA_GROUNDED_RESEARCH_REALIZATION_ENABLED", True):
+        return None
+    safe_evidence = [sanitize_user_surface_text(str(x or ""), fallback="", limit=420) for x in evidence_lines]
+    safe_evidence = [ln.strip() for ln in safe_evidence if str(ln or "").strip()]
+    if not safe_evidence:
+        return None
+    fallback = sanitize_user_surface_text(str(fallback_reply or ""), fallback="", limit=1200).strip()
+    if not fallback:
+        return None
+    model = model_for_role("worker")
+    timeout_seconds = max(
+        5,
+        int((os.environ.get("ANDREA_STATEFUL_REALIZATION_TIMEOUT_SECONDS") or "18").strip()),
+    )
+    system = (
+        "You are Andrea. Produce a concise grounded technical answer.\n"
+        "Rules:\n"
+        "1) Use ONLY facts from EVIDENCE_LINES.\n"
+        "2) If evidence is partial, be explicit about uncertainty.\n"
+        "3) Do NOT invent commands, versions, files, causes, or guarantees.\n"
+        "4) Keep it practical and user-facing.\n"
+        "5) If evidence is weak, return the fallback.\n"
+        "Return JSON with keys: reply (string), grounded (boolean), used_fallback (boolean), anchors_used (array of strings)."
+    )
+    payload = json.dumps(
+        {
+            "user_text": str(user_text or "").strip(),
+            "answer_family": str(answer_family or "grounded_research").strip(),
+            "evidence_lines": safe_evidence,
+            "evidence_strength": int(evidence_strength or _evidence_strength(safe_evidence)),
+            "required_anchors": [str(x).strip().lower() for x in required_anchors if str(x).strip()],
+            "fallback_reply": fallback,
+        },
+        ensure_ascii=False,
+    )
+    try:
+        parsed = _openai_json_chat(
+            system=system,
+            user=payload,
+            model=model,
+            timeout_seconds=timeout_seconds,
+        )
+    except Exception:
+        return None
+    reply = sanitize_user_surface_text(str(parsed.get("reply") or ""), fallback="", limit=1200).strip()
+    if not reply:
+        return None
+    if not bool(parsed.get("grounded")):
+        return None
+    if not _evidence_anchor_overlap(reply, safe_evidence):
+        return None
+    req = [str(x).strip().lower() for x in required_anchors if str(x).strip()]
+    if req and not _anchors_present_in_reply(reply, req):
+        anchors_used = parsed.get("anchors_used")
+        if not isinstance(anchors_used, list):
+            return None
+        used_low = {str(x).strip().lower() for x in anchors_used if str(x).strip()}
+        if any(a not in used_low for a in req):
+            return None
+    return reply
 

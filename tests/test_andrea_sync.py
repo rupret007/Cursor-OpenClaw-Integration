@@ -5111,6 +5111,56 @@ class TestAndreaSync(unittest.TestCase):
         self.assertIsNotNone(expanded)
         self.assertIn("today", str(expanded).lower())
 
+    def test_build_turn_plan_marks_research_technical_guidance(self) -> None:
+        from services.andrea_sync.turn_intelligence import build_turn_plan
+
+        plan = build_turn_plan(
+            "What does this timeout error usually mean?",
+            scenario_id="researchSummary",
+            projection_has_continuity_state=False,
+        )
+        self.assertEqual(plan.domain, "technical_guidance")
+        self.assertFalse(plan.force_delegate)
+        self.assertFalse(plan.prefer_state_reply)
+
+    def test_grounded_research_reply_returns_contract_for_technical_guidance(self) -> None:
+        os.environ["ANDREA_GROUNDED_RESEARCH_ENABLED"] = "1"
+        os.environ["ANDREA_GROUNDED_RESEARCH_REALIZATION_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer
+        from services.andrea_sync.turn_intelligence import build_turn_plan
+
+        server = SyncServer()
+        plan = build_turn_plan(
+            "How should I configure retries for timeout failures?",
+            scenario_id="researchSummary",
+            projection_has_continuity_state=False,
+        )
+        with mock.patch.object(
+            server,
+            "_resolve_runtime_skill",
+            return_value={"skill_key": "brave-api-search", "truth": {"status": "verified_available"}},
+        ), mock.patch.object(
+            server,
+            "_run_direct_openclaw_lookup",
+            return_value=(
+                "Retries usually help transient timeout errors when backoff and max attempts are bounded.",
+                "grounded_research_ready",
+            ),
+        ):
+            out = server._maybe_grounded_research_reply(
+                "t-grounded",
+                classify_text="How should I configure retries for timeout failures?",
+                turn_plan=plan,
+                scenario_id="researchSummary",
+            )
+        self.assertIsNotNone(out)
+        assert out is not None
+        text, reason, contract = out
+        self.assertIn("timeout", text.lower())
+        self.assertEqual(reason, "grounded_research_lookup")
+        self.assertEqual(contract.get("source"), "grounded_research_lookup")
+        self.assertEqual(contract.get("retrieval_source"), "brave-api-search")
+
 
 if __name__ == "__main__":
     unittest.main()

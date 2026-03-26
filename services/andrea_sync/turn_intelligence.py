@@ -21,6 +21,7 @@ TurnDomain = Literal[
     "project_status",
     "approval_state",
     "external_information",
+    "technical_guidance",
     "opinion_reflection",
     "technical_execution",
 ]
@@ -31,6 +32,7 @@ AnswerFamilyName = Literal[
     "cursor_continuation",
     "blocked_state",
     "approval_state",
+    "grounded_research",
 ]
 
 
@@ -141,6 +143,19 @@ _CURSOR_FOLLOWUP_HEAVY_RE = re.compile(
     re.I,
 )
 
+_TECHNICAL_GUIDANCE_RE = re.compile(
+    r"\b("
+    r"how\s+do\s+i|"
+    r"what\s+does\s+this\s+(?:[\w-]+\s+)?error|"
+    r"why\s+(?:is|does)\s+.*(?:error|fail|failing|timeout|crash)|"
+    r"how\s+should\s+i\s+configure|"
+    r"what\s+is\s+the\s+usual\s+fix|"
+    r"best\s+way\s+to\s+(?:fix|configure|debug)|"
+    r"explain\s+(?:this|that)\s+(?:error|issue|warning)"
+    r")\b",
+    re.I,
+)
+
 
 def is_approval_state_question(text: str) -> bool:
     """True for approval inventory / pending-approval questions across close paraphrases."""
@@ -191,7 +206,7 @@ def _policy_flags_for_domain(domain: TurnDomain) -> tuple[bool, bool]:
     """
     (allow_goal_continuity_repair, inject_durable_memory)
     """
-    if domain == "external_information":
+    if domain in {"external_information", "technical_guidance"}:
         return False, False
     if domain in {"project_status", "approval_state"}:
         return True, True
@@ -265,8 +280,12 @@ def build_turn_plan(
         if domain == "external_information":
             prefer_state_reply = False
     elif sid == "researchSummary":
-        domain = "external_information"
-        context_boundary = "external_world_only"
+        if _TECHNICAL_GUIDANCE_RE.search(clean):
+            domain = "technical_guidance"
+            context_boundary = "technical_lookup_guidance"
+        else:
+            domain = "external_information"
+            context_boundary = "external_world_only"
     elif sid in {"noteOrReminderCapture", "recentMessagesOrInboxLookup"}:
         domain = "personal_agenda"
         # Inbox / recent-text scenarios should not inherit schedule-oriented agenda hints.
@@ -294,6 +313,9 @@ def build_turn_plan(
         elif _OPINION_RE.search(clean):
             domain = "opinion_reflection"
             context_boundary = "recent_thread_only"
+        elif _TECHNICAL_GUIDANCE_RE.search(clean):
+            domain = "technical_guidance"
+            context_boundary = "technical_lookup_guidance"
         elif continuity_focus in (
             "recent_outcome_history",
             "blocked_state",
@@ -314,7 +336,7 @@ def build_turn_plan(
         domain = "personal_agenda"
         context_boundary = "personal_agenda_state"
 
-    if domain == "external_information":
+    if domain in {"external_information", "technical_guidance"}:
         prefer_state_reply = False
 
     allow_goal_continuity_repair, inject_durable_memory = _policy_flags_for_domain(domain)
@@ -366,6 +388,12 @@ def resolve_answer_family_profile(text: str, turn_plan: TurnPlan) -> AnswerFamil
             family="cursor_recall",
             allowed_sources=("cursor_continuity_recall", "goal_status"),
             min_score=70,
+        )
+    if domain in {"external_information", "technical_guidance"}:
+        return AnswerFamilyProfile(
+            family="grounded_research",
+            allowed_sources=("grounded_research_lookup",),
+            min_score=66,
         )
     return AnswerFamilyProfile(
         family="general_status",

@@ -6,6 +6,7 @@ from unittest import mock
 
 from services.andrea_sync.stateful_answer_realization import (
     _bundle_evidence_for_source,
+    maybe_realize_grounded_technical_reply,
     maybe_realize_stateful_reply,
 )
 from services.andrea_sync.turn_intelligence import TurnPlan
@@ -44,6 +45,43 @@ class StatefulAnswerRealizationTests(unittest.TestCase):
                 turn_plan=self._turn_plan(),
             )
         self.assertIsNone(out)
+
+    @mock.patch("services.andrea_sync.stateful_answer_realization._openai_json_chat")
+    def test_grounded_technical_realization_requires_evidence_anchors(
+        self, mock_chat: mock.MagicMock
+    ) -> None:
+        mock_chat.return_value = {
+            "reply": "Timeout errors are commonly transient; bounded retries with backoff usually help.",
+            "grounded": True,
+            "used_fallback": False,
+            "anchors_used": ["timeout", "retries"],
+        }
+        with mock.patch.dict(
+            os.environ,
+            {
+                "ANDREA_STATEFUL_REALIZATION_ENABLED": "1",
+                "ANDREA_GROUNDED_RESEARCH_REALIZATION_ENABLED": "1",
+                "OPENAI_API_ENABLED": "1",
+                "OPENAI_API_KEY": "x",
+            },
+            clear=False,
+        ):
+            out = maybe_realize_grounded_technical_reply(
+                user_text="What does this timeout error usually mean?",
+                answer_family="grounded_research",
+                evidence_lines=[
+                    "Timeout failures are often transient under network jitter.",
+                    "Retries with bounded backoff reduce repeated timeout failures.",
+                ],
+                fallback_reply="I can only confirm that retries may help some timeout failures.",
+                required_anchors=("timeout", "retries"),
+                evidence_strength=5,
+            )
+        self.assertIsNotNone(out)
+        assert out is not None
+        low = out.lower()
+        self.assertIn("timeout", low)
+        self.assertIn("retries", low)
 
     def test_bundle_goal_status_splits_structured_lines(self) -> None:
         evidence = _bundle_evidence_for_source(

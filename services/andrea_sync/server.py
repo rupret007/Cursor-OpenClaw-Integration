@@ -90,8 +90,9 @@ from .semantic_continuity import (
     user_message_suggests_anaphoric_cursor_continue,
 )
 from .semantic_answer_engine import choose_semantic_state_reply
+from .stateful_answer_realization import maybe_realize_grounded_technical_reply
 from .telegram_continuation import attach_continuation_if_applicable
-from .turn_intelligence import TurnPlan, build_turn_plan
+from .turn_intelligence import TurnPlan, build_turn_plan, resolve_answer_family_profile
 from .store import (
     append_event,
     complete_execution_attempt,
@@ -1747,6 +1748,61 @@ class SyncServer:
                         task_id, decision.reply_text, decision.reason
                     )
                 return decision, applied
+            grounded = self._maybe_grounded_research_reply(
+                task_id,
+                classify_text=classify_text,
+                turn_plan=effective_turn_plan,
+                scenario_id=pre_resolution.scenario_id,
+            )
+            if grounded is not None:
+                grounded_text, grounded_reason, grounded_contract = grounded
+                scen_res = ScenarioResolution(
+                    scenario_id=pre_resolution.scenario_id,
+                    confidence=max(pre_resolution.confidence, 0.82),
+                    support_level=pre_resolution.support_level,
+                    reason=grounded_reason,
+                    goal_id=pre_resolution.goal_id,
+                    needs_plan=False,
+                    suggested_lane="direct_assistant",
+                    action_class=pre_resolution.action_class,
+                    proof_class=pre_resolution.proof_class,
+                    approval_mode=pre_resolution.approval_mode,
+                )
+                self._append_task_event(
+                    task_id,
+                    EventType.SCENARIO_RESOLVED,
+                    scen_res.to_event_payload(),
+                )
+                decision = AndreaRouteDecision(
+                    mode="direct",
+                    reason=grounded_reason,
+                    reply_text=grounded_text,
+                    collaboration_mode=str(
+                        user_payload.get("collaboration_mode")
+                        or principal_prefs.get("collaboration_mode")
+                        or "auto"
+                    ),
+                )
+                applied = self._append_task_event(
+                    task_id,
+                    EventType.ASSISTANT_REPLIED,
+                    {
+                        "text": decision.reply_text,
+                        "route": "direct",
+                        "reason": decision.reason,
+                        "grounded_research_selection": grounded_contract,
+                    },
+                )
+                if applied:
+                    self.with_lock(lambda c: set_meta(c, marker, str(time.time())))
+                    self._record_daily_assistant_receipt_after_direct_reply(
+                        task_id,
+                        scen_res.to_event_payload(),
+                        decision.reply_text,
+                        route="direct",
+                        reason=decision.reason,
+                    )
+                return decision, applied
             if pre_turn_plan.force_delegate:
                 decision = AndreaRouteDecision(
                     mode="delegate",
@@ -2961,6 +3017,130 @@ class SyncServer:
             "- Keep internal tool/config/runtime details out of the user-facing answer.\n"
             "- Put the final answer in the summary field as 1-2 short sentences.\n"
         )
+
+    def _build_grounded_research_prompt(self, text: str) -> str:
+        return (
+            "Use the verified search/research capability to answer the user question.\n"
+            f"User request: {text.strip()}\n\n"
+            "Rules:\n"
+            "- Return only facts you can verify from retrieved evidence.\n"
+            "- If evidence is partial, include uncertainty explicitly.\n"
+            "- Do not invent commands, version numbers, file paths, or outcomes.\n"
+            "- Keep internal runtime/config details out of the user-facing summary.\n"
+            "- Put the final user-facing answer in summary as 1-3 short sentences.\n"
+        )
+
+    def _research_required_anchors(self, text: str) -> list[str]:
+        out: list[str] = []
+        for tok in re.split(r"[^a-zA-Z0-9_]+", str(text or "").lower()):
+            clean = tok.strip()
+            if len(clean) < 6:
+                continue
+            if clean in {"should", "usually", "because", "around", "config", "system"}:
+                continue
+            if clean not in out:
+                out.append(clean)
+            if len(out) >= 3:
+                break
+        return out
+
+    def _looks_execution_heavy_or_repo_action(self, text: str) -> bool:
+        clean = str(text or "").strip()
+        if not clean:
+            return False
+        if re.search(r"[/~][\\w.\\-~/]+|`[^`]+`|\\b\\w+\\.(py|ts|tsx|js|jsx|md|sh|json|yaml|yml)\\b", clean, re.I):
+            return True
+        return bool(
+            re.search(
+                r"\\b("
+                r"implement|refactor|migrate|edit\\s+file|write\\s+code|create\\s+pr|open\\s+pr|"
+                r"run\\s+tests|fix\\s+the\\s+code|debug\\s+in\\s+repo|apply\\s+patch|commit\\s+this"
+                r")\\b",
+                clean,
+                re.I,
+            )
+        )
+
+    def _maybe_grounded_research_reply(
+        self,
+        task_id: str,
+        *,
+        classify_text: str,
+        turn_plan: TurnPlan,
+        scenario_id: str,
+    ) -> tuple[str, str, dict[str, Any]] | None:
+        if not _env_bool("ANDREA_GROUNDED_RESEARCH_ENABLED", True):
+            return None
+        dom = str(turn_plan.domain or "")
+        if dom not in {"external_information", "technical_guidance"} and str(scenario_id or "") != "researchSummary":
+            return None
+        if bool(turn_plan.force_delegate):
+            return None
+        if self._looks_execution_heavy_or_repo_action(classify_text):
+            return None
+        family_profile = resolve_answer_family_profile(classify_text, turn_plan)
+        resolved = self._resolve_runtime_skill(
+            task_id,
+            skill_key="brave-api-search",
+            actor="server_grounded_research",
+        )
+        if str(resolved.get("truth", {}).get("status") or "") != "verified_available":
+            unavailable = (
+                "I couldn't verify live lookup capability right now, so I can only give a general answer. "
+                "If you want, I can retry lookup in a moment."
+            )
+            contract = {
+                "family": family_profile.family,
+                "source": "grounded_research_lookup",
+                "retrieval_source": "brave-api-search",
+                "query": str(classify_text or "").strip(),
+                "evidence_lines": [],
+                "evidence_strength": 0,
+                "required_anchors": [],
+                "fallback_policy": "truthful_unavailable_lookup_fallback",
+                "lookup_status": str(resolved.get("truth", {}).get("status") or "unavailable"),
+            }
+            return unavailable, "grounded_research_unavailable", contract
+        lookup_summary, lookup_reason = self._run_direct_openclaw_lookup(
+            task_id,
+            prompt=self._build_grounded_research_prompt(classify_text),
+            route_reason="structured_grounded_research",
+            success_reason="grounded_research_ready",
+            success_fallback="I gathered a grounded summary from verified lookup.",
+            failure_reason="grounded_research_failed",
+            failure_reply="I couldn't gather a grounded lookup summary cleanly just now.",
+        )
+        summary = shared_sanitize_user_surface_text(str(lookup_summary or "").strip(), fallback="", limit=1200).strip()
+        if not summary:
+            return None
+        evidence_lines = [summary]
+        required_anchors = self._research_required_anchors(summary)
+        evidence_strength = max(1, min(8, len(summary) // 80 + len(required_anchors)))
+        realized = maybe_realize_grounded_technical_reply(
+            user_text=classify_text,
+            answer_family=str(family_profile.family or "grounded_research"),
+            evidence_lines=evidence_lines,
+            fallback_reply=summary,
+            required_anchors=required_anchors,
+            evidence_strength=evidence_strength,
+        )
+        final_reply = shared_sanitize_user_surface_text(
+            str(realized or summary).strip(),
+            fallback=summary,
+            limit=1200,
+        ).strip()
+        contract = {
+            "family": family_profile.family,
+            "source": "grounded_research_lookup",
+            "retrieval_source": "brave-api-search",
+            "query": str(classify_text or "").strip(),
+            "evidence_lines": evidence_lines,
+            "evidence_strength": evidence_strength,
+            "required_anchors": required_anchors,
+            "fallback_policy": "prefer_grounded_lookup_then_truthful_fallback",
+            "lookup_reason": lookup_reason,
+        }
+        return final_reply, "grounded_research_lookup", contract
 
     def _run_direct_openclaw_lookup(
         self,

@@ -67,6 +67,7 @@ FAILURE_FAMILIES = (
     "delegation_miss",
     "external_info_contamination",
     "thin_summary",
+    "grounded_research_failure",
 )
 
 MECHANICAL_PHRASES = (
@@ -293,6 +294,11 @@ def build_turn_capture(
         if isinstance(semantic_selection.get("turn_contract"), dict)
         else {}
     )
+    grounded_selection = (
+        assistant_payload.get("grounded_research_selection")
+        if isinstance(assistant_payload.get("grounded_research_selection"), dict)
+        else {}
+    )
     assistant_route = _task_route(detail)
     rendered_reply = _rendered_reply_text(
         harness=harness,
@@ -313,6 +319,7 @@ def build_turn_capture(
         "assistant_reason": _task_assistant_reason(detail),
         "assistant_semantic_selection": semantic_selection,
         "semantic_turn_contract": semantic_contract,
+        "assistant_grounded_research_selection": grounded_selection,
         "scenario_id": scenario_id or resolution.scenario_id,
         "scenario_reason": str(scen.get("reason") or resolution.reason),
         "turn_plan_domain": plan.domain,
@@ -369,6 +376,25 @@ def run_deterministic_detectors(
             contract_evidence_strength = int(semantic_contract.get("evidence_strength") or 0)
         except (TypeError, ValueError):
             contract_evidence_strength = 0
+    grounded_selection = capture.get("assistant_grounded_research_selection")
+    grounded_source = ""
+    grounded_family = ""
+    grounded_evidence_strength = 0
+    grounded_required_anchors: list[str] = []
+    grounded_evidence_lines: list[str] = []
+    if isinstance(grounded_selection, dict):
+        grounded_source = str(grounded_selection.get("source") or "")
+        grounded_family = str(grounded_selection.get("family") or "")
+        try:
+            grounded_evidence_strength = int(grounded_selection.get("evidence_strength") or 0)
+        except (TypeError, ValueError):
+            grounded_evidence_strength = 0
+        raw_anchors = grounded_selection.get("required_anchors")
+        if isinstance(raw_anchors, list):
+            grounded_required_anchors = [str(x).strip().lower() for x in raw_anchors if str(x).strip()]
+        raw_lines = grounded_selection.get("evidence_lines")
+        if isinstance(raw_lines, list):
+            grounded_evidence_lines = [str(x).strip().lower() for x in raw_lines if str(x).strip()]
 
     if capture.get("leak_internal_runtime") or capture.get("leak_sanitized_empty"):
         findings.append(
@@ -458,6 +484,57 @@ def run_deterministic_detectors(
                 "issue_code": "conversation_stateful_domain_hijack",
                 "severity": "high",
                 "detail": "stateful semantic answer used outside project/approval domain",
+            }
+        )
+    if grounded_source and expected_sources and grounded_source not in expected_sources:
+        findings.append(
+            {
+                "family": "wrong_domain_contamination",
+                "issue_code": "conversation_semantic_source_family_mismatch",
+                "severity": "high",
+                "detail": f"grounded source {grounded_source!r} not in expected family sources {tuple(expected_sources)!r}",
+            }
+        )
+    if grounded_source and not grounded_evidence_lines:
+        findings.append(
+            {
+                "family": "grounded_research_failure",
+                "issue_code": "conversation_research_contract_missing",
+                "severity": "high",
+                "detail": "grounded lookup selected without evidence lines",
+            }
+        )
+    if grounded_family and expected_family and grounded_family != expected_family:
+        findings.append(
+            {
+                "family": "wrong_domain_contamination",
+                "issue_code": "conversation_semantic_contract_family_mismatch",
+                "severity": "high",
+                "detail": f"grounded contract family {grounded_family!r} does not match expected {expected_family!r}",
+            }
+        )
+    if grounded_required_anchors and not all(a in low for a in grounded_required_anchors):
+        findings.append(
+            {
+                "family": "grounded_research_failure",
+                "issue_code": "conversation_grounding_anchor_miss",
+                "severity": "high",
+                "detail": "grounded reply missed one or more required evidence anchors",
+            }
+        )
+    fallbackish_lookup = (
+        is_generic_direct_reply(text)
+        or "tell me more" in low
+        or "say a bit more" in low
+        or "i can help with that" in low
+    )
+    if grounded_source and grounded_evidence_strength >= 4 and fallbackish_lookup:
+        findings.append(
+            {
+                "family": "grounded_research_failure",
+                "issue_code": "conversation_generic_fallback_despite_lookup",
+                "severity": "high",
+                "detail": "generic fallback-shaped answer despite strong grounded lookup evidence",
             }
         )
     if (
@@ -801,7 +878,7 @@ def run_semantic_adjudicator(
         "You resolve ambiguous assistant routing for Andrea. Return ONLY JSON with keys: "
         "next_action (one of: direct_reply, clarify, delegate), "
         "domain_family (one of: casual_conversation, personal_agenda, attention_today, "
-        "external_information, project_status, approval_state, technical_execution, other), "
+        "external_information, technical_guidance, project_status, approval_state, technical_execution, other), "
         "continuity_family (one of: none, blocked_state, recent_outcome_history, "
         "cursor_followup_heavy_lift), "
         "reuse_recent_delegation (bool), "
@@ -866,6 +943,7 @@ class ConversationCaseSpec:
     first_update_id: int
     first_message_id: int
     patch_openclaw_news: bool = False
+    patch_openclaw_summary: str = ""
     patch_bluebubbles: bool = False
     expect_external_domain: bool = False
     expect_cursor_substance: bool = False
@@ -1605,6 +1683,9 @@ def run_conversation_case(
     patches: List[Any] = []
     if case.patch_openclaw_news:
         patches.append(_openclaw_news_patch(server))
+    elif case.patch_openclaw_summary:
+        patches.append(_openclaw_generic_patch(server, case.patch_openclaw_summary))
+        patches.append(_resolve_skill_patch(server))
     if case.patch_bluebubbles:
         patches.append(_bluebubbles_patch(server))
         patches.append(
@@ -2029,6 +2110,22 @@ CONVERSATION_CORE_CASES: tuple[ConversationCaseSpec, ...] = (
         first_message_id=28007,
         patch_openclaw_news=True,
         expect_external_domain=True,
+    ),
+    ConversationCaseSpec(
+        case_id="technical_guidance_timeout",
+        title="Technical guidance timeout",
+        behavior_family="grounded_research",
+        turns=("What does this timeout error usually mean?",),
+        chat_id=88070,
+        from_id=99070,
+        first_update_id=18070,
+        first_message_id=28070,
+        patch_openclaw_summary=(
+            "Timeout failures are often transient under load. "
+            "Bounded retries with backoff are a common first mitigation."
+        ),
+        required_assistant_reasons=("grounded_research_lookup",),
+        required_turn_domains=("technical_guidance",),
     ),
     ConversationCaseSpec(
         case_id="working_on_now",

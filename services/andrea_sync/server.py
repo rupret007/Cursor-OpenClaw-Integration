@@ -30,6 +30,7 @@ from .assistant_answer_composer import (
     build_recent_outcome_history_reply_from_state,
     cursor_followup_context_reply_with_fallback,
     find_viable_recent_cursor_workstream_reply,
+    format_reply_with_next_step_options,
     merge_goal_reply_with_followthrough,
     same_chat_has_cursor_continuation_viability,
     try_composer_early_short_circuit,
@@ -3122,6 +3123,28 @@ class SyncServer:
             "- Put the final user-facing answer in summary as 1-3 short sentences.\n"
         )
 
+    def _split_grounded_lookup_evidence_lines(self, summary: str) -> list[str]:
+        s = str(summary or "").strip()
+        if not s:
+            return []
+        parts = re.split(r"(?<=[.!?])\s+", s)
+        lines = [p.strip() for p in parts if len(p.strip()) > 10]
+        return lines[:4] if lines else [s]
+
+    def _grounded_lookup_next_step_options(self, *, answer_mode: str) -> list[str]:
+        mode = str(answer_mode or "").strip()
+        if mode == "strong_evidence_answer":
+            return []
+        if mode == "partial_evidence_helpful_answer":
+            return [
+                "Retry grounded lookup if you need fresher or broader evidence.",
+                "Narrow to the exact tool, error string, or version you care about.",
+            ]
+        return [
+            "Retry grounded lookup in a moment when connectivity is stable.",
+            "Ask a narrower factual question (exact command, error text, or version).",
+        ]
+
     def _research_required_anchors(self, text: str) -> list[str]:
         out: list[str] = []
         for tok in re.split(r"[^a-zA-Z0-9_]+", str(text or "").lower()):
@@ -3173,10 +3196,14 @@ class SyncServer:
             actor="server_grounded_research",
         )
         if str(resolved.get("truth", {}).get("status") or "") != "verified_available":
-            unavailable = (
+            unavailable_base = (
                 "I couldn't verify live lookup capability right now, so I can only give a general answer. "
                 "If you want, I can retry lookup in a moment."
             )
+            n_opts = self._grounded_lookup_next_step_options(answer_mode="truthful_fallback_with_next_steps")[
+                :2
+            ]
+            unavailable = format_reply_with_next_step_options(unavailable_base, n_opts)
             contract = {
                 "family": family_profile.family,
                 "source": "grounded_research_lookup",
@@ -3187,6 +3214,9 @@ class SyncServer:
                 "required_anchors": [],
                 "fallback_policy": "truthful_unavailable_lookup_fallback",
                 "lookup_status": str(resolved.get("truth", {}).get("status") or "unavailable"),
+                "answer_mode": "truthful_fallback_with_next_steps",
+                "uncertainty_mode": "thin",
+                "next_step_options": n_opts,
             }
             return unavailable, "grounded_research_unavailable", contract
         lookup_summary, lookup_reason = self._run_direct_openclaw_lookup(
@@ -3201,9 +3231,22 @@ class SyncServer:
         summary = shared_sanitize_user_surface_text(str(lookup_summary or "").strip(), fallback="", limit=1200).strip()
         if not summary:
             return None
-        evidence_lines = [summary]
+        evidence_lines = self._split_grounded_lookup_evidence_lines(summary)
         required_anchors = self._research_required_anchors(summary)
-        evidence_strength = max(1, min(8, len(summary) // 80 + len(required_anchors)))
+        line_score = sum(
+            1 + (1 if ":" in ln else 0) + (1 if len(ln) > 48 else 0) for ln in evidence_lines
+        )
+        evidence_strength = max(1, min(12, line_score + len(required_anchors)))
+        if evidence_strength >= 6:
+            answer_mode = "strong_evidence_answer"
+            uncertainty_mode = "clear"
+        elif evidence_strength >= 2:
+            answer_mode = "partial_evidence_helpful_answer"
+            uncertainty_mode = "partial"
+        else:
+            answer_mode = "truthful_fallback_with_next_steps"
+            uncertainty_mode = "thin"
+        next_opts = self._grounded_lookup_next_step_options(answer_mode=answer_mode)[:2]
         realized = maybe_realize_grounded_technical_reply(
             user_text=classify_text,
             answer_family=str(family_profile.family or "grounded_research"),
@@ -3211,6 +3254,11 @@ class SyncServer:
             fallback_reply=summary,
             required_anchors=required_anchors,
             evidence_strength=evidence_strength,
+            answer_mode=answer_mode,
+            uncertainty_mode=uncertainty_mode,
+            next_step_options=next_opts,
+            retrieval_source="brave-api-search",
+            query=str(classify_text or "").strip(),
         )
         final_reply = shared_sanitize_user_surface_text(
             str(realized or summary).strip(),
@@ -3227,6 +3275,9 @@ class SyncServer:
             "required_anchors": required_anchors,
             "fallback_policy": "prefer_grounded_lookup_then_truthful_fallback",
             "lookup_reason": lookup_reason,
+            "answer_mode": answer_mode,
+            "uncertainty_mode": uncertainty_mode,
+            "next_step_options": next_opts,
         }
         return final_reply, "grounded_research_lookup", contract
 

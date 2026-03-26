@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -541,6 +542,91 @@ CONTINUATION_NO_VIABLE_WORKSTREAM_FALLBACK = (
     "so I’d need to start a new one from your latest instruction."
 )
 
+
+def useful_fallback_uplift_enabled() -> bool:
+    """When true, thin truthful fallbacks gain bounded, policy-grounded next-step options."""
+    raw = (os.environ.get("ANDREA_USEFUL_FALLBACK_UPLIFT_ENABLED") or "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def format_reply_with_next_step_options(base: str, options: Sequence[str]) -> str:
+    """Append a short Next options section; facts stay in base, options are guidance only."""
+    b = str(base or "").strip()
+    opts = [str(o).strip() for o in options if str(o).strip()][:2]
+    if not b or not opts:
+        return b
+    lines = "\n".join(f"• {o}" for o in opts)
+    return sanitize_user_surface_text(f"{b}\n\nNext options:\n{lines}", fallback=b, limit=1200).strip()
+
+
+def derive_stateful_next_step_options(
+    conn: Any,
+    task_id: str,
+    *,
+    source: str,
+    user_text: str,
+) -> tuple[str, ...]:
+    """
+    Deterministic next-step affordances for stateful lanes (no invented state).
+    Safe when conn is minimal/test: falls back to generic capability-true options.
+    """
+    um = str(user_text or "").strip()
+    src = str(source or "").strip()
+    out: list[str] = []
+    try:
+        if src == "cursor_continuity_recall":
+            if same_chat_has_cursor_continuation_viability(conn, task_id, um):
+                out.append(
+                    "If you meant a nearby Cursor run on this chat, say “continue that” "
+                    "and I’ll pick up the strongest same-chat workstream I can verify."
+                )
+            out.append(
+                "Re-send your latest instruction so I can run a fresh Cursor pass with clean tracked context."
+            )
+            out.append(
+                "Name a rough time window or the task label you care about if you need a tighter recap anchor."
+            )
+        elif src == "cursor_heavy_lift_context":
+            out.append(
+                "Start a new heavy-lift Cursor pass from your latest instruction—I’ll track it on this thread."
+            )
+            if same_chat_has_cursor_continuation_viability(conn, task_id, um):
+                out.append(
+                    "If the right workstream is already on this chat, say “continue that” and I’ll bind to it."
+                )
+        elif src == "blocked_state_reply":
+            out.append("Reply with what changed if the blocker should be cleared, or ask for the exact task id.")
+            out.append("I can recap the latest tracked outcome if you want surrounding context.")
+        elif src in {"goal_status", "goal_continuity"}:
+            out.append(
+                "If you need a tighter inventory, name the goal id, approval id, or task label you mean."
+            )
+            out.append("Ask for the latest tracked outcome on this thread if the summary above is too thin.")
+    except Exception:
+        out = []
+    if not out:
+        if src in {"cursor_continuity_recall", "cursor_heavy_lift_context"}:
+            out = [
+                "Re-send your latest instruction for a fresh Cursor pass.",
+                "Say “continue that” if you want me to bind to recent same-chat Cursor work.",
+            ]
+        elif src == "blocked_state_reply":
+            out = [
+                "Tell me what changed if the blocker should be cleared.",
+            ]
+        else:
+            out = [
+                "Name the specific task, approval, or label you mean so I can narrow the check.",
+            ]
+    seen: set[str] = set()
+    uniq: list[str] = []
+    for o in out:
+        k = o.lower()
+        if k not in seen:
+            seen.add(k)
+            uniq.append(o)
+    return tuple(uniq[:2])
+
 _GRACE_CURSOR_CONTINUITY = (
     "I don't have a prior Cursor result stored for this thread yet. "
     "If you want, I can start a fresh Cursor pass now and give you a concise recap."
@@ -549,6 +635,38 @@ _GRACE_GENERIC_HISTORY = (
     "I don't have enough recorded history on the current task to say that confidently. "
     "I can still check the latest linked goal or start tracking the next step explicitly."
 )
+
+
+def is_degenerate_cursor_recall_reply(text: str) -> bool:
+    """True for grace / no-clean-recap surfaces, including useful-fallback uplift variants."""
+    t = str(text or "").strip()
+    if not t:
+        return True
+    if t in (
+        _GRACE_CURSOR_CONTINUITY,
+        _GRACE_GENERIC_HISTORY,
+        RECALL_NO_CLEAN_CURSOR_RECAP_FALLBACK,
+    ):
+        return True
+    low = t.lower()
+    return "not finding a recent clean cursor result" in low
+
+
+def _recall_no_clean_fallback_reply(
+    conn: Any,
+    task_id: str,
+    *,
+    user_message: str,
+    tail: str = "",
+) -> str:
+    base = f"{RECALL_NO_CLEAN_CURSOR_RECAP_FALLBACK}{tail}".strip()
+    if not useful_fallback_uplift_enabled():
+        return base
+    opts = derive_stateful_next_step_options(
+        conn, task_id, source="cursor_continuity_recall", user_text=user_message
+    )
+    return format_reply_with_next_step_options(base, opts)
+
 
 _AMBIGUOUS_CURSOR_CONTINUE_REPLY = (
     "I see more than one recent Cursor workstream on this thread that could fit. "
@@ -1498,12 +1616,7 @@ def build_cursor_continuity_recall_reply_from_state(
                 )
                 if (
                     alt_text
-                    and alt_text
-                    not in (
-                        _GRACE_CURSOR_CONTINUITY,
-                        _GRACE_GENERIC_HISTORY,
-                        RECALL_NO_CLEAN_CURSOR_RECAP_FALLBACK,
-                    )
+                    and (not is_degenerate_cursor_recall_reply(alt_text))
                     and not _cursor_recall_composition_is_metadata_led(alt_text)
                 ):
                     return alt_text
@@ -1563,7 +1676,7 @@ def build_cursor_continuity_recall_reply_from_state(
 
     if not lines:
         if is_cursor_thread_recall_question(um):
-            return RECALL_NO_CLEAN_CURSOR_RECAP_FALLBACK
+            return _recall_no_clean_fallback_reply(conn, use_id, user_message=um)
         return _GRACE_GENERIC_HISTORY
 
     if (
@@ -1573,7 +1686,7 @@ def build_cursor_continuity_recall_reply_from_state(
         and is_cursor_thread_recall_question(um)
         and not exec_lines
     ):
-        return RECALL_NO_CLEAN_CURSOR_RECAP_FALLBACK
+        return _recall_no_clean_fallback_reply(conn, use_id, user_message=um)
 
     tail = ""
     if blocked_reason or followthrough_needs_user_attention(_followthrough_section(meta)):
@@ -1588,7 +1701,7 @@ def build_cursor_continuity_recall_reply_from_state(
             if clean and not is_continuation_fallback_family_text(clean):
                 out = f"Cursor recap: {clean}{tail}".strip()
             else:
-                out = f"{RECALL_NO_CLEAN_CURSOR_RECAP_FALLBACK}{tail}".strip()
+                out = _recall_no_clean_fallback_reply(conn, use_id, user_message=um, tail=tail)
         elif receipt_substantive:
             lead_ln = receipt_substantive[0]
             clean = _normalize_cursor_recap_lead(
@@ -1597,11 +1710,11 @@ def build_cursor_continuity_recall_reply_from_state(
             if clean:
                 out = f"Cursor recap: {clean}{tail}".strip()
             else:
-                out = f"{RECALL_NO_CLEAN_CURSOR_RECAP_FALLBACK}{tail}".strip()
+                out = _recall_no_clean_fallback_reply(conn, use_id, user_message=um, tail=tail)
         else:
-            out = f"{RECALL_NO_CLEAN_CURSOR_RECAP_FALLBACK}{tail}".strip()
+            out = _recall_no_clean_fallback_reply(conn, use_id, user_message=um, tail=tail)
     if strict_cursor_recall and _cursor_recall_output_should_force_clean_fallback(out):
-        out = f"{RECALL_NO_CLEAN_CURSOR_RECAP_FALLBACK}{tail}".strip()
+        out = _recall_no_clean_fallback_reply(conn, use_id, user_message=um, tail=tail)
     return out
 
 
@@ -1623,11 +1736,7 @@ def find_viable_recent_cursor_workstream_reply(
 
     def _safe_recap(tid: str) -> Optional[str]:
         recap = build_cursor_continuity_recall_reply_from_state(conn, tid, user_message=um)
-        if not recap or recap in (
-            _GRACE_CURSOR_CONTINUITY,
-            _GRACE_GENERIC_HISTORY,
-            RECALL_NO_CLEAN_CURSOR_RECAP_FALLBACK,
-        ):
+        if not recap or is_degenerate_cursor_recall_reply(recap):
             return None
         if _cursor_recall_composition_is_metadata_led(recap):
             return None
@@ -1848,16 +1957,17 @@ def cursor_followup_context_reply_with_fallback(
         recap = build_cursor_continuity_recall_reply_from_state(
             conn, alt, user_message=user_message
         )
-        if recap not in (
-            _GRACE_GENERIC_HISTORY,
-            _GRACE_CURSOR_CONTINUITY,
-            RECALL_NO_CLEAN_CURSOR_RECAP_FALLBACK,
-        ):
+        if not is_degenerate_cursor_recall_reply(recap):
             return (
                 "The last Cursor run on this thread already finished. "
                 "I can start a new heavy-lift pass using this as the starting point:\n"
                 f"{recap}"
             )
+    if useful_fallback_uplift_enabled():
+        opts = derive_stateful_next_step_options(
+            conn, task_id, source="cursor_heavy_lift_context", user_text=um
+        )
+        return format_reply_with_next_step_options(CONTINUATION_NO_VIABLE_WORKSTREAM_FALLBACK, opts)
     return CONTINUATION_NO_VIABLE_WORKSTREAM_FALLBACK
 
 

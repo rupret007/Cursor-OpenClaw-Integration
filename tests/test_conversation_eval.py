@@ -325,6 +325,74 @@ class ConversationEvalDetectorTests(unittest.TestCase):
         codes = {h["issue_code"] for h in hits}
         self.assertIn("conversation_fallback_shaped_under_contract_evidence", codes)
 
+    def test_detects_missing_next_step_guidance_for_semantic_contract(self) -> None:
+        cap = {
+            "raw_reply_text": "Adjusted the handler path for retries only.",
+            "rendered_reply_sanitized": "Andrea:\nAdjusted the handler path for retries only.",
+            "user_turn": "What did Cursor say?",
+            "turn_plan_domain": "project_status",
+            "assistant_reason": "semantic_state_cursor_continuity_recall",
+            "assistant_semantic_selection": {"source": "cursor_continuity_recall"},
+            "semantic_turn_contract": {
+                "family": "cursor_recall",
+                "source": "cursor_continuity_recall",
+                "allowed_sources": ["cursor_continuity_recall"],
+                "evidence_strength": 3,
+                "answer_mode": "partial_evidence_helpful_answer",
+                "next_step_options": [
+                    "Re-send your latest instruction so I can run a fresh Cursor pass with clean tracked context.",
+                    "Name a rough time window if you need a tighter recap anchor.",
+                ],
+            },
+            "expected_answer_family": "cursor_recall",
+            "expected_answer_sources": ["cursor_continuity_recall"],
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap)
+        codes = {h["issue_code"] for h in hits}
+        self.assertIn("conversation_missing_next_step_guidance", codes)
+
+    def test_detects_partial_evidence_not_exploited(self) -> None:
+        cap = {
+            "raw_reply_text": "I’m not finding a recent clean Cursor result to recap from this thread.",
+            "rendered_reply_sanitized": "Andrea:\nI’m not finding a recent clean Cursor result to recap from this thread.",
+            "user_turn": "What did Cursor say?",
+            "turn_plan_domain": "project_status",
+            "assistant_reason": "semantic_state_cursor_continuity_recall",
+            "assistant_semantic_selection": {"source": "cursor_continuity_recall"},
+            "semantic_turn_contract": {
+                "family": "cursor_recall",
+                "source": "cursor_continuity_recall",
+                "evidence_strength": 4,
+                "answer_mode": "partial_evidence_helpful_answer",
+            },
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap)
+        codes = {h["issue_code"] for h in hits}
+        self.assertIn("conversation_partial_evidence_not_exploited", codes)
+
+    def test_grounded_unavailable_contract_skips_missing_evidence_line_failure(self) -> None:
+        cap = {
+            "raw_reply_text": "Could not verify lookup.",
+            "rendered_reply_sanitized": "Andrea: Could not verify lookup.",
+            "user_turn": "What does this error mean?",
+            "assistant_reason": "grounded_research_unavailable",
+            "assistant_grounded_research_selection": {
+                "source": "grounded_research_lookup",
+                "family": "grounded_research",
+                "evidence_lines": [],
+                "fallback_policy": "truthful_unavailable_lookup_fallback",
+            },
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap)
+        codes = {h["issue_code"] for h in hits}
+        self.assertNotIn("conversation_research_contract_missing", codes)
+
     def test_clean_cursor_recall_fallback_not_flagged_as_approval_contamination(self) -> None:
         cap = {
             "raw_reply_text": "I'm not finding a recent clean Cursor result to recap from this thread.",

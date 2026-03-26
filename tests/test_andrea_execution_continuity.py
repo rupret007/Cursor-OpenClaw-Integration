@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -255,9 +256,10 @@ class ExecutionContinuityTests(unittest.TestCase):
                 "reason": "seed",
             },
         )
-        text = build_cursor_continuity_recall_reply_from_state(
-            self.conn, "tsk_recall_only_cont", user_message="What did Cursor say?"
-        )
+        with mock.patch.dict(os.environ, {"ANDREA_USEFUL_FALLBACK_UPLIFT_ENABLED": "0"}, clear=False):
+            text = build_cursor_continuity_recall_reply_from_state(
+                self.conn, "tsk_recall_only_cont", user_message="What did Cursor say?"
+            )
         self.assertEqual(text.strip(), RECALL_NO_CLEAN_CURSOR_RECAP_FALLBACK.strip())
 
     def test_cursor_followup_fallback_picks_ranked_same_chat_delegated_task(self) -> None:

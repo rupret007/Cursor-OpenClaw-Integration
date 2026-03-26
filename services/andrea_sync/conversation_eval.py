@@ -37,6 +37,7 @@ from .experience_types import ExperienceCheckResult, ExperienceObservation, Expe
 from .model_router import model_for_role
 from .projector import project_task_dict
 from .scenario_runtime import resolve_scenario
+from .stateful_answer_realization import next_step_options_reflected_in_reply
 from .schema import CommandType, EventType, TaskStatus
 from .semantic_continuity import resolve_semantic_continuity_patch, same_chat_max_delegation_score
 from .store import (
@@ -94,6 +95,8 @@ def _looks_fallback_shaped_reply(text: str) -> bool:
     low = str(text or "").strip().lower()
     if not low:
         return True
+    if "next options:" in low:
+        return False
     patterns = (
         "not finding a recent clean cursor result",
         "not finding a recent cursor workstream",
@@ -374,9 +377,15 @@ def run_deterministic_detectors(
     contract_source = ""
     contract_allowed_sources: set[str] = set()
     contract_evidence_strength = 0
+    contract_answer_mode = ""
+    contract_next_steps: list[str] = []
     if isinstance(semantic_contract, dict):
         contract_family = str(semantic_contract.get("family") or "")
         contract_source = str(semantic_contract.get("source") or "")
+        contract_answer_mode = str(semantic_contract.get("answer_mode") or "").strip()
+        raw_ns = semantic_contract.get("next_step_options")
+        if isinstance(raw_ns, list):
+            contract_next_steps = [str(x).strip() for x in raw_ns if str(x).strip()]
         raw_allowed = semantic_contract.get("allowed_sources")
         if isinstance(raw_allowed, list):
             contract_allowed_sources = {str(x) for x in raw_allowed if str(x)}
@@ -390,9 +399,17 @@ def run_deterministic_detectors(
     grounded_evidence_strength = 0
     grounded_required_anchors: list[str] = []
     grounded_evidence_lines: list[str] = []
+    grounded_answer_mode = ""
+    grounded_next_steps: list[str] = []
+    grounded_fallback_policy = ""
     if isinstance(grounded_selection, dict):
         grounded_source = str(grounded_selection.get("source") or "")
         grounded_family = str(grounded_selection.get("family") or "")
+        grounded_answer_mode = str(grounded_selection.get("answer_mode") or "").strip()
+        grounded_fallback_policy = str(grounded_selection.get("fallback_policy") or "").strip()
+        g_ns = grounded_selection.get("next_step_options")
+        if isinstance(g_ns, list):
+            grounded_next_steps = [str(x).strip() for x in g_ns if str(x).strip()]
         try:
             grounded_evidence_strength = int(grounded_selection.get("evidence_strength") or 0)
         except (TypeError, ValueError):
@@ -545,14 +562,15 @@ def run_deterministic_detectors(
             }
         )
     if grounded_source and not grounded_evidence_lines:
-        findings.append(
-            {
-                "family": "grounded_research_failure",
-                "issue_code": "conversation_research_contract_missing",
-                "severity": "high",
-                "detail": "grounded lookup selected without evidence lines",
-            }
-        )
+        if grounded_fallback_policy != "truthful_unavailable_lookup_fallback":
+            findings.append(
+                {
+                    "family": "grounded_research_failure",
+                    "issue_code": "conversation_research_contract_missing",
+                    "severity": "high",
+                    "detail": "grounded lookup selected without evidence lines",
+                }
+            )
     if grounded_family and expected_family and grounded_family != expected_family:
         findings.append(
             {
@@ -686,6 +704,67 @@ def run_deterministic_detectors(
                 "issue_code": "conversation_fallback_shaped_under_contract_evidence",
                 "severity": "high",
                 "detail": "rendered answer stayed fallback-shaped despite strong contract evidence",
+            }
+        )
+    ar = str(capture.get("assistant_reason") or "")
+    if (
+        contract_answer_mode == "partial_evidence_helpful_answer"
+        and contract_evidence_strength >= 3
+        and contract_evidence_strength <= 5
+        and ar.startswith("semantic_state_")
+        and _looks_fallback_shaped_reply(text)
+    ):
+        findings.append(
+            {
+                "family": "thin_summary",
+                "issue_code": "conversation_partial_evidence_not_exploited",
+                "severity": "medium",
+                "detail": "partial-evidence contract allowed more substance but reply stayed fallback-shaped",
+            }
+        )
+    if (
+        contract_answer_mode
+        in {"partial_evidence_helpful_answer", "truthful_fallback_with_next_steps"}
+        and contract_next_steps
+        and ar.startswith("semantic_state_")
+        and not next_step_options_reflected_in_reply(text, contract_next_steps)
+    ):
+        findings.append(
+            {
+                "family": "thin_summary",
+                "issue_code": "conversation_missing_next_step_guidance",
+                "severity": "medium",
+                "detail": "semantic contract required grounded next-step options but rendered reply omitted them",
+            }
+        )
+    if (
+        grounded_answer_mode == "truthful_fallback_with_next_steps"
+        and grounded_next_steps
+        and grounded_source
+        and not next_step_options_reflected_in_reply(text, grounded_next_steps)
+    ):
+        findings.append(
+            {
+                "family": "grounded_research_failure",
+                "issue_code": "conversation_sterile_truthful_fallback",
+                "severity": "medium",
+                "detail": "truthful fallback contract carried next-step options but reply did not surface them",
+            }
+        )
+    if (
+        grounded_answer_mode == "partial_evidence_helpful_answer"
+        and grounded_evidence_strength >= 3
+        and grounded_next_steps
+        and grounded_source
+        and fallbackish_lookup
+        and not next_step_options_reflected_in_reply(text, grounded_next_steps)
+    ):
+        findings.append(
+            {
+                "family": "grounded_research_failure",
+                "issue_code": "conversation_low_utility_despite_partial_evidence",
+                "severity": "medium",
+                "detail": "partial grounded evidence with required next steps produced a thin or generic surface",
             }
         )
     if expect_cursor_substance and is_cursor_thread_recall_question(user):

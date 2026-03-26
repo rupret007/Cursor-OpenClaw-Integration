@@ -65,6 +65,10 @@ def stateful_realization_enabled() -> bool:
     return bool((os.environ.get("OPENAI_API_KEY") or "").strip())
 
 
+def partial_evidence_realization_enabled() -> bool:
+    return _env_truthy("ANDREA_PARTIAL_EVIDENCE_REALIZATION_ENABLED", True)
+
+
 def _allowed_sources() -> set[str]:
     raw = (os.environ.get("ANDREA_STATEFUL_REALIZATION_SOURCES") or "").strip()
     if not raw:
@@ -103,6 +107,8 @@ def _looks_fallback_shaped_reply(text: str) -> bool:
     low = str(text or "").strip().lower()
     if not low:
         return True
+    if "next options:" in low:
+        return False
     patterns = (
         "not finding a recent clean cursor result",
         "not finding a recent cursor workstream",
@@ -183,6 +189,9 @@ class StatefulRealizationInput:
     evidence_strength: int
     fallback_policy: str
     evidence_lines: tuple[str, ...]
+    answer_mode: str
+    uncertainty_mode: str
+    next_step_options: tuple[str, ...]
 
 
 def _split_structured_text_lines(text: str) -> List[str]:
@@ -270,6 +279,42 @@ def _anchors_present_in_reply(reply: str, anchors: Sequence[str]) -> bool:
     return True
 
 
+def next_step_options_reflected_in_reply(reply: str, options: Sequence[str]) -> bool:
+    """Public helper for eval/harness: overlap between rendered reply and approved next-step cues."""
+    return _next_step_options_reflected(reply, options)
+
+
+def _next_step_options_reflected(reply: str, options: Sequence[str]) -> bool:
+    """True when the reply appears to carry at least half of the approved next-step cues."""
+    if not options:
+        return True
+    r = str(reply or "").lower()
+    hits = 0
+    for opt in options:
+        words = [w for w in re.split(r"\W+", str(opt or "").lower()) if len(w) >= 5]
+        if not words:
+            hits += 1
+            continue
+        need = max(1, len(words) // 3)
+        got = sum(1 for w in words if w in r)
+        if got >= need:
+            hits += 1
+    return hits >= max(1, (len(list(options)) + 1) // 2)
+
+
+def _assemble_stateful_with_next_steps(body: str, options: Sequence[str]) -> str:
+    b = sanitize_user_surface_text(str(body or "").strip(), fallback="", limit=1200).strip()
+    opts = [sanitize_user_surface_text(str(o), fallback="", limit=420).strip() for o in options if str(o).strip()][
+        :2
+    ]
+    if not b:
+        return ""
+    if not opts:
+        return b
+    lines = "\n".join(f"• {o}" for o in opts)
+    return sanitize_user_surface_text(f"{b}\n\nNext options:\n{lines}", fallback=b, limit=1200).strip()
+
+
 def maybe_realize_stateful_reply(
     conn: Any,
     task_id: str,
@@ -310,6 +355,24 @@ def maybe_realize_stateful_reply(
         if isinstance(turn_contract, Mapping)
         else ""
     )
+    answer_mode = (
+        str(turn_contract.get("answer_mode") or "").strip()
+        if isinstance(turn_contract, Mapping)
+        else ""
+    ) or "strong_evidence_answer"
+    uncertainty_mode = (
+        str(turn_contract.get("uncertainty_mode") or "").strip()
+        if isinstance(turn_contract, Mapping)
+        else ""
+    ) or "clear"
+    next_raw = turn_contract.get("next_step_options") if isinstance(turn_contract, Mapping) else None
+    next_step_options: tuple[str, ...] = ()
+    if isinstance(next_raw, list):
+        next_step_options = tuple(
+            sanitize_user_surface_text(str(x), fallback="", limit=420).strip()
+            for x in next_raw
+            if str(x).strip()
+        )[:2]
     inp = StatefulRealizationInput(
         source=str(source or ""),
         deterministic_reply=str(deterministic_reply or "").strip(),
@@ -322,6 +385,9 @@ def maybe_realize_stateful_reply(
         evidence_strength=evidence_strength,
         fallback_policy=fallback_policy,
         evidence_lines=tuple(evidence),
+        answer_mode=answer_mode,
+        uncertainty_mode=uncertainty_mode,
+        next_step_options=next_step_options,
     )
     if not inp.deterministic_reply or not inp.evidence_lines:
         return None
@@ -330,6 +396,17 @@ def maybe_realize_stateful_reply(
         5,
         int((os.environ.get("ANDREA_STATEFUL_REALIZATION_TIMEOUT_SECONDS") or "18").strip()),
     )
+    mode_rules = ""
+    if partial_evidence_realization_enabled() and inp.answer_mode in {
+        "partial_evidence_helpful_answer",
+        "truthful_fallback_with_next_steps",
+    }:
+        mode_rules = (
+            "7) ANSWER_MODE allows partial help: state only verified facts from EVIDENCE_LINES first, "
+            "then briefly name the uncertainty boundary.\n"
+            "8) NEXT_STEP_OPTIONS lists approved actions only—rephrase at most one or two of them naturally; "
+            "do NOT add new options or new facts.\n"
+        )
     system = (
         "You are Andrea. Rewrite state-backed assistant replies to sound natural and concise.\n"
         "Rules:\n"
@@ -339,6 +416,7 @@ def maybe_realize_stateful_reply(
         "4) If evidence is weak, return the provided fallback.\n"
         "5) Never output runtime internals or configuration names.\n"
         "6) Preserve required anchors and family integrity.\n"
+        f"{mode_rules}"
         "Return JSON object with keys: reply (string), grounded (boolean), used_fallback (boolean), "
         "family_preserved (boolean), anchors_used (array of strings)."
     )
@@ -349,6 +427,9 @@ def maybe_realize_stateful_reply(
             "continuity_focus": inp.continuity_focus,
             "candidate_source": inp.source,
             "answer_family": inp.family,
+            "answer_mode": inp.answer_mode,
+            "uncertainty_mode": inp.uncertainty_mode,
+            "next_step_options": list(inp.next_step_options),
             "deterministic_reply": inp.deterministic_reply,
             "fallback_reply": inp.fallback_reply,
             "required_anchors": list(inp.required_anchors),
@@ -391,7 +472,23 @@ def maybe_realize_stateful_reply(
         if any(a not in used_low for a in inp.required_anchors):
             return None
     if inp.evidence_strength >= 5 and _looks_fallback_shaped_reply(safe):
-        return None
+        if (
+            partial_evidence_realization_enabled()
+            and inp.answer_mode == "partial_evidence_helpful_answer"
+            and inp.next_step_options
+        ):
+            safe = _assemble_stateful_with_next_steps(inp.deterministic_reply, inp.next_step_options)
+        else:
+            return None
+    if (
+        partial_evidence_realization_enabled()
+        and inp.answer_mode
+        in {"partial_evidence_helpful_answer", "truthful_fallback_with_next_steps"}
+        and inp.next_step_options
+        and not _next_step_options_reflected(safe, inp.next_step_options)
+    ):
+        base = safe if _evidence_anchor_overlap(safe, inp.evidence_lines) else inp.deterministic_reply
+        safe = _assemble_stateful_with_next_steps(base, inp.next_step_options)
     low_safe = safe.lower()
     low_ev = " ".join(str(x).lower() for x in inp.evidence_lines)
     if inp.family == "approval_state":
@@ -413,6 +510,11 @@ def maybe_realize_grounded_technical_reply(
     fallback_reply: str,
     required_anchors: Sequence[str] = (),
     evidence_strength: int = 0,
+    answer_mode: str = "",
+    uncertainty_mode: str = "",
+    next_step_options: Sequence[str] = (),
+    retrieval_source: str = "",
+    query: str = "",
 ) -> str | None:
     """Bounded synthesis for lookup-backed technical/research answers."""
     if not stateful_realization_enabled():
@@ -426,11 +528,34 @@ def maybe_realize_grounded_technical_reply(
     fallback = sanitize_user_surface_text(str(fallback_reply or ""), fallback="", limit=1200).strip()
     if not fallback:
         return None
+    ev_s = int(evidence_strength or _evidence_strength(safe_evidence))
+    mode = str(answer_mode or "").strip() or (
+        "strong_evidence_answer"
+        if ev_s >= 6
+        else ("partial_evidence_helpful_answer" if ev_s >= 2 else "truthful_fallback_with_next_steps")
+    )
+    u_mode = str(uncertainty_mode or "").strip() or (
+        "clear" if mode == "strong_evidence_answer" else ("partial" if mode == "partial_evidence_helpful_answer" else "thin")
+    )
+    n_opts = tuple(
+        sanitize_user_surface_text(str(x), fallback="", limit=420).strip()
+        for x in next_step_options
+        if str(x).strip()
+    )[:2]
     model = model_for_role("worker")
     timeout_seconds = max(
         5,
         int((os.environ.get("ANDREA_STATEFUL_REALIZATION_TIMEOUT_SECONDS") or "18").strip()),
     )
+    extra_mode = ""
+    if partial_evidence_realization_enabled() and mode in {
+        "partial_evidence_helpful_answer",
+        "truthful_fallback_with_next_steps",
+    }:
+        extra_mode = (
+            "6) If ANSWER_MODE is partial or truthful_fallback, end with one or two NEXT_STEP_OPTIONS "
+            "phrased naturally—no new options or facts.\n"
+        )
     system = (
         "You are Andrea. Produce a concise grounded technical answer.\n"
         "Rules:\n"
@@ -439,14 +564,20 @@ def maybe_realize_grounded_technical_reply(
         "3) Do NOT invent commands, versions, files, causes, or guarantees.\n"
         "4) Keep it practical and user-facing.\n"
         "5) If evidence is weak, return the fallback.\n"
+        f"{extra_mode}"
         "Return JSON with keys: reply (string), grounded (boolean), used_fallback (boolean), anchors_used (array of strings)."
     )
     payload = json.dumps(
         {
             "user_text": str(user_text or "").strip(),
             "answer_family": str(answer_family or "grounded_research").strip(),
+            "answer_mode": mode,
+            "uncertainty_mode": u_mode,
+            "next_step_options": list(n_opts),
+            "retrieval_source": str(retrieval_source or "").strip(),
+            "query": str(query or "").strip(),
             "evidence_lines": safe_evidence,
-            "evidence_strength": int(evidence_strength or _evidence_strength(safe_evidence)),
+            "evidence_strength": ev_s,
             "required_anchors": [str(x).strip().lower() for x in required_anchors if str(x).strip()],
             "fallback_reply": fallback,
         },
@@ -460,21 +591,43 @@ def maybe_realize_grounded_technical_reply(
             timeout_seconds=timeout_seconds,
         )
     except Exception:
+        if partial_evidence_realization_enabled() and n_opts and mode != "strong_evidence_answer":
+            return _assemble_stateful_with_next_steps(fallback, n_opts)
         return None
     reply = sanitize_user_surface_text(str(parsed.get("reply") or ""), fallback="", limit=1200).strip()
     if not reply:
+        if partial_evidence_realization_enabled() and n_opts and mode != "strong_evidence_answer":
+            return _assemble_stateful_with_next_steps(fallback, n_opts)
         return None
     if not bool(parsed.get("grounded")):
+        if partial_evidence_realization_enabled() and n_opts and mode != "strong_evidence_answer":
+            return _assemble_stateful_with_next_steps(fallback, n_opts)
         return None
     if not _evidence_anchor_overlap(reply, safe_evidence):
+        if partial_evidence_realization_enabled() and n_opts and mode != "strong_evidence_answer":
+            return _assemble_stateful_with_next_steps(fallback, n_opts)
         return None
     req = [str(x).strip().lower() for x in required_anchors if str(x).strip()]
     if req and not _anchors_present_in_reply(reply, req):
         anchors_used = parsed.get("anchors_used")
         if not isinstance(anchors_used, list):
+            if partial_evidence_realization_enabled() and n_opts and mode != "strong_evidence_answer":
+                return _assemble_stateful_with_next_steps(fallback, n_opts)
             return None
         used_low = {str(x).strip().lower() for x in anchors_used if str(x).strip()}
         if any(a not in used_low for a in req):
+            if partial_evidence_realization_enabled() and n_opts and mode != "strong_evidence_answer":
+                return _assemble_stateful_with_next_steps(fallback, n_opts)
             return None
+    if (
+        partial_evidence_realization_enabled()
+        and mode in {"partial_evidence_helpful_answer", "truthful_fallback_with_next_steps"}
+        and n_opts
+        and not _next_step_options_reflected(reply, n_opts)
+    ):
+        base = reply if _evidence_anchor_overlap(reply, safe_evidence) else fallback
+        reply = _assemble_stateful_with_next_steps(base, n_opts)
+    if ev_s >= 4 and _looks_fallback_shaped_reply(reply) and mode == "partial_evidence_helpful_answer" and n_opts:
+        reply = _assemble_stateful_with_next_steps(fallback, n_opts)
     return reply
 

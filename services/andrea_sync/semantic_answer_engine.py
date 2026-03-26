@@ -11,6 +11,7 @@ from .assistant_answer_composer import (
     build_blocked_state_reply_from_state,
     build_recent_outcome_history_reply_from_state,
     cursor_followup_context_reply_with_fallback,
+    derive_stateful_next_step_options,
 )
 from .stateful_answer_realization import maybe_realize_stateful_reply
 from .semantic_continuity import user_message_suggests_anaphoric_cursor_continue
@@ -77,6 +78,9 @@ class SemanticTurnContract:
     min_score: int
     fallback_policy: str
     binding_reason: str = ""
+    answer_mode: str = "strong_evidence_answer"
+    uncertainty_mode: str = "clear"
+    next_step_options: tuple[str, ...] = ()
 
     def to_metadata(self) -> Dict[str, Any]:
         return {
@@ -89,6 +93,9 @@ class SemanticTurnContract:
             "min_score": int(self.min_score),
             "fallback_policy": self.fallback_policy,
             "binding_reason": self.binding_reason,
+            "answer_mode": self.answer_mode,
+            "uncertainty_mode": self.uncertainty_mode,
+            "next_step_options": list(self.next_step_options),
         }
 
 
@@ -200,6 +207,20 @@ def _contract_is_admissible(
     return True
 
 
+def _classify_answer_mode(
+    *,
+    source: str,
+    evidence_strength: int,
+    candidate_text: str,
+) -> tuple[str, str]:
+    thin_cursor = source == "cursor_continuity_recall" and _looks_thin_cursor_recap(candidate_text)
+    if evidence_strength >= 6 and not thin_cursor:
+        return "strong_evidence_answer", "clear"
+    if evidence_strength >= 2 or thin_cursor:
+        return "partial_evidence_helpful_answer", "partial"
+    return "truthful_fallback_with_next_steps", "thin"
+
+
 def _build_turn_contract(
     *,
     family: str,
@@ -208,8 +229,24 @@ def _build_turn_contract(
     candidate_text: str,
     min_score: int,
     binding_reason: str = "",
+    conn: Any = None,
+    task_id: str = "",
+    user_text: str = "",
 ) -> SemanticTurnContract:
     evidence_lines = tuple(_split_structured_text_lines(candidate_text)[:8]) or (candidate_text,)
+    ev_strength = _evidence_strength(evidence_lines)
+    answer_mode, uncertainty_mode = _classify_answer_mode(
+        source=source, evidence_strength=ev_strength, candidate_text=candidate_text
+    )
+    next_step_options: tuple[str, ...] = ()
+    if conn is not None and str(task_id or "").strip():
+        if answer_mode in {"partial_evidence_helpful_answer", "truthful_fallback_with_next_steps"}:
+            next_step_options = derive_stateful_next_step_options(
+                conn,
+                str(task_id),
+                source=str(source),
+                user_text=str(user_text or ""),
+            )
     fallback_policy = (
         "allow_truthful_fallback_when_evidence_thin"
         if source in {"cursor_continuity_recall", "cursor_heavy_lift_context"}
@@ -221,10 +258,13 @@ def _build_turn_contract(
         allowed_sources=tuple(str(x) for x in allowed_sources),
         required_anchors=_required_anchors_for(family, source, candidate_text),
         evidence_lines=evidence_lines,
-        evidence_strength=_evidence_strength(evidence_lines),
+        evidence_strength=ev_strength,
         min_score=int(min_score),
         fallback_policy=fallback_policy,
         binding_reason=str(binding_reason or "").strip(),
+        answer_mode=answer_mode,
+        uncertainty_mode=uncertainty_mode,
+        next_step_options=next_step_options,
     )
 
 
@@ -319,6 +359,9 @@ def choose_semantic_state_reply(
             candidate_text=cleaned,
             min_score=min_score,
             binding_reason=binding_reason,
+            conn=conn,
+            task_id=task_id,
+            user_text=text,
         )
         if not _contract_is_admissible(contract, candidate_text=cleaned):
             continue

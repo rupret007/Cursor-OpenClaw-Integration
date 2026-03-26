@@ -97,6 +97,8 @@ class SemanticAnswerEngineTests(unittest.TestCase):
         self.assertEqual(contract.get("family"), "cursor_recall")
         self.assertEqual(contract.get("source"), "cursor_continuity_recall")
         self.assertIn("cursor", contract.get("required_anchors") or [])
+        self.assertIn(contract.get("answer_mode") or "", ("strong_evidence_answer", "partial_evidence_helpful_answer"))
+        self.assertIsInstance(contract.get("next_step_options"), list)
 
     def test_returns_none_for_non_stateful_domain(self) -> None:
         turn_plan = TurnPlan(

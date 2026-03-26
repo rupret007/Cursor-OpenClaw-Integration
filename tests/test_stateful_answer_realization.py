@@ -301,3 +301,55 @@ class StatefulAnswerRealizationTests(unittest.TestCase):
             )
         self.assertIsNone(out)
 
+    @mock.patch("services.andrea_sync.stateful_answer_realization._bundle_evidence_for_source")
+    @mock.patch("services.andrea_sync.stateful_answer_realization._openai_json_chat")
+    def test_partial_contract_appends_next_steps_when_llm_omits_them(
+        self,
+        mock_chat: mock.MagicMock,
+        mock_bundle: mock.MagicMock,
+    ) -> None:
+        mock_bundle.return_value = [
+            "Latest useful result: tightened timeout handling for the worker.",
+        ]
+        mock_chat.return_value = {
+            "reply": "Cursor recap: latest useful result tightened timeout handling for the worker.",
+            "grounded": True,
+            "used_fallback": False,
+        }
+        with mock.patch.dict(
+            os.environ,
+            {
+                "ANDREA_STATEFUL_REALIZATION_ENABLED": "1",
+                "OPENAI_API_ENABLED": "1",
+                "OPENAI_API_KEY": "x",
+            },
+            clear=False,
+        ):
+            out = maybe_realize_stateful_reply(
+                conn=object(),
+                task_id="t1",
+                source="cursor_continuity_recall",
+                deterministic_reply="Cursor recap: tightened timeout handling for the worker.",
+                fallback_reply="I’m not finding a recent clean Cursor result to recap from this thread.",
+                user_text="Where are we on the project overall?",
+                turn_plan=self._turn_plan(),
+                turn_contract={
+                    "family": "cursor_recall",
+                    "source": "cursor_continuity_recall",
+                    "required_anchors": ["cursor"],
+                    "evidence_lines": list(mock_bundle.return_value),
+                    "evidence_strength": 4,
+                    "fallback_policy": "allow_truthful_fallback_when_evidence_thin",
+                    "answer_mode": "partial_evidence_helpful_answer",
+                    "uncertainty_mode": "partial",
+                    "next_step_options": [
+                        "Narrow to the exact toolkit version and error string you are seeing.",
+                        "Re-run grounded lookup after you capture the precise stack trace.",
+                    ],
+                },
+            )
+        self.assertIsNotNone(out)
+        assert out is not None
+        self.assertIn("next options", out.lower())
+        self.assertIn("toolkit", out.lower())
+

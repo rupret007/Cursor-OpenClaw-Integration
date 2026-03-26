@@ -262,6 +262,56 @@ class ConversationEvalDetectorTests(unittest.TestCase):
         codes = {h["issue_code"] for h in hits}
         self.assertIn("conversation_openclaw_identity_state_hijack", codes)
 
+    def test_detects_openclaw_blocker_fallback_under_state(self) -> None:
+        cap = {
+            "raw_reply_text": (
+                "I’m not finding a recent Cursor workstream with enough context to safely continue, "
+                "so I’d need to start a new one from your latest instruction."
+            ),
+            "rendered_reply_sanitized": (
+                "I’m not finding a recent Cursor workstream with enough context to safely continue, "
+                "so I’d need to start a new one from your latest instruction."
+            ),
+            "user_turn": "What is OpenClaw blocked on?",
+            "turn_plan_domain": "project_status",
+            "assistant_reason": "semantic_state_cursor_heavy_lift_context",
+            "meta_openclaw_present": True,
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap)
+        codes = {h["issue_code"] for h in hits}
+        self.assertIn("conversation_openclaw_blocker_fallback_under_state", codes)
+
+    def test_detects_openclaw_blocker_vague_under_state(self) -> None:
+        cap = {
+            "raw_reply_text": "OpenClaw is in a waiting state right now.",
+            "rendered_reply_sanitized": "OpenClaw is in a waiting state right now.",
+            "user_turn": "What is OpenClaw blocked on?",
+            "turn_plan_domain": "project_status",
+            "assistant_reason": "semantic_state_goal_status",
+            "meta_openclaw_present": True,
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap)
+        codes = {h["issue_code"] for h in hits}
+        self.assertIn("conversation_openclaw_blocker_vague_under_state", codes)
+
+    def test_detects_anaphoric_continue_thin(self) -> None:
+        cap = {
+            "raw_reply_text": "I do not see active tracked work right now.",
+            "rendered_reply_sanitized": "I do not see active tracked work right now.",
+            "user_turn": "continue that",
+            "turn_plan_domain": "project_status",
+            "assistant_reason": "semantic_state_cursor_heavy_lift_context",
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap)
+        codes = {h["issue_code"] for h in hits}
+        self.assertIn("conversation_cursor_continue_anaphoric_thin", codes)
+
     def test_detects_grounded_research_contract_missing_evidence(self) -> None:
         cap = {
             "raw_reply_text": "Timeout errors are often transient; retries can help.",

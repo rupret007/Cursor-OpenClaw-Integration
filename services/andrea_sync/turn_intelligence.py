@@ -165,6 +165,26 @@ _OPENCLAW_COLLAB_ASK_RE = re.compile(
     r")\b",
     re.I,
 )
+_COLLAB_BLOCKER_RE = re.compile(
+    r"\b("
+    r"blocked|blocker|blocking|blocked\s+on|holding\s+that\s+up|holding\s+it\s+up|stuck"
+    r")\b",
+    re.I,
+)
+_COLLAB_RECAP_RE = re.compile(
+    r"\b("
+    r"what\s+happened|what\s+did\s+(?:cursor|openclaw)\s+(?:say|do)|"
+    r"cursor\s+thread|openclaw\s+thread|recap|summary"
+    r")\b",
+    re.I,
+)
+_COLLAB_CONTINUE_RE = re.compile(
+    r"\b("
+    r"continue|resume|working\s+on|work(ing)?\s+on\s+right\s+now|"
+    r"what\s+is\s+(?:cursor|openclaw)\s+working\s+on"
+    r")\b",
+    re.I,
+)
 
 _TECHNICAL_GUIDANCE_RE = re.compile(
     r"\b("
@@ -282,6 +302,20 @@ def is_openclaw_collaboration_state_question(text: str) -> bool:
     ):
         return True
     return False
+
+
+def classify_openclaw_collaboration_focus(text: str) -> ContinuityFocus:
+    """Classify explicit OpenClaw/Cursor collaboration asks into continuity focus."""
+    clean = str(text or "").strip()
+    if not clean or not is_openclaw_collaboration_state_question(clean):
+        return "none"
+    if _COLLAB_BLOCKER_RE.search(clean):
+        return "blocked_state"
+    if _COLLAB_RECAP_RE.search(clean):
+        return "recent_outcome_history"
+    if _COLLAB_CONTINUE_RE.search(clean):
+        return "cursor_followup_heavy_lift"
+    return "recent_outcome_history"
 
 
 def classify_openclaw_source_role(*, source: str, candidate_text: str) -> OpenClawSourceRole:
@@ -447,6 +481,9 @@ def classify_continuity_focus(text: str) -> ContinuityFocus:
     clean = str(text or "").strip()
     if _BLOCKED_STATE_RE.search(clean):
         return "blocked_state"
+    collab_focus = classify_openclaw_collaboration_focus(clean)
+    if collab_focus != "none":
+        return collab_focus
     if is_recent_outcome_history_question(clean):
         return "recent_outcome_history"
     if _TOOLING_IDENTITY_Q_RE.match(clean):

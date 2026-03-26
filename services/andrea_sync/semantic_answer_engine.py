@@ -12,6 +12,8 @@ from .assistant_answer_composer import (
     build_recent_outcome_history_reply_from_state,
     cursor_followup_context_reply_with_fallback,
     derive_stateful_next_step_options,
+    gather_cursor_recall_evidence_pack,
+    stateful_guidance_class_for_turn,
 )
 from .stateful_answer_realization import maybe_realize_stateful_reply
 from .semantic_continuity import user_message_suggests_anaphoric_cursor_continue
@@ -77,6 +79,7 @@ class SemanticTurnContract:
     binding_reason: str = ""
     answer_mode: str = "strong_evidence_answer"
     uncertainty_mode: str = "clear"
+    guidance_class: str = ""
     next_step_options: tuple[str, ...] = ()
     utility_goal: str = "concise_grounded_summary"
     brevity_max_words_soft: int = 115
@@ -94,6 +97,7 @@ class SemanticTurnContract:
             "binding_reason": self.binding_reason,
             "answer_mode": self.answer_mode,
             "uncertainty_mode": self.uncertainty_mode,
+            "guidance_class": self.guidance_class,
             "next_step_options": list(self.next_step_options),
             "utility_goal": self.utility_goal,
             "brevity_max_words_soft": int(self.brevity_max_words_soft),
@@ -247,7 +251,24 @@ def _build_turn_contract(
     task_id: str = "",
     user_text: str = "",
 ) -> SemanticTurnContract:
-    evidence_lines = tuple(_split_structured_text_lines(candidate_text)[:8]) or (candidate_text,)
+    lines = list(_split_structured_text_lines(candidate_text)[:8]) or [candidate_text]
+    if (
+        conn is not None
+        and str(task_id or "").strip()
+        and source == "cursor_continuity_recall"
+    ):
+        try:
+            pack = gather_cursor_recall_evidence_pack(conn, str(task_id), user_message=str(user_text or ""))
+            lines = [
+                *list(pack.source_truth_narrative_lines)[:3],
+                *list(pack.source_truth_receipt_lines)[:2],
+                *( [f"Phase summary: {pack.outcome_phase_summary}"] if pack.outcome_phase_summary else [] ),
+                *( [f"Blocked reason: {pack.outcome_blocked_reason}"] if pack.outcome_blocked_reason else [] ),
+                *lines,
+            ]
+        except Exception:
+            pass
+    evidence_lines = tuple(_split_structured_text_lines("\n".join(lines))[:8]) or (candidate_text,)
     ev_strength = _evidence_strength(evidence_lines)
     answer_mode, uncertainty_mode = _classify_answer_mode(
         source=source, evidence_strength=ev_strength, candidate_text=candidate_text
@@ -262,6 +283,7 @@ def _build_turn_contract(
                 source=str(source),
                 user_text=str(user_text or ""),
             )
+    guidance_class = stateful_guidance_class_for_turn(source=str(source), user_text=str(user_text or ""))
     fallback_policy = (
         "allow_truthful_fallback_when_evidence_thin"
         if source in {"cursor_continuity_recall", "cursor_heavy_lift_context"}
@@ -279,6 +301,7 @@ def _build_turn_contract(
         binding_reason=str(binding_reason or "").strip(),
         answer_mode=answer_mode,
         uncertainty_mode=uncertainty_mode,
+        guidance_class=str(guidance_class or ""),
         next_step_options=next_step_options,
         utility_goal=utility_goal,
         brevity_max_words_soft=int(brevity_max_words_soft),

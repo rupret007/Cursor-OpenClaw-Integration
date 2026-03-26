@@ -39,7 +39,11 @@ from .projector import project_task_dict
 from .scenario_runtime import resolve_scenario
 from .stateful_answer_realization import next_step_options_reflected_in_reply
 from .schema import CommandType, EventType, TaskStatus
-from .semantic_continuity import resolve_semantic_continuity_patch, same_chat_max_delegation_score
+from .semantic_continuity import (
+    resolve_semantic_continuity_patch,
+    same_chat_max_delegation_score,
+    user_message_suggests_anaphoric_cursor_continue,
+)
 from .store import (
     append_event,
     create_goal,
@@ -1126,6 +1130,45 @@ def run_deterministic_detectors(
                 "detail": "cursor continuation ask with thin reply",
             }
         )
+    if user_message_suggests_anaphoric_cursor_continue(user) and _looks_fallback_shaped_reply(text):
+        findings.append(
+            {
+                "family": "cursor_continuation_failure",
+                "issue_code": "conversation_cursor_continue_anaphoric_thin",
+                "severity": "medium",
+                "detail": "anaphoric continue ask returned fallback-shaped continuation surface",
+            }
+        )
+    if is_openclaw_collaboration_state_question(user):
+        low_user = user.lower()
+        blocker_ask = any(tok in low_user for tok in ("block", "blocked", "blocker", "holding", "stuck"))
+        if blocker_ask:
+            looks_continuation_fallback = any(
+                p in low
+                for p in (
+                    "not finding a recent cursor workstream",
+                    "i do not see active tracked work right now",
+                    "start a new one from your latest instruction",
+                )
+            )
+            if looks_continuation_fallback:
+                findings.append(
+                    {
+                        "family": "thin_summary",
+                        "issue_code": "conversation_openclaw_blocker_fallback_under_state",
+                        "severity": "high",
+                        "detail": "explicit OpenClaw blocker ask returned continuation/no-work fallback wording",
+                    }
+                )
+            elif ("blocker" not in low and "blocked" not in low) and len(text.strip()) < 160:
+                findings.append(
+                    {
+                        "family": "thin_summary",
+                        "issue_code": "conversation_openclaw_blocker_vague_under_state",
+                        "severity": "medium",
+                        "detail": "explicit OpenClaw blocker ask stayed vague despite collaboration-state context",
+                    }
+                )
     return findings
 
 
@@ -3004,6 +3047,22 @@ CONVERSATION_CORE_CASES: tuple[ConversationCaseSpec, ...] = (
         required_reply_markers=("internal collaboration limitation",),
     ),
     ConversationCaseSpec(
+        case_id="openclaw_collaboration_blocked_on_turn_still_works",
+        title="OpenClaw blocked-on phrasing surfaces collaboration blocker state",
+        behavior_family="blocked_state",
+        turns=("What is OpenClaw blocked on?",),
+        chat_id=88190,
+        from_id=99290,
+        first_update_id=18994,
+        first_message_id=6894,
+        setup_fn=_seed_openclaw_blocker_carryover_state,
+        required_reply_markers=("internal collaboration limitation",),
+        forbidden_reply_markers=(
+            "not finding a recent cursor workstream",
+            "start a new one from your latest instruction",
+        ),
+    ),
+    ConversationCaseSpec(
         case_id="cursor_recap_recursion",
         title="Cursor recap recursion hygiene",
         behavior_family="thin_summary",
@@ -3138,6 +3197,23 @@ CONVERSATION_CORE_CASES: tuple[ConversationCaseSpec, ...] = (
         from_id=99099,
         first_update_id=18794,
         first_message_id=6721,
+        setup_fn=_seed_source_truth_rich_recall,
+        required_reply_markers=("RICH_RECALL_GROUNDED_FACT_42",),
+        forbidden_reply_markers=("recent clean Cursor result", "where things stand:"),
+        expect_cursor_substance=True,
+        required_turn_domains=("project_status",),
+        required_continuity_focuses=("recent_outcome_history",),
+        wait_policy="routing_smoke",
+    ),
+    ConversationCaseSpec(
+        case_id="cursor_thread_rich_truth_not_fallback_shaped",
+        title="Cursor thread recap should avoid fallback-shaped rendering",
+        behavior_family="cursor_recall",
+        turns=("What happened in the Cursor thread?",),
+        chat_id=77795,
+        from_id=99100,
+        first_update_id=18795,
+        first_message_id=6722,
         setup_fn=_seed_source_truth_rich_recall,
         required_reply_markers=("RICH_RECALL_GROUNDED_FACT_42",),
         forbidden_reply_markers=("recent clean Cursor result", "where things stand:"),

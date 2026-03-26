@@ -44,6 +44,7 @@ from .user_surface import (
 from .turn_intelligence import (
     TurnPlan,
     is_approval_state_question,
+    is_openclaw_collaboration_state_question,
     is_cursor_recall_family_question,
     is_explicit_cursor_recall_question,
     openclaw_role_relevance_for_turn,
@@ -578,6 +579,11 @@ def _stateful_guidance_class(*, source: str, user_text: str) -> str:
     if src in {"cursor_continuity_recall", "cursor_heavy_lift_context"}:
         return "thread_task_binding"
     return "generic_stateful"
+
+
+def stateful_guidance_class_for_turn(*, source: str, user_text: str) -> str:
+    """Public helper for semantic contracts and realization payload shaping."""
+    return _stateful_guidance_class(source=source, user_text=user_text)
 
 
 def derive_stateful_next_step_options(
@@ -2588,7 +2594,15 @@ def pick_repair_winner(
                 continue
             return wtext, winner.source
 
-        if winner.source in {"blocked_state_reply", "cursor_heavy_lift_context"}:
+        if winner.source == "cursor_heavy_lift_context":
+            if (
+                is_cursor_thread_recall_question(classify_text)
+                or is_openclaw_collaboration_state_question(classify_text)
+            ) and _cursor_recall_composition_is_metadata_led(wtext):
+                continue
+            return wtext, winner.source
+
+        if winner.source == "blocked_state_reply":
             return wtext, winner.source
 
         if winner.source == "followthrough_goal":

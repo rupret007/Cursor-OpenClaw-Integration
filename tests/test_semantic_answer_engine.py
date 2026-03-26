@@ -101,8 +101,49 @@ class SemanticAnswerEngineTests(unittest.TestCase):
         self.assertEqual(contract.get("family"), "cursor_recall")
         self.assertEqual(contract.get("source"), "cursor_continuity_recall")
         self.assertIn("cursor", contract.get("required_anchors") or [])
+        self.assertEqual(contract.get("guidance_class"), "thread_task_binding")
         self.assertIn(contract.get("answer_mode") or "", ("strong_evidence_answer", "partial_evidence_helpful_answer"))
         self.assertIsInstance(contract.get("next_step_options"), list)
+
+    @mock.patch("services.andrea_sync.semantic_answer_engine.build_goal_continuity_reply")
+    @mock.patch("services.andrea_sync.semantic_answer_engine.try_goal_status_nl_reply")
+    @mock.patch("services.andrea_sync.semantic_answer_engine.gather_cursor_recall_evidence_pack")
+    @mock.patch(
+        "services.andrea_sync.semantic_answer_engine.build_recent_outcome_history_reply_from_state"
+    )
+    @mock.patch("services.andrea_sync.semantic_answer_engine.maybe_realize_stateful_reply")
+    def test_cursor_recall_contract_uses_richer_recall_evidence_lines(
+        self,
+        mock_realize: mock.MagicMock,
+        mock_recent: mock.MagicMock,
+        mock_pack: mock.MagicMock,
+        mock_goal_status: mock.MagicMock,
+        mock_goal_cont: mock.MagicMock,
+    ) -> None:
+        mock_realize.return_value = None
+        mock_recent.return_value = "Cursor recap: Fixed retries."
+        mock_goal_status.return_value = None
+        mock_goal_cont.return_value = None
+        mock_pack.return_value = mock.Mock(
+            source_truth_narrative_lines=("Latest useful result: SOURCE_TRUTH_DETAIL_A.",),
+            source_truth_receipt_lines=("Recent receipt: SOURCE_TRUTH_DETAIL_B.",),
+            outcome_phase_summary="SOURCE_TRUTH_PHASE_C",
+            outcome_blocked_reason="",
+        )
+
+        result = choose_semantic_state_reply(
+            conn=object(),
+            task_id="t-rich-contract",
+            user_text="What happened in the Cursor thread?",
+            turn_plan=self._turn_plan(focus="recent_outcome_history"),
+            scenario_id="statusFollowupContinue",
+        )
+        self.assertIsNotNone(result)
+        assert result is not None
+        contract = result.to_metadata().get("turn_contract") or {}
+        lines = [str(x) for x in (contract.get("evidence_lines") or [])]
+        self.assertTrue(any("SOURCE_TRUTH_DETAIL_A" in ln for ln in lines))
+        self.assertTrue(any("SOURCE_TRUTH_DETAIL_B" in ln for ln in lines))
 
     def test_returns_none_for_non_stateful_domain(self) -> None:
         turn_plan = TurnPlan(

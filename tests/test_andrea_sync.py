@@ -5134,6 +5134,28 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(plan.domain, "technical_guidance")
         self.assertFalse(plan.force_delegate)
 
+    def test_build_turn_plan_classifies_openclaw_blocked_on_as_blocked_state(self) -> None:
+        from services.andrea_sync.turn_intelligence import build_turn_plan
+
+        plan = build_turn_plan(
+            "What is OpenClaw blocked on?",
+            scenario_id="statusFollowupContinue",
+            projection_has_continuity_state=True,
+        )
+        self.assertEqual(plan.domain, "project_status")
+        self.assertEqual(plan.continuity_focus, "blocked_state")
+
+    def test_build_turn_plan_classifies_openclaw_thread_recap_as_recent_outcome_history(self) -> None:
+        from services.andrea_sync.turn_intelligence import build_turn_plan
+
+        plan = build_turn_plan(
+            "What happened in the Cursor thread?",
+            scenario_id="statusFollowupContinue",
+            projection_has_continuity_state=True,
+        )
+        self.assertEqual(plan.domain, "project_status")
+        self.assertEqual(plan.continuity_focus, "recent_outcome_history")
+
     def test_grounded_research_reply_returns_contract_for_technical_guidance(self) -> None:
         os.environ["ANDREA_GROUNDED_RESEARCH_ENABLED"] = "1"
         os.environ["ANDREA_GROUNDED_RESEARCH_REALIZATION_ENABLED"] = "0"

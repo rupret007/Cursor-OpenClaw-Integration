@@ -83,6 +83,14 @@ def _local_brevity_profile(answer_mode: str) -> tuple[str, int]:
     return "truthful_next_steps_brevity", 260
 
 
+def _mode_for_stateful_strength(evidence_strength: int) -> tuple[str, str]:
+    if int(evidence_strength or 0) >= 6:
+        return "strong_evidence_answer", "clear"
+    if int(evidence_strength or 0) >= 2:
+        return "partial_evidence_helpful_answer", "partial"
+    return "truthful_fallback_with_next_steps", "thin"
+
+
 def _reply_word_count(text: str) -> int:
     return len(re.findall(r"\b\w+\b", str(text or "")))
 
@@ -440,23 +448,41 @@ def maybe_realize_stateful_reply(
         if isinstance(turn_contract, Mapping)
         else 0
     )
-    if evidence_strength <= 0:
-        evidence_strength = _evidence_strength(evidence)
+    merged_strength = _evidence_strength(evidence)
+    evidence_strength = max(int(evidence_strength or 0), int(merged_strength or 0))
     fallback_policy = (
         str(turn_contract.get("fallback_policy") or "").strip()
         if isinstance(turn_contract, Mapping)
         else ""
     )
-    answer_mode = (
+    contract_answer_mode = (
         str(turn_contract.get("answer_mode") or "").strip()
         if isinstance(turn_contract, Mapping)
         else ""
-    ) or "strong_evidence_answer"
-    uncertainty_mode = (
+    )
+    contract_uncertainty_mode = (
         str(turn_contract.get("uncertainty_mode") or "").strip()
         if isinstance(turn_contract, Mapping)
         else ""
-    ) or "clear"
+    )
+    answer_mode = contract_answer_mode or "strong_evidence_answer"
+    uncertainty_mode = contract_uncertainty_mode or "clear"
+    # If merged evidence is stronger than contract text-only evidence, allow mode uplift.
+    contract_strength = (
+        int(turn_contract.get("evidence_strength") or 0)
+        if isinstance(turn_contract, Mapping)
+        else 0
+    )
+    if merged_strength > contract_strength:
+        lifted_mode, lifted_uncertainty = _mode_for_stateful_strength(evidence_strength)
+        mode_order = {
+            "truthful_fallback_with_next_steps": 0,
+            "partial_evidence_helpful_answer": 1,
+            "strong_evidence_answer": 2,
+        }
+        if mode_order.get(lifted_mode, 0) > mode_order.get(answer_mode, 0):
+            answer_mode = lifted_mode
+            uncertainty_mode = lifted_uncertainty
     next_raw = turn_contract.get("next_step_options") if isinstance(turn_contract, Mapping) else None
     next_step_options: tuple[str, ...] = ()
     if isinstance(next_raw, list):

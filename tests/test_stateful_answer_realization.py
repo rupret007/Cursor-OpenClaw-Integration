@@ -6,6 +6,7 @@ from unittest import mock
 
 from services.andrea_sync.stateful_answer_realization import (
     _bundle_evidence_for_source,
+    _compress_reply_to_word_budget,
     maybe_realize_grounded_technical_reply,
     maybe_realize_stateful_reply,
 )
@@ -352,4 +353,20 @@ class StatefulAnswerRealizationTests(unittest.TestCase):
         assert out is not None
         self.assertIn("next options", out.lower())
         self.assertIn("toolkit", out.lower())
+
+    def test_compress_reply_respects_word_budget_and_evidence(self) -> None:
+        ev = ("The migration ordering was fixed and retries now cap at three.",)
+        long_reply = (
+            "The migration ordering was fixed and retries now cap at three. "
+            "We also adjusted handler paths for edge cases around timeouts. "
+            "Finally we documented the rollout risk for operators."
+        )
+        out = _compress_reply_to_word_budget(
+            long_reply,
+            max_words=16,
+            evidence_lines=ev,
+            required_anchors=(),
+        )
+        self.assertLessEqual(len(out.split()), 22)
+        self.assertIn("migration", out.lower())
 

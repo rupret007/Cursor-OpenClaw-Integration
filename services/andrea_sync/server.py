@@ -90,7 +90,7 @@ from .semantic_continuity import (
     same_chat_max_delegation_score,
     user_message_suggests_anaphoric_cursor_continue,
 )
-from .semantic_answer_engine import choose_semantic_state_reply
+from .semantic_answer_engine import brevity_profile_for_answer_mode, choose_semantic_state_reply
 from .stateful_answer_realization import maybe_realize_grounded_technical_reply
 from .telegram_continuation import attach_continuation_if_applicable
 from .turn_intelligence import (
@@ -3127,23 +3127,41 @@ class SyncServer:
         s = str(summary or "").strip()
         if not s:
             return []
+        if "\n" in s:
+            raw_lines = [ln.strip().lstrip("-*• ").strip() for ln in s.splitlines()]
+            nl_lines = [ln for ln in raw_lines if len(ln) > 10]
+            if len(nl_lines) >= 2:
+                return nl_lines[:6]
+        if ";" in s and len(s) > 72:
+            semi = [p.strip() for p in s.split(";") if len(p.strip()) > 10]
+            if len(semi) >= 2:
+                return semi[:6]
         parts = re.split(r"(?<=[.!?])\s+", s)
         lines = [p.strip() for p in parts if len(p.strip()) > 10]
         return lines[:4] if lines else [s]
 
-    def _grounded_lookup_next_step_options(self, *, answer_mode: str) -> list[str]:
+    def _grounded_lookup_next_step_options(self, *, answer_mode: str, classify_text: str = "") -> list[str]:
         mode = str(answer_mode or "").strip()
+        qt = str(classify_text or "").strip().lower()
         if mode == "strong_evidence_answer":
             return []
         if mode == "partial_evidence_helpful_answer":
-            return [
+            opts = [
                 "Retry grounded lookup if you need fresher or broader evidence.",
                 "Narrow to the exact tool, error string, or version you care about.",
             ]
-        return [
+            if any(k in qt for k in ("error", "traceback", "stack trace", "exception", "failed")):
+                opts[0] = "Paste the full error text or traceback you’re seeing."
+            if any(k in qt for k in ("version", "compatible", "compatibility", "upgrade", "downgrade")):
+                opts[1] = "Name the exact tool or runtime version you’re targeting."
+            return opts
+        opts = [
             "Retry grounded lookup in a moment when connectivity is stable.",
             "Ask a narrower factual question (exact command, error text, or version).",
         ]
+        if any(k in qt for k in ("error", "traceback", "exception")):
+            opts[1] = "Paste the exact error message or command output you’re seeing."
+        return opts
 
     def _research_required_anchors(self, text: str) -> list[str]:
         out: list[str] = []
@@ -3200,10 +3218,12 @@ class SyncServer:
                 "I couldn't verify live lookup capability right now, so I can only give a general answer. "
                 "If you want, I can retry lookup in a moment."
             )
-            n_opts = self._grounded_lookup_next_step_options(answer_mode="truthful_fallback_with_next_steps")[
-                :2
-            ]
+            n_opts = self._grounded_lookup_next_step_options(
+                answer_mode="truthful_fallback_with_next_steps",
+                classify_text=classify_text,
+            )[:2]
             unavailable = format_reply_with_next_step_options(unavailable_base, n_opts)
+            ug, bmw = brevity_profile_for_answer_mode("truthful_fallback_with_next_steps")
             contract = {
                 "family": family_profile.family,
                 "source": "grounded_research_lookup",
@@ -3217,6 +3237,8 @@ class SyncServer:
                 "answer_mode": "truthful_fallback_with_next_steps",
                 "uncertainty_mode": "thin",
                 "next_step_options": n_opts,
+                "utility_goal": ug,
+                "brevity_max_words_soft": int(bmw),
             }
             return unavailable, "grounded_research_unavailable", contract
         lookup_summary, lookup_reason = self._run_direct_openclaw_lookup(
@@ -3246,7 +3268,11 @@ class SyncServer:
         else:
             answer_mode = "truthful_fallback_with_next_steps"
             uncertainty_mode = "thin"
-        next_opts = self._grounded_lookup_next_step_options(answer_mode=answer_mode)[:2]
+        next_opts = self._grounded_lookup_next_step_options(
+            answer_mode=answer_mode,
+            classify_text=classify_text,
+        )[:2]
+        ug, bmw = brevity_profile_for_answer_mode(answer_mode)
         realized = maybe_realize_grounded_technical_reply(
             user_text=classify_text,
             answer_family=str(family_profile.family or "grounded_research"),
@@ -3278,6 +3304,8 @@ class SyncServer:
             "answer_mode": answer_mode,
             "uncertainty_mode": uncertainty_mode,
             "next_step_options": next_opts,
+            "utility_goal": ug,
+            "brevity_max_words_soft": int(bmw),
         }
         return final_reply, "grounded_research_lookup", contract
 

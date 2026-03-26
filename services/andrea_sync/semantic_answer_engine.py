@@ -81,6 +81,8 @@ class SemanticTurnContract:
     answer_mode: str = "strong_evidence_answer"
     uncertainty_mode: str = "clear"
     next_step_options: tuple[str, ...] = ()
+    utility_goal: str = "concise_grounded_summary"
+    brevity_max_words_soft: int = 115
 
     def to_metadata(self) -> Dict[str, Any]:
         return {
@@ -96,6 +98,8 @@ class SemanticTurnContract:
             "answer_mode": self.answer_mode,
             "uncertainty_mode": self.uncertainty_mode,
             "next_step_options": list(self.next_step_options),
+            "utility_goal": self.utility_goal,
+            "brevity_max_words_soft": int(self.brevity_max_words_soft),
         }
 
 
@@ -221,6 +225,19 @@ def _classify_answer_mode(
     return "truthful_fallback_with_next_steps", "thin"
 
 
+def brevity_profile_for_answer_mode(answer_mode: str) -> tuple[str, int]:
+    """
+    Map answer_mode to (utility_goal, brevity_max_words_soft) for realization and eval.
+    Soft caps are targets; eval allows a modest slack band before flagging.
+    """
+    m = str(answer_mode or "").strip()
+    if m == "strong_evidence_answer":
+        return "concise_grounded_summary", 115
+    if m == "partial_evidence_helpful_answer":
+        return "partial_helpful_brevity", 185
+    return "truthful_next_steps_brevity", 260
+
+
 def _build_turn_contract(
     *,
     family: str,
@@ -238,6 +255,7 @@ def _build_turn_contract(
     answer_mode, uncertainty_mode = _classify_answer_mode(
         source=source, evidence_strength=ev_strength, candidate_text=candidate_text
     )
+    utility_goal, brevity_max_words_soft = brevity_profile_for_answer_mode(answer_mode)
     next_step_options: tuple[str, ...] = ()
     if conn is not None and str(task_id or "").strip():
         if answer_mode in {"partial_evidence_helpful_answer", "truthful_fallback_with_next_steps"}:
@@ -265,6 +283,8 @@ def _build_turn_contract(
         answer_mode=answer_mode,
         uncertainty_mode=uncertainty_mode,
         next_step_options=next_step_options,
+        utility_goal=utility_goal,
+        brevity_max_words_soft=int(brevity_max_words_soft),
     )
 
 

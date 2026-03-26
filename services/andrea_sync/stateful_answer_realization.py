@@ -69,6 +69,64 @@ def partial_evidence_realization_enabled() -> bool:
     return _env_truthy("ANDREA_PARTIAL_EVIDENCE_REALIZATION_ENABLED", True)
 
 
+def _local_brevity_profile(answer_mode: str) -> tuple[str, int]:
+    """Keep aligned with semantic_answer_engine.brevity_profile_for_answer_mode (no import cycle)."""
+    m = str(answer_mode or "").strip()
+    if m == "strong_evidence_answer":
+        return "concise_grounded_summary", 115
+    if m == "partial_evidence_helpful_answer":
+        return "partial_helpful_brevity", 185
+    return "truthful_next_steps_brevity", 260
+
+
+def _reply_word_count(text: str) -> int:
+    return len(re.findall(r"\b\w+\b", str(text or "")))
+
+
+def _split_next_options_suffix(text: str) -> tuple[str, str]:
+    t = str(text or "")
+    low = t.lower()
+    key = "next options:"
+    i = low.find(key)
+    if i < 0:
+        return t.strip(), ""
+    return t[:i].strip(), t[i:].strip()
+
+
+def _compress_reply_to_word_budget(
+    reply: str,
+    *,
+    max_words: int,
+    evidence_lines: Sequence[str],
+    required_anchors: Sequence[str],
+) -> str:
+    head, tail = _split_next_options_suffix(reply)
+    if _reply_word_count(head) <= max_words:
+        return reply.strip()
+    sentences = re.split(r"(?<=[.!?])\s+", head)
+    out: List[str] = []
+    wc = 0
+    for sent in sentences:
+        chunk = sent.strip()
+        if not chunk:
+            continue
+        sw = _reply_word_count(chunk)
+        if out and wc + sw > max_words:
+            break
+        out.append(chunk)
+        wc += sw
+    new_head = " ".join(out).strip()
+    if not new_head:
+        return reply.strip()
+    if not _evidence_anchor_overlap(new_head, evidence_lines):
+        return reply.strip()
+    if required_anchors and not _anchors_present_in_reply(new_head, required_anchors):
+        return reply.strip()
+    if tail:
+        return sanitize_user_surface_text(f"{new_head}\n\n{tail}", fallback=new_head, limit=1200).strip()
+    return new_head
+
+
 def _allowed_sources() -> set[str]:
     raw = (os.environ.get("ANDREA_STATEFUL_REALIZATION_SOURCES") or "").strip()
     if not raw:
@@ -192,6 +250,8 @@ class StatefulRealizationInput:
     answer_mode: str
     uncertainty_mode: str
     next_step_options: tuple[str, ...]
+    utility_goal: str = "concise_grounded_summary"
+    brevity_max_words_soft: int = 115
 
 
 def _split_structured_text_lines(text: str) -> List[str]:
@@ -373,6 +433,19 @@ def maybe_realize_stateful_reply(
             for x in next_raw
             if str(x).strip()
         )[:2]
+    utility_goal = (
+        str(turn_contract.get("utility_goal") or "").strip()
+        if isinstance(turn_contract, Mapping)
+        else ""
+    )
+    brevity_max_words_soft = 0
+    if isinstance(turn_contract, Mapping):
+        try:
+            brevity_max_words_soft = int(turn_contract.get("brevity_max_words_soft") or 0)
+        except (TypeError, ValueError):
+            brevity_max_words_soft = 0
+    if not utility_goal or brevity_max_words_soft <= 0:
+        utility_goal, brevity_max_words_soft = _local_brevity_profile(answer_mode)
     inp = StatefulRealizationInput(
         source=str(source or ""),
         deterministic_reply=str(deterministic_reply or "").strip(),
@@ -388,6 +461,8 @@ def maybe_realize_stateful_reply(
         answer_mode=answer_mode,
         uncertainty_mode=uncertainty_mode,
         next_step_options=next_step_options,
+        utility_goal=utility_goal,
+        brevity_max_words_soft=int(brevity_max_words_soft),
     )
     if not inp.deterministic_reply or not inp.evidence_lines:
         return None
@@ -407,6 +482,13 @@ def maybe_realize_stateful_reply(
             "8) NEXT_STEP_OPTIONS lists approved actions only—rephrase at most one or two of them naturally; "
             "do NOT add new options or new facts.\n"
         )
+    brevity_rule = ""
+    if inp.brevity_max_words_soft > 0:
+        brevity_rule = (
+            f"9) UTILITY_GOAL is {inp.utility_goal!r}: keep the main reply body under roughly "
+            f"{inp.brevity_max_words_soft} words (excluding a trailing Next options list if present). "
+            "Lead with the verified summary, not metadata scaffolding.\n"
+        )
     system = (
         "You are Andrea. Rewrite state-backed assistant replies to sound natural and concise.\n"
         "Rules:\n"
@@ -417,6 +499,7 @@ def maybe_realize_stateful_reply(
         "5) Never output runtime internals or configuration names.\n"
         "6) Preserve required anchors and family integrity.\n"
         f"{mode_rules}"
+        f"{brevity_rule}"
         "Return JSON object with keys: reply (string), grounded (boolean), used_fallback (boolean), "
         "family_preserved (boolean), anchors_used (array of strings)."
     )
@@ -429,6 +512,8 @@ def maybe_realize_stateful_reply(
             "answer_family": inp.family,
             "answer_mode": inp.answer_mode,
             "uncertainty_mode": inp.uncertainty_mode,
+            "utility_goal": inp.utility_goal,
+            "brevity_max_words_soft": inp.brevity_max_words_soft,
             "next_step_options": list(inp.next_step_options),
             "deterministic_reply": inp.deterministic_reply,
             "fallback_reply": inp.fallback_reply,
@@ -499,6 +584,22 @@ def maybe_realize_stateful_reply(
             "blocked" not in low_safe and "blocker" not in low_safe and "blocking" not in low_safe
         ):
             return None
+    slack = 38
+    if inp.brevity_max_words_soft > 0 and _reply_word_count(safe) > inp.brevity_max_words_soft + slack:
+        compressed = _compress_reply_to_word_budget(
+            safe,
+            max_words=inp.brevity_max_words_soft,
+            evidence_lines=inp.evidence_lines,
+            required_anchors=inp.required_anchors,
+        )
+        if compressed and _reply_word_count(compressed) + 5 < _reply_word_count(safe):
+            safe = compressed
+            if inp.next_step_options and not _next_step_options_reflected(safe, inp.next_step_options):
+                base = safe if _evidence_anchor_overlap(safe, inp.evidence_lines) else inp.deterministic_reply
+                safe = _assemble_stateful_with_next_steps(
+                    sanitize_user_surface_text(base, fallback=inp.deterministic_reply, limit=1200).strip(),
+                    inp.next_step_options,
+                )
     return safe
 
 
@@ -542,6 +643,7 @@ def maybe_realize_grounded_technical_reply(
         for x in next_step_options
         if str(x).strip()
     )[:2]
+    utility_goal, brevity_max_words_soft = _local_brevity_profile(mode)
     model = model_for_role("worker")
     timeout_seconds = max(
         5,
@@ -556,6 +658,12 @@ def maybe_realize_grounded_technical_reply(
             "6) If ANSWER_MODE is partial or truthful_fallback, end with one or two NEXT_STEP_OPTIONS "
             "phrased naturally—no new options or facts.\n"
         )
+    brevity_line = ""
+    if brevity_max_words_soft > 0:
+        brevity_line = (
+            f"7) UTILITY_GOAL is {utility_goal!r}: target roughly {brevity_max_words_soft} words in the main body "
+            "(excluding a trailing Next options list). Avoid boilerplate about lookup mechanics.\n"
+        )
     system = (
         "You are Andrea. Produce a concise grounded technical answer.\n"
         "Rules:\n"
@@ -565,6 +673,7 @@ def maybe_realize_grounded_technical_reply(
         "4) Keep it practical and user-facing.\n"
         "5) If evidence is weak, return the fallback.\n"
         f"{extra_mode}"
+        f"{brevity_line}"
         "Return JSON with keys: reply (string), grounded (boolean), used_fallback (boolean), anchors_used (array of strings)."
     )
     payload = json.dumps(
@@ -573,6 +682,8 @@ def maybe_realize_grounded_technical_reply(
             "answer_family": str(answer_family or "grounded_research").strip(),
             "answer_mode": mode,
             "uncertainty_mode": u_mode,
+            "utility_goal": utility_goal,
+            "brevity_max_words_soft": int(brevity_max_words_soft),
             "next_step_options": list(n_opts),
             "retrieval_source": str(retrieval_source or "").strip(),
             "query": str(query or "").strip(),
@@ -629,5 +740,18 @@ def maybe_realize_grounded_technical_reply(
         reply = _assemble_stateful_with_next_steps(base, n_opts)
     if ev_s >= 4 and _looks_fallback_shaped_reply(reply) and mode == "partial_evidence_helpful_answer" and n_opts:
         reply = _assemble_stateful_with_next_steps(fallback, n_opts)
+    slack = 42
+    if brevity_max_words_soft > 0 and _reply_word_count(reply) > brevity_max_words_soft + slack:
+        compressed = _compress_reply_to_word_budget(
+            reply,
+            max_words=brevity_max_words_soft,
+            evidence_lines=safe_evidence,
+            required_anchors=req,
+        )
+        if compressed and _reply_word_count(compressed) + 5 < _reply_word_count(reply):
+            reply = compressed
+            if n_opts and mode != "strong_evidence_answer" and not _next_step_options_reflected(reply, n_opts):
+                base = reply if _evidence_anchor_overlap(reply, safe_evidence) else fallback
+                reply = _assemble_stateful_with_next_steps(base, n_opts)
     return reply
 

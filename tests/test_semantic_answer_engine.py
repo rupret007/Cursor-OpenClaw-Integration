@@ -3,7 +3,10 @@ from __future__ import annotations
 import unittest
 from unittest import mock
 
-from services.andrea_sync.semantic_answer_engine import choose_semantic_state_reply
+from services.andrea_sync.semantic_answer_engine import (
+    brevity_profile_for_answer_mode,
+    choose_semantic_state_reply,
+)
 from services.andrea_sync.turn_intelligence import TurnPlan
 
 
@@ -274,3 +277,14 @@ class SemanticAnswerEngineTests(unittest.TestCase):
             binding_reason="non_stateful_turn:opinion_reflection",
         )
         self.assertIsNone(result)
+
+    def test_brevity_profile_for_answer_mode(self) -> None:
+        g, n = brevity_profile_for_answer_mode("strong_evidence_answer")
+        self.assertEqual(g, "concise_grounded_summary")
+        self.assertEqual(n, 115)
+        g2, n2 = brevity_profile_for_answer_mode("partial_evidence_helpful_answer")
+        self.assertEqual(g2, "partial_helpful_brevity")
+        self.assertEqual(n2, 185)
+        g3, n3 = brevity_profile_for_answer_mode("truthful_fallback_with_next_steps")
+        self.assertEqual(g3, "truthful_next_steps_brevity")
+        self.assertEqual(n3, 260)

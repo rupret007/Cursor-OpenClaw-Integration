@@ -17,7 +17,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from queue import Empty, Queue
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Sequence
 
 from .adapters import alexa as alexa_adapt
 from .adapters import telegram as tg_adapt
@@ -3140,9 +3140,66 @@ class SyncServer:
         lines = [p.strip() for p in parts if len(p.strip()) > 10]
         return lines[:4] if lines else [s]
 
+    def _compose_grounded_primary_finding(
+        self,
+        *,
+        evidence_lines: Sequence[str],
+        classify_text: str,
+        guidance_class: str,
+        answer_mode: str,
+    ) -> str:
+        def _cause_fragment(line: str) -> str:
+            low = str(line or "").lower()
+            if "intermediate" in low and "chain" in low:
+                return "incomplete intermediate chains"
+            if "expiry" in low or "expired" in low or "notafter" in low:
+                return "certificate expiry"
+            if "hostname" in low and "mismatch" in low:
+                return "hostname mismatch"
+            clean = re.sub(r"^(?:other\s+)?(?:common\s+)?(?:causes?|factors?)\s+include\s+", "", str(line or "").strip(), flags=re.I)
+            clean = clean.rstrip(".")
+            words = clean.split()
+            return " ".join(words[:8]) if words else clean
+
+        lines = [str(x or "").strip() for x in evidence_lines if str(x or "").strip()]
+        if not lines:
+            return ""
+        if answer_mode == "strong_evidence_answer" and len(lines) >= 3:
+            head = lines[0].rstrip(".")
+            second = _cause_fragment(lines[1])
+            third = _cause_fragment(lines[2])
+            # Keep all major causes but collapse raw multiline evidence into one concise explanation.
+            joined = (
+                f"{head}. Other common causes include {second} and {third}."
+            )
+            return shared_sanitize_user_surface_text(joined, fallback=lines[0], limit=420).strip()
+        if answer_mode == "partial_evidence_helpful_answer" and len(lines) >= 2:
+            head = lines[0].rstrip(".")
+            second = _cause_fragment(lines[1])
+            joined = f"{head}. Another likely factor is {second}."
+            return shared_sanitize_user_surface_text(joined, fallback=lines[0], limit=420).strip()
+        return shared_sanitize_user_surface_text(lines[0], fallback=lines[0], limit=420).strip()
+
+    def _compose_grounded_uncertainty_boundary(
+        self,
+        *,
+        answer_mode: str,
+        guidance_class: str,
+        evidence_strength: int,
+    ) -> str:
+        if answer_mode == "strong_evidence_answer":
+            return ""
+        if answer_mode == "partial_evidence_helpful_answer":
+            return "I can narrow this further if you share one concrete detail from your exact setup."
+        return "I can only give a general direction until live lookup is available again."
+
     def _grounded_lookup_guidance_class(self, *, classify_text: str, turn_domain: str = "") -> str:
         qt = str(classify_text or "").strip().lower()
         dom = str(turn_domain or "").strip().lower()
+        if any(k in qt for k in ("ssl", "tls", "certificate")) and any(
+            k in qt for k in ("error", "warning", "trust", "expired", "expiry")
+        ):
+            return "certificate_tls"
         if any(k in qt for k in ("error", "traceback", "stack trace", "exception", "failed", "failure")):
             return "error_traceback"
         if any(k in qt for k in ("version", "compatible", "compatibility", "upgrade", "downgrade")):
@@ -3188,6 +3245,11 @@ class SyncServer:
         if mode == "strong_evidence_answer":
             return []
         if mode == "partial_evidence_helpful_answer":
+            if gc == "certificate_tls":
+                return [
+                    "Share the exact certificate warning text and hostname shown by the client/browser.",
+                    "Confirm whether the chain is complete and whether the certificate is expired for that host.",
+                ]
             if gc == "error_traceback":
                 return [
                     "Paste the full error text or traceback you’re seeing.",
@@ -3211,6 +3273,11 @@ class SyncServer:
             return [
                 "Retry grounded lookup if you need fresher or broader evidence.",
                 "Narrow to the exact tool, error string, or version you care about.",
+            ]
+        if gc == "certificate_tls":
+            return [
+                "Share the exact certificate warning and hostname so I can narrow the likely cause.",
+                "Check chain completeness and certificate expiry on the serving endpoint, then share what you find.",
             ]
         if gc == "error_traceback":
             return [
@@ -3295,10 +3362,9 @@ class SyncServer:
                 classify_text=classify_text,
                 turn_domain=str(turn_plan.domain or ""),
             )
-            unavailable_base = (
-                "I couldn't verify live lookup capability right now, so I can only give a general answer. "
-                "If you want, I can retry lookup in a moment."
-            )
+            unavailable_base = "I couldn't verify live lookup capability right now, so I can only give a general answer."
+            if guidance_class == "certificate_tls":
+                unavailable_base += " For SSL or certificate warnings, I can still help you triage likely causes from the exact warning details."
             n_opts = self._grounded_lookup_next_step_options(
                 answer_mode="truthful_fallback_with_next_steps",
                 classify_text=classify_text,
@@ -3320,6 +3386,9 @@ class SyncServer:
                 "uncertainty_mode": "thin",
                 "next_step_options": n_opts,
                 "guidance_class": guidance_class,
+                "primary_finding": unavailable_base,
+                "secondary_evidence_lines": [],
+                "uncertainty_boundary": "Live lookup is unavailable right now.",
                 "utility_goal": ug,
                 "brevity_max_words_soft": int(bmw),
             }
@@ -3355,29 +3424,48 @@ class SyncServer:
             classify_text=classify_text,
             turn_domain=str(turn_plan.domain or ""),
         )
+        if guidance_class == "error_traceback" and any(k in str(classify_text or "").lower() for k in ("ssl", "tls", "certificate")):
+            guidance_class = "certificate_tls"
         next_opts = self._grounded_lookup_next_step_options(
             answer_mode=answer_mode,
             classify_text=classify_text,
             guidance_class=guidance_class,
         )[:2]
+        primary_finding = self._compose_grounded_primary_finding(
+            evidence_lines=evidence_lines,
+            classify_text=classify_text,
+            guidance_class=guidance_class,
+            answer_mode=answer_mode,
+        )
+        uncertainty_boundary = self._compose_grounded_uncertainty_boundary(
+            answer_mode=answer_mode,
+            guidance_class=guidance_class,
+            evidence_strength=evidence_strength,
+        )
+        shaped_fallback = primary_finding or summary
+        if uncertainty_boundary and answer_mode != "strong_evidence_answer":
+            shaped_fallback = f"{shaped_fallback} {uncertainty_boundary}".strip()
         ug, bmw = brevity_profile_for_answer_mode(answer_mode)
         realized = maybe_realize_grounded_technical_reply(
             user_text=classify_text,
             answer_family=str(family_profile.family or "grounded_research"),
             evidence_lines=evidence_lines,
-            fallback_reply=summary,
+            fallback_reply=shaped_fallback,
             required_anchors=required_anchors,
             evidence_strength=evidence_strength,
             answer_mode=answer_mode,
             uncertainty_mode=uncertainty_mode,
             next_step_options=next_opts,
             guidance_class=guidance_class,
+            primary_finding=primary_finding,
+            supporting_evidence_lines=evidence_lines[1:4],
+            uncertainty_boundary=uncertainty_boundary,
             retrieval_source="brave-api-search",
             query=str(classify_text or "").strip(),
         )
         final_reply = shared_sanitize_user_surface_text(
-            str(realized or summary).strip(),
-            fallback=summary,
+            str(realized or shaped_fallback or summary).strip(),
+            fallback=shaped_fallback or summary,
             limit=1200,
         ).strip()
         contract = {
@@ -3394,6 +3482,9 @@ class SyncServer:
             "uncertainty_mode": uncertainty_mode,
             "next_step_options": next_opts,
             "guidance_class": guidance_class,
+            "primary_finding": primary_finding,
+            "secondary_evidence_lines": evidence_lines[1:4],
+            "uncertainty_boundary": uncertainty_boundary,
             "utility_goal": ug,
             "brevity_max_words_soft": int(bmw),
         }

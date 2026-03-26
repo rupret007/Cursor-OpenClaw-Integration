@@ -520,6 +520,73 @@ class ConversationEvalDetectorTests(unittest.TestCase):
         codes = {h["issue_code"] for h in hits}
         self.assertIn("conversation_grounded_specific_guidance_miss", codes)
 
+    def test_detects_unavailable_technical_generic_retry_guidance(self) -> None:
+        cap = {
+            "raw_reply_text": (
+                "Lookup is unavailable right now.\n\nNext options:\n"
+                "• Retry grounded lookup in a moment when connectivity is stable.\n"
+                "• Paste the warning details."
+            ),
+            "rendered_reply_sanitized": (
+                "Lookup is unavailable right now.\n\nNext options:\n"
+                "• Retry grounded lookup in a moment when connectivity is stable.\n"
+                "• Paste the warning details."
+            ),
+            "user_turn": "What does this SSL certificate error mean?",
+            "assistant_reason": "grounded_research_unavailable",
+            "assistant_grounded_research_selection": {
+                "source": "grounded_research_lookup",
+                "family": "grounded_research",
+                "query": "What does this SSL certificate error mean?",
+                "answer_mode": "truthful_fallback_with_next_steps",
+                "fallback_policy": "truthful_unavailable_lookup_fallback",
+                "guidance_class": "certificate_tls",
+                "next_step_options": [
+                    "Retry grounded lookup in a moment when connectivity is stable.",
+                    "Paste the exact warning details.",
+                ],
+                "evidence_lines": [],
+                "evidence_strength": 0,
+            },
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap)
+        codes = {h["issue_code"] for h in hits}
+        self.assertIn("conversation_grounded_unavailable_generic_retry_guidance", codes)
+
+    def test_detects_grounded_multiline_raw_carrythrough(self) -> None:
+        raw = (
+            "Hostname mismatches commonly trigger certificate warnings in browsers. "
+            "Incomplete intermediate chains can produce trust errors until the full chain is installed. "
+            "Expiry warnings appear when the leaf certificate is past its notAfter date."
+        )
+        cap = {
+            "raw_reply_text": raw,
+            "rendered_reply_sanitized": raw,
+            "user_turn": "Why am I seeing an SSL certificate warning in the browser?",
+            "assistant_reason": "grounded_research_lookup",
+            "assistant_grounded_research_selection": {
+                "source": "grounded_research_lookup",
+                "family": "grounded_research",
+                "query": "Why am I seeing an SSL certificate warning in the browser?",
+                "answer_mode": "strong_evidence_answer",
+                "guidance_class": "certificate_tls",
+                "next_step_options": [],
+                "evidence_lines": [
+                    "Hostname mismatches commonly trigger certificate warnings in browsers.",
+                    "Incomplete intermediate chains can produce trust errors until the full chain is installed.",
+                    "Expiry warnings appear when the leaf certificate is past its notAfter date.",
+                ],
+                "evidence_strength": 9,
+            },
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap)
+        codes = {h["issue_code"] for h in hits}
+        self.assertIn("conversation_grounded_multiline_raw_carrythrough", codes)
+
     def test_detects_grounded_strong_brevity_violation(self) -> None:
         long_body = " ".join([f"fact{i}" for i in range(200)])
         cap = {

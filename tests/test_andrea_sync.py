@@ -5123,6 +5123,17 @@ class TestAndreaSync(unittest.TestCase):
         self.assertFalse(plan.force_delegate)
         self.assertFalse(plan.prefer_state_reply)
 
+    def test_build_turn_plan_marks_mixed_ssl_warning_as_technical_guidance(self) -> None:
+        from services.andrea_sync.turn_intelligence import build_turn_plan
+
+        plan = build_turn_plan(
+            "Why am I seeing an SSL certificate warning in the browser?",
+            scenario_id="mixedResourceGoal",
+            projection_has_continuity_state=False,
+        )
+        self.assertEqual(plan.domain, "technical_guidance")
+        self.assertFalse(plan.force_delegate)
+
     def test_grounded_research_reply_returns_contract_for_technical_guidance(self) -> None:
         os.environ["ANDREA_GROUNDED_RESEARCH_ENABLED"] = "1"
         os.environ["ANDREA_GROUNDED_RESEARCH_REALIZATION_ENABLED"] = "0"
@@ -5165,6 +5176,9 @@ class TestAndreaSync(unittest.TestCase):
             ("concise_grounded_summary", "partial_helpful_brevity", "truthful_next_steps_brevity"),
         )
         self.assertGreater(int(contract.get("brevity_max_words_soft") or 0), 0)
+        self.assertTrue(str(contract.get("primary_finding") or "").strip())
+        self.assertIn("secondary_evidence_lines", contract)
+        self.assertIn("uncertainty_boundary", contract)
 
     def test_build_direct_reply_does_not_use_social_checkin_for_substantive_turn(self) -> None:
         from services.andrea_sync.andrea_router import build_direct_reply
@@ -5254,6 +5268,19 @@ class SyncServerGroundedUsefulnessTests(unittest.TestCase):
         self.assertGreaterEqual(len(opts), 1)
         self.assertTrue(any("version" in o.lower() for o in opts))
 
+    def test_grounded_lookup_next_step_options_ssl_unavailable_are_specific(self) -> None:
+        from services.andrea_sync.server import SyncServer
+
+        server = SyncServer()
+        opts = server._grounded_lookup_next_step_options(
+            answer_mode="truthful_fallback_with_next_steps",
+            classify_text="What does this SSL certificate error mean?",
+            guidance_class="certificate_tls",
+        )
+        self.assertEqual(len(opts), 2)
+        self.assertTrue(any("hostname" in o.lower() or "certificate" in o.lower() for o in opts))
+        self.assertFalse(any("connectivity is stable" in o.lower() for o in opts))
+
     def test_grounded_research_unavailable_includes_utility_contract_and_next_steps(self) -> None:
         os.environ["ANDREA_GROUNDED_RESEARCH_ENABLED"] = "1"
         from services.andrea_sync.server import SyncServer
@@ -5284,7 +5311,7 @@ class SyncServerGroundedUsefulnessTests(unittest.TestCase):
         self.assertEqual(contract.get("utility_goal"), "truthful_next_steps_brevity")
         self.assertGreater(int(contract.get("brevity_max_words_soft") or 0), 0)
         self.assertEqual(contract.get("answer_mode"), "truthful_fallback_with_next_steps")
-        self.assertEqual(contract.get("guidance_class"), "error_traceback")
+        self.assertEqual(contract.get("guidance_class"), "certificate_tls")
 
 
 if __name__ == "__main__":

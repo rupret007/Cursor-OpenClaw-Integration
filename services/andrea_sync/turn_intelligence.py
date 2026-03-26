@@ -147,11 +147,14 @@ _TECHNICAL_GUIDANCE_RE = re.compile(
     r"\b("
     r"how\s+do\s+i|"
     r"what\s+does\s+this\s+(?:[\w-]+\s+)?error|"
+    r"what\s+does\s+this\s+(?:ssl|tls|certificate)\s+(?:error|warning|issue)\s+mean|"
     r"why\s+(?:is|does)\s+.*(?:error|fail|failing|timeout|crash)|"
+    r"why\s+am\s+i\s+seeing\s+.*(?:ssl|tls|certificate|warning|error)|"
     r"how\s+should\s+i\s+configure|"
     r"what\s+is\s+the\s+usual\s+fix|"
     r"best\s+way\s+to\s+(?:fix|configure|debug)|"
-    r"explain\s+(?:this|that)\s+(?:error|issue|warning)"
+    r"explain\s+(?:this|that)\s+(?:error|issue|warning)|"
+    r"(?:ssl|tls|certificate)\s+(?:error|warning|issue)"
     r")\b",
     re.I,
 )

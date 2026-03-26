@@ -378,6 +378,18 @@ def _specific_guidance_reflected(reply: str, options: Sequence[str]) -> bool:
     return bool(required & _specific_guidance_tokens(reply))
 
 
+def _reply_contains_verbatim_evidence_lines(reply: str, evidence_lines: Sequence[str], *, min_hits: int = 2) -> bool:
+    low = str(reply or "").lower()
+    hits = 0
+    for ln in evidence_lines:
+        clean = str(ln or "").strip().lower()
+        if len(clean) < 36:
+            continue
+        if clean in low:
+            hits += 1
+    return hits >= min_hits
+
+
 def run_deterministic_detectors(
     capture: Mapping[str, Any],
     *,
@@ -828,6 +840,36 @@ def run_deterministic_detectors(
                 "issue_code": "conversation_grounded_specific_guidance_miss",
                 "severity": "medium",
                 "detail": f"grounded {detail_class} next-step guidance was available but reply stayed generic",
+            }
+        )
+    if (
+        grounded_source
+        and grounded_fallback_policy == "truthful_unavailable_lookup_fallback"
+        and grounded_answer_mode == "truthful_fallback_with_next_steps"
+        and grounded_guidance_class in {"error_traceback", "certificate_tls", "configuration_setup", "version_compatibility"}
+        and "retry grounded lookup in a moment when connectivity is stable" in low
+    ):
+        findings.append(
+            {
+                "family": "grounded_research_failure",
+                "issue_code": "conversation_grounded_unavailable_generic_retry_guidance",
+                "severity": "medium",
+                "detail": "lookup-unavailable technical guidance kept generic retry wording despite query-specific class",
+            }
+        )
+    if (
+        grounded_source
+        and grounded_answer_mode == "strong_evidence_answer"
+        and len(grounded_evidence_lines) >= 3
+        and _reply_contains_verbatim_evidence_lines(text, grounded_evidence_lines, min_hits=2)
+        and _eval_reply_word_count(text) > 24
+    ):
+        findings.append(
+            {
+                "family": "grounded_research_failure",
+                "issue_code": "conversation_grounded_multiline_raw_carrythrough",
+                "severity": "medium",
+                "detail": "strong-evidence technical reply carried raw multiline evidence instead of concise synthesis",
             }
         )
     if (

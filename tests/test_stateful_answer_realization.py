@@ -418,3 +418,54 @@ class StatefulAnswerRealizationTests(unittest.TestCase):
         self.assertIn("next options", out.lower())
         self.assertIn("traceback", out.lower())
 
+    @mock.patch("services.andrea_sync.stateful_answer_realization._openai_json_chat")
+    def test_uncertainty_assist_uses_second_model_when_first_reply_is_fallback_shaped(
+        self, mock_chat: mock.MagicMock
+    ) -> None:
+        mock_chat.side_effect = [
+            {
+                "reply": "I can only give a general answer right now.",
+                "grounded": True,
+                "used_fallback": False,
+                "anchors_used": ["certificate"],
+            },
+            {
+                "reply": "SSL certificate warnings usually come from hostname mismatch, incomplete intermediate chain, or certificate expiry.",
+                "grounded": True,
+                "used_fallback": False,
+                "anchors_used": ["certificate", "hostname"],
+            },
+        ]
+        with mock.patch.dict(
+            os.environ,
+            {
+                "ANDREA_STATEFUL_REALIZATION_ENABLED": "1",
+                "ANDREA_GROUNDED_RESEARCH_REALIZATION_ENABLED": "1",
+                "ANDREA_TECHNICAL_UNCERTAINTY_ASSIST_ENABLED": "1",
+                "OPENAI_API_ENABLED": "1",
+                "OPENAI_API_KEY": "x",
+                "ANDREA_MODEL_WORKER": "worker-model",
+                "ANDREA_DIRECT_OPENAI_MODEL": "direct-model",
+            },
+            clear=False,
+        ):
+            out = maybe_realize_grounded_technical_reply(
+                user_text="Why am I seeing an SSL certificate warning?",
+                answer_family="grounded_research",
+                evidence_lines=[
+                    "Hostname mismatches commonly trigger certificate warnings in browsers.",
+                    "Incomplete intermediate chains can produce trust errors.",
+                    "Expiry warnings appear when the leaf certificate is expired.",
+                ],
+                fallback_reply="SSL warnings often indicate hostname, chain, or expiry issues.",
+                required_anchors=("certificate",),
+                evidence_strength=4,
+                answer_mode="partial_evidence_helpful_answer",
+                uncertainty_mode="partial",
+                guidance_class="certificate_tls",
+            )
+        self.assertIsNotNone(out)
+        assert out is not None
+        self.assertIn("certificate", out.lower())
+        self.assertIn("intermediate", out.lower())
+

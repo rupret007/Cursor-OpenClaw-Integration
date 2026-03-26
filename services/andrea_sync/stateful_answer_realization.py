@@ -69,6 +69,10 @@ def partial_evidence_realization_enabled() -> bool:
     return _env_truthy("ANDREA_PARTIAL_EVIDENCE_REALIZATION_ENABLED", True)
 
 
+def technical_uncertainty_assist_enabled() -> bool:
+    return _env_truthy("ANDREA_TECHNICAL_UNCERTAINTY_ASSIST_ENABLED", True)
+
+
 def _local_brevity_profile(answer_mode: str) -> tuple[str, int]:
     """Keep aligned with semantic_answer_engine.brevity_profile_for_answer_mode (no import cycle)."""
     m = str(answer_mode or "").strip()
@@ -657,6 +661,9 @@ def maybe_realize_grounded_technical_reply(
     uncertainty_mode: str = "",
     next_step_options: Sequence[str] = (),
     guidance_class: str = "",
+    primary_finding: str = "",
+    supporting_evidence_lines: Sequence[str] = (),
+    uncertainty_boundary: str = "",
     retrieval_source: str = "",
     query: str = "",
 ) -> str | None:
@@ -686,6 +693,13 @@ def maybe_realize_grounded_technical_reply(
         for x in next_step_options
         if str(x).strip()
     )[:2]
+    primary = sanitize_user_surface_text(str(primary_finding or ""), fallback="", limit=420).strip()
+    supporting = tuple(
+        sanitize_user_surface_text(str(x), fallback="", limit=420).strip()
+        for x in supporting_evidence_lines
+        if str(x).strip()
+    )[:4]
+    uncertainty = sanitize_user_surface_text(str(uncertainty_boundary or ""), fallback="", limit=280).strip()
     utility_goal, brevity_max_words_soft = _local_brevity_profile(mode)
     model = model_for_role("worker")
     timeout_seconds = max(
@@ -711,7 +725,8 @@ def maybe_realize_grounded_technical_reply(
         "You are Andrea. Produce a concise grounded technical answer.\n"
         "Rules:\n"
         "1) Use ONLY facts from EVIDENCE_LINES.\n"
-        "2) If evidence is partial, be explicit about uncertainty.\n"
+        "2) Lead with PRIMARY_FINDING when present; use SUPPORTING_EVIDENCE_LINES only to tighten clarity.\n"
+        "3) If evidence is partial, be explicit about uncertainty and use UNCERTAINTY_BOUNDARY if provided.\n"
         "3) Do NOT invent commands, versions, files, causes, or guarantees.\n"
         "4) Keep it practical and user-facing.\n"
         "5) If evidence is weak, return the fallback.\n"
@@ -726,6 +741,9 @@ def maybe_realize_grounded_technical_reply(
             "answer_mode": mode,
             "uncertainty_mode": u_mode,
             "guidance_class": str(guidance_class or "").strip(),
+            "primary_finding": primary,
+            "supporting_evidence_lines": list(supporting),
+            "uncertainty_boundary": uncertainty,
             "utility_goal": utility_goal,
             "brevity_max_words_soft": int(brevity_max_words_soft),
             "next_step_options": list(n_opts),
@@ -738,14 +756,20 @@ def maybe_realize_grounded_technical_reply(
         },
         ensure_ascii=False,
     )
-    try:
-        parsed = _openai_json_chat(
-            system=system,
-            user=payload,
-            model=model,
-            timeout_seconds=timeout_seconds,
-        )
-    except Exception:
+
+    def _run_grounded_model(model_name: str) -> dict[str, Any] | None:
+        try:
+            return _openai_json_chat(
+                system=system,
+                user=payload,
+                model=model_name,
+                timeout_seconds=timeout_seconds,
+            )
+        except Exception:
+            return None
+
+    parsed = _run_grounded_model(model)
+    if not isinstance(parsed, dict):
         if partial_evidence_realization_enabled() and n_opts and mode != "strong_evidence_answer":
             return _assemble_stateful_with_next_steps(fallback, n_opts)
         return None
@@ -759,9 +783,36 @@ def maybe_realize_grounded_technical_reply(
             return _assemble_stateful_with_next_steps(fallback, n_opts)
         return None
     if not _evidence_anchor_overlap(reply, safe_evidence):
-        if partial_evidence_realization_enabled() and n_opts and mode != "strong_evidence_answer":
-            return _assemble_stateful_with_next_steps(fallback, n_opts)
-        return None
+        if (
+            technical_uncertainty_assist_enabled()
+            and mode in {"partial_evidence_helpful_answer", "truthful_fallback_with_next_steps"}
+        ):
+            assist_model = (os.environ.get("ANDREA_DIRECT_OPENAI_MODEL") or "").strip() or model_for_role("verifier")
+            if assist_model and assist_model != model:
+                parsed_assist = _run_grounded_model(assist_model)
+                assist_reply = (
+                    sanitize_user_surface_text(str((parsed_assist or {}).get("reply") or ""), fallback="", limit=1200).strip()
+                    if isinstance(parsed_assist, dict)
+                    else ""
+                )
+                if (
+                    assist_reply
+                    and bool((parsed_assist or {}).get("grounded"))
+                    and _evidence_anchor_overlap(assist_reply, safe_evidence)
+                ):
+                    reply = assist_reply
+                else:
+                    if partial_evidence_realization_enabled() and n_opts and mode != "strong_evidence_answer":
+                        return _assemble_stateful_with_next_steps(fallback, n_opts)
+                    return None
+            else:
+                if partial_evidence_realization_enabled() and n_opts and mode != "strong_evidence_answer":
+                    return _assemble_stateful_with_next_steps(fallback, n_opts)
+                return None
+        else:
+            if partial_evidence_realization_enabled() and n_opts and mode != "strong_evidence_answer":
+                return _assemble_stateful_with_next_steps(fallback, n_opts)
+            return None
     req = [str(x).strip().lower() for x in required_anchors if str(x).strip()]
     if req and not _anchors_present_in_reply(reply, req):
         anchors_used = parsed.get("anchors_used")
@@ -790,6 +841,28 @@ def maybe_realize_grounded_technical_reply(
     ):
         base = reply if _evidence_anchor_overlap(reply, safe_evidence) else fallback
         reply = _assemble_stateful_with_next_steps(base, n_opts)
+    if (
+        technical_uncertainty_assist_enabled()
+        and mode in {"partial_evidence_helpful_answer", "truthful_fallback_with_next_steps"}
+        and (_looks_fallback_shaped_reply(reply) or "general answer" in reply.lower())
+    ):
+        assist_model = (os.environ.get("ANDREA_DIRECT_OPENAI_MODEL") or "").strip() or model_for_role("verifier")
+        if assist_model and assist_model != model:
+            parsed_assist = _run_grounded_model(assist_model)
+            assist_reply = (
+                sanitize_user_surface_text(str((parsed_assist or {}).get("reply") or ""), fallback="", limit=1200).strip()
+                if isinstance(parsed_assist, dict)
+                else ""
+            )
+            if (
+                assist_reply
+                and bool((parsed_assist or {}).get("grounded"))
+                and _evidence_anchor_overlap(assist_reply, safe_evidence)
+            ):
+                reply = assist_reply
+                if n_opts and not _specific_next_step_guidance_reflected(reply, n_opts):
+                    base = reply if _evidence_anchor_overlap(reply, safe_evidence) else fallback
+                    reply = _assemble_stateful_with_next_steps(base, n_opts)
     if ev_s >= 4 and _looks_fallback_shaped_reply(reply) and mode == "partial_evidence_helpful_answer" and n_opts:
         reply = _assemble_stateful_with_next_steps(fallback, n_opts)
     slack = 42

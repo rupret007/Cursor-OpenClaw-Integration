@@ -469,6 +469,57 @@ class ConversationEvalDetectorTests(unittest.TestCase):
         codes = {h["issue_code"] for h in hits}
         self.assertNotIn("conversation_grounded_error_query_generic_next_steps", codes)
 
+    def test_detects_stateful_specific_guidance_miss(self) -> None:
+        cap = {
+            "raw_reply_text": "Cursor recap: partial result.\n\nNext options:\n• Retry later.\n• Ask a narrower question.",
+            "rendered_reply_sanitized": "Cursor recap: partial result.\n\nNext options:\n• Retry later.\n• Ask a narrower question.",
+            "user_turn": "What did Cursor say about the traceback?",
+            "turn_plan_domain": "project_status",
+            "assistant_reason": "semantic_state_cursor_continuity_recall",
+            "assistant_semantic_selection": {"source": "cursor_continuity_recall"},
+            "semantic_turn_contract": {
+                "family": "cursor_recall",
+                "source": "cursor_continuity_recall",
+                "answer_mode": "partial_evidence_helpful_answer",
+                "next_step_options": [
+                    "Paste the full error text or traceback you’re seeing.",
+                    "Include the exact command or action that triggers it.",
+                ],
+                "evidence_strength": 4,
+            },
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap)
+        codes = {h["issue_code"] for h in hits}
+        self.assertIn("conversation_stateful_specific_guidance_miss", codes)
+
+    def test_detects_grounded_specific_guidance_miss(self) -> None:
+        cap = {
+            "raw_reply_text": "Partial setup note.\n\nNext options:\n• Retry grounded lookup.\n• Ask a narrower question.",
+            "rendered_reply_sanitized": "Partial setup note.\n\nNext options:\n• Retry grounded lookup.\n• Ask a narrower question.",
+            "user_turn": "Why is this config failing?",
+            "assistant_reason": "grounded_research_lookup",
+            "assistant_grounded_research_selection": {
+                "source": "grounded_research_lookup",
+                "family": "grounded_research",
+                "query": "Why is this config failing?",
+                "guidance_class": "configuration_setup",
+                "answer_mode": "partial_evidence_helpful_answer",
+                "next_step_options": [
+                    "Share the relevant config snippet or command flags (redact secrets).",
+                    "Name the environment where this runs (local, container, CI, or cloud).",
+                ],
+                "evidence_lines": ["Config mismatch can fail when env variables differ by runtime."],
+                "evidence_strength": 4,
+            },
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap)
+        codes = {h["issue_code"] for h in hits}
+        self.assertIn("conversation_grounded_specific_guidance_miss", codes)
+
     def test_detects_grounded_strong_brevity_violation(self) -> None:
         long_body = " ".join([f"fact{i}" for i in range(200)])
         cap = {

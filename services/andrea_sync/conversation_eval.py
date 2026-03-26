@@ -352,6 +352,32 @@ def _eval_reply_word_count(text: str) -> int:
     return len(re.findall(r"\b\w+\b", str(text or "")))
 
 
+def _specific_guidance_tokens(text: str) -> set[str]:
+    low = str(text or "").lower()
+    mapping = {
+        "traceback": ("traceback", "stack trace", "exception"),
+        "error": ("error", "failed", "failure"),
+        "version": ("version", "compatib", "upgrade", "downgrade"),
+        "config": ("config", "flag", "yaml", "toml", "ini", "environment", "runtime"),
+        "command": ("command", "output"),
+        "task": ("task label", "task id", "goal id", "approval id", "workstream"),
+    }
+    out: set[str] = set()
+    for key, needles in mapping.items():
+        if any(n in low for n in needles):
+            out.add(key)
+    return out
+
+
+def _specific_guidance_reflected(reply: str, options: Sequence[str]) -> bool:
+    required = set()
+    for opt in options:
+        required |= _specific_guidance_tokens(opt)
+    if not required:
+        return True
+    return bool(required & _specific_guidance_tokens(reply))
+
+
 def run_deterministic_detectors(
     capture: Mapping[str, Any],
     *,
@@ -385,11 +411,13 @@ def run_deterministic_detectors(
     contract_next_steps: list[str] = []
     contract_utility_goal = ""
     contract_brevity_max_words_soft = 0
+    contract_guidance_class = ""
     if isinstance(semantic_contract, dict):
         contract_family = str(semantic_contract.get("family") or "")
         contract_source = str(semantic_contract.get("source") or "")
         contract_answer_mode = str(semantic_contract.get("answer_mode") or "").strip()
         contract_utility_goal = str(semantic_contract.get("utility_goal") or "").strip()
+        contract_guidance_class = str(semantic_contract.get("guidance_class") or "").strip()
         try:
             contract_brevity_max_words_soft = int(semantic_contract.get("brevity_max_words_soft") or 0)
         except (TypeError, ValueError):
@@ -416,6 +444,7 @@ def run_deterministic_detectors(
     grounded_utility_goal = ""
     grounded_brevity_max_words_soft = 0
     grounded_query_l = ""
+    grounded_guidance_class = ""
     if isinstance(grounded_selection, dict):
         grounded_source = str(grounded_selection.get("source") or "")
         grounded_family = str(grounded_selection.get("family") or "")
@@ -423,6 +452,7 @@ def run_deterministic_detectors(
         grounded_fallback_policy = str(grounded_selection.get("fallback_policy") or "").strip()
         grounded_query_l = str(grounded_selection.get("query") or "").strip().lower()
         grounded_utility_goal = str(grounded_selection.get("utility_goal") or "").strip()
+        grounded_guidance_class = str(grounded_selection.get("guidance_class") or "").strip()
         try:
             grounded_brevity_max_words_soft = int(grounded_selection.get("brevity_max_words_soft") or 0)
         except (TypeError, ValueError):
@@ -758,6 +788,20 @@ def run_deterministic_detectors(
             }
         )
     if (
+        contract_answer_mode in {"partial_evidence_helpful_answer", "truthful_fallback_with_next_steps"}
+        and contract_next_steps
+        and ar.startswith("semantic_state_")
+        and not _specific_guidance_reflected(text, contract_next_steps)
+    ):
+        findings.append(
+            {
+                "family": "thin_summary",
+                "issue_code": "conversation_stateful_specific_guidance_miss",
+                "severity": "medium",
+                "detail": "semantic contract carried specific next-step guidance but rendered reply stayed generic",
+            }
+        )
+    if (
         grounded_answer_mode == "truthful_fallback_with_next_steps"
         and grounded_next_steps
         and grounded_source
@@ -769,6 +813,21 @@ def run_deterministic_detectors(
                 "issue_code": "conversation_sterile_truthful_fallback",
                 "severity": "medium",
                 "detail": "truthful fallback contract carried next-step options but reply did not surface them",
+            }
+        )
+    if (
+        grounded_answer_mode in {"partial_evidence_helpful_answer", "truthful_fallback_with_next_steps"}
+        and grounded_source
+        and grounded_next_steps
+        and not _specific_guidance_reflected(text, grounded_next_steps)
+    ):
+        detail_class = grounded_guidance_class or contract_guidance_class or "query-specific"
+        findings.append(
+            {
+                "family": "grounded_research_failure",
+                "issue_code": "conversation_grounded_specific_guidance_miss",
+                "severity": "medium",
+                "detail": f"grounded {detail_class} next-step guidance was available but reply stayed generic",
             }
         )
     if (

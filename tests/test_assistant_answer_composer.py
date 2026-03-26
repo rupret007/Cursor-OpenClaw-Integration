@@ -270,6 +270,58 @@ class TestAssistantAnswerComposer(unittest.TestCase):
         assert got is not None
         self.assertEqual(got[1], "blocked_state_reply")
 
+    def test_stateful_next_steps_are_error_specific_for_cursor_recall(self) -> None:
+        from services.andrea_sync.assistant_answer_composer import derive_stateful_next_step_options
+
+        r0 = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "comp-next-opt-1",
+                "payload": {
+                    "text": "hi",
+                    "routing_text": "hi",
+                    "chat_id": 77031,
+                    "message_id": 1,
+                },
+            },
+        )
+        tid = r0["task_id"]
+        opts = derive_stateful_next_step_options(
+            self.conn,
+            tid,
+            source="cursor_continuity_recall",
+            user_text="What did Cursor say about this traceback error?",
+        )
+        self.assertTrue(any(("traceback" in o.lower() or "error" in o.lower()) for o in opts))
+
+    def test_stateful_next_steps_for_goal_status_offer_action_shape(self) -> None:
+        from services.andrea_sync.assistant_answer_composer import derive_stateful_next_step_options
+
+        r0 = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "comp-next-opt-2",
+                "payload": {
+                    "text": "status",
+                    "routing_text": "status",
+                    "chat_id": 77032,
+                    "message_id": 1,
+                },
+            },
+        )
+        tid = r0["task_id"]
+        opts = derive_stateful_next_step_options(
+            self.conn,
+            tid,
+            source="goal_status",
+            user_text="Status update please",
+        )
+        self.assertTrue(any("recap" in o.lower() and "continue action" in o.lower() for o in opts))
+
     def test_draft_should_force_continuity_repair_detects_metadata_scaffold(self) -> None:
         thin = (
             "Where things stand: task status **created**; result: **queued**; "

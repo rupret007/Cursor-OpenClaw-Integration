@@ -5243,6 +5243,17 @@ class SyncServerGroundedUsefulnessTests(unittest.TestCase):
         self.assertGreaterEqual(len(opts), 1)
         self.assertTrue(any("paste" in o.lower() or "traceback" in o.lower() for o in opts))
 
+    def test_grounded_lookup_next_step_options_version_aware(self) -> None:
+        from services.andrea_sync.server import SyncServer
+
+        server = SyncServer()
+        opts = server._grounded_lookup_next_step_options(
+            answer_mode="partial_evidence_helpful_answer",
+            classify_text="Are these Python and pandas versions compatible?",
+        )
+        self.assertGreaterEqual(len(opts), 1)
+        self.assertTrue(any("version" in o.lower() for o in opts))
+
     def test_grounded_research_unavailable_includes_utility_contract_and_next_steps(self) -> None:
         os.environ["ANDREA_GROUNDED_RESEARCH_ENABLED"] = "1"
         from services.andrea_sync.server import SyncServer
@@ -5273,6 +5284,7 @@ class SyncServerGroundedUsefulnessTests(unittest.TestCase):
         self.assertEqual(contract.get("utility_goal"), "truthful_next_steps_brevity")
         self.assertGreater(int(contract.get("brevity_max_words_soft") or 0), 0)
         self.assertEqual(contract.get("answer_mode"), "truthful_fallback_with_next_steps")
+        self.assertEqual(contract.get("guidance_class"), "error_traceback")
 
 
 if __name__ == "__main__":

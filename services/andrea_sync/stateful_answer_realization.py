@@ -250,6 +250,7 @@ class StatefulRealizationInput:
     answer_mode: str
     uncertainty_mode: str
     next_step_options: tuple[str, ...]
+    guidance_class: str = ""
     utility_goal: str = "concise_grounded_summary"
     brevity_max_words_soft: int = 115
 
@@ -362,6 +363,33 @@ def _next_step_options_reflected(reply: str, options: Sequence[str]) -> bool:
     return hits >= max(1, (len(list(options)) + 1) // 2)
 
 
+def _specific_guidance_tokens(text: str) -> set[str]:
+    low = str(text or "").lower()
+    mapping = {
+        "traceback": ("traceback", "stack trace", "exception"),
+        "error": ("error", "failed", "failure"),
+        "version": ("version", "compatib", "upgrade", "downgrade"),
+        "config": ("config", "flag", "yaml", "toml", "ini", "environment", "runtime"),
+        "command": ("command", "output"),
+        "task": ("task label", "task id", "goal id", "approval id", "workstream"),
+    }
+    out: set[str] = set()
+    for key, needles in mapping.items():
+        if any(n in low for n in needles):
+            out.add(key)
+    return out
+
+
+def _specific_next_step_guidance_reflected(reply: str, options: Sequence[str]) -> bool:
+    required = set()
+    for opt in options:
+        required |= _specific_guidance_tokens(opt)
+    if not required:
+        return True
+    present = _specific_guidance_tokens(reply)
+    return bool(required & present)
+
+
 def _assemble_stateful_with_next_steps(body: str, options: Sequence[str]) -> str:
     b = sanitize_user_surface_text(str(body or "").strip(), fallback="", limit=1200).strip()
     opts = [sanitize_user_surface_text(str(o), fallback="", limit=420).strip() for o in options if str(o).strip()][
@@ -461,6 +489,11 @@ def maybe_realize_stateful_reply(
         answer_mode=answer_mode,
         uncertainty_mode=uncertainty_mode,
         next_step_options=next_step_options,
+        guidance_class=(
+            str(turn_contract.get("guidance_class") or "").strip()
+            if isinstance(turn_contract, Mapping)
+            else ""
+        ),
         utility_goal=utility_goal,
         brevity_max_words_soft=int(brevity_max_words_soft),
     )
@@ -512,6 +545,7 @@ def maybe_realize_stateful_reply(
             "answer_family": inp.family,
             "answer_mode": inp.answer_mode,
             "uncertainty_mode": inp.uncertainty_mode,
+            "guidance_class": inp.guidance_class,
             "utility_goal": inp.utility_goal,
             "brevity_max_words_soft": inp.brevity_max_words_soft,
             "next_step_options": list(inp.next_step_options),
@@ -574,6 +608,14 @@ def maybe_realize_stateful_reply(
     ):
         base = safe if _evidence_anchor_overlap(safe, inp.evidence_lines) else inp.deterministic_reply
         safe = _assemble_stateful_with_next_steps(base, inp.next_step_options)
+    if (
+        partial_evidence_realization_enabled()
+        and inp.answer_mode in {"partial_evidence_helpful_answer", "truthful_fallback_with_next_steps"}
+        and inp.next_step_options
+        and not _specific_next_step_guidance_reflected(safe, inp.next_step_options)
+    ):
+        base = safe if _evidence_anchor_overlap(safe, inp.evidence_lines) else inp.deterministic_reply
+        safe = _assemble_stateful_with_next_steps(base, inp.next_step_options)
     low_safe = safe.lower()
     low_ev = " ".join(str(x).lower() for x in inp.evidence_lines)
     if inp.family == "approval_state":
@@ -614,6 +656,7 @@ def maybe_realize_grounded_technical_reply(
     answer_mode: str = "",
     uncertainty_mode: str = "",
     next_step_options: Sequence[str] = (),
+    guidance_class: str = "",
     retrieval_source: str = "",
     query: str = "",
 ) -> str | None:
@@ -682,6 +725,7 @@ def maybe_realize_grounded_technical_reply(
             "answer_family": str(answer_family or "grounded_research").strip(),
             "answer_mode": mode,
             "uncertainty_mode": u_mode,
+            "guidance_class": str(guidance_class or "").strip(),
             "utility_goal": utility_goal,
             "brevity_max_words_soft": int(brevity_max_words_soft),
             "next_step_options": list(n_opts),
@@ -735,6 +779,14 @@ def maybe_realize_grounded_technical_reply(
         and mode in {"partial_evidence_helpful_answer", "truthful_fallback_with_next_steps"}
         and n_opts
         and not _next_step_options_reflected(reply, n_opts)
+    ):
+        base = reply if _evidence_anchor_overlap(reply, safe_evidence) else fallback
+        reply = _assemble_stateful_with_next_steps(base, n_opts)
+    if (
+        partial_evidence_realization_enabled()
+        and mode in {"partial_evidence_helpful_answer", "truthful_fallback_with_next_steps"}
+        and n_opts
+        and not _specific_next_step_guidance_reflected(reply, n_opts)
     ):
         base = reply if _evidence_anchor_overlap(reply, safe_evidence) else fallback
         reply = _assemble_stateful_with_next_steps(base, n_opts)

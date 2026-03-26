@@ -370,3 +370,51 @@ class StatefulAnswerRealizationTests(unittest.TestCase):
         self.assertLessEqual(len(out.split()), 22)
         self.assertIn("migration", out.lower())
 
+    @mock.patch("services.andrea_sync.stateful_answer_realization._openai_json_chat")
+    def test_grounded_realization_repairs_generic_next_steps_when_specific_options_exist(
+        self, mock_chat: mock.MagicMock
+    ) -> None:
+        mock_chat.return_value = {
+            "reply": (
+                "The failure points to an import resolution issue.\n\n"
+                "Next options:\n"
+                "• Retry grounded lookup in a moment.\n"
+                "• Ask a narrower question."
+            ),
+            "grounded": True,
+            "used_fallback": False,
+            "anchors_used": ["import", "error"],
+        }
+        with mock.patch.dict(
+            os.environ,
+            {
+                "ANDREA_STATEFUL_REALIZATION_ENABLED": "1",
+                "ANDREA_GROUNDED_RESEARCH_REALIZATION_ENABLED": "1",
+                "OPENAI_API_ENABLED": "1",
+                "OPENAI_API_KEY": "x",
+            },
+            clear=False,
+        ):
+            out = maybe_realize_grounded_technical_reply(
+                user_text="What does this import error traceback mean?",
+                answer_family="grounded_research",
+                evidence_lines=[
+                    "Import errors commonly occur when a package path or runtime env mismatches.",
+                    "Traceback details identify the failing module and import location.",
+                ],
+                fallback_reply="The traceback indicates an import mismatch.",
+                required_anchors=("import", "traceback"),
+                evidence_strength=4,
+                answer_mode="partial_evidence_helpful_answer",
+                uncertainty_mode="partial",
+                next_step_options=(
+                    "Paste the full error text or traceback you’re seeing.",
+                    "Include the exact command or action that triggers it.",
+                ),
+                guidance_class="error_traceback",
+            )
+        self.assertIsNotNone(out)
+        assert out is not None
+        self.assertIn("next options", out.lower())
+        self.assertIn("traceback", out.lower())
+

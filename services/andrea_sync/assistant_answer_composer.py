@@ -559,6 +559,26 @@ def format_reply_with_next_step_options(base: str, options: Sequence[str]) -> st
     return sanitize_user_surface_text(f"{b}\n\nNext options:\n{lines}", fallback=b, limit=1200).strip()
 
 
+def _stateful_guidance_class(*, source: str, user_text: str) -> str:
+    src = str(source or "").strip()
+    qt = str(user_text or "").strip().lower()
+    if src == "blocked_state_reply":
+        return "blocked_open_loop"
+    if any(k in qt for k in ("continue that", "resume", "pick up that", "same run", "that task", "which run")):
+        return "thread_task_binding"
+    if any(k in qt for k in ("error", "traceback", "stack trace", "exception", "failed", "failure")):
+        return "error_traceback"
+    if any(k in qt for k in ("version", "compatible", "compatibility", "upgrade", "downgrade")):
+        return "version_compatibility"
+    if any(k in qt for k in ("config", "configure", "setup", "install", "environment", "env", "flag")):
+        return "configuration_setup"
+    if any(k in qt for k in ("what is", "how does", "why", "explain", "difference")):
+        return "concept_explanation"
+    if src in {"cursor_continuity_recall", "cursor_heavy_lift_context"}:
+        return "thread_task_binding"
+    return "generic_stateful"
+
+
 def derive_stateful_next_step_options(
     conn: Any,
     task_id: str,
@@ -572,36 +592,50 @@ def derive_stateful_next_step_options(
     """
     um = str(user_text or "").strip()
     src = str(source or "").strip()
+    guidance_class = _stateful_guidance_class(source=src, user_text=um)
     out: list[str] = []
     try:
         if src == "cursor_continuity_recall":
             if same_chat_has_cursor_continuation_viability(conn, task_id, um):
+                if guidance_class == "thread_task_binding":
+                    out.append(
+                        "Say “continue that” and include the task label or rough time window so I can bind the right same-chat run."
+                    )
+                else:
+                    out.append(
+                        "If you meant a nearby Cursor run on this chat, say “continue that” and I’ll pick up the strongest same-chat workstream I can verify."
+                    )
+            if guidance_class == "error_traceback":
+                out.append("Paste the exact error text from that run so I can anchor the recap to the failing step.")
+            elif guidance_class == "version_compatibility":
+                out.append("Name the exact tool/runtime version from that run you want checked.")
+            elif guidance_class == "configuration_setup":
+                out.append("Share the config snippet or flags used in that run (redact secrets).")
+            else:
                 out.append(
-                    "If you meant a nearby Cursor run on this chat, say “continue that” "
-                    "and I’ll pick up the strongest same-chat workstream I can verify."
+                    "Re-send your latest instruction so I can run a fresh Cursor pass with clean tracked context."
                 )
-            out.append(
-                "Re-send your latest instruction so I can run a fresh Cursor pass with clean tracked context."
-            )
-            out.append(
-                "Name a rough time window or the task label you care about if you need a tighter recap anchor."
-            )
+            out.append("Name the task label or rough time window if you need a tighter recap anchor.")
         elif src == "cursor_heavy_lift_context":
             out.append(
                 "Start a new heavy-lift Cursor pass from your latest instruction—I’ll track it on this thread."
             )
             if same_chat_has_cursor_continuation_viability(conn, task_id, um):
-                out.append(
-                    "If the right workstream is already on this chat, say “continue that” and I’ll bind to it."
-                )
+                if guidance_class == "thread_task_binding":
+                    out.append("If the right workstream is already on this chat, say “continue that” with the task label.")
+                else:
+                    out.append("If the right workstream is already on this chat, say “continue that” and I’ll bind to it.")
         elif src == "blocked_state_reply":
             out.append("Reply with what changed if the blocker should be cleared, or ask for the exact task id.")
-            out.append("I can recap the latest tracked outcome if you want surrounding context.")
+            if guidance_class == "error_traceback":
+                out.append("Paste the latest failing error text so I can tell you exactly what remains blocked.")
+            else:
+                out.append("I can recap the latest tracked outcome if you want surrounding context.")
         elif src in {"goal_status", "goal_continuity"}:
             out.append(
                 "If you need a tighter inventory, name the goal id, approval id, or task label you mean."
             )
-            out.append("Ask for the latest tracked outcome on this thread if the summary above is too thin.")
+            out.append("Say whether you want a recap, unblock step, or continue action from this state.")
     except Exception:
         out = []
     if not out:

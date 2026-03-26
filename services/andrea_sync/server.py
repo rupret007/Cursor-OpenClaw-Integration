@@ -3140,21 +3140,98 @@ class SyncServer:
         lines = [p.strip() for p in parts if len(p.strip()) > 10]
         return lines[:4] if lines else [s]
 
-    def _grounded_lookup_next_step_options(self, *, answer_mode: str, classify_text: str = "") -> list[str]:
+    def _grounded_lookup_guidance_class(self, *, classify_text: str, turn_domain: str = "") -> str:
+        qt = str(classify_text or "").strip().lower()
+        dom = str(turn_domain or "").strip().lower()
+        if any(k in qt for k in ("error", "traceback", "stack trace", "exception", "failed", "failure")):
+            return "error_traceback"
+        if any(k in qt for k in ("version", "compatible", "compatibility", "upgrade", "downgrade")):
+            return "version_compatibility"
+        if any(
+            k in qt
+            for k in (
+                "config",
+                "configure",
+                "configuration",
+                "setup",
+                "install",
+                "environment",
+                "env ",
+                "yaml",
+                "toml",
+                ".ini",
+                "docker",
+                "path",
+                "flag",
+                "option",
+            )
+        ):
+            return "configuration_setup"
+        if any(k in qt for k in ("what is", "how does", "why", "difference", "explain")):
+            return "concept_explanation"
+        if dom == "technical_guidance":
+            return "concept_explanation"
+        return "generic_technical"
+
+    def _grounded_lookup_next_step_options(
+        self,
+        *,
+        answer_mode: str,
+        classify_text: str = "",
+        guidance_class: str = "",
+    ) -> list[str]:
         mode = str(answer_mode or "").strip()
         qt = str(classify_text or "").strip().lower()
+        gc = str(guidance_class or "").strip() or self._grounded_lookup_guidance_class(
+            classify_text=classify_text
+        )
         if mode == "strong_evidence_answer":
             return []
         if mode == "partial_evidence_helpful_answer":
-            opts = [
+            if gc == "error_traceback":
+                return [
+                    "Paste the full error text or traceback you’re seeing.",
+                    "Include the exact command or action that triggers it.",
+                ]
+            if gc == "version_compatibility":
+                return [
+                    "Name the exact tool/runtime and version numbers you are using.",
+                    "Say the target version pair you want to validate for compatibility.",
+                ]
+            if gc == "configuration_setup":
+                return [
+                    "Share the relevant config snippet or command flags (redact secrets).",
+                    "Name the environment where this runs (local, container, CI, or cloud).",
+                ]
+            if gc == "concept_explanation":
+                return [
+                    "Name the exact tool or feature you want explained in this context.",
+                    "Say whether you want a brief explanation or concrete fix steps.",
+                ]
+            return [
                 "Retry grounded lookup if you need fresher or broader evidence.",
                 "Narrow to the exact tool, error string, or version you care about.",
             ]
-            if any(k in qt for k in ("error", "traceback", "stack trace", "exception", "failed")):
-                opts[0] = "Paste the full error text or traceback you’re seeing."
-            if any(k in qt for k in ("version", "compatible", "compatibility", "upgrade", "downgrade")):
-                opts[1] = "Name the exact tool or runtime version you’re targeting."
-            return opts
+        if gc == "error_traceback":
+            return [
+                "Retry grounded lookup in a moment when connectivity is stable.",
+                "Paste the exact error text plus the command output that produced it.",
+            ]
+        if gc == "version_compatibility":
+            return [
+                "Retry grounded lookup in a moment when connectivity is stable.",
+                "Share exact versions so I can check the compatibility boundary directly.",
+            ]
+        if gc == "configuration_setup":
+            return [
+                "Retry grounded lookup in a moment when connectivity is stable.",
+                "Share the minimal config snippet and runtime environment details.",
+            ]
+        if gc == "concept_explanation":
+            return [
+                "Retry grounded lookup in a moment when connectivity is stable.",
+                "Ask a narrower concept question with the exact tool or feature name.",
+            ]
         opts = [
             "Retry grounded lookup in a moment when connectivity is stable.",
             "Ask a narrower factual question (exact command, error text, or version).",
@@ -3214,6 +3291,10 @@ class SyncServer:
             actor="server_grounded_research",
         )
         if str(resolved.get("truth", {}).get("status") or "") != "verified_available":
+            guidance_class = self._grounded_lookup_guidance_class(
+                classify_text=classify_text,
+                turn_domain=str(turn_plan.domain or ""),
+            )
             unavailable_base = (
                 "I couldn't verify live lookup capability right now, so I can only give a general answer. "
                 "If you want, I can retry lookup in a moment."
@@ -3221,6 +3302,7 @@ class SyncServer:
             n_opts = self._grounded_lookup_next_step_options(
                 answer_mode="truthful_fallback_with_next_steps",
                 classify_text=classify_text,
+                guidance_class=guidance_class,
             )[:2]
             unavailable = format_reply_with_next_step_options(unavailable_base, n_opts)
             ug, bmw = brevity_profile_for_answer_mode("truthful_fallback_with_next_steps")
@@ -3237,6 +3319,7 @@ class SyncServer:
                 "answer_mode": "truthful_fallback_with_next_steps",
                 "uncertainty_mode": "thin",
                 "next_step_options": n_opts,
+                "guidance_class": guidance_class,
                 "utility_goal": ug,
                 "brevity_max_words_soft": int(bmw),
             }
@@ -3268,9 +3351,14 @@ class SyncServer:
         else:
             answer_mode = "truthful_fallback_with_next_steps"
             uncertainty_mode = "thin"
+        guidance_class = self._grounded_lookup_guidance_class(
+            classify_text=classify_text,
+            turn_domain=str(turn_plan.domain or ""),
+        )
         next_opts = self._grounded_lookup_next_step_options(
             answer_mode=answer_mode,
             classify_text=classify_text,
+            guidance_class=guidance_class,
         )[:2]
         ug, bmw = brevity_profile_for_answer_mode(answer_mode)
         realized = maybe_realize_grounded_technical_reply(
@@ -3283,6 +3371,7 @@ class SyncServer:
             answer_mode=answer_mode,
             uncertainty_mode=uncertainty_mode,
             next_step_options=next_opts,
+            guidance_class=guidance_class,
             retrieval_source="brave-api-search",
             query=str(classify_text or "").strip(),
         )
@@ -3304,6 +3393,7 @@ class SyncServer:
             "answer_mode": answer_mode,
             "uncertainty_mode": uncertainty_mode,
             "next_step_options": next_opts,
+            "guidance_class": guidance_class,
             "utility_goal": ug,
             "brevity_max_words_soft": int(bmw),
         }

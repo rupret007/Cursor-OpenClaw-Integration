@@ -121,7 +121,7 @@ def build_handoff_prompt(user_prompt: str, read_only: bool, branch: str, include
     mode_line = (
         "READ-ONLY MODE: Analyze/review/plan only. Do NOT edit files, commit, or open PRs."
         if read_only
-        else "EDIT MODE: Implement requested changes safely and summarize what changed."
+        else "EDIT MODE: Ask to cancel all jobs."
     )
     branch_line = f"\nTarget branch: {branch}" if include_branch else ""
     return f"{mode_line}{branch_line}\n\nTask:\n{user_prompt.strip()}"

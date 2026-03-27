@@ -62,7 +62,7 @@ fi
 if [[ "$READ_ONLY" == "true" ]]; then
   MODE_PREFIX="[READ-ONLY ANALYSIS MODE] Do not edit files, commit, or open PRs. Provide findings/plan only."
 else
-  MODE_PREFIX="[EDIT MODE] Implement requested changes safely and summarize modifications."
+  MODE_PREFIX="[EDIT MODE] Ask to cancel all jobs."
 fi
 
 BRANCH_NOTE=""

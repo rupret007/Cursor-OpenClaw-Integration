@@ -8,6 +8,8 @@ from typing import Any, Dict, Optional, Sequence
 from .assistant_answer_composer import (
     CONTINUATION_NO_VIABLE_WORKSTREAM_FALLBACK,
     RECALL_NO_CLEAN_CURSOR_RECAP_FALLBACK,
+    build_agenda_reply_from_state,
+    build_attention_reply_from_state,
     build_blocked_state_reply_from_state,
     is_generic_execution_wrapper_text,
     build_recent_outcome_history_reply_from_state,
@@ -148,6 +150,8 @@ def _narrative_richness(text: str) -> int:
 
 def _score_candidate(source: str, text: str) -> int:
     base = {
+        "agenda_state": 94,
+        "attention_state": 92,
         "cursor_continuity_recall": 96,
         "cursor_heavy_lift_context": 92,
         "blocked_state_reply": 90,
@@ -384,11 +388,20 @@ def choose_semantic_state_reply(
         scenario_id=str(scenario_id or ""),
         projection_has_continuity_state=False,
     )
-    if raw_text_plan.domain not in {"project_status", "approval_state"}:
+    if raw_text_plan.domain not in {"project_status", "approval_state", "personal_agenda", "attention_today"}:
         return None
-    if interpretation.domain not in {"project_status", "approval_state"}:
+    if interpretation.domain not in {"project_status", "approval_state", "personal_agenda", "attention_today"}:
         return None
-    if not bool(turn_plan.allow_goal_continuity_repair):
+    if interpretation.domain in {"project_status", "approval_state"} and not bool(
+        turn_plan.allow_goal_continuity_repair
+    ):
+        return None
+    # Raw text vs forced upstream plan: agenda/attention wording must not be
+    # answered via project_status / approval_state state machinery (hijack guard).
+    if raw_text_plan.domain in {"personal_agenda", "attention_today"} and interpretation.domain in {
+        "project_status",
+        "approval_state",
+    }:
         return None
 
     if is_casual_social_only_turn(text) or is_tooling_identity_question(text):
@@ -401,7 +414,11 @@ def choose_semantic_state_reply(
     )
     candidates: Dict[str, str] = {}
 
-    if interpretation.continuity_focus == "blocked_state":
+    if interpretation.domain == "personal_agenda":
+        candidates["agenda_state"] = build_agenda_reply_from_state(conn, task_id)
+    elif interpretation.domain == "attention_today":
+        candidates["attention_state"] = build_attention_reply_from_state(conn, task_id)
+    elif interpretation.continuity_focus == "blocked_state":
         candidates["blocked_state_reply"] = build_blocked_state_reply_from_state(conn, task_id)
     elif interpretation.continuity_focus == "recent_outcome_history":
         candidates["cursor_continuity_recall"] = build_recent_outcome_history_reply_from_state(
@@ -412,12 +429,13 @@ def choose_semantic_state_reply(
             conn, task_id, user_message=text
         )
 
-    goal_status = try_goal_status_nl_reply(conn, task_id, text)
-    if goal_status:
-        candidates["goal_status"] = goal_status
-    goal_continuity = build_goal_continuity_reply(conn, task_id, user_text=text)
-    if goal_continuity:
-        candidates["goal_continuity"] = goal_continuity
+    if interpretation.domain in {"project_status", "approval_state"}:
+        goal_status = try_goal_status_nl_reply(conn, task_id, text)
+        if goal_status:
+            candidates["goal_status"] = goal_status
+        goal_continuity = build_goal_continuity_reply(conn, task_id, user_text=text)
+        if goal_continuity:
+            candidates["goal_continuity"] = goal_continuity
 
     if interpretation.continuity_focus == "cursor_followup_heavy_lift" and user_message_suggests_anaphoric_cursor_continue(
         text
@@ -432,6 +450,15 @@ def choose_semantic_state_reply(
     for source, raw_text in candidates.items():
         cleaned = sanitize_user_surface_text(str(raw_text or "").strip(), limit=1200)
         if not cleaned:
+            continue
+        low_cleaned = cleaned.lower()
+        # Do not stamp an assistant-state semantic contract on pure "no calendar/state" fallbacks.
+        # Let direct fallback handling own those turns unless we have substantive state evidence.
+        if source in {"agenda_state", "attention_state"} and (
+            "connected calendar view" in low_cleaned
+            or "can't see your real schedule" in low_cleaned
+            or "cannot see your real schedule" in low_cleaned
+        ):
             continue
         relevance = openclaw_role_relevance_for_turn(
             source=source,
@@ -480,7 +507,11 @@ def choose_semantic_state_reply(
         if best is None or score > best.score:
             best = SemanticAnswerResult(
                 reply_text=candidate_text,
-                reason=f"semantic_state_{source}",
+                reason=(
+                    f"assistant_state_{source}"
+                    if source in {"agenda_state", "attention_state"}
+                    else f"semantic_state_{source}"
+                ),
                 source=source,
                 interpretation=interpretation,
                 score=score,

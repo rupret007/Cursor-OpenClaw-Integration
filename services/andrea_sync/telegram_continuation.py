@@ -31,6 +31,7 @@ _STR_MERGE_KEYS = (
     "routing_hint",
     "collaboration_mode",
     "visibility_mode",
+    "requested_execution_mode",
     "preferred_model_family",
     "preferred_model_label",
 )
@@ -175,6 +176,7 @@ def _merge_anchor_routing(payload: Dict[str, Any], prev_telegram_meta: Dict[str,
         "routing_hint": "auto",
         "collaboration_mode": "auto",
         "visibility_mode": "summary",
+        "requested_execution_mode": "",
         "preferred_model_family": "",
         "preferred_model_label": "",
     }

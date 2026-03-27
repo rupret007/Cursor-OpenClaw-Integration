@@ -15,6 +15,12 @@ ContinuityFocus = Literal[
     "cursor_followup_heavy_lift",
 ]
 
+TurnIntentClass = Literal[
+    "none",
+    "assistant_state_query",
+    "cursor_control_plane",
+]
+
 
 TurnDomain = Literal[
     "casual_conversation",
@@ -52,6 +58,8 @@ AnswerFamilyName = Literal[
     "cursor_continuation",
     "blocked_state",
     "approval_state",
+    "assistant_state_agenda",
+    "assistant_state_attention",
     "grounded_research",
 ]
 
@@ -85,6 +93,7 @@ _AGENDA_RE = re.compile(
     r"what\s+are\s+my\s+plans\s+today|"
     r"what'?s\s+on\s+my\s+schedule\s+today|"
     r"what\s+is\s+on\s+my\s+schedule\s+today|"
+    r"what\s+do\s+i\s+have\s+on\s+my\s+schedule\s+today|"
     r"what\s+do\s+i\s+have\s+today"
     r")\b",
     re.I,
@@ -172,6 +181,30 @@ _CURSOR_FOLLOWUP_HEAVY_RE = re.compile(
     r"resume\s+(?:the\s+)?cursor\s+task|"
     r"continue\s+(?:that|the|this)\s+(?:cursor|heavy)[\s-]?(?:run|task|work)?|"
     r"heavy[\s-]?lift|repo[\s-]?wide",
+    re.I,
+)
+_ASSISTANT_STATE_QUERY_RE = re.compile(
+    r"\b("
+    r"@openclaw|ask\s+@?openclaw|ask\s+openclaw"
+    r")\b.*\b("
+    r"schedule|agenda|plans?|availability|reminders?"
+    r")\b",
+    re.I,
+)
+_CURSOR_CONTROL_PLANE_RE = re.compile(
+    r"\b("
+    r"@cursor|ask\s+@?cursor|ask\s+cursor"
+    r")\b.*\b("
+    r"cancel|stop|abort|kill|terminate|pause|resume"
+    r")\b.*\b("
+    r"jobs?|runs?|tasks?|queue|queues|workflow|workflows"
+    r")\b",
+    re.I,
+)
+_GENERIC_CANCEL_CURSOR_WORK_RE = re.compile(
+    r"\b("
+    r"cancel|stop|abort|kill|terminate"
+    r")\s+(?:all\s+)?(?:cursor\s+)?(?:jobs?|runs?|tasks?)\b",
     re.I,
 )
 _OPENCLAW_COLLAB_ASK_RE = re.compile(
@@ -372,6 +405,17 @@ def is_openclaw_collaboration_state_question(text: str) -> bool:
     return False
 
 
+def classify_turn_intent_class(text: str) -> TurnIntentClass:
+    clean = str(text or "").strip()
+    if not clean:
+        return "none"
+    if _CURSOR_CONTROL_PLANE_RE.search(clean) or _GENERIC_CANCEL_CURSOR_WORK_RE.search(clean):
+        return "cursor_control_plane"
+    if _ASSISTANT_STATE_QUERY_RE.search(clean):
+        return "assistant_state_query"
+    return "none"
+
+
 def classify_openclaw_collaboration_focus(text: str) -> ContinuityFocus:
     """Classify explicit OpenClaw/Cursor collaboration asks into continuity focus."""
     clean = str(text or "").strip()
@@ -474,6 +518,25 @@ def arbitrate_answer_lane(
     clean = str(text or "").strip()
     domain = str(turn_plan.domain or "")
     focus = str(turn_plan.continuity_focus or "")
+    intent_class = classify_turn_intent_class(clean)
+    if intent_class == "cursor_control_plane":
+        return LaneArbitrationDecision(
+            "local_stateful_answer",
+            "explicit_cursor_control_plane",
+            openclaw_primary=False,
+        )
+    if bool(turn_plan.force_delegate) or is_execution_heavy_or_repo_action(clean):
+        return LaneArbitrationDecision(
+            "heavy_lift_delegated_execution",
+            "execution_heavy_or_forced_delegate",
+            openclaw_primary=False,
+        )
+    if intent_class == "assistant_state_query":
+        return LaneArbitrationDecision(
+            "local_stateful_answer",
+            "explicit_assistant_state_query",
+            openclaw_primary=True,
+        )
     if is_casual_social_only_turn(clean):
         return LaneArbitrationDecision("lightweight_direct", "casual_social", openclaw_primary=False)
     if is_tooling_identity_question(clean):
@@ -482,12 +545,6 @@ def arbitrate_answer_lane(
         return LaneArbitrationDecision("lightweight_direct", "lightweight_conversational", openclaw_primary=False)
     if is_simple_direct_utility_question(clean):
         return LaneArbitrationDecision("lightweight_direct", "simple_direct_utility", openclaw_primary=False)
-    if bool(turn_plan.force_delegate) or is_execution_heavy_or_repo_action(clean):
-        return LaneArbitrationDecision(
-            "heavy_lift_delegated_execution",
-            "execution_heavy_or_forced_delegate",
-            openclaw_primary=False,
-        )
     if direct_policy.lookup_eligible or domain in {"external_information", "technical_guidance"}:
         return LaneArbitrationDecision(
             "grounded_research_guidance",
@@ -701,6 +758,8 @@ def classify_continuity_focus(text: str) -> ContinuityFocus:
         return "recent_outcome_history"
     if _TOOLING_IDENTITY_Q_RE.match(clean):
         return "none"
+    if classify_turn_intent_class(clean) in {"assistant_state_query", "cursor_control_plane"}:
+        return "none"
     if _CURSOR_FOLLOWUP_HEAVY_RE.search(clean):
         return "cursor_followup_heavy_lift"
     return "none"
@@ -747,6 +806,7 @@ def build_turn_plan(
 ) -> TurnPlan:
     clean = str(text or "").strip()
     sid = str(scenario_id or "").strip()
+    intent_class = classify_turn_intent_class(clean)
     domain: TurnDomain = "casual_conversation"
     context_boundary = "casual_only"
     prefer_state_reply = False
@@ -859,6 +919,10 @@ def build_turn_plan(
         domain = "external_information"
         context_boundary = "external_world_only"
 
+    # Explicit @openclaw assistant-state asks should prioritize stateful assistant answers.
+    if intent_class == "assistant_state_query" and domain in {"personal_agenda", "attention_today"}:
+        prefer_state_reply = True
+
     if domain in {"external_information", "technical_guidance"}:
         prefer_state_reply = False
 
@@ -916,6 +980,18 @@ def resolve_answer_family_profile(text: str, turn_plan: TurnPlan) -> AnswerFamil
         return AnswerFamilyProfile(
             family="grounded_research",
             allowed_sources=("grounded_research_lookup",),
+            min_score=66,
+        )
+    if domain == "personal_agenda":
+        return AnswerFamilyProfile(
+            family="assistant_state_agenda",
+            allowed_sources=("agenda_state",),
+            min_score=66,
+        )
+    if domain == "attention_today":
+        return AnswerFamilyProfile(
+            family="assistant_state_attention",
+            allowed_sources=("attention_state",),
             min_score=66,
         )
     return AnswerFamilyProfile(

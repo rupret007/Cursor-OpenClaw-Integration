@@ -102,6 +102,7 @@ from .turn_intelligence import (
     arbitrate_answer_lane,
     build_direct_answer_policy,
     build_turn_plan,
+    classify_turn_intent_class,
     is_everyday_utility_lookup_question,
     is_execution_heavy_or_repo_action,
     is_lightweight_conversational_question,
@@ -1047,6 +1048,24 @@ class SyncServer:
             return str(telegram_meta.get("preferred_model_label") or "").strip()
         prefs = self._principal_preferences(task_id)
         return str(prefs.get("preferred_model_label") or "").strip()
+
+    def _task_requested_execution_mode(self, task_id: str) -> str:
+        snapshot = self._task_snapshot(task_id)
+        if not snapshot:
+            return "agent"
+        execution_meta = self._projection_meta(snapshot["projection"], "execution")
+        mode = str(execution_meta.get("requested_execution_mode") or "").strip().lower()
+        if mode in {"ask", "plan", "agent"}:
+            return mode
+        telegram_meta = self._projection_meta(snapshot["projection"], "telegram")
+        mode = str(telegram_meta.get("requested_execution_mode") or "").strip().lower()
+        if mode in {"ask", "plan", "agent"}:
+            return mode
+        prefs = self._principal_preferences(task_id)
+        mode = str(prefs.get("requested_execution_mode") or "").strip().lower()
+        if mode in {"ask", "plan", "agent"}:
+            return mode
+        return "agent"
 
     def _task_mention_targets(self, task_id: str) -> list[str]:
         snapshot = self._task_snapshot(task_id)
@@ -2309,6 +2328,7 @@ class SyncServer:
                     "requested_capability": str(
                         user_payload.get("requested_capability") or ""
                     ),
+                    "requested_execution_mode": self._task_requested_execution_mode(task_id),
                     "mention_targets": user_payload.get("mention_targets", []),
                     "model_mentions": user_payload.get("model_mentions", []),
                     "preferred_model_family": str(
@@ -4057,6 +4077,91 @@ class SyncServer:
             "defaulted": defaulted,
         }
 
+    def _handle_cursor_control_plane_action(
+        self,
+        task_id: str,
+        *,
+        text: str,
+        channel: str,
+        payload: Dict[str, Any],
+    ) -> tuple[str, str]:
+        low = str(text or "").strip().lower()
+        if "pause" in low or "resume" in low:
+            return (
+                "I recognized that as a Cursor control command, but pause and resume are not wired here yet. "
+                "I can stop active jobs if you want.",
+                "cursor_control_plane_command",
+            )
+
+        chat_id = payload.get("chat_id")
+        if channel == "telegram" and chat_id is not None:
+            candidate_task_ids = list_telegram_task_ids_for_chat(self.conn, chat_id, limit=64)
+        else:
+            candidate_task_ids = [
+                str(row.get("task_id") or "").strip()
+                for row in list_tasks(self.conn, limit=128)
+                if isinstance(row, dict)
+            ]
+
+        cancelled = 0
+        seen: set[str] = set()
+        for candidate_task_id in candidate_task_ids:
+            tid = str(candidate_task_id or "").strip()
+            if not tid or tid == task_id or tid in seen:
+                continue
+            seen.add(tid)
+            task_channel = self.with_lock(lambda c, tid=tid: get_task_channel(c, tid))
+            if not task_channel:
+                continue
+            detail = self.with_lock(
+                lambda c, tid=tid, task_channel=task_channel: project_task_dict(c, tid, task_channel)
+            )
+            status = str(detail.get("status") or "").strip().lower()
+            if status not in {"queued", "running", "awaiting_approval"}:
+                continue
+            meta = detail.get("meta") if isinstance(detail.get("meta"), dict) else {}
+            assistant_meta = meta.get("assistant") if isinstance(meta.get("assistant"), dict) else {}
+            execution_meta = meta.get("execution") if isinstance(meta.get("execution"), dict) else {}
+            cursor_meta = meta.get("cursor") if isinstance(meta.get("cursor"), dict) else {}
+            route_mode = str(assistant_meta.get("route") or "").strip().lower()
+            execution_lane = str(execution_meta.get("lane") or "").strip().lower()
+            cursor_kind = str(cursor_meta.get("kind") or "").strip().lower()
+            cursor_agent_id = str(
+                cursor_meta.get("agent_id") or detail.get("cursor_agent_id") or ""
+            ).strip()
+            if (
+                route_mode != "delegate"
+                and execution_lane not in {"cursor", "openclaw_hybrid"}
+                and cursor_kind not in {"cursor", "openclaw"}
+                and not cursor_agent_id
+            ):
+                continue
+            applied = self._append_task_event(
+                tid,
+                EventType.JOB_FAILED,
+                {
+                    "error": "stopped_by_user",
+                    "detail": {
+                        "requested_by": "cursor_control_plane",
+                        "source_task_id": task_id,
+                        "command_text": str(text or "")[:200],
+                    },
+                },
+            )
+            if applied:
+                cancelled += 1
+
+        if cancelled <= 0:
+            return (
+                "I do not see any active Cursor-side jobs to cancel right now.",
+                "cursor_control_plane_command",
+            )
+        job_label = "job" if cancelled == 1 else "jobs"
+        return (
+            f"I cancelled {cancelled} active {job_label}.",
+            "cursor_control_plane_command",
+        )
+
     def _maybe_handle_structured_assistant_action(
         self, task_id: str
     ) -> tuple[str, str] | None:
@@ -4065,6 +4170,13 @@ class SyncServer:
         if not text:
             return None
         channel = str(payload.get("channel") or "telegram").strip() or "telegram"
+        if classify_turn_intent_class(text) == "cursor_control_plane":
+            return self._handle_cursor_control_plane_action(
+                task_id,
+                text=text,
+                channel=channel,
+                payload=payload,
+            )
         pending_draft = self._load_pending_outbound_draft(task_id)
         if pending_draft:
             if OUTBOUND_CANCEL_RE.match(text):
@@ -5239,6 +5351,8 @@ class SyncServer:
         collaboration_mode = self._task_collaboration_mode(task_id)
         preferred_model_family = self._task_preferred_model_family(task_id)
         preferred_model_label = self._task_preferred_model_label(task_id)
+        requested_execution_mode = self._task_requested_execution_mode(task_id)
+        read_only_execution = requested_execution_mode in {"ask", "plan"}
         if not prompt:
             self._append_orchestration_step(
                 task_id,
@@ -5260,6 +5374,7 @@ class SyncServer:
                     "visibility_mode": visibility_mode,
                     "preferred_model_family": preferred_model_family,
                     "preferred_model_label": preferred_model_label,
+                    "requested_execution_mode": requested_execution_mode,
                 },
             )
             return
@@ -5267,11 +5382,12 @@ class SyncServer:
         cursor_trace: Dict[str, Any] = {
             "cursor_strategy": "single_pass",
             "executor_model": executor_model,
+            "requested_execution_mode": requested_execution_mode,
         }
         exec_prompt = prompt
         short_tid = re.sub(r"[^a-zA-Z0-9._-]+", "-", (task_id or "task")[:40]).strip("-") or "task"
         pm = planner_model_for_lane("telegram")
-        if plan_first_enabled("telegram") and pm:
+        if requested_execution_mode == "agent" and plan_first_enabled("telegram") and pm:
             try:
                 planner_prompt = build_telegram_cursor_planner_prompt(prompt)
                 branch_pl = f"telegram/{short_tid}-plan-{uuid.uuid4().hex[:8]}"
@@ -5328,20 +5444,21 @@ class SyncServer:
                 cursor_trace = {
                     "cursor_strategy": "single_pass",
                     "executor_model": executor_model,
+                    "requested_execution_mode": requested_execution_mode,
                 }
                 exec_prompt = prompt
 
         branch_exec = None
-        if cursor_trace.get("cursor_strategy") == "plan_first":
+        if cursor_trace.get("cursor_strategy") == "plan_first" and not read_only_execution:
             branch_exec = f"telegram/{short_tid}-exec-{uuid.uuid4().hex[:8]}"
 
         self._append_orchestration_step(task_id, "execution", "started", lane="cursor")
         try:
             created = self._create_cursor_job(
                 exec_prompt,
-                read_only=None,
+                read_only=True if read_only_execution else None,
                 model=executor_model,
-                branch=branch_exec,
+                branch=None if read_only_execution else branch_exec,
             )
         except Exception as exc:  # noqa: BLE001
             self._append_orchestration_step(
@@ -5364,6 +5481,7 @@ class SyncServer:
                     "visibility_mode": visibility_mode,
                     "preferred_model_family": preferred_model_family,
                     "preferred_model_label": preferred_model_label,
+                    "requested_execution_mode": requested_execution_mode,
                     "backend": "cursor",
                     "runner": "cursor",
                     **cursor_trace,

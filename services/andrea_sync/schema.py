@@ -263,6 +263,65 @@ def _derive_requested_capability(payload: Dict[str, Any]) -> str:
     return "assistant"
 
 
+_WRITE_EXECUTION_REQUEST_RE = re.compile(
+    r"\b("
+    r"fix|implement|refactor|edit|update|change|modify|patch|"
+    r"write\s+code|add|remove|create\s+pr|open\s+(?:a\s+)?pr|pull\s+request|"
+    r"commit|ship|apply\s+patch|restart\s+service|reload\s+service|migrate"
+    r")\b",
+    re.I,
+)
+_PLAN_EXECUTION_REQUEST_RE = re.compile(
+    r"\b("
+    r"plan|review|audit|inspect|analy[sz]e|triage|investigate|diagnos(?:e|is)|"
+    r"assess|look\s+into|read\s+through|understand|approach"
+    r")\b",
+    re.I,
+)
+_ASK_EXECUTION_REQUEST_RE = re.compile(
+    r"\b("
+    r"explain|summari[sz]e|what|why|how|tell\s+me|show\s+me"
+    r")\b",
+    re.I,
+)
+
+
+def _derive_requested_execution_mode(payload: Dict[str, Any]) -> str:
+    explicit = str(payload.get("requested_execution_mode") or "").strip().lower()
+    if explicit in {"ask", "plan", "agent"}:
+        return explicit
+    text = str(payload.get("routing_text") or payload.get("text") or "").strip()
+    if not text:
+        return ""
+    requested_capability = _derive_requested_capability(payload)
+    routing_hint = str(payload.get("routing_hint") or "").strip().lower()
+    collaboration_mode = str(payload.get("collaboration_mode") or "").strip().lower()
+    repo_context = bool(
+        re.search(
+            r"\b(repo|repository|code|tests?|bug|bugs|pr|pull\s+request|branch|file|files|diff|patch|service|services)\b",
+            text,
+            re.I,
+        )
+    )
+    execution_context = (
+        requested_capability in {"cursor_execution", "collaboration"}
+        or routing_hint in {"cursor", "collaborate"}
+        or collaboration_mode in {"cursor_primary", "collaborative"}
+        or repo_context
+    )
+    if _WRITE_EXECUTION_REQUEST_RE.search(text) and execution_context:
+        return "agent"
+    if not execution_context:
+        return ""
+    if _PLAN_EXECUTION_REQUEST_RE.search(text):
+        return "plan"
+    if _ASK_EXECUTION_REQUEST_RE.search(text):
+        return "ask"
+    if execution_context:
+        return "agent"
+    return ""
+
+
 def _normalize_machine_trace(value: Any) -> List[Dict[str, Any]]:
     if not isinstance(value, list):
         return []
@@ -833,6 +892,11 @@ def _refresh_outcome_meta(proj: "TaskProjection") -> None:
         or telegram_meta.get("requested_capability")
         or ""
     ).strip()
+    requested_execution_mode = str(
+        execution_meta.get("requested_execution_mode")
+        or telegram_meta.get("requested_execution_mode")
+        or ""
+    ).strip()
     visibility_mode = str(
         execution_meta.get("visibility_mode") or telegram_meta.get("visibility_mode") or "summary"
     ).strip() or "summary"
@@ -954,6 +1018,7 @@ def _refresh_outcome_meta(proj: "TaskProjection") -> None:
     outcome_meta["routing_hint"] = routing_hint
     outcome_meta["collaboration_mode"] = collaboration_mode
     outcome_meta["requested_capability"] = requested_capability or "unspecified"
+    outcome_meta["requested_execution_mode"] = requested_execution_mode or "unspecified"
     outcome_meta["visibility_mode"] = visibility_mode
     outcome_meta["execution_lane"] = lane
     outcome_meta["runner"] = runner
@@ -1083,10 +1148,18 @@ def legal_task_transition(
             return True, TaskStatus.RUNNING
         if current == TaskStatus.RUNNING:
             return True, None
+        if current == TaskStatus.COMPLETED:
+            # Routing may emit ASSISTANT_REPLIED (terminal complete) before a deferred
+            # delegated runner executes (e.g. experience harness calling _run_delegated_job).
+            return True, TaskStatus.RUNNING
         return False, None
     if event == EventType.JOB_COMPLETED:
-        if current in (TaskStatus.CANCELLED, TaskStatus.FAILED, TaskStatus.COMPLETED):
+        if current in (TaskStatus.CANCELLED, TaskStatus.FAILED):
             return False, None
+        if current == TaskStatus.COMPLETED:
+            # Allow meta/summary refresh when a second completion event arrives after terminal
+            # assistant receipt (same overall completed status).
+            return True, None
         return True, TaskStatus.COMPLETED
     if event == EventType.ASSISTANT_REPLIED:
         if current in (TaskStatus.CANCELLED, TaskStatus.FAILED, TaskStatus.COMPLETED):
@@ -1250,6 +1323,9 @@ def fold_projection(
             if payload.get("visibility_mode"):
                 telegram_meta["visibility_mode"] = str(payload.get("visibility_mode"))
             telegram_meta["requested_capability"] = _derive_requested_capability(payload)
+            requested_execution_mode = _derive_requested_execution_mode(payload)
+            if requested_execution_mode:
+                telegram_meta["requested_execution_mode"] = requested_execution_mode
             if routing_text:
                 telegram_meta["routing_text"] = routing_text[:500]
             if snippet:
@@ -1350,6 +1426,9 @@ def fold_projection(
         if payload.get("visibility_mode"):
             execution_meta["visibility_mode"] = str(payload["visibility_mode"])
         execution_meta["requested_capability"] = _derive_requested_capability(payload)
+        requested_execution_mode = _derive_requested_execution_mode(payload)
+        if requested_execution_mode:
+            execution_meta["requested_execution_mode"] = requested_execution_mode
         mention_targets = payload.get("mention_targets")
         if isinstance(mention_targets, list):
             execution_meta["mention_targets"] = [str(v) for v in mention_targets[:5]]
@@ -1540,10 +1619,16 @@ def fold_projection(
             openclaw_meta["model"] = str(payload["model"])
         if payload.get("visibility_mode"):
             execution_meta["visibility_mode"] = str(payload["visibility_mode"])
+        if payload.get("collaboration_mode"):
+            execution_meta["collaboration_mode"] = str(payload["collaboration_mode"])
+        if payload.get("routing_hint"):
+            execution_meta["routing_hint"] = str(payload["routing_hint"])
         if payload.get("preferred_model_family"):
             execution_meta["preferred_model_family"] = str(payload["preferred_model_family"])
         if payload.get("preferred_model_label"):
             execution_meta["preferred_model_label"] = str(payload["preferred_model_label"])
+        if payload.get("requested_execution_mode"):
+            execution_meta["requested_execution_mode"] = str(payload["requested_execution_mode"])
         if payload.get("user_safe_error"):
             execution_meta["user_safe_error"] = _clip_meta_text(payload.get("user_safe_error"), 500)
         if payload.get("internal_error"):
@@ -1584,10 +1669,16 @@ def fold_projection(
             openclaw_meta["model"] = str(payload["model"])
         if payload.get("visibility_mode"):
             execution_meta["visibility_mode"] = str(payload["visibility_mode"])
+        if payload.get("collaboration_mode"):
+            execution_meta["collaboration_mode"] = str(payload["collaboration_mode"])
+        if payload.get("routing_hint"):
+            execution_meta["routing_hint"] = str(payload["routing_hint"])
         if payload.get("preferred_model_family"):
             execution_meta["preferred_model_family"] = str(payload["preferred_model_family"])
         if payload.get("preferred_model_label"):
             execution_meta["preferred_model_label"] = str(payload["preferred_model_label"])
+        if payload.get("requested_execution_mode"):
+            execution_meta["requested_execution_mode"] = str(payload["requested_execution_mode"])
         if payload.get("user_safe_error"):
             execution_meta["user_safe_error"] = _clip_meta_text(payload.get("user_safe_error"), 500)
         if payload.get("internal_error"):
@@ -1638,6 +1729,8 @@ def fold_projection(
             execution_meta["preferred_model_family"] = str(payload["preferred_model_family"])
         if payload.get("preferred_model_label"):
             execution_meta["preferred_model_label"] = str(payload["preferred_model_label"])
+        if payload.get("requested_execution_mode"):
+            execution_meta["requested_execution_mode"] = str(payload["requested_execution_mode"])
         if payload.get("user_safe_error"):
             execution_meta["user_safe_error"] = _clip_meta_text(payload.get("user_safe_error"), 500)
         if payload.get("internal_error"):
@@ -1693,6 +1786,8 @@ def fold_projection(
             execution_meta["preferred_model_family"] = str(payload["preferred_model_family"])
         if payload.get("preferred_model_label"):
             execution_meta["preferred_model_label"] = str(payload["preferred_model_label"])
+        if payload.get("requested_execution_mode"):
+            execution_meta["requested_execution_mode"] = str(payload["requested_execution_mode"])
         if payload.get("user_safe_error"):
             execution_meta["user_safe_error"] = _clip_meta_text(payload.get("user_safe_error"), 500)
         if payload.get("internal_error"):

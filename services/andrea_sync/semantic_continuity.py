@@ -10,6 +10,8 @@ from .store import get_task_channel, list_telegram_task_ids_for_chat
 from .turn_intelligence import (
     ContinuityFocus,
     build_turn_plan,
+    classify_turn_intent_class,
+    is_agenda_day_plan_question,
     is_anaphoric_outcome_recall_question,
 )
 
@@ -229,7 +231,14 @@ def resolve_semantic_continuity_patch(
         projection_has_continuity_state=False,
         same_chat_delegation_score=0,
     )
-    if _non_stateful_turn_domain(raw_plan.domain) and not (
+    allow_assistant_state_domain = (
+        raw_plan.domain in {"personal_agenda", "attention_today"}
+        and (
+            is_agenda_day_plan_question(clean)
+            or classify_turn_intent_class(clean) == "assistant_state_query"
+        )
+    )
+    if _non_stateful_turn_domain(raw_plan.domain) and not allow_assistant_state_domain and not (
         user_message_suggests_anaphoric_outcome_recall(clean)
         or user_message_suggests_anaphoric_cursor_continue(clean)
     ):

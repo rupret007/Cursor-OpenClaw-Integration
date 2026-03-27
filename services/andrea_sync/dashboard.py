@@ -261,6 +261,9 @@ def _task_list_item(row: Dict[str, Any], proj: Dict[str, Any]) -> Dict[str, Any]
         "requested_capability": execution.get("requested_capability")
         or telegram.get("requested_capability")
         or "",
+        "requested_execution_mode": execution.get("requested_execution_mode")
+        or telegram.get("requested_execution_mode")
+        or "",
         "preferred_model_label": execution.get("preferred_model_label")
         or telegram.get("preferred_model_label")
         or "",
@@ -1486,7 +1489,7 @@ def render_dashboard_html() -> str:
             ${rows.map((task) => {
               const lane = task.delegated_to_cursor
                 ? "OpenClaw -> Cursor"
-                : (task.provider || task.preferred_model_label || task.collaboration_mode || "direct");
+                : (task.provider || task.preferred_model_label || (task.requested_execution_mode ? `${task.requested_execution_mode} mode` : "") || task.collaboration_mode || "direct");
               const summary = task.summary || task.last_error || "";
               const cls = task.task_id === selectedTaskId ? "taskRow selected" : "taskRow";
               return `
@@ -1524,6 +1527,7 @@ def render_dashboard_html() -> str:
         ["Cursor agent", task.cursor_agent_id || (((task.meta || {}).cursor || {}).agent_url || "n/a")],
         ["Provider/model", `${(((task.meta || {}).openclaw || {}).provider || "")} ${(((task.meta || {}).openclaw || {}).model || "")}`.trim() || "n/a"],
         ["Preferred lane", (((task.meta || {}).execution || {}).preferred_model_label || ((task.meta || {}).telegram || {}).preferred_model_label || "n/a")],
+        ["Execution mode", (((task.meta || {}).execution || {}).requested_execution_mode || ((task.meta || {}).telegram || {}).requested_execution_mode || "n/a")],
         ["Collaboration", (((task.meta || {}).execution || {}).collaboration_mode || ((task.meta || {}).telegram || {}).collaboration_mode || "n/a")]
       ];
       document.getElementById("taskMeta").innerHTML = meta.map(([label, value]) => `

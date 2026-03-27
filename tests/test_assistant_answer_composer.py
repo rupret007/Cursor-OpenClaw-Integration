@@ -204,7 +204,7 @@ class TestAssistantAnswerComposer(unittest.TestCase):
         self.assertIn("top plan items i can see right now", low)
         self.assertIn("review deploy checklist", low)
         self.assertIn("execution context", low)
-        self.assertIn("full calendar view", low)
+        self.assertIn("full calendar integration", low)
 
     def test_gather_repair_includes_state_rich_goal_when_receipt_snippets_exist(self) -> None:
         r0 = handle_command(

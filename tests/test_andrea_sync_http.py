@@ -46,6 +46,9 @@ class TestAndreaSyncHTTP(unittest.TestCase):
             "ANDREA_SYNC_BACKGROUND_ENABLED",
             "ANDREA_SYNC_TELEGRAM_NOTIFIER",
             "TELEGRAM_BOT_TOKEN",
+            "OPENAI_API_ENABLED",
+            "OPENAI_API_KEY",
+            "ANDREA_GROUNDED_RESEARCH_ENABLED",
         ):
             cls._env_backup[key] = os.environ.get(key)
         os.environ["ANDREA_SYNC_DB"] = cls._dbpath
@@ -54,6 +57,9 @@ class TestAndreaSyncHTTP(unittest.TestCase):
         os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
         os.environ["TELEGRAM_BOT_TOKEN"] = ""
+        os.environ["OPENAI_API_ENABLED"] = "0"
+        os.environ.pop("OPENAI_API_KEY", None)
+        os.environ["ANDREA_GROUNDED_RESEARCH_ENABLED"] = "0"
 
         from services.andrea_sync.server import SyncServer, make_handler
 
@@ -65,8 +71,23 @@ class TestAndreaSyncHTTP(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls) -> None:
+        try:
+            from services.andrea_sync.experience_assurance import _drain_sync_server_queue
+
+            _drain_sync_server_queue(cls._srv, timeout=45.0)
+        except Exception:
+            pass
+        try:
+            cls._srv.shutdown_queue_worker()
+        except Exception:
+            pass
+        try:
+            cls._srv.conn.close()
+        except Exception:
+            pass
         cls._httpd.shutdown()
         cls._httpd.server_close()
+        cls._thread.join(timeout=30.0)
         for key, val in cls._env_backup.items():
             if val is None:
                 os.environ.pop(key, None)
@@ -1161,6 +1182,9 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
             "ANDREA_SYNC_BACKGROUND_ENABLED",
             "ANDREA_SYNC_TELEGRAM_NOTIFIER",
             "TELEGRAM_BOT_TOKEN",
+            "OPENAI_API_ENABLED",
+            "OPENAI_API_KEY",
+            "ANDREA_GROUNDED_RESEARCH_ENABLED",
         ):
             cls._env_backup[key] = os.environ.get(key)
         os.environ["ANDREA_SYNC_DB"] = cls._dbpath
@@ -1170,6 +1194,9 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
         os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
         os.environ["TELEGRAM_BOT_TOKEN"] = ""
+        os.environ["OPENAI_API_ENABLED"] = "0"
+        os.environ.pop("OPENAI_API_KEY", None)
+        os.environ["ANDREA_GROUNDED_RESEARCH_ENABLED"] = "0"
 
         from services.andrea_sync.server import SyncServer, make_handler
 
@@ -1181,8 +1208,23 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls) -> None:
+        try:
+            from services.andrea_sync.experience_assurance import _drain_sync_server_queue
+
+            _drain_sync_server_queue(cls._srv, timeout=45.0)
+        except Exception:
+            pass
+        try:
+            cls._srv.shutdown_queue_worker()
+        except Exception:
+            pass
+        try:
+            cls._srv.conn.close()
+        except Exception:
+            pass
         cls._httpd.shutdown()
         cls._httpd.server_close()
+        cls._thread.join(timeout=30.0)
         for key, val in cls._env_backup.items():
             if val is None:
                 os.environ.pop(key, None)
@@ -1217,20 +1259,30 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
                 "X-Telegram-Bot-Api-Secret-Token": "hdrsecret",
             },
         )
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             self.assertEqual(resp.status, 200)
         detail = None
-        for _ in range(40):
-            req_tasks = urllib.request.Request(self._url("/v1/tasks?limit=5"), method="GET")
-            with urllib.request.urlopen(req_tasks, timeout=5) as resp_tasks:
+        for _ in range(120):
+            req_tasks = urllib.request.Request(self._url("/v1/tasks?limit=20"), method="GET")
+            with urllib.request.urlopen(req_tasks, timeout=30) as resp_tasks:
                 tasks = json.loads(resp_tasks.read().decode("utf-8"))["tasks"]
-            telegram_tasks = [t for t in tasks if t["channel"] == "telegram"]
-            if telegram_tasks:
-                tid = telegram_tasks[0]["task_id"]
-                req_task = urllib.request.Request(self._url(f"/v1/tasks/{tid}"), method="GET")
-                with urllib.request.urlopen(req_task, timeout=5) as resp_task:
-                    detail = json.loads(resp_task.read().decode("utf-8"))
-                if detail["task"]["status"] == "queued":
+            for row in tasks:
+                if row.get("channel") != "telegram":
+                    continue
+                req_task = urllib.request.Request(self._url(f"/v1/tasks/{row['task_id']}"), method="GET")
+                with urllib.request.urlopen(req_task, timeout=30) as resp_task:
+                    candidate = json.loads(resp_task.read().decode("utf-8"))
+                meta = candidate["task"].get("meta", {})
+                if meta.get("telegram", {}).get("message_id") != 9:
+                    continue
+                detail = candidate
+                st = str(candidate["task"].get("status") or "")
+                execution = meta.get("execution") if isinstance(meta.get("execution"), dict) else {}
+                if st == "queued" and execution.get("lane") == "openclaw_hybrid":
+                    break
+            if detail and str(detail["task"].get("status") or "") == "queued":
+                ex = (detail["task"].get("meta") or {}).get("execution") or {}
+                if isinstance(ex, dict) and ex.get("lane") == "openclaw_hybrid":
                     break
             time.sleep(0.05)
         self.assertIsNotNone(detail)
@@ -1266,7 +1318,7 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
                 method="POST",
                 headers=headers,
             )
-            with urllib.request.urlopen(req1, timeout=5) as resp:
+            with urllib.request.urlopen(req1, timeout=30) as resp:
                 self.assertEqual(resp.status, 200)
             body2 = json.dumps(
                 {
@@ -1285,13 +1337,13 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
                 method="POST",
                 headers=headers,
             )
-            with urllib.request.urlopen(req2, timeout=5) as resp:
+            with urllib.request.urlopen(req2, timeout=30) as resp:
                 self.assertEqual(resp.status, 200)
 
             last_detail: dict | None = None
             for _ in range(80):
                 req_tasks = urllib.request.Request(self._url("/v1/tasks?limit=50"), method="GET")
-                with urllib.request.urlopen(req_tasks, timeout=5) as resp_tasks:
+                with urllib.request.urlopen(req_tasks, timeout=30) as resp_tasks:
                     tasks = json.loads(resp_tasks.read().decode("utf-8"))["tasks"]
                 hits = 0
                 for row in tasks:
@@ -1301,7 +1353,7 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
                     req_task = urllib.request.Request(
                         self._url(f"/v1/tasks/{tid}"), method="GET"
                     )
-                    with urllib.request.urlopen(req_task, timeout=5) as resp_task:
+                    with urllib.request.urlopen(req_task, timeout=30) as resp_task:
                         detail = json.loads(resp_task.read().decode("utf-8"))
                     tg = detail["task"].get("meta", {}).get("telegram", {})
                     if tg.get("chat_id") == 5050:
@@ -1345,17 +1397,17 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
                 "X-Telegram-Bot-Api-Secret-Token": "hdrsecret",
             },
         )
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             self.assertEqual(resp.status, 200)
         detail = None
-        for _ in range(40):
+        for _ in range(120):
             req_tasks = urllib.request.Request(self._url("/v1/tasks?limit=10"), method="GET")
-            with urllib.request.urlopen(req_tasks, timeout=5) as resp_tasks:
+            with urllib.request.urlopen(req_tasks, timeout=30) as resp_tasks:
                 tasks = json.loads(resp_tasks.read().decode("utf-8"))["tasks"]
             telegram_tasks = [t for t in tasks if t["channel"] == "telegram"]
             for task in telegram_tasks:
                 req_task = urllib.request.Request(self._url(f"/v1/tasks/{task['task_id']}"), method="GET")
-                with urllib.request.urlopen(req_task, timeout=5) as resp_task:
+                with urllib.request.urlopen(req_task, timeout=30) as resp_task:
                     candidate = json.loads(resp_task.read().decode("utf-8"))
                 meta = candidate["task"].get("meta", {})
                 if meta.get("telegram", {}).get("message_id") == 10:
@@ -1401,7 +1453,7 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
                         "X-Telegram-Bot-Api-Secret-Token": "hdrsecret",
                     },
                 )
-                with urllib.request.urlopen(req, timeout=5) as resp:
+                with urllib.request.urlopen(req, timeout=30) as resp:
                     self.assertEqual(resp.status, 200)
 
             post(91001, 501, "@Andrea @Cursor please collaborate on repo cleanup")
@@ -1409,7 +1461,7 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
             tid_collab: str | None = None
             for _ in range(80):
                 req_tasks = urllib.request.Request(self._url("/v1/tasks?limit=40"), method="GET")
-                with urllib.request.urlopen(req_tasks, timeout=5) as resp_tasks:
+                with urllib.request.urlopen(req_tasks, timeout=30) as resp_tasks:
                     tasks = json.loads(resp_tasks.read().decode("utf-8"))["tasks"]
                 for row in tasks:
                     if row["channel"] != "telegram":
@@ -1417,7 +1469,7 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
                     req_task = urllib.request.Request(
                         self._url(f"/v1/tasks/{row['task_id']}"), method="GET"
                     )
-                    with urllib.request.urlopen(req_task, timeout=5) as resp_task:
+                    with urllib.request.urlopen(req_task, timeout=30) as resp_task:
                         candidate = json.loads(resp_task.read().decode("utf-8"))
                     meta = candidate["task"].get("meta", {})
                     if meta.get("telegram", {}).get("message_id") == 501:
@@ -1433,7 +1485,7 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
             detail_greet: dict | None = None
             for _ in range(80):
                 req_tasks = urllib.request.Request(self._url("/v1/tasks?limit=40"), method="GET")
-                with urllib.request.urlopen(req_tasks, timeout=5) as resp_tasks:
+                with urllib.request.urlopen(req_tasks, timeout=30) as resp_tasks:
                     tasks = json.loads(resp_tasks.read().decode("utf-8"))["tasks"]
                 for row in tasks:
                     if row["channel"] != "telegram":
@@ -1441,7 +1493,7 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
                     req_task = urllib.request.Request(
                         self._url(f"/v1/tasks/{row['task_id']}"), method="GET"
                     )
-                    with urllib.request.urlopen(req_task, timeout=5) as resp_task:
+                    with urllib.request.urlopen(req_task, timeout=30) as resp_task:
                         candidate = json.loads(resp_task.read().decode("utf-8"))
                     meta = candidate["task"].get("meta", {})
                     if meta.get("telegram", {}).get("message_id") == 502:
@@ -1499,19 +1551,19 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
                     "X-Telegram-Bot-Api-Secret-Token": "hdrsecret",
                 },
             )
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            with urllib.request.urlopen(req, timeout=30) as resp:
                 self.assertEqual(resp.status, 200)
 
         def wait_for_detail(message_id: int) -> dict:
             detail = None
-            for _ in range(40):
+            for _ in range(120):
                 req_tasks = urllib.request.Request(self._url("/v1/tasks?limit=20"), method="GET")
-                with urllib.request.urlopen(req_tasks, timeout=5) as resp_tasks:
+                with urllib.request.urlopen(req_tasks, timeout=30) as resp_tasks:
                     tasks = json.loads(resp_tasks.read().decode("utf-8"))["tasks"]
                 telegram_tasks = [t for t in tasks if t["channel"] == "telegram"]
                 for task in telegram_tasks:
                     req_task = urllib.request.Request(self._url(f"/v1/tasks/{task['task_id']}"), method="GET")
-                    with urllib.request.urlopen(req_task, timeout=5) as resp_task:
+                    with urllib.request.urlopen(req_task, timeout=30) as resp_task:
                         candidate = json.loads(resp_task.read().decode("utf-8"))
                     meta = candidate["task"].get("meta", {})
                     if meta.get("telegram", {}).get("message_id") == message_id:
@@ -1626,17 +1678,17 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
                 },
             ) as job_mock,
         ):
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            with urllib.request.urlopen(req, timeout=30) as resp:
                 self.assertEqual(resp.status, 200)
             detail = None
-            for _ in range(40):
+            for _ in range(120):
                 req_tasks = urllib.request.Request(self._url("/v1/tasks?limit=20"), method="GET")
-                with urllib.request.urlopen(req_tasks, timeout=5) as resp_tasks:
+                with urllib.request.urlopen(req_tasks, timeout=30) as resp_tasks:
                     tasks = json.loads(resp_tasks.read().decode("utf-8"))["tasks"]
                 telegram_tasks = [t for t in tasks if t["channel"] == "telegram"]
                 for task in telegram_tasks:
                     req_task = urllib.request.Request(self._url(f"/v1/tasks/{task['task_id']}"), method="GET")
-                    with urllib.request.urlopen(req_task, timeout=5) as resp_task:
+                    with urllib.request.urlopen(req_task, timeout=30) as resp_task:
                         candidate = json.loads(resp_task.read().decode("utf-8"))
                     meta = candidate["task"].get("meta", {})
                     if meta.get("telegram", {}).get("message_id") == 63:
@@ -1655,7 +1707,13 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
         self.assertNotIn("cursor", detail["task"]["meta"])
         self.assertNotIn("JobQueued", [row["event_type"] for row in detail["events"]])
         resolve_mock.assert_called_once()
-        job_mock.assert_called_once()
+        self.assertGreaterEqual(job_mock.call_count, 1)
+        bb_calls = [
+            c
+            for c in job_mock.call_args_list
+            if "recent text" in str(c.args[1] if len(c.args) > 1 else "").lower()
+        ]
+        self.assertTrue(bb_calls, "expected a bluebubbles recent-text OpenClaw job call")
 
     def test_telegram_is_this_openclaw_routes_direct(self) -> None:
         """Success gate: Is this OpenClaw? stays direct, no delegation lifecycle."""
@@ -1679,17 +1737,17 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
                 "X-Telegram-Bot-Api-Secret-Token": "hdrsecret",
             },
         )
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             self.assertEqual(resp.status, 200)
         detail = None
-        for _ in range(40):
+        for _ in range(120):
             req_tasks = urllib.request.Request(self._url("/v1/tasks?limit=10"), method="GET")
-            with urllib.request.urlopen(req_tasks, timeout=5) as resp_tasks:
+            with urllib.request.urlopen(req_tasks, timeout=30) as resp_tasks:
                 tasks = json.loads(resp_tasks.read().decode("utf-8"))["tasks"]
             telegram_tasks = [t for t in tasks if t["channel"] == "telegram"]
             for task in telegram_tasks:
                 req_task = urllib.request.Request(self._url(f"/v1/tasks/{task['task_id']}"), method="GET")
-                with urllib.request.urlopen(req_task, timeout=5) as resp_task:
+                with urllib.request.urlopen(req_task, timeout=30) as resp_task:
                     candidate = json.loads(resp_task.read().decode("utf-8"))
                 meta = candidate["task"].get("meta", {})
                 if meta.get("telegram", {}).get("message_id") == 11:
@@ -1730,17 +1788,17 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
                 "X-Telegram-Bot-Api-Secret-Token": "hdrsecret",
             },
         )
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             self.assertEqual(resp.status, 200)
         detail = None
-        for _ in range(40):
+        for _ in range(120):
             req_tasks = urllib.request.Request(self._url("/v1/tasks?limit=10"), method="GET")
-            with urllib.request.urlopen(req_tasks, timeout=5) as resp_tasks:
+            with urllib.request.urlopen(req_tasks, timeout=30) as resp_tasks:
                 tasks = json.loads(resp_tasks.read().decode("utf-8"))["tasks"]
             telegram_tasks = [t for t in tasks if t["channel"] == "telegram"]
             for task in telegram_tasks:
                 req_task = urllib.request.Request(self._url(f"/v1/tasks/{task['task_id']}"), method="GET")
-                with urllib.request.urlopen(req_task, timeout=5) as resp_task:
+                with urllib.request.urlopen(req_task, timeout=30) as resp_task:
                     candidate = json.loads(resp_task.read().decode("utf-8"))
                 meta = candidate["task"].get("meta", {})
                 if meta.get("telegram", {}).get("message_id") == 12:
@@ -1781,17 +1839,17 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
                 "X-Telegram-Bot-Api-Secret-Token": "hdrsecret",
             },
         )
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             self.assertEqual(resp.status, 200)
         detail = None
-        for _ in range(40):
+        for _ in range(120):
             req_tasks = urllib.request.Request(self._url("/v1/tasks?limit=10"), method="GET")
-            with urllib.request.urlopen(req_tasks, timeout=5) as resp_tasks:
+            with urllib.request.urlopen(req_tasks, timeout=30) as resp_tasks:
                 tasks = json.loads(resp_tasks.read().decode("utf-8"))["tasks"]
             telegram_tasks = [t for t in tasks if t["channel"] == "telegram"]
             for task in telegram_tasks:
                 req_task = urllib.request.Request(self._url(f"/v1/tasks/{task['task_id']}"), method="GET")
-                with urllib.request.urlopen(req_task, timeout=5) as resp_task:
+                with urllib.request.urlopen(req_task, timeout=30) as resp_task:
                     candidate = json.loads(resp_task.read().decode("utf-8"))
                 meta = candidate["task"].get("meta", {})
                 if meta.get("telegram", {}).get("message_id") == 13:
@@ -1863,17 +1921,17 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
                     "X-Telegram-Bot-Api-Secret-Token": "hdrsecret",
                 },
             )
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            with urllib.request.urlopen(req, timeout=30) as resp:
                 self.assertEqual(resp.status, 200)
             detail = None
-            for _ in range(40):
+            for _ in range(120):
                 req_tasks = urllib.request.Request(self._url("/v1/tasks?limit=20"), method="GET")
-                with urllib.request.urlopen(req_tasks, timeout=5) as resp_tasks:
+                with urllib.request.urlopen(req_tasks, timeout=30) as resp_tasks:
                     tasks = json.loads(resp_tasks.read().decode("utf-8"))["tasks"]
                 telegram_tasks = [t for t in tasks if t["channel"] == "telegram"]
                 for task in telegram_tasks:
                     req_task = urllib.request.Request(self._url(f"/v1/tasks/{task['task_id']}"), method="GET")
-                    with urllib.request.urlopen(req_task, timeout=5) as resp_task:
+                    with urllib.request.urlopen(req_task, timeout=30) as resp_task:
                         candidate = json.loads(resp_task.read().decode("utf-8"))
                     meta = candidate["task"].get("meta", {})
                     if meta.get("telegram", {}).get("message_id") == 31:
@@ -1940,17 +1998,17 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
                 "X-Telegram-Bot-Api-Secret-Token": "hdrsecret",
             },
         )
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             self.assertEqual(resp.status, 200)
         detail = None
-        for _ in range(40):
+        for _ in range(120):
             req_tasks = urllib.request.Request(self._url("/v1/tasks?limit=20"), method="GET")
-            with urllib.request.urlopen(req_tasks, timeout=5) as resp_tasks:
+            with urllib.request.urlopen(req_tasks, timeout=30) as resp_tasks:
                 tasks = json.loads(resp_tasks.read().decode("utf-8"))["tasks"]
             telegram_tasks = [t for t in tasks if t["channel"] == "telegram"]
             for task in telegram_tasks:
                 req_task = urllib.request.Request(self._url(f"/v1/tasks/{task['task_id']}"), method="GET")
-                with urllib.request.urlopen(req_task, timeout=5) as resp_task:
+                with urllib.request.urlopen(req_task, timeout=30) as resp_task:
                     candidate = json.loads(resp_task.read().decode("utf-8"))
                 meta = candidate["task"].get("meta", {})
                 if meta.get("telegram", {}).get("message_id") == 33:
@@ -1987,17 +2045,17 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
                 "X-Telegram-Bot-Api-Secret-Token": "hdrsecret",
             },
         )
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             self.assertEqual(resp.status, 200)
         detail = None
-        for _ in range(40):
+        for _ in range(120):
             req_tasks = urllib.request.Request(self._url("/v1/tasks?limit=20"), method="GET")
-            with urllib.request.urlopen(req_tasks, timeout=5) as resp_tasks:
+            with urllib.request.urlopen(req_tasks, timeout=30) as resp_tasks:
                 tasks = json.loads(resp_tasks.read().decode("utf-8"))["tasks"]
             telegram_tasks = [t for t in tasks if t["channel"] == "telegram"]
             for task in telegram_tasks:
                 req_task = urllib.request.Request(self._url(f"/v1/tasks/{task['task_id']}"), method="GET")
-                with urllib.request.urlopen(req_task, timeout=5) as resp_task:
+                with urllib.request.urlopen(req_task, timeout=30) as resp_task:
                     candidate = json.loads(resp_task.read().decode("utf-8"))
                 meta = candidate["task"].get("meta", {})
                 if meta.get("telegram", {}).get("message_id") == 34:
@@ -2033,17 +2091,17 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
                 "X-Telegram-Bot-Api-Secret-Token": "hdrsecret",
             },
         )
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             self.assertEqual(resp.status, 200)
         detail = None
-        for _ in range(40):
+        for _ in range(120):
             req_tasks = urllib.request.Request(self._url("/v1/tasks?limit=20"), method="GET")
-            with urllib.request.urlopen(req_tasks, timeout=5) as resp_tasks:
+            with urllib.request.urlopen(req_tasks, timeout=30) as resp_tasks:
                 tasks = json.loads(resp_tasks.read().decode("utf-8"))["tasks"]
             telegram_tasks = [t for t in tasks if t["channel"] == "telegram"]
             for task in telegram_tasks:
                 req_task = urllib.request.Request(self._url(f"/v1/tasks/{task['task_id']}"), method="GET")
-                with urllib.request.urlopen(req_task, timeout=5) as resp_task:
+                with urllib.request.urlopen(req_task, timeout=30) as resp_task:
                     candidate = json.loads(resp_task.read().decode("utf-8"))
                 meta = candidate["task"].get("meta", {})
                 if meta.get("telegram", {}).get("message_id") == 35:

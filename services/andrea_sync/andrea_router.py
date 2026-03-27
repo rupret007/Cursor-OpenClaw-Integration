@@ -112,7 +112,9 @@ META_OPENCLAW_RE = re.compile(
     r"what (?:is|'s) openclaw|"
     r"is (?:this|that) (?:the )?openclaw|"
     r"is openclaw (?:in there|there)|"
-    r"openclaw are you there"
+    r"openclaw are you there|"
+    r"(?:whats?|what(?:'s|s))\s+up.*openclaw|"
+    r"openclaw.*(there|up|hey|hello)"
     r")$",
     re.I,
 )
@@ -147,7 +149,17 @@ COLLABORATE_RE = re.compile(
     re.I,
 )
 CASUAL_CHECKIN_RE = re.compile(
-    r"^(?:how(?:'s|\s+is)\s+it\s+going|how\s+are\s+things|how(?:'s|\s+is)\s+everything)\s*[?.!]*\s*$",
+    r"^(?:"
+    r"how(?:'s|s|\s+is)\s+it\s+going|"
+    r"how\s+are\s+things|"
+    r"how(?:'s|s|\s+is)\s+everything|"
+    r"what(?:'s|s|\s+is)\s+up|"
+    r"whats\s+up|"
+    r"sup|"
+    r"wassup|"
+    r"howdy|"
+    r"you\s+there\??"
+    r")\s*[?.!]*\s*$",
     re.I,
 )
 AGENDA_OR_DAY_PLAN_RE = re.compile(

@@ -879,11 +879,24 @@ class SyncServer:
                 continue
             if intent.action == "cancel_jobs":
                 handled = True
-                parts.append(
-                    self._format_cursor_control_reply(
-                        cancel_all_jobs(repo_root=self.repo_root)
-                    )
+                payload = self._latest_user_message_payload(task_id)
+                text = str(payload.get("routing_text") or payload.get("text") or "").strip()
+                channel = str(payload.get("channel") or "telegram").strip() or "telegram"
+                ctrl_reply, _ = self._handle_cursor_control_plane_action(
+                    task_id,
+                    text=text,
+                    channel=channel,
+                    payload=payload if isinstance(payload, dict) else {},
                 )
+                low_ctrl = str(ctrl_reply or "").lower()
+                if "do not see any active" in low_ctrl:
+                    parts.append(
+                        self._format_cursor_control_reply(
+                            cancel_all_jobs(repo_root=self.repo_root)
+                        )
+                    )
+                else:
+                    parts.append(ctrl_reply)
                 continue
             if intent.action == "list_active_jobs":
                 handled = True
@@ -1561,9 +1574,14 @@ class SyncServer:
             direct_intent_reply = self._direct_intent_bundle_reply(task_id, intent_envelope)
             bundle_prelude_text = ""
             if direct_intent_reply and not intent_envelope.has_code_plane_intent:
+                protected_reason = (
+                    "cursor_control_plane_command"
+                    if intent_envelope.control_plane_flag
+                    else "protected_or_control_intent"
+                )
                 decision = AndreaRouteDecision(
                     mode="direct",
-                    reason="protected_or_control_intent",
+                    reason=protected_reason,
                     reply_text=direct_intent_reply,
                     collaboration_mode=str(
                         user_payload.get("collaboration_mode")

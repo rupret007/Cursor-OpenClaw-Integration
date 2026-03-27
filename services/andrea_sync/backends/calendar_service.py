@@ -218,8 +218,8 @@ def build_today_schedule_reply(
     }
     if not all_events:
         if provider_available:
-            return "Nothing scheduled today.", metadata
-        return "I don't see anything scheduled today.", metadata
+            return "Nothing scheduled on your calendar today.", metadata
+        return "I don't see anything on your calendar for today.", metadata
     lines = ["Here’s what you have today:"]
     for event in all_events[:8]:
         suffix = ""

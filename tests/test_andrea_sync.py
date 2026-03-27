@@ -5378,6 +5378,54 @@ class TestAndreaSync(unittest.TestCase):
         lane = arbitrate_answer_lane(text=text, turn_plan=plan, direct_policy=policy)
         self.assertEqual(lane.lane, "heavy_lift_delegated_execution")
 
+    def test_arbitrate_answer_lane_treats_explicit_cursor_cancel_as_control_plane(self) -> None:
+        from services.andrea_sync.turn_intelligence import (
+            arbitrate_answer_lane,
+            build_direct_answer_policy,
+            build_turn_plan,
+            classify_turn_intent_class,
+        )
+
+        text = "Ask @cursor to cancel all jobs."
+        plan = build_turn_plan(
+            text,
+            scenario_id="mixedResourceGoal",
+            projection_has_continuity_state=False,
+        )
+        policy = build_direct_answer_policy(
+            text,
+            scenario_id="mixedResourceGoal",
+            turn_plan=plan,
+        )
+        lane = arbitrate_answer_lane(text=text, turn_plan=plan, direct_policy=policy)
+        self.assertEqual(classify_turn_intent_class(text), "cursor_control_plane")
+        self.assertEqual(lane.lane, "local_stateful_answer")
+        self.assertEqual(lane.reason, "explicit_cursor_control_plane")
+
+    def test_build_turn_plan_recognizes_explicit_openclaw_schedule_query(self) -> None:
+        from services.andrea_sync.turn_intelligence import (
+            arbitrate_answer_lane,
+            build_direct_answer_policy,
+            build_turn_plan,
+            classify_turn_intent_class,
+        )
+
+        text = "Ask @openclaw what do I have on my schedule today?"
+        plan = build_turn_plan(
+            text,
+            scenario_id="mixedResourceGoal",
+            projection_has_continuity_state=False,
+        )
+        policy = build_direct_answer_policy(
+            text,
+            scenario_id="mixedResourceGoal",
+            turn_plan=plan,
+        )
+        lane = arbitrate_answer_lane(text=text, turn_plan=plan, direct_policy=policy)
+        self.assertEqual(classify_turn_intent_class(text), "assistant_state_query")
+        self.assertEqual(plan.domain, "personal_agenda")
+        self.assertEqual(lane.lane, "local_stateful_answer")
+
     def test_build_direct_answer_policy_keeps_simple_math_lightweight(self) -> None:
         from services.andrea_sync.turn_intelligence import (
             arbitrate_answer_lane,
@@ -5416,6 +5464,23 @@ class TestAndreaSync(unittest.TestCase):
             projection_has_continuity_state=False,
         )
         self.assertEqual(weather.domain, "external_information")
+
+    def test_resolve_answer_family_profile_uses_assistant_state_family_for_agenda(self) -> None:
+        from services.andrea_sync.turn_intelligence import (
+            build_turn_plan,
+            resolve_answer_family_profile,
+        )
+
+        text = "Ask OpenClaw what's on my schedule today"
+        plan = build_turn_plan(
+            text,
+            scenario_id="mixedResourceGoal",
+            projection_has_continuity_state=False,
+        )
+        family = resolve_answer_family_profile(text, plan)
+        self.assertEqual(plan.domain, "personal_agenda")
+        self.assertEqual(family.family, "assistant_state_agenda")
+        self.assertEqual(family.allowed_sources, ("agenda_state",))
 
     def test_build_turn_plan_and_policy_keep_meaning_of_life_lightweight(self) -> None:
         from services.andrea_sync.turn_intelligence import (

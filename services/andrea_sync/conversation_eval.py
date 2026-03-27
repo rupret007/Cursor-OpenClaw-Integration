@@ -48,6 +48,7 @@ from .semantic_continuity import (
 )
 from .store import (
     append_event,
+    create_reminder,
     create_goal,
     create_goal_approval,
     get_task_channel,
@@ -2145,10 +2146,24 @@ def _seed_personal_agenda_state_pack(harness: Any) -> None:
                 )
             )
         )
+        # Seed a near-term reminder so agenda replies can surface concrete plan items.
+        server.with_lock(
+            lambda c: create_reminder(
+                c,
+                principal_id=principal_id,
+                channel="telegram",
+                delivery_target="seed_chat_88046",
+                message="Review deploy checklist and approval decision",
+                due_at=time.time() + 1800.0,
+                status="scheduled",
+                source_task_id=task_id,
+                metadata={"seed": "personal_agenda_state_pack"},
+            )
+        )
     server.with_lock(
         lambda c: insert_user_outcome_receipt(
             c,
-            receipt_id="seed-agenda-status-receipt-1",
+            receipt_id=f"seed-agenda-status-receipt-{int(time.time() * 1000)}",
             task_id=task_id,
             receipt_kind="status_followup",
             summary="Follow up on deploy checklist and approval decision today.",
@@ -3141,6 +3156,46 @@ CONVERSATION_CORE_CASES: tuple[ConversationCaseSpec, ...] = (
         forbidden_reply_markers=("i do not have a full calendar view here yet",),
     ),
     ConversationCaseSpec(
+        case_id="openclaw_schedule_explicit_mention_stays_assistant_lane",
+        title="Explicit @openclaw schedule ask stays assistant lane",
+        behavior_family="personal_agenda",
+        turns=("Ask @openclaw what do I have on my schedule today?",),
+        chat_id=88047,
+        from_id=99046,
+        first_update_id=18047,
+        first_message_id=28047,
+        setup_fn=_seed_personal_agenda_state_pack,
+        required_turn_domains=("personal_agenda",),
+        forbid_unnecessary_delegate=True,
+        forbidden_reply_markers=(
+            "i can spin up a cursor run",
+            "repo-wide",
+            "pull request",
+            "code patch",
+        ),
+        wait_policy="routing_smoke",
+    ),
+    ConversationCaseSpec(
+        case_id="openclaw_schedule_nonmention_stays_assistant_lane",
+        title="Explicit OpenClaw schedule ask (no @) stays assistant lane",
+        behavior_family="personal_agenda",
+        turns=("Ask OpenClaw what's on my schedule today.",),
+        chat_id=88048,
+        from_id=99046,
+        first_update_id=18048,
+        first_message_id=28048,
+        setup_fn=_seed_personal_agenda_state_pack,
+        required_turn_domains=("personal_agenda",),
+        forbid_unnecessary_delegate=True,
+        forbidden_reply_markers=(
+            "i can spin up a cursor run",
+            "repo-wide",
+            "pull request",
+            "code patch",
+        ),
+        wait_policy="routing_smoke",
+    ),
+    ConversationCaseSpec(
         case_id="meaning_of_life_lightweight",
         title="Meaning of life stays lightweight",
         behavior_family="opinion_reflection",
@@ -3531,6 +3586,24 @@ CONVERSATION_CORE_CASES: tuple[ConversationCaseSpec, ...] = (
         wait_policy="routing_smoke",
     ),
     ConversationCaseSpec(
+        case_id="cursor_control_plane_cancel_jobs_no_codegen",
+        title="Explicit @cursor cancel-jobs stays control-plane",
+        behavior_family="operational_control_plane",
+        turns=("Ask @cursor to cancel all jobs.",),
+        chat_id=88074,
+        from_id=99074,
+        first_update_id=18074,
+        first_message_id=28074,
+        required_assistant_reasons=("cursor_control_plane_command",),
+        forbid_unnecessary_delegate=True,
+        forbidden_reply_markers=(
+            "pull request",
+            "repo-wide issue",
+            "i can implement",
+            "code patch",
+        ),
+    ),
+    ConversationCaseSpec(
         case_id="bluebubbles_then_summarize",
         title="Tool follow-up carryover",
         behavior_family="tool_followup_carryover",
@@ -3910,7 +3983,9 @@ def conversation_core_scenarios(conversation_eval_options: Mapping[str, Any] | N
     scoped_ids_raw = opts.get("scenario_ids")
     scoped_ids: set[str] | None = None
     if isinstance(scoped_ids_raw, list):
-        scoped_ids = {str(x).strip() for x in scoped_ids_raw if str(x).strip()}
+        tmp = {str(x).strip() for x in scoped_ids_raw if str(x).strip()}
+        # Empty list from CLI means "no filter"; only non-empty lists scope the suite.
+        scoped_ids = tmp if tmp else None
     elif isinstance(scoped_ids_raw, str) and str(scoped_ids_raw).strip():
         scoped_ids = {x.strip() for x in str(scoped_ids_raw).split(",") if x.strip()}
     out: List[ExperienceScenario] = []

@@ -2775,12 +2775,18 @@ def _build_personal_runtime_reply(
 
     if lines:
         lines.append(
-            "I do not have a full calendar view here yet—this is the best grounded plan I can "
-            "build from reminders and assistant state."
+            "I don't have full calendar integration in this chat, so this is the best grounded plan "
+            "I can build from reminders and assistant state."
         )
         return "\n".join(lines)
     if attention_first:
         return DIRECT_ATTENTION_NO_STATE_REPLY
+    pending = int(proactive.get("pending_reminder_count") or 0)
+    if principal_id:
+        return (
+            f"{DIRECT_AGENDA_NO_CALENDAR_REPLY} "
+            f"Pending reminders in queue: {pending}."
+        )
     return DIRECT_AGENDA_NO_CALENDAR_REPLY
 
 

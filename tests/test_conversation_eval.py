@@ -1208,6 +1208,8 @@ class ConversationCoreScenariosTests(unittest.TestCase):
         self.assertIn("conversation_core::simple_conversion_direct", ids)
         self.assertIn("conversation_core::plans_today", ids)
         self.assertIn("conversation_core::schedule_today_seeded_state_pack", ids)
+        self.assertIn("conversation_core::openclaw_schedule_explicit_mention_stays_assistant_lane", ids)
+        self.assertIn("conversation_core::openclaw_schedule_nonmention_stays_assistant_lane", ids)
         self.assertIn("conversation_core::meaning_of_life_lightweight", ids)
         self.assertIn("conversation_core::weather_current_conditions", ids)
         self.assertIn("conversation_core::openclaw_collaboration_working_on_turn_still_works", ids)
@@ -1217,6 +1219,7 @@ class ConversationCoreScenariosTests(unittest.TestCase):
         self.assertIn("conversation_core::short_technical_question_not_social", ids)
         self.assertIn("conversation_core::technical_guidance_lookup_unavailable_next_steps", ids)
         self.assertIn("conversation_core::technical_guidance_multiline_partial_evidence", ids)
+        self.assertIn("conversation_core::cursor_control_plane_cancel_jobs_no_codegen", ids)
         self.assertIn("conversation_core::cursor_recall_thin_thread_next_steps", ids)
 
     def test_conversation_smoke_subset_size(self) -> None:
@@ -1230,6 +1233,23 @@ class ConversationCoreScenariosTests(unittest.TestCase):
         rows = conversation_core_scenarios({"scenario_ids": ["hi_andrea", "plans_today"]})
         ids = {r.scenario_id for r in rows}
         self.assertEqual(ids, {"conversation_core::hi_andrea", "conversation_core::plans_today"})
+
+    def test_empty_scenario_ids_list_means_no_scope(self) -> None:
+        """CLI passes scenario_ids=[] when --scenario-ids is omitted; must not filter to zero."""
+        full = conversation_core_scenarios({})
+        scoped_empty = conversation_core_scenarios({"scenario_ids": []})
+        self.assertGreater(len(full), 0)
+        self.assertEqual(len(scoped_empty), len(full))
+
+    def test_fix_brief_handoff_with_empty_scenario_ids_still_enumerates(self) -> None:
+        rows = conversation_core_scenarios(
+            {
+                "prepare_fix_brief": True,
+                "fix_brief_handoff": True,
+                "scenario_ids": [],
+            }
+        )
+        self.assertGreater(len(rows), 0)
 
     def test_wait_policy_status_sets(self) -> None:
         terminal = _wait_statuses_for_policy("terminal_reply")

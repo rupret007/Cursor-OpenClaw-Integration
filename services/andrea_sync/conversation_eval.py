@@ -10,6 +10,7 @@ import os
 import random
 import time
 import re
+from collections import Counter
 import urllib.error
 import urllib.request
 from contextlib import ExitStack
@@ -319,6 +320,11 @@ def build_turn_capture(
         if isinstance(assistant_payload.get("grounded_research_selection"), dict)
         else {}
     )
+    capture_hint = (
+        assistant_payload.get("turn_capture_hint")
+        if isinstance(assistant_payload.get("turn_capture_hint"), dict)
+        else {}
+    )
     assistant_route = _task_route(detail)
     rendered_reply = _rendered_reply_text(
         harness=harness,
@@ -327,6 +333,28 @@ def build_turn_capture(
         assistant_route=assistant_route,
     )
     rendered_sanitized = sanitize_user_surface_text(rendered_reply, fallback="", limit=4000)
+    normalized_contract = _build_normalized_capture_contract(
+        assistant_reason=_task_assistant_reason(detail),
+        expected_family=expected_family,
+        expected_sources=expected_sources,
+        semantic_contract=semantic_contract,
+        grounded_selection=grounded_selection,
+        turn_domain=plan.domain,
+        continuity_focus=plan.continuity_focus,
+    )
+    if capture_hint:
+        family_hint = str(capture_hint.get("family") or "").strip()
+        if family_hint:
+            normalized_contract["family"] = family_hint
+        source_hint = str(capture_hint.get("source") or "").strip()
+        if source_hint:
+            normalized_contract["source"] = source_hint
+        allowed_hint = capture_hint.get("allowed_sources")
+        if isinstance(allowed_hint, list):
+            normalized_contract["allowed_sources"] = [str(x).strip() for x in allowed_hint if str(x).strip()]
+        lane_hint = str(capture_hint.get("lane") or "").strip()
+        if lane_hint:
+            normalized_contract["lane"] = lane_hint
     return {
         "user_turn": user_text,
         "raw_reply_text": raw_reply,
@@ -340,6 +368,8 @@ def build_turn_capture(
         "assistant_semantic_selection": semantic_selection,
         "semantic_turn_contract": semantic_contract,
         "assistant_grounded_research_selection": grounded_selection,
+        "assistant_turn_capture_hint": capture_hint,
+        "normalized_capture_contract": normalized_contract,
         "scenario_id": scenario_id or resolution.scenario_id,
         "scenario_reason": str(scen.get("reason") or resolution.reason),
         "turn_plan_domain": plan.domain,
@@ -357,6 +387,85 @@ def build_turn_capture(
         "leak_echo_or_metadata_scaffold": draft_should_force_continuity_repair(raw_reply, user_text),
         "leak_internal_runtime": bool(raw_reply) and is_internal_runtime_text(raw_reply),
         "leak_sanitized_empty": bool(raw_reply) and not bool(sanitized),
+    }
+
+
+def _infer_capture_source_from_reason(
+    *,
+    assistant_reason: str,
+    expected_sources: Sequence[str],
+    expected_family: str,
+) -> str:
+    reason = str(assistant_reason or "").strip().lower()
+    if reason.startswith("semantic_state_"):
+        return "semantic_state_reply"
+    if "grounded_research" in reason:
+        return "grounded_research_lookup"
+    if "goal_runtime_status" in reason:
+        return "goal_runtime_state"
+    if "agenda" in reason or "attention_today" in reason:
+        return "assistant_state_reply"
+    if "approval" in str(expected_family or ""):
+        return "approval_state_reply"
+    if expected_sources:
+        return str(expected_sources[0] or "")
+    return "direct_reply"
+
+
+def _build_normalized_capture_contract(
+    *,
+    assistant_reason: str,
+    expected_family: str,
+    expected_sources: Sequence[str],
+    semantic_contract: Mapping[str, Any],
+    grounded_selection: Mapping[str, Any],
+    turn_domain: str,
+    continuity_focus: str,
+) -> Dict[str, Any]:
+    if isinstance(semantic_contract, Mapping) and semantic_contract:
+        family = str(semantic_contract.get("family") or expected_family or "").strip()
+        source = str(semantic_contract.get("source") or "").strip() or _infer_capture_source_from_reason(
+            assistant_reason=assistant_reason,
+            expected_sources=expected_sources,
+            expected_family=expected_family,
+        )
+        allowed_raw = semantic_contract.get("allowed_sources")
+        allowed = (
+            [str(x).strip() for x in allowed_raw if str(x).strip()]
+            if isinstance(allowed_raw, list)
+            else list(expected_sources)
+        )
+        return {
+            "family": family,
+            "source": source,
+            "allowed_sources": allowed,
+            "turn_domain": str(turn_domain or ""),
+            "continuity_focus": str(continuity_focus or ""),
+            "capture_mode": "semantic",
+        }
+    if isinstance(grounded_selection, Mapping) and grounded_selection:
+        family = str(grounded_selection.get("family") or expected_family or "").strip()
+        source = str(grounded_selection.get("source") or "grounded_research_lookup").strip()
+        return {
+            "family": family,
+            "source": source,
+            "allowed_sources": list(expected_sources) or [source],
+            "turn_domain": str(turn_domain or ""),
+            "continuity_focus": str(continuity_focus or ""),
+            "capture_mode": "grounded",
+        }
+    source = _infer_capture_source_from_reason(
+        assistant_reason=assistant_reason,
+        expected_sources=expected_sources,
+        expected_family=expected_family,
+    )
+    return {
+        "family": str(expected_family or "").strip(),
+        "source": source,
+        "allowed_sources": list(expected_sources),
+        "turn_domain": str(turn_domain or ""),
+        "continuity_focus": str(continuity_focus or ""),
+        "capture_mode": "direct_or_fallback",
     }
 
 
@@ -1938,6 +2047,116 @@ def _seed_openclaw_blocker_carryover_state(harness: Any) -> None:
     )
 
 
+def _seed_openclaw_work_status_partial_state(harness: Any) -> None:
+    """Seed collaboration state where OpenClaw has active work details without hard blocked_reason text."""
+    server = harness.server
+    assert server is not None
+    created = server.with_lock(
+        lambda c: handle_command(
+            c,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "seed-openclaw-work-status-partial",
+                "payload": {
+                    "text": "Seed OpenClaw working state",
+                    "routing_text": "Seed OpenClaw working state",
+                    "chat_id": 88191,
+                    "message_id": 7201,
+                    "from_user": 99291,
+                },
+            },
+        )
+    )
+    task_id = str(created.get("task_id") or "")
+    if not task_id:
+        return
+    server.with_lock(
+        lambda c: handle_command(
+            c,
+            {
+                "command_type": CommandType.REPORT_CURSOR_EVENT.value,
+                "channel": "cursor",
+                "task_id": task_id,
+                "payload": {
+                    "event_type": EventType.JOB_COMPLETED.value,
+                    "payload": {
+                        "backend": "openclaw",
+                        "runner": "openclaw",
+                        "summary": "OpenClaw is validating deploy readiness and waiting on infra credentials.",
+                        "user_summary": (
+                            "OpenClaw is validating deploy readiness and waiting on staging credentials "
+                            "before the next deploy verification pass."
+                        ),
+                        "collaboration_trace": [
+                            "OpenClaw completed config audit and dependency checks.",
+                            "Next step is deploy verification after staging credentials arrive.",
+                        ],
+                    },
+                },
+            },
+        )
+    )
+
+
+def _seed_personal_agenda_state_pack(harness: Any) -> None:
+    """Seed a minimal but concrete assistant-state pack for agenda/day-plan realism."""
+    server = harness.server
+    assert server is not None
+    created = server.with_lock(
+        lambda c: handle_command(
+            c,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "seed-personal-agenda-pack",
+                "payload": {
+                    "text": "Seed personal agenda state",
+                    "routing_text": "Seed personal agenda state",
+                    "chat_id": 88046,
+                    "message_id": 28146,
+                    "from_user": 99046,
+                },
+            },
+        )
+    )
+    task_id = str(created.get("task_id") or "")
+    if not task_id:
+        return
+    principal_id = server.with_lock(lambda c: get_task_principal_id(c, task_id))
+    if principal_id:
+        server.with_lock(
+            lambda c: (
+                lambda gid: (
+                    link_task_to_goal(c, task_id, gid),
+                    create_goal_approval(
+                        c,
+                        gid,
+                        task_id,
+                        rationale="Confirm production deploy timing with the team.",
+                    ),
+                )
+            )(
+                create_goal(
+                    c,
+                    principal_id=principal_id,
+                    summary="Seed agenda review goal",
+                    channel="telegram",
+                )
+            )
+        )
+    server.with_lock(
+        lambda c: insert_user_outcome_receipt(
+            c,
+            receipt_id="seed-agenda-status-receipt-1",
+            task_id=task_id,
+            receipt_kind="status_followup",
+            summary="Follow up on deploy checklist and approval decision today.",
+            proof_refs={"reason": "agenda_seed"},
+        )
+    )
+
+
 def _seed_source_truth_over_derived_recall(harness: Any) -> None:
     server = harness.server
     assert server is not None
@@ -2909,6 +3128,19 @@ CONVERSATION_CORE_CASES: tuple[ConversationCaseSpec, ...] = (
         required_turn_domains=("personal_agenda",),
     ),
     ConversationCaseSpec(
+        case_id="schedule_today_seeded_state_pack",
+        title="Schedule today uses seeded assistant state",
+        behavior_family="personal_agenda",
+        turns=("What's on my schedule today?",),
+        chat_id=88046,
+        from_id=99046,
+        first_update_id=18046,
+        first_message_id=28046,
+        setup_fn=_seed_personal_agenda_state_pack,
+        required_turn_domains=("personal_agenda",),
+        forbidden_reply_markers=("i do not have a full calendar view here yet",),
+    ),
+    ConversationCaseSpec(
         case_id="meaning_of_life_lightweight",
         title="Meaning of life stays lightweight",
         behavior_family="opinion_reflection",
@@ -3481,6 +3713,22 @@ CONVERSATION_CORE_CASES: tuple[ConversationCaseSpec, ...] = (
         ),
     ),
     ConversationCaseSpec(
+        case_id="openclaw_collaboration_working_on_partial_state_useful",
+        title="OpenClaw working-on partial state surfaces strongest detail",
+        behavior_family="blocked_state",
+        turns=("What is OpenClaw working on?",),
+        chat_id=88191,
+        from_id=99291,
+        first_update_id=18997,
+        first_message_id=6897,
+        setup_fn=_seed_openclaw_work_status_partial_state,
+        required_reply_markers=("staging credentials",),
+        forbidden_reply_markers=(
+            "i do not see a concrete blocker right now",
+            "not finding a recent cursor workstream",
+        ),
+    ),
+    ConversationCaseSpec(
         case_id="cursor_recap_recursion",
         title="Cursor recap recursion hygiene",
         behavior_family="thin_summary",
@@ -3659,9 +3907,17 @@ def conversation_core_scenarios(conversation_eval_options: Mapping[str, Any] | N
     opts = dict(conversation_eval_options or {})
     smoke = bool(opts.get("smoke"))
     smoke_ids = set(CONVERSATION_SMOKE_CASE_IDS) if smoke else None
+    scoped_ids_raw = opts.get("scenario_ids")
+    scoped_ids: set[str] | None = None
+    if isinstance(scoped_ids_raw, list):
+        scoped_ids = {str(x).strip() for x in scoped_ids_raw if str(x).strip()}
+    elif isinstance(scoped_ids_raw, str) and str(scoped_ids_raw).strip():
+        scoped_ids = {x.strip() for x in str(scoped_ids_raw).split(",") if x.strip()}
     out: List[ExperienceScenario] = []
     for case in CONVERSATION_CORE_CASES:
         if smoke_ids is not None and case.case_id not in smoke_ids:
+            continue
+        if scoped_ids is not None and case.case_id not in scoped_ids:
             continue
         out.append(
             ExperienceScenario(
@@ -3684,25 +3940,158 @@ def conversation_core_scenarios(conversation_eval_options: Mapping[str, Any] | N
 
 
 def cluster_failed_checks(checks: Iterable[ExperienceCheckResult]) -> List[Dict[str, Any]]:
+    def _quality_state(check: ExperienceCheckResult) -> str:
+        meta = check.metadata if isinstance(check.metadata, dict) else {}
+        q = str(meta.get("quality_state") or ("fail" if not check.passed else "full_pass")).strip().lower()
+        return q if q in {"full_pass", "weak_pass", "fail"} else ("fail" if not check.passed else "full_pass")
+
+    def _last_capture(check: ExperienceCheckResult) -> Dict[str, Any]:
+        meta = check.metadata if isinstance(check.metadata, dict) else {}
+        caps = meta.get("captures")
+        if isinstance(caps, list) and caps and isinstance(caps[-1], dict):
+            return dict(caps[-1])
+        return {}
+
+    def _signature_for(check: ExperienceCheckResult, family: str) -> Dict[str, Any]:
+        meta = check.metadata if isinstance(check.metadata, dict) else {}
+        cap = _last_capture(check)
+        expected_family = str(cap.get("expected_answer_family") or "").strip()
+        expected_sources_raw = cap.get("expected_answer_sources")
+        expected_sources = (
+            {str(x).strip() for x in expected_sources_raw if str(x).strip()}
+            if isinstance(expected_sources_raw, list)
+            else set()
+        )
+        normalized = cap.get("normalized_capture_contract")
+        normalized = normalized if isinstance(normalized, dict) else {}
+        actual_family = str(normalized.get("family") or "").strip()
+        actual_source = str(normalized.get("source") or "").strip()
+        issue_codes = sorted(
+            {
+                str(c).strip()
+                for c in (
+                    check.issue_codes
+                    or (meta.get("issue_codes") if isinstance(meta.get("issue_codes"), list) else [])
+                )
+                if str(c).strip()
+            }
+        )
+        top_codes = issue_codes[:2]
+        domain = str(cap.get("turn_plan_domain") or "").strip()
+        focus = str(cap.get("turn_plan_continuity_focus") or "").strip()
+        mismatch_bits: List[str] = []
+        if expected_family and actual_family and expected_family != actual_family:
+            mismatch_bits.append("family_mismatch")
+        if expected_sources and actual_source and actual_source not in expected_sources:
+            mismatch_bits.append("source_mismatch")
+        if str(cap.get("assistant_route") or "").strip() == "delegate":
+            mismatch_bits.append("delegate_surface")
+        code_sig = ",".join(top_codes) if top_codes else "no_code"
+        signature = (
+            f"{family}|{code_sig}|{','.join(sorted(mismatch_bits)) or 'no_mismatch'}|"
+            f"{domain or 'domain_none'}|{focus or 'focus_none'}"
+        )
+        return {
+            "signature": signature,
+            "issue_codes": issue_codes,
+            "mismatch_bits": mismatch_bits,
+            "expected_family": expected_family,
+            "actual_family": actual_family,
+            "actual_source": actual_source,
+            "domain": domain,
+            "focus": focus,
+        }
+
     buckets: Dict[str, Dict[str, Any]] = {}
     for row in checks:
-        meta = row.metadata if isinstance(row.metadata, dict) else {}
-        qstate = str(meta.get("quality_state") or ("fail" if not row.passed else "full_pass"))
-        if row.passed and qstate == "full_pass":
+        state = _quality_state(row)
+        if state == "full_pass":
             continue
+        meta = row.metadata if isinstance(row.metadata, dict) else {}
         fams = meta.get("failure_families")
         if not isinstance(fams, list) or not fams:
             fams = ["unknown"]
-        for fam in fams:
-            key = str(fam)
-            b = buckets.setdefault(
+        for fam_raw in fams:
+            fam = str(fam_raw or "unknown").strip() or "unknown"
+            sig = _signature_for(row, fam)
+            key = sig["signature"]
+            bucket = buckets.setdefault(
                 key,
-                {"failure_family": key, "count": 0, "scenario_ids": []},
+                {
+                    "failure_family": fam,
+                    "cluster_signature": key,
+                    "count": 0,
+                    "fail_count": 0,
+                    "weak_pass_count": 0,
+                    "scenario_ids": [],
+                    "issue_codes": Counter(),
+                    "quality_states": Counter(),
+                    "behavior_families": Counter(),
+                    "mismatch_bits": Counter(),
+                    "sample_expected_family": "",
+                    "sample_actual_family": "",
+                    "sample_actual_source": "",
+                    "turn_domains": Counter(),
+                    "continuity_focuses": Counter(),
+                },
             )
-            b["count"] += 1
-            if row.scenario_id not in b["scenario_ids"]:
-                b["scenario_ids"].append(row.scenario_id)
-    return sorted(buckets.values(), key=lambda x: -int(x.get("count") or 0))
+            bucket["count"] += 1
+            bucket["quality_states"][state] += 1
+            if state == "fail":
+                bucket["fail_count"] += 1
+            elif state == "weak_pass":
+                bucket["weak_pass_count"] += 1
+            if row.scenario_id not in bucket["scenario_ids"]:
+                bucket["scenario_ids"].append(row.scenario_id)
+            for code in sig["issue_codes"]:
+                bucket["issue_codes"][code] += 1
+            for bit in sig["mismatch_bits"]:
+                bucket["mismatch_bits"][bit] += 1
+            if sig["domain"]:
+                bucket["turn_domains"][sig["domain"]] += 1
+            if sig["focus"]:
+                bucket["continuity_focuses"][sig["focus"]] += 1
+            cmeta = row.metadata if isinstance(row.metadata, dict) else {}
+            fam_hint = str(cmeta.get("behavior_family") or "").strip()
+            if fam_hint:
+                bucket["behavior_families"][fam_hint] += 1
+            if not bucket["sample_expected_family"]:
+                bucket["sample_expected_family"] = sig["expected_family"]
+            if not bucket["sample_actual_family"]:
+                bucket["sample_actual_family"] = sig["actual_family"]
+            if not bucket["sample_actual_source"]:
+                bucket["sample_actual_source"] = sig["actual_source"]
+
+    clusters: List[Dict[str, Any]] = []
+    for raw in buckets.values():
+        clusters.append(
+            {
+                "failure_family": raw["failure_family"],
+                "cluster_signature": raw["cluster_signature"],
+                "count": int(raw["count"]),
+                "fail_count": int(raw["fail_count"]),
+                "weak_pass_count": int(raw["weak_pass_count"]),
+                "scenario_ids": list(raw["scenario_ids"]),
+                "quality_states": dict(raw["quality_states"]),
+                "issue_codes": [code for code, _ in raw["issue_codes"].most_common()],
+                "behavior_families": [name for name, _ in raw["behavior_families"].most_common()],
+                "mismatch_bits": [name for name, _ in raw["mismatch_bits"].most_common()],
+                "turn_domains": [name for name, _ in raw["turn_domains"].most_common()],
+                "continuity_focuses": [name for name, _ in raw["continuity_focuses"].most_common()],
+                "sample_expected_family": str(raw.get("sample_expected_family") or ""),
+                "sample_actual_family": str(raw.get("sample_actual_family") or ""),
+                "sample_actual_source": str(raw.get("sample_actual_source") or ""),
+            }
+        )
+    return sorted(
+        clusters,
+        key=lambda x: (
+            -int(x.get("fail_count") or 0),
+            -int(x.get("weak_pass_count") or 0),
+            -int(x.get("count") or 0),
+            str(x.get("failure_family") or ""),
+        ),
+    )
 
 
 def build_cursor_fix_brief(
@@ -3713,14 +4102,42 @@ def build_cursor_fix_brief(
 ) -> Dict[str, Any]:
     """Bounded fix brief for human/Cursor; does not apply code changes."""
     fam = str(cluster.get("failure_family") or "unknown")
+    cluster_sig = str(cluster.get("cluster_signature") or "")
+    cluster_ids = {str(x).strip() for x in (cluster.get("scenario_ids") or []) if str(x).strip()}
     related = []
     for c in checks:
         cmeta = c.metadata if isinstance(c.metadata, dict) else {}
         cstate = str(cmeta.get("quality_state") or ("fail" if not c.passed else "full_pass"))
-        if cstate != "full_pass" and fam in (cmeta.get("failure_families") or []):
+        if cstate == "full_pass":
+            continue
+        if fam not in (cmeta.get("failure_families") or []):
+            continue
+        if cluster_ids and c.scenario_id not in cluster_ids:
+            continue
+        if cluster_sig:
+            # Keep only checks whose local signature still matches this cluster.
+            local_clusters = cluster_failed_checks([c])
+            local_sig = str(local_clusters[0].get("cluster_signature") or "") if local_clusters else ""
+            if local_sig and local_sig != cluster_sig:
+                continue
+        if cstate != "full_pass":
             related.append(c)
     prompts: List[str] = []
+    expected_actual: List[Dict[str, Any]] = []
+    scenario_ids: List[str] = []
+    likely_files: List[str] = []
+    behavior_families: List[str] = []
+    seeded_state_signals: List[str] = []
     for c in related[:5]:
+        scenario_ids.append(c.scenario_id)
+        for path in list(c.suspected_files or []):
+            p = str(path or "").strip()
+            if p and p not in likely_files:
+                likely_files.append(p)
+        cmeta = c.metadata if isinstance(c.metadata, dict) else {}
+        bf = str(cmeta.get("behavior_family") or "").strip()
+        if bf and bf not in behavior_families:
+            behavior_families.append(bf)
         caps = c.metadata.get("captures") if isinstance(c.metadata, dict) else None
         if isinstance(caps, list) and caps:
             last = caps[-1] if isinstance(caps[-1], dict) else {}
@@ -3728,26 +4145,85 @@ def build_cursor_fix_brief(
             r = last.get("rendered_reply_sanitized") or last.get("raw_reply_text")
             if u:
                 prompts.append(f"User: {u}\nReply: {_clip(r, 600)}")
+            expected_actual.append(
+                {
+                    "scenario_id": c.scenario_id,
+                    "expected_family": str(last.get("expected_answer_family") or ""),
+                    "expected_sources": list(last.get("expected_answer_sources") or []),
+                    "actual_family": str(
+                        (last.get("normalized_capture_contract") or {}).get("family")
+                        if isinstance(last.get("normalized_capture_contract"), dict)
+                        else ""
+                    ),
+                    "actual_source": str(
+                        (last.get("normalized_capture_contract") or {}).get("source")
+                        if isinstance(last.get("normalized_capture_contract"), dict)
+                        else ""
+                    ),
+                    "assistant_reason": str(last.get("assistant_reason") or ""),
+                    "turn_domain": str(last.get("turn_plan_domain") or ""),
+                    "continuity_focus": str(last.get("turn_plan_continuity_focus") or ""),
+                }
+            )
+            if bool(last.get("delegated_to_cursor")):
+                seeded_state_signals.append("delegated_to_cursor")
+            if bool(last.get("meta_openclaw_present")):
+                seeded_state_signals.append("meta_openclaw_present")
+            if bool(last.get("meta_cursor_present")):
+                seeded_state_signals.append("meta_cursor_present")
     codes: List[str] = []
     for c in related:
         codes.extend(c.issue_codes)
+    if not likely_files:
+        likely_files = [
+            "services/andrea_sync/conversation_eval.py",
+            "services/andrea_sync/server.py",
+            "services/andrea_sync/turn_intelligence.py",
+        ]
+    target_case_ids = sorted(
+        {
+            str(cid).split("conversation_core::", 1)[-1]
+            for cid in scenario_ids
+            if str(cid).strip()
+        }
+    )
+    rerun_cmd = (
+        "python3 scripts/andrea_experience_cycle.py --suite conversation_core --prepare-fix-brief "
+        f"--scenario-ids {','.join(target_case_ids)}"
+        if target_case_ids
+        else "python3 scripts/andrea_experience_cycle.py --suite conversation_core --prepare-fix-brief"
+    )
+    cursor_handoff_ready = bool(
+        target_case_ids
+        and len(target_case_ids) <= 4
+        and len(likely_files) <= 8
+        and int(cluster.get("fail_count") or 0) >= 1
+    )
     brief = {
         "title": f"Conversation quality fix · {fam}",
         "failure_family": fam,
+        "cluster_signature": cluster_sig,
+        "quality_breakdown": {
+            "count": int(cluster.get("count") or len(related)),
+            "fail_count": int(cluster.get("fail_count") or 0),
+            "weak_pass_count": int(cluster.get("weak_pass_count") or 0),
+        },
         "deterministic_issue_codes": sorted({str(x) for x in codes}),
         "failing_prompts": prompts,
-        "likely_files": [
-            "services/andrea_sync/server.py",
-            "services/andrea_sync/andrea_router.py",
-            "services/andrea_sync/assistant_answer_composer.py",
-            "services/andrea_sync/user_surface.py",
-            "services/andrea_sync/turn_intelligence.py",
-        ],
+        "expected_vs_actual_samples": expected_actual[:5],
+        "scenario_ids": sorted({str(x) for x in scenario_ids if str(x)}),
+        "behavior_families": list(behavior_families),
+        "seeded_state_signals": sorted({str(x) for x in seeded_state_signals if str(x)}),
+        "likely_files": likely_files[:12],
+        "targeted_rerun_command": rerun_cmd,
         "scope_instruction": "Modify 1-3 files; avoid runtime env toggles unless necessary.",
         "acceptance_criteria": [
-            "conversation_core suite passes deterministic detectors for this family",
+            "targeted conversation_core scenario subset returns full_pass for this cluster signature",
+            "full conversation_core run does not add new fail/weak_pass regressions",
             "no new metadata or echo regressions on casual + status turns",
         ],
+        "cursor_handoff_ready": cursor_handoff_ready,
+        "human_review_required": not cursor_handoff_ready,
         "baseline_vs_candidate": {
             "note": "Re-run scripts/andrea_experience_cycle.py with --suite conversation_core "
             "and compare verification_report.checks metadata before/after change.",
@@ -3763,32 +4239,27 @@ def attach_conversation_eval_report(
     checks: Sequence[ExperienceCheckResult],
     *,
     prepare_fix_brief: bool,
+    fix_brief_handoff: bool = False,
 ) -> None:
     clusters = cluster_failed_checks(checks)
     run_metadata["conversation_failure_clusters"] = clusters
     run_metadata["failure_family_counts"] = {
         str(c.get("failure_family")): int(c.get("count") or 0) for c in clusters
     }
+    run_metadata["fix_brief_handoff_enabled"] = bool(fix_brief_handoff)
     if prepare_fix_brief and clusters:
         briefs = []
         for c in clusters[:8]:
-            if str(c.get("failure_family") or "") in {
-                "generic_fallback_leak",
-                "question_echo",
-                "metadata_surface_leak",
-                "thin_summary",
-                "cursor_recall_failure",
-                "cursor_continuation_failure",
-                "followup_carryover_failure",
-                "wrong_context_boundary",
-                "overly_mechanical_wording",
-                "grounded_research_failure",
-                "delegation_miss",
-            }:
-                briefs.append(build_cursor_fix_brief(cluster=c, checks=checks))
+            briefs.append(build_cursor_fix_brief(cluster=c, checks=checks))
         run_metadata["cursor_fix_briefs"] = briefs
+        run_metadata["cursor_handoff_ready_briefs"] = (
+            [b for b in briefs if bool(b.get("cursor_handoff_ready"))]
+            if fix_brief_handoff
+            else []
+        )
     else:
         run_metadata["cursor_fix_briefs"] = []
+        run_metadata["cursor_handoff_ready_briefs"] = []
 
 
 __all__ = [

@@ -1082,6 +1082,57 @@ class ConversationEvalReportTests(unittest.TestCase):
         clusters = meta.get("conversation_failure_clusters") or []
         self.assertTrue(clusters)
 
+    def test_attach_report_adds_handoff_ready_briefs_when_enabled(self) -> None:
+        meta: dict = {}
+        sc = ExperienceScenario(
+            scenario_id="conversation_core::handoff",
+            title="handoff",
+            description="d",
+            category="conversation",
+            runner=lambda h, s: ExperienceCheckResult.from_observations(s, []),
+            suspected_files=["services/andrea_sync/conversation_eval.py"],
+        )
+        chk = ExperienceCheckResult.from_observations(
+            sc,
+            [
+                ExperienceObservation(
+                    description="x",
+                    expected="y",
+                    observed="z",
+                    passed=False,
+                    issue_code="conversation_openclaw_work_status_vague_under_state",
+                    severity="high",
+                )
+            ],
+            metadata={
+                "failure_families": ["blocked_state"],
+                "quality_state": "fail",
+                "captures": [
+                    {
+                        "user_turn": "What is OpenClaw working on?",
+                        "raw_reply_text": "I do not see active tracked work right now.",
+                        "expected_answer_family": "blocked_state",
+                        "expected_answer_sources": ["blocked_state_reply"],
+                        "normalized_capture_contract": {
+                            "family": "blocked_state",
+                            "source": "blocked_state_reply",
+                        },
+                    }
+                ],
+            },
+        )
+        attach_conversation_eval_report(
+            meta,
+            [chk],
+            prepare_fix_brief=True,
+            fix_brief_handoff=True,
+        )
+        self.assertTrue(meta.get("cursor_fix_briefs"))
+        self.assertTrue(meta.get("cursor_handoff_ready_briefs"))
+        brief = (meta.get("cursor_handoff_ready_briefs") or [{}])[0]
+        self.assertIn("targeted_rerun_command", brief)
+        self.assertIn("--scenario-ids", str(brief.get("targeted_rerun_command") or ""))
+
 
 class ConversationCoreSuitePersistenceTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -1156,10 +1207,12 @@ class ConversationCoreScenariosTests(unittest.TestCase):
         self.assertIn("conversation_core::simple_math_direct", ids)
         self.assertIn("conversation_core::simple_conversion_direct", ids)
         self.assertIn("conversation_core::plans_today", ids)
+        self.assertIn("conversation_core::schedule_today_seeded_state_pack", ids)
         self.assertIn("conversation_core::meaning_of_life_lightweight", ids)
         self.assertIn("conversation_core::weather_current_conditions", ids)
         self.assertIn("conversation_core::openclaw_collaboration_working_on_turn_still_works", ids)
         self.assertIn("conversation_core::openclaw_collaboration_waiting_on_turn_still_works", ids)
+        self.assertIn("conversation_core::openclaw_collaboration_working_on_partial_state_useful", ids)
         self.assertIn("conversation_core::technical_guidance_timeout", ids)
         self.assertIn("conversation_core::short_technical_question_not_social", ids)
         self.assertIn("conversation_core::technical_guidance_lookup_unavailable_next_steps", ids)
@@ -1172,6 +1225,11 @@ class ConversationCoreScenariosTests(unittest.TestCase):
         ids = {r.scenario_id for r in rows}
         for cid in CONVERSATION_SMOKE_CASE_IDS:
             self.assertIn(f"conversation_core::{cid}", ids)
+
+    def test_conversation_core_scenarios_can_scope_case_ids(self) -> None:
+        rows = conversation_core_scenarios({"scenario_ids": ["hi_andrea", "plans_today"]})
+        ids = {r.scenario_id for r in rows}
+        self.assertEqual(ids, {"conversation_core::hi_andrea", "conversation_core::plans_today"})
 
     def test_wait_policy_status_sets(self) -> None:
         terminal = _wait_statuses_for_policy("terminal_reply")
@@ -1219,3 +1277,5 @@ class BuildTurnCaptureTests(unittest.TestCase):
             )
         self.assertEqual(cap["assistant_route"], "direct")
         self.assertIn("turn_plan_domain", cap)
+        self.assertIn("normalized_capture_contract", cap)
+        self.assertTrue(isinstance(cap["normalized_capture_contract"], dict))

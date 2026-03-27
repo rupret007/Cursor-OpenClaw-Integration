@@ -56,6 +56,17 @@ def main() -> int:
         help="When running conversation_core, attach gated Cursor fix briefs to run metadata.",
     )
     parser.add_argument(
+        "--fix-brief-handoff",
+        action="store_true",
+        default=False,
+        help="When --prepare-fix-brief is set, include cursor_handoff_ready brief candidates in metadata.",
+    )
+    parser.add_argument(
+        "--scenario-ids",
+        default="",
+        help="Comma-separated conversation_core case ids to run as a targeted subset.",
+    )
+    parser.add_argument(
         "--sample-pass-evals",
         type=int,
         default=0,
@@ -80,9 +91,11 @@ def main() -> int:
         "llm_eval": bool(args.llm_eval),
         "adjudicate_ambiguous": bool(args.adjudicate_ambiguous),
         "prepare_fix_brief": bool(args.prepare_fix_brief),
+        "fix_brief_handoff": bool(args.fix_brief_handoff),
         "sample_pass_evals": int(args.sample_pass_evals or 0),
         "smoke": bool(args.smoke),
         "fail_fast": bool(args.fail_fast),
+        "scenario_ids": [x.strip() for x in str(args.scenario_ids or "").split(",") if x.strip()],
     }
 
     conn = connect(Path(args.db).expanduser())

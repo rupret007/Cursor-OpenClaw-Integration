@@ -3515,6 +3515,7 @@ def run_experience_assurance(
             run_metadata,
             checks,
             prepare_fix_brief=bool((conversation_eval_options or {}).get("prepare_fix_brief")),
+            fix_brief_handoff=bool((conversation_eval_options or {}).get("fix_brief_handoff")),
         )
     run = ExperienceRun(
         run_id=new_experience_run_id(),

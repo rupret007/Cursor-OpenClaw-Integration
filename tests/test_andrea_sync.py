@@ -5234,6 +5234,7 @@ class TestAndreaSync(unittest.TestCase):
 
     def test_build_direct_answer_policy_promotes_substantive_mixed_question(self) -> None:
         from services.andrea_sync.turn_intelligence import (
+            arbitrate_answer_lane,
             build_direct_answer_policy,
             build_turn_plan,
         )
@@ -5251,6 +5252,76 @@ class TestAndreaSync(unittest.TestCase):
         self.assertFalse(policy.allow_casual_social_fallback)
         self.assertTrue(policy.lookup_eligible)
         self.assertEqual(policy.preferred_lookup_domain, "technical_guidance")
+        lane = arbitrate_answer_lane(
+            text="Why does this timeout happen?",
+            turn_plan=plan,
+            direct_policy=policy,
+        )
+        self.assertEqual(lane.lane, "grounded_research_guidance")
+
+    def test_arbitrate_answer_lane_marks_explicit_openclaw_state_as_primary(self) -> None:
+        from services.andrea_sync.turn_intelligence import (
+            arbitrate_answer_lane,
+            build_direct_answer_policy,
+            build_turn_plan,
+        )
+
+        text = "What is OpenClaw blocked on?"
+        plan = build_turn_plan(
+            text,
+            scenario_id="statusFollowupContinue",
+            projection_has_continuity_state=True,
+        )
+        policy = build_direct_answer_policy(
+            text,
+            scenario_id="statusFollowupContinue",
+            turn_plan=plan,
+        )
+        lane = arbitrate_answer_lane(text=text, turn_plan=plan, direct_policy=policy)
+        self.assertEqual(lane.lane, "openclaw_collaboration_state_answer")
+        self.assertTrue(lane.openclaw_primary)
+
+    def test_arbitrate_answer_lane_keeps_casual_turn_lightweight(self) -> None:
+        from services.andrea_sync.turn_intelligence import (
+            arbitrate_answer_lane,
+            build_direct_answer_policy,
+            build_turn_plan,
+        )
+
+        text = "hi"
+        plan = build_turn_plan(
+            text,
+            scenario_id="statusFollowupContinue",
+            projection_has_continuity_state=True,
+        )
+        policy = build_direct_answer_policy(
+            text,
+            scenario_id="statusFollowupContinue",
+            turn_plan=plan,
+        )
+        lane = arbitrate_answer_lane(text=text, turn_plan=plan, direct_policy=policy)
+        self.assertEqual(lane.lane, "lightweight_direct")
+
+    def test_arbitrate_answer_lane_treats_repo_inspect_as_heavy_lift(self) -> None:
+        from services.andrea_sync.turn_intelligence import (
+            arbitrate_answer_lane,
+            build_direct_answer_policy,
+            build_turn_plan,
+        )
+
+        text = "Please inspect the repo and summarize the likely failing tests."
+        plan = build_turn_plan(
+            text,
+            scenario_id="mixedResourceGoal",
+            projection_has_continuity_state=False,
+        )
+        policy = build_direct_answer_policy(
+            text,
+            scenario_id="mixedResourceGoal",
+            turn_plan=plan,
+        )
+        lane = arbitrate_answer_lane(text=text, turn_plan=plan, direct_policy=policy)
+        self.assertEqual(lane.lane, "heavy_lift_delegated_execution")
 
 
 class SyncServerGroundedUsefulnessTests(unittest.TestCase):

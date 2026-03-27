@@ -28,6 +28,14 @@ TurnDomain = Literal[
     "technical_execution",
 ]
 
+AnswerLane = Literal[
+    "lightweight_direct",
+    "local_stateful_answer",
+    "grounded_research_guidance",
+    "openclaw_collaboration_state_answer",
+    "heavy_lift_delegated_execution",
+]
+
 OpenClawSourceRole = Literal[
     "non_openclaw",
     "internal_runtime",
@@ -229,8 +237,9 @@ _DIRECT_SUBSTANTIVE_HINT_RE = re.compile(
 _EXECUTION_HEAVY_OR_REPO_RE = re.compile(
     r"\b("
     r"implement|refactor|migrate|edit\s+file|write\s+code|"
-    r"create\s+pr|open\s+pr|pull\s+request|"
-    r"run\s+tests?|fix\s+the\s+code|debug\s+in\s+repo|"
+    r"create\s+pr|open\s+(?:a\s+)?pr|pull\s+request|"
+    r"run\s+tests?|fix\s+(?:the\s+)?(?:code|tests?|failing\s+tests?|bug|bugs)|debug\s+in\s+repo|"
+    r"inspect\s+(?:the\s+)?repo|inspect\s+(?:the\s+)?repository|"
     r"apply\s+patch|commit\s+this|"
     r"restart\s+service|reload\s+service"
     r")\b",
@@ -247,6 +256,13 @@ class DirectAnswerPolicy:
     allow_casual_social_fallback: bool
     lookup_eligible: bool
     preferred_lookup_domain: TurnDomain | str
+
+
+@dataclass(frozen=True)
+class LaneArbitrationDecision:
+    lane: AnswerLane
+    reason: str
+    openclaw_primary: bool = False
 
 
 def is_approval_state_question(text: str) -> bool:
@@ -373,6 +389,8 @@ def openclaw_role_relevance_for_turn(
     if role == "collaboration_blocker":
         if explicit_collab or focus == "blocked_state":
             return "allow"
+        if focus in {"recent_outcome_history", "cursor_followup_heavy_lift"}:
+            return "exclude"
         if approval_only:
             return "demote"
         if domain == "project_status":
@@ -385,6 +403,53 @@ def openclaw_role_relevance_for_turn(
             return "demote"
         return "exclude"
     return "allow"
+
+
+def arbitrate_answer_lane(
+    *,
+    text: str,
+    turn_plan: "TurnPlan",
+    direct_policy: DirectAnswerPolicy,
+) -> LaneArbitrationDecision:
+    """
+    Deterministic lane arbitration for source-of-truth selection.
+
+    This is intentionally rule-based and lightweight: lane choice should be
+    deterministic, while realization remains bounded and model-assisted.
+    """
+    clean = str(text or "").strip()
+    domain = str(turn_plan.domain or "")
+    focus = str(turn_plan.continuity_focus or "")
+    if is_casual_social_only_turn(clean):
+        return LaneArbitrationDecision("lightweight_direct", "casual_social", openclaw_primary=False)
+    if is_tooling_identity_question(clean):
+        return LaneArbitrationDecision("lightweight_direct", "tooling_identity", openclaw_primary=False)
+    if bool(turn_plan.force_delegate) or is_execution_heavy_or_repo_action(clean):
+        return LaneArbitrationDecision(
+            "heavy_lift_delegated_execution",
+            "execution_heavy_or_forced_delegate",
+            openclaw_primary=False,
+        )
+    if direct_policy.lookup_eligible or domain in {"external_information", "technical_guidance"}:
+        return LaneArbitrationDecision(
+            "grounded_research_guidance",
+            "lookup_eligible_domain",
+            openclaw_primary=False,
+        )
+    explicit_collab = is_openclaw_collaboration_state_question(clean)
+    if explicit_collab and domain in {"project_status", "approval_state"}:
+        return LaneArbitrationDecision(
+            "openclaw_collaboration_state_answer",
+            "explicit_collaboration_state_intent",
+            openclaw_primary=True,
+        )
+    if domain in {"project_status", "approval_state"} or focus in {
+        "blocked_state",
+        "recent_outcome_history",
+        "cursor_followup_heavy_lift",
+    }:
+        return LaneArbitrationDecision("local_stateful_answer", "project_or_approval_state", openclaw_primary=False)
+    return LaneArbitrationDecision("lightweight_direct", "fallback_lightweight", openclaw_primary=False)
 
 
 def is_execution_heavy_or_repo_action(text: str) -> bool:

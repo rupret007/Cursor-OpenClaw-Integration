@@ -14,6 +14,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from services.andrea_sync.assistant_answer_composer import (  # noqa: E402
     AnswerCandidate,
+    build_execution_outcome_surface_bundle,
     build_stateful_summary_bundle,
     bounded_composer_repair,
     draft_should_force_continuity_repair,
@@ -21,6 +22,7 @@ from services.andrea_sync.assistant_answer_composer import (  # noqa: E402
     followthrough_needs_user_attention,
     gather_cursor_recall_evidence_pack,
     gather_repair_candidates,
+    is_generic_execution_wrapper_text,
     pick_repair_winner,
 )
 from services.andrea_sync.turn_intelligence import build_turn_plan  # noqa: E402
@@ -1310,6 +1312,62 @@ class TestAssistantAnswerComposer(unittest.TestCase):
         self.assertIsNotNone(out)
         assert out is not None
         self.assertIn("VIABLE_NEIGHBOR_RECAP_MARK_77", out)
+
+    def test_is_generic_execution_wrapper_text_distinguishes_substantive_outcome(self) -> None:
+        self.assertTrue(is_generic_execution_wrapper_text("OpenClaw completed the delegated task."))
+        self.assertTrue(is_generic_execution_wrapper_text("I finished your request."))
+        self.assertFalse(
+            is_generic_execution_wrapper_text(
+                "Cursor completed rollout and smoke checks cleanly with no regressions."
+            )
+        )
+
+    def test_execution_outcome_surface_bundle_prefers_phase_and_receipt_substance(self) -> None:
+        result = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "comp-outcome-bundle",
+                "payload": {
+                    "text": "please continue",
+                    "routing_text": "please continue",
+                    "chat_id": 88135,
+                    "message_id": 1,
+                },
+            },
+        )
+        tid = result["task_id"]
+        append_event(
+            self.conn,
+            tid,
+            EventType.JOB_COMPLETED,
+            {
+                "summary": "OpenClaw completed the delegated task.",
+                "backend": "openclaw",
+                "runner": "openclaw",
+                "user_summary": "OpenClaw completed the delegated task.",
+                "phase_outputs": {
+                    "execution": {"summary": "Applied the retry patch and reran the failing tests."},
+                    "synthesis": {"summary": "All tests passed and the fix is ready to ship."},
+                },
+            },
+        )
+        insert_user_outcome_receipt(
+            self.conn,
+            receipt_id="rcpt_outcome_bundle_1",
+            task_id=tid,
+            scenario_id="statusFollowupContinue",
+            pack_id="trusted_daily_assistant",
+            receipt_kind="outcome",
+            summary="Assistant outcome (goal_runtime_status).",
+            proof_refs={"reply_excerpt": "Receipt says: fixed retries and stabilized the workflow."},
+        )
+        bundle = build_execution_outcome_surface_bundle(self.conn, tid, user_message="what happened?")
+        self.assertIn("tests passed", bundle.primary_finding.lower())
+        joined = " ".join(bundle.evidence_lines).lower()
+        self.assertIn("retry patch", joined)
+        self.assertIn("receipt says", joined)
 
 
 if __name__ == "__main__":

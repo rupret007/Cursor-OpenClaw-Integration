@@ -26,11 +26,13 @@ from .andrea_router import AndreaRouteDecision, route_message
 from .assistant_answer_composer import (
     CONTINUATION_NO_VIABLE_WORKSTREAM_FALLBACK,
     bounded_composer_repair,
+    build_execution_outcome_surface_bundle,
     build_blocked_state_reply_from_state,
     build_recent_outcome_history_reply_from_state,
     cursor_followup_context_reply_with_fallback,
     find_viable_recent_cursor_workstream_reply,
     format_reply_with_next_step_options,
+    is_generic_execution_wrapper_text,
     merge_goal_reply_with_followthrough,
     same_chat_has_cursor_continuation_viability,
     try_composer_early_short_circuit,
@@ -95,6 +97,7 @@ from .stateful_answer_realization import maybe_realize_grounded_technical_reply
 from .telegram_continuation import attach_continuation_if_applicable
 from .turn_intelligence import (
     TurnPlan,
+    arbitrate_answer_lane,
     build_direct_answer_policy,
     build_turn_plan,
     is_execution_heavy_or_repo_action,
@@ -195,10 +198,7 @@ def _sanitize_user_surface_text(text: Any, *, fallback: str = "") -> str:
 
 
 def _is_generic_openclaw_summary(text: Any) -> bool:
-    return str(text or "").strip() in {
-        "",
-        "OpenClaw completed the delegated task.",
-    }
+    return is_generic_execution_wrapper_text(text)
 
 
 REMIND_ME_RE = re.compile(r"^\s*(?:please\s+)?remind me(?:\s+to)?\s+(?P<body>.+?)\s*$", re.I)
@@ -981,7 +981,7 @@ class SyncServer:
             return "OpenClaw and Cursor"
         return "Cursor"
 
-    def _telegram_collaboration_trace(self, projection: Dict[str, Any]) -> list[str]:
+    def _telegram_collaboration_trace(self, projection: Dict[str, Any], *, task_id: str = "") -> list[str]:
         openclaw_meta = self._projection_meta(projection, "openclaw")
         items: list[str] = []
         phase_outputs = openclaw_meta.get("phase_outputs")
@@ -999,7 +999,7 @@ class SyncServer:
                 text = _sanitize_user_surface_text(raw or "")
                 if text and text not in items:
                     items.append(text)
-        summary = self._telegram_final_summary_text(projection)
+        summary = self._telegram_final_summary_text(projection, task_id=task_id)
         return dedupe_user_surface_items(items, suppress_against=[summary], limit=4, item_limit=240)
 
     def _collaboration_trace_excerpt(self, trace: list[str]) -> str:
@@ -1020,7 +1020,34 @@ class SyncServer:
             fallback="I ran into an internal limitation while working on this request.",
         )
 
-    def _telegram_final_summary_text(self, projection: Dict[str, Any]) -> str:
+    def _telegram_final_summary_text(self, projection: Dict[str, Any], *, task_id: str = "") -> str:
+        tid = str(task_id or projection.get("task_id") or projection.get("id") or "").strip()
+        if tid:
+            try:
+                bundle = self.with_lock(
+                    lambda c: build_execution_outcome_surface_bundle(c, tid),
+                )
+            except Exception:
+                bundle = None
+            if bundle and bundle.primary_finding:
+                primary = _sanitize_user_surface_text(bundle.primary_finding)
+                support = (
+                    _sanitize_user_surface_text(bundle.supporting_evidence_lines[0])
+                    if bundle.supporting_evidence_lines
+                    else ""
+                )
+                next_step = (
+                    _sanitize_user_surface_text(bundle.next_step_options[0], fallback="",)
+                    if bundle.next_step_options
+                    else ""
+                )
+                merged = primary
+                if support and support.lower() != primary.lower():
+                    merged = f"{primary} Supporting detail: {support}"
+                if next_step and "next" not in merged.lower():
+                    merged = f"{merged} Next: {next_step}"
+                if merged and not _is_generic_openclaw_summary(merged):
+                    return _sanitize_user_surface_text(merged, fallback=primary)
         summary = str(projection.get("summary") or "").strip()
         openclaw_meta = self._projection_meta(projection, "openclaw")
         user_summary = str(openclaw_meta.get("user_summary") or "").strip()
@@ -1311,7 +1338,7 @@ class SyncServer:
                     format_final_message(
                         task_id,
                         status=status,
-                        summary=self._telegram_final_summary_text(projection),
+                        summary=self._telegram_final_summary_text(projection, task_id=task_id),
                         pr_url=str(cursor_meta.get("pr_url") or ""),
                         agent_url=str(cursor_meta.get("agent_url") or ""),
                         last_error=self._telegram_user_safe_error_text(projection)
@@ -1324,7 +1351,10 @@ class SyncServer:
                             openclaw_meta.get("session_id") or ""
                         ),
                         visibility_mode=visibility_mode,
-                        collaboration_trace=self._telegram_collaboration_trace(projection),
+                        collaboration_trace=self._telegram_collaboration_trace(
+                            projection,
+                            task_id=task_id,
+                        ),
                         routing_hint=fin_routing,
                         collaboration_mode=fin_collab,
                         provider=str(openclaw_meta.get("provider") or ""),
@@ -1474,6 +1504,11 @@ class SyncServer:
                 scenario_id=pre_resolution.scenario_id,
                 turn_plan=effective_turn_plan,
             )
+            lane_decision = arbitrate_answer_lane(
+                text=classify_text,
+                turn_plan=effective_turn_plan,
+                direct_policy=direct_policy,
+            )
             if (
                 str(direct_policy.preferred_lookup_domain or "")
                 in {"technical_guidance", "external_information"}
@@ -1492,10 +1527,46 @@ class SyncServer:
                     allow_goal_continuity_repair=False,
                     inject_durable_memory=False,
                 )
+            if lane_decision.lane == "grounded_research_guidance":
+                preferred = str(direct_policy.preferred_lookup_domain or "").strip()
+                if preferred in {"technical_guidance", "external_information"}:
+                    effective_turn_plan = replace(
+                        effective_turn_plan,
+                        domain=preferred,
+                        context_boundary=(
+                            "technical_lookup_guidance"
+                            if preferred == "technical_guidance"
+                            else "external_world_only"
+                        ),
+                        prefer_state_reply=False,
+                        allow_goal_continuity_repair=False,
+                        inject_durable_memory=False,
+                    )
+            elif lane_decision.lane == "openclaw_collaboration_state_answer":
+                if effective_turn_plan.domain in {"project_status", "approval_state"}:
+                    effective_turn_plan = replace(
+                        effective_turn_plan,
+                        prefer_state_reply=True,
+                        allow_goal_continuity_repair=True,
+                    )
+            elif lane_decision.lane == "heavy_lift_delegated_execution":
+                effective_turn_plan = replace(
+                    effective_turn_plan,
+                    force_delegate=True,
+                    prefer_state_reply=False,
+                    allow_goal_continuity_repair=False,
+                )
+            elif lane_decision.lane == "lightweight_direct":
+                if effective_turn_plan.domain in {"casual_conversation", "opinion_reflection"}:
+                    effective_turn_plan = replace(
+                        effective_turn_plan,
+                        prefer_state_reply=False,
+                        allow_goal_continuity_repair=False,
+                    )
             _decision_profile = build_decision_profile(
                 classify_text,
-                turn_domain=pre_turn_plan.domain,
-                scenario_force_delegate=pre_turn_plan.force_delegate,
+                turn_domain=effective_turn_plan.domain,
+                scenario_force_delegate=effective_turn_plan.force_delegate,
             )
             metric_log(
                 "orchestration_decision_profile",
@@ -1504,6 +1575,9 @@ class SyncServer:
                 state_first=_decision_profile.state_first,
                 heavy_lift_hint=_decision_profile.heavy_lift_hint,
                 profile_reason=_decision_profile.reason,
+                lane=lane_decision.lane,
+                lane_reason=lane_decision.reason,
+                openclaw_primary=lane_decision.openclaw_primary,
             )
             route_memory_notes = (
                 self._principal_memory_notes(task_id)
@@ -1833,7 +1907,7 @@ class SyncServer:
                         reason=decision.reason,
                     )
                 return decision, applied
-            if pre_turn_plan.force_delegate:
+            if effective_turn_plan.force_delegate:
                 decision = AndreaRouteDecision(
                     mode="delegate",
                     reason="turn_plan_technical_execution",
@@ -1864,9 +1938,9 @@ class SyncServer:
                         or principal_prefs.get("preferred_model_family")
                         or ""
                     ),
-                    turn_domain=pre_turn_plan.domain,
-                    context_boundary=pre_turn_plan.context_boundary,
-                    inject_durable_memory=pre_turn_plan.inject_durable_memory,
+                    turn_domain=effective_turn_plan.domain,
+                    context_boundary=effective_turn_plan.context_boundary,
+                    inject_durable_memory=effective_turn_plan.inject_durable_memory,
                 )
             resolution, scenario_contract = resolve_scenario(
                 classify_text,

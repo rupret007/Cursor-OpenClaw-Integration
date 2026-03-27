@@ -23,6 +23,7 @@ from .assistant_answer_composer import (
     _cursor_recall_output_should_force_clean_fallback,
     draft_implies_false_completion,
     draft_should_force_continuity_repair,
+    is_generic_execution_wrapper_text,
     is_continuation_fallback_family_text,
     is_cursor_thread_recall_question,
     is_strict_cursor_domain_recall_question,
@@ -432,6 +433,9 @@ def run_deterministic_detectors(
     low = text.lower()
     expected_family = str(capture.get("expected_answer_family") or "")
     expected_sources = set(capture.get("expected_answer_sources") or [])
+    delegated_present = bool(capture.get("delegated_to_cursor")) or bool(capture.get("meta_cursor_present")) or bool(
+        capture.get("meta_openclaw_present")
+    )
     semantic_selection = capture.get("assistant_semantic_selection")
     semantic_source = ""
     if isinstance(semantic_selection, dict):
@@ -547,6 +551,52 @@ def run_deterministic_detectors(
                 "issue_code": "conversation_generic_fallback_leak",
                 "severity": "medium",
                 "detail": "generic direct fallback phrasing",
+            }
+        )
+    wrapper_led = (
+        "i finished your request" in low
+        or "finished processing this task" in low
+        or is_generic_execution_wrapper_text(raw_text)
+    )
+    surface_has_outcome_detail = any(
+        tok in low
+        for tok in (
+            "phase ",
+            "blocked:",
+            "failure:",
+            "recent receipt",
+            "latest useful result",
+            "supporting detail:",
+            "pr is available",
+            "next:",
+        )
+    )
+    if (
+        delegated_present
+        and wrapper_led
+        and not surface_has_outcome_detail
+        and (
+            contract_evidence_strength >= 5
+            or bool(contract_primary_finding)
+            or expected_family in {"cursor_recall", "blocked_state"}
+            or expect_cursor_substance
+        )
+    ):
+        findings.append(
+            {
+                "family": "thin_summary",
+                "issue_code": "conversation_delegated_outcome_wrapper_over_substance",
+                "severity": "high",
+                "detail": "delegated result surface stayed wrapper-led despite available outcome evidence",
+            }
+        )
+    if bool(capture.get("delegated_to_cursor")) and "openclaw finished processing this task" in low and "cursor" not in low:
+        findings.append(
+            {
+                "family": "wrong_domain_contamination",
+                "issue_code": "conversation_delegated_role_confusion",
+                "severity": "medium",
+                "detail": "delegated-to-cursor terminal surface omitted Cursor executor role",
             }
         )
     substantive_turn = is_substantive_non_social_question(user)

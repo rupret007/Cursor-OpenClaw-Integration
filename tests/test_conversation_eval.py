@@ -226,6 +226,50 @@ class ConversationEvalDetectorTests(unittest.TestCase):
         codes = {h["issue_code"] for h in hits}
         self.assertIn("conversation_recap_fallback_under_source_truth", codes)
 
+    def test_detects_delegated_outcome_wrapper_over_substance(self) -> None:
+        cap = {
+            "raw_reply_text": (
+                "Andrea:\nI finished your request.\n\nWhat happened:\n- OpenClaw finished processing this task."
+            ),
+            "rendered_reply_sanitized": (
+                "Andrea: I finished your request. What happened: OpenClaw finished processing this task."
+            ),
+            "user_turn": "what happened in the cursor thread?",
+            "turn_plan_domain": "project_status",
+            "assistant_reason": "semantic_state_cursor_continuity_recall",
+            "semantic_turn_contract": {
+                "family": "cursor_recall",
+                "source": "cursor_continuity_recall",
+                "evidence_strength": 6,
+                "primary_finding": "Cursor fixed the failing tests and prepared a PR.",
+            },
+            "delegated_to_cursor": True,
+            "meta_cursor_present": True,
+            "meta_openclaw_present": True,
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap, expect_cursor_substance=True)
+        codes = {h["issue_code"] for h in hits}
+        self.assertIn("conversation_delegated_outcome_wrapper_over_substance", codes)
+
+    def test_detects_delegated_role_confusion_when_cursor_omitted(self) -> None:
+        cap = {
+            "raw_reply_text": (
+                "Andrea:\nI finished your request.\n\nWhat happened:\n- OpenClaw finished processing this task."
+            ),
+            "user_turn": "continue that cursor task",
+            "turn_plan_domain": "project_status",
+            "delegated_to_cursor": True,
+            "meta_cursor_present": True,
+            "meta_openclaw_present": True,
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap)
+        codes = {h["issue_code"] for h in hits}
+        self.assertIn("conversation_delegated_role_confusion", codes)
+
     def test_detects_stateful_domain_hijack_outside_status_domains(self) -> None:
         cap = {
             "raw_reply_text": "I’m not finding a recent clean Cursor result to recap from this thread.",
@@ -300,6 +344,44 @@ class ConversationEvalDetectorTests(unittest.TestCase):
         hits = run_deterministic_detectors(cap)
         codes = {h["issue_code"] for h in hits}
         self.assertIn("conversation_openclaw_identity_state_hijack", codes)
+
+    def test_detects_openclaw_collab_scaffold_on_continue_turn(self) -> None:
+        cap = {
+            "raw_reply_text": (
+                "The main blocker right now is: I hit an internal collaboration limitation while trying to pass work between reasoning lanes."
+            ),
+            "rendered_reply_sanitized": (
+                "Andrea: The main blocker right now is: I hit an internal collaboration limitation while trying to pass work between reasoning lanes."
+            ),
+            "user_turn": "continue that Cursor task",
+            "turn_plan_domain": "project_status",
+            "assistant_reason": "semantic_state_blocked_state_reply",
+            "meta_openclaw_present": True,
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap)
+        codes = {h["issue_code"] for h in hits}
+        self.assertIn("conversation_openclaw_extraneous_collab_scaffold", codes)
+
+    def test_detects_stateful_hijack_on_technical_guidance_turn(self) -> None:
+        cap = {
+            "raw_reply_text": "The main blocker right now is: cross-model handoff stalled.",
+            "rendered_reply_sanitized": "Andrea: The main blocker right now is: cross-model handoff stalled.",
+            "user_turn": "What does this timeout error usually mean?",
+            "turn_plan_domain": "technical_guidance",
+            "assistant_reason": "semantic_state_blocked_state_reply",
+            "assistant_semantic_selection": {"source": "blocked_state_reply"},
+            "expected_answer_family": "grounded_research",
+            "expected_answer_sources": ["grounded_research_lookup"],
+            "meta_openclaw_present": True,
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap)
+        codes = {h["issue_code"] for h in hits}
+        self.assertIn("conversation_stateful_domain_hijack", codes)
+        self.assertIn("conversation_semantic_source_family_mismatch", codes)
 
     def test_detects_openclaw_blocker_fallback_under_state(self) -> None:
         cap = {

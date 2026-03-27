@@ -76,6 +76,14 @@ _FT_PENDING_STATES = frozenset(
 )
 
 _GOAL_RUNTIME_RECEIPT_REASONS = frozenset({"goal_runtime_status", "semantic_state_goal_status"})
+_GENERIC_EXECUTION_WRAPPER_RE = re.compile(
+    r"^(?:andrea:\s*)?(?:"
+    r"(?:i\s+)?(?:finished|completed)\s+(?:your\s+request|this\s+task)(?:\s+and\s+\w+.*)?|"
+    r"(?:openclaw|cursor|openclaw\s+and\s+cursor)\s+"
+    r"(?:finished|completed)\s+(?:processing|the\s+(?:delegated\s+)?task|this\s+task)"
+    r")\.?\s*$",
+    re.I,
+)
 
 
 def _parse_receipt_proof_refs(row: Any) -> Dict[str, Any]:
@@ -257,6 +265,37 @@ class StatefulSummaryBundle:
     evidence_strength: int
 
 
+@dataclass(frozen=True)
+class ExecutionOutcomeSurfaceBundle:
+    """Ranked deterministic bundle for delegated terminal result surfacing."""
+
+    source: str
+    primary_finding: str
+    supporting_evidence_lines: Tuple[str, ...]
+    uncertainty_boundary: str
+    next_step_options: Tuple[str, ...]
+    evidence_lines: Tuple[str, ...]
+    evidence_strength: int
+
+
+def is_generic_execution_wrapper_text(text: Any) -> bool:
+    clean = sanitize_user_surface_text(str(text or "").strip(), fallback="", limit=420).strip()
+    if not clean:
+        return True
+    low = clean.lower().strip()
+    if low == "openclaw completed the delegated task.":
+        return True
+    if _GENERIC_EXECUTION_WRAPPER_RE.match(clean):
+        return True
+    if (
+        len(clean.split()) <= 9
+        and any(tok in low for tok in ("finished", "completed", "processing"))
+        and any(tok in low for tok in ("task", "request"))
+    ):
+        return True
+    return False
+
+
 def _receipt_reply_excerpt(row: Any) -> str:
     refs = _parse_receipt_proof_refs(row)
     return sanitize_user_surface_text(str(refs.get("reply_excerpt") or ""), limit=380).strip()
@@ -311,6 +350,156 @@ def _build_stateful_summary_bundle_from_lines(
     )
 
 
+def build_execution_outcome_surface_bundle(
+    conn: Any,
+    task_id: str,
+    *,
+    user_message: str = "",
+) -> ExecutionOutcomeSurfaceBundle:
+    """
+    Build a deterministic terminal-outcome bundle so Andrea can surface
+    substantive delegated results ahead of lifecycle wrappers.
+    """
+    meta = _projection_meta(conn, task_id)
+    proj = _projection_full(conn, task_id)
+    outcome = _outcome_section(meta)
+    openclaw = meta.get("openclaw") if isinstance(meta.get("openclaw"), dict) else {}
+    cursor = meta.get("cursor") if isinstance(meta.get("cursor"), dict) else {}
+    execution = meta.get("execution") if isinstance(meta.get("execution"), dict) else {}
+    status = str(proj.get("status") or "").strip().lower()
+    strict_cursor_recall = is_strict_cursor_domain_recall_question(user_message)
+    hard_dom = _task_has_hard_cursor_domain_affinity(meta, conn, task_id)
+
+    def _safe(text: Any, limit: int = 420) -> str:
+        return sanitize_user_surface_text(str(text or "").strip(), fallback="", limit=limit).strip()
+
+    def _substantive(text: Any, limit: int = 420) -> str:
+        safe = _safe(text, limit=limit)
+        if not safe or is_generic_execution_wrapper_text(safe):
+            return ""
+        return safe
+
+    ranked: List[str] = []
+    seen: set[str] = set()
+
+    def _append(line: str) -> None:
+        clean = _safe(line, limit=420)
+        if not clean:
+            return
+        key = clean.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        ranked.append(clean)
+
+    blocked_reason = _safe(
+        openclaw.get("blocked_reason") or outcome.get("blocked_reason") or execution.get("user_safe_error"),
+        limit=380,
+    )
+    if blocked_reason and status in {"failed", "blocked"}:
+        _append(f"Blocked: {blocked_reason}")
+
+    phase_outputs = openclaw.get("phase_outputs") if isinstance(openclaw.get("phase_outputs"), dict) else {}
+    for phase in ("synthesis", "execution", "critique", "plan"):
+        block = phase_outputs.get(phase)
+        if not isinstance(block, dict):
+            continue
+        summary = _substantive(block.get("summary"), limit=380)
+        if summary:
+            _append(f"Phase {phase}: {summary}")
+
+    user_summary = _substantive(openclaw.get("user_summary"), limit=420)
+    if user_summary:
+        _append(user_summary)
+    proj_summary = _substantive(proj.get("summary"), limit=420)
+    if proj_summary:
+        low_proj = proj_summary.lower()
+        if not (
+            user_summary
+            and low_proj.startswith("cursor recap:")
+            and len(low_proj) < 220
+        ):
+            _append(proj_summary)
+    phase_summary = _substantive(outcome.get("current_phase_summary"), limit=420)
+    if phase_summary:
+        _append(phase_summary)
+
+    for row in list_recent_user_outcome_receipts_for_task(conn, task_id, limit=3):
+        raw_summary = str(row["summary"] or "")
+        receipt_summary = _safe(raw_summary, limit=380)
+        excerpt = _receipt_reply_excerpt(row)
+        kind = str(row["receipt_kind"] or "").strip()
+        candidate = excerpt or receipt_summary
+        if _ledger_receipt_summary_is_generic_placeholder(raw_summary):
+            candidate = excerpt
+        if not candidate or is_generic_execution_wrapper_text(candidate):
+            continue
+        label = "Recent receipt excerpt" if excerpt and candidate == excerpt else "Recent receipt"
+        _append(f"{label}{f' ({kind})' if kind else ''}: {candidate}")
+
+    if not (strict_cursor_recall and not hard_dom):
+        for line in _openclaw_narrative_lines(meta):
+            stripped = _safe(_strip_recall_label(line), limit=380)
+            if stripped and not is_generic_execution_wrapper_text(stripped):
+                _append(stripped)
+
+    for line in _execution_recall_context_lines(conn, task_id):
+        _append(line)
+
+    if blocked_reason and not any("blocked:" in ln.lower() for ln in ranked):
+        _append(f"Blocked: {blocked_reason}")
+
+    lifecycle = build_delegated_lifecycle_contract(meta)
+    recommended = lifecycle.get("recommended_next_actions")
+    next_steps: List[str] = []
+    if isinstance(recommended, list):
+        mapping = {
+            "status": "Check the current execution status.",
+            "followup": "Send the next instruction for this same workstream.",
+            "conversation": "Ask for a concise recap of what changed.",
+            "artifacts": "Open the linked artifacts for full details.",
+        }
+        for code in recommended[:3]:
+            mapped = mapping.get(str(code or "").strip().lower(), "")
+            if mapped and mapped not in next_steps:
+                next_steps.append(mapped)
+    pr_url = _safe(cursor.get("pr_url"), limit=1000)
+    if pr_url:
+        next_steps.insert(0, "Review the PR to validate and merge.")
+    if blocked_reason and "Address the blocker" not in next_steps:
+        next_steps.append("Address the blocker and tell me what you want resumed next.")
+    if not next_steps and status in {"completed", "failed"}:
+        next_steps.append("Tell me the next change you want and I can continue from this state.")
+
+    primary = ranked[0] if ranked else ""
+    support = tuple(ranked[1:4]) if len(ranked) > 1 else ()
+    uncertainty = ""
+    if blocked_reason and "blocked" not in primary.lower():
+        uncertainty = f"Blocked reason: {blocked_reason}"
+    if strict_cursor_recall and not hard_dom:
+        primary = ""
+    if not primary:
+        fallback = _safe(openclaw.get("user_summary") or proj.get("summary"), limit=420)
+        if fallback and not (strict_cursor_recall and not hard_dom):
+            primary = fallback
+
+    base = _build_stateful_summary_bundle_from_lines(
+        source="execution_outcome_surface",
+        primary_finding=primary,
+        supporting_lines=support,
+        uncertainty_boundary=uncertainty,
+    )
+    return ExecutionOutcomeSurfaceBundle(
+        source=base.source,
+        primary_finding=base.primary_finding,
+        supporting_evidence_lines=base.secondary_evidence_lines,
+        uncertainty_boundary=base.uncertainty_boundary,
+        next_step_options=tuple(next_steps[:2]),
+        evidence_lines=base.evidence_lines,
+        evidence_strength=int(base.evidence_strength),
+    )
+
+
 def _structured_lines(text: str) -> List[str]:
     out: List[str] = []
     for raw in re.split(r"[\r\n]+", str(text or "")):
@@ -337,6 +526,7 @@ def build_stateful_summary_bundle(
     det_lines = [ln for ln in _structured_lines(deterministic_reply) if ln]
     if src == "cursor_continuity_recall":
         pack = gather_cursor_recall_evidence_pack(conn, task_id, user_message=um)
+        out_bundle = build_execution_outcome_surface_bundle(conn, task_id, user_message=um)
         primary = _pick_cursor_recap_lead(
             narrative_lines=pack.source_truth_narrative_lines,
             assistant_lines=pack.derived_assistant_lines,
@@ -353,8 +543,10 @@ def build_stateful_summary_bundle(
             )
         return _build_stateful_summary_bundle_from_lines(
             source=src,
-            primary_finding=primary,
+            primary_finding=primary or out_bundle.primary_finding,
             supporting_lines=[
+                *( [out_bundle.primary_finding] if out_bundle.primary_finding else [] ),
+                *list(out_bundle.supporting_evidence_lines)[:2],
                 *list(pack.source_truth_narrative_lines)[:3],
                 *list(pack.source_truth_receipt_lines)[:2],
                 *( [f"Phase summary: {pack.outcome_phase_summary}"] if pack.outcome_phase_summary else [] ),
@@ -368,6 +560,7 @@ def build_stateful_summary_bundle(
         meta = _projection_meta(conn, task_id)
         outcome = _outcome_section(meta)
         ft = _followthrough_section(meta)
+        out_bundle = build_execution_outcome_surface_bundle(conn, task_id, user_message=um)
         blocked_reason = sanitize_user_surface_text(str(outcome.get("blocked_reason") or ""), limit=360).strip()
         phase_summary = sanitize_user_surface_text(
             str(outcome.get("current_phase_summary") or outcome.get("current_phase") or ""),
@@ -396,8 +589,9 @@ def build_stateful_summary_bundle(
             uncertainty = "I do not have a single durable blocker reason yet."
         return _build_stateful_summary_bundle_from_lines(
             source=src,
-            primary_finding=primary,
+            primary_finding=primary or out_bundle.primary_finding,
             supporting_lines=[
+                *( [out_bundle.primary_finding] if out_bundle.primary_finding else [] ),
                 *list(pack.source_truth_narrative_lines)[:2],
                 *list(pack.source_truth_receipt_lines)[:1],
                 *( [f"Phase summary: {phase_summary}"] if phase_summary else [] ),
@@ -408,6 +602,7 @@ def build_stateful_summary_bundle(
         )
     if src == "cursor_heavy_lift_context":
         pack = gather_cursor_recall_evidence_pack(conn, task_id, user_message=um)
+        out_bundle = build_execution_outcome_surface_bundle(conn, task_id, user_message=um)
         v = assess_cursor_workstream_viability(conn, task_id, um, continuation_boost=True)
         primary = _pick_cursor_recap_lead(
             narrative_lines=pack.source_truth_narrative_lines,
@@ -425,8 +620,9 @@ def build_stateful_summary_bundle(
             )
         return _build_stateful_summary_bundle_from_lines(
             source=src,
-            primary_finding=primary,
+            primary_finding=primary or out_bundle.primary_finding,
             supporting_lines=[
+                *( [out_bundle.primary_finding] if out_bundle.primary_finding else [] ),
                 *( [pack.support_continuation_line] if pack.support_continuation_line else [] ),
                 *list(pack.source_truth_narrative_lines)[:2],
                 *list(pack.source_truth_receipt_lines)[:1],
@@ -1751,6 +1947,7 @@ def build_cursor_continuity_recall_reply_from_state(
     )
     um = str(user_message or "").strip()
     pack = gather_cursor_recall_evidence_pack(conn, use_id, user_message=um)
+    outcome_bundle = build_execution_outcome_surface_bundle(conn, use_id, user_message=um)
     meta = _projection_meta(conn, use_id)
     proj = _projection_full(conn, use_id)
     outcome = _outcome_section(meta)
@@ -1827,6 +2024,10 @@ def build_cursor_continuity_recall_reply_from_state(
                 prefer_source_truth=prefer_truth_lead,
             )
         if not recap_lead:
+            recap_lead = _normalize_cursor_recap_lead(
+                sanitize_user_surface_text(outcome_bundle.primary_finding, limit=360)
+            )
+        if not recap_lead:
             recap_lead = _fallback_cursor_recap_from_state(
                 conn,
                 use_id,
@@ -1875,7 +2076,13 @@ def build_cursor_continuity_recall_reply_from_state(
             lines.append(cont_line)
 
         # Include at most one extra substantive corroboration line for brevity.
-        for line in list(narrative_lines) + list(receipt_substantive) + list(assistant_lines):
+        corroboration = [
+            *list(outcome_bundle.supporting_evidence_lines),
+            *list(narrative_lines),
+            *list(receipt_substantive),
+            *list(assistant_lines),
+        ]
+        for line in corroboration:
             if len(lines) >= (3 if recap_lead else 2):
                 break
             if _strip_recall_label(line) == recap_lead:

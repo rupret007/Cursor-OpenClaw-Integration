@@ -3801,6 +3801,87 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(proj["meta"]["proactive"]["pending_reminder_count"], 1)
         self.assertEqual(proj["meta"]["outcome"]["pending_reminder_count"], 1)
 
+    def test_server_followups_cursor_control_plane_stays_direct_without_active_jobs(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        try:
+            result = handle_command(
+                server.conn,
+                {
+                    "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                    "channel": "telegram",
+                    "external_id": "tg-cursor-cancel-none",
+                    "payload": {
+                        "text": "Ask @cursor to cancel all jobs.",
+                        "routing_text": "Ask @cursor to cancel all jobs.",
+                        "chat_id": 1,
+                        "message_id": 293,
+                    },
+                },
+            )
+            server._handle_task_followups(result["task_id"])
+            proj = project_task_dict(server.conn, result["task_id"], "telegram")
+            self.assertEqual(proj["status"], TaskStatus.COMPLETED.value)
+            self.assertEqual(proj["meta"]["assistant"]["reason"], "cursor_control_plane_command")
+            self.assertIn("cancel", proj["meta"]["assistant"]["last_reply"].lower())
+        finally:
+            server.shutdown_queue_worker()
+            server.conn.close()
+
+    def test_server_followups_cursor_control_plane_cancels_active_delegate_job(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        try:
+            queued = handle_command(
+                server.conn,
+                {
+                    "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                    "channel": "telegram",
+                    "external_id": "tg-cursor-job-active",
+                    "payload": {
+                        "text": "Please inspect the repo, fix the failing tests, and open a PR.",
+                        "routing_text": "Please inspect the repo, fix the failing tests, and open a PR.",
+                        "chat_id": 1,
+                        "message_id": 294,
+                    },
+                },
+            )
+            server._handle_task_followups(queued["task_id"])
+            queued_proj = project_task_dict(server.conn, queued["task_id"], "telegram")
+            self.assertEqual(queued_proj["status"], TaskStatus.QUEUED.value)
+
+            cancel = handle_command(
+                server.conn,
+                {
+                    "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                    "channel": "telegram",
+                    "external_id": "tg-cursor-cancel-active",
+                    "payload": {
+                        "text": "Ask @cursor to cancel all jobs.",
+                        "routing_text": "Ask @cursor to cancel all jobs.",
+                        "chat_id": 1,
+                        "message_id": 295,
+                    },
+                },
+            )
+            server._handle_task_followups(cancel["task_id"])
+            cancel_proj = project_task_dict(server.conn, cancel["task_id"], "telegram")
+            self.assertEqual(cancel_proj["status"], TaskStatus.COMPLETED.value)
+            self.assertEqual(cancel_proj["meta"]["assistant"]["reason"], "cursor_control_plane_command")
+            self.assertIn("cancelled 1 active job", cancel_proj["meta"]["assistant"]["last_reply"].lower())
+
+            queued_proj = project_task_dict(server.conn, queued["task_id"], "telegram")
+            self.assertEqual(queued_proj["status"], TaskStatus.FAILED.value)
+        finally:
+            server.shutdown_queue_worker()
+            server.conn.close()
+
     def test_server_followups_memory_note_is_saved_on_principal(self) -> None:
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
         os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
@@ -3841,28 +3922,66 @@ class TestAndreaSync(unittest.TestCase):
         from services.andrea_sync.server import SyncServer  # noqa: E402
 
         server = SyncServer()
-        result = handle_command(
-            server.conn,
-            {
-                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
-                "channel": "telegram",
-                "external_id": "tg-cursor-mention",
-                "payload": {
-                    "text": "@Cursor fix the failing tests",
-                    "routing_text": "fix the failing tests",
-                    "routing_hint": "cursor",
-                    "collaboration_mode": "cursor_primary",
-                    "mention_targets": ["cursor"],
-                    "chat_id": 1,
-                    "message_id": 30,
+        try:
+            result = handle_command(
+                server.conn,
+                {
+                    "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                    "channel": "telegram",
+                    "external_id": "tg-cursor-mention",
+                    "payload": {
+                        "text": "@Cursor fix the failing tests",
+                        "routing_text": "fix the failing tests",
+                        "routing_hint": "cursor",
+                        "collaboration_mode": "cursor_primary",
+                        "mention_targets": ["cursor"],
+                        "chat_id": 1,
+                        "message_id": 30,
+                    },
                 },
-            },
-        )
-        server._handle_task_followups(result["task_id"])
-        proj = project_task_dict(server.conn, result["task_id"], "telegram")
-        self.assertEqual(proj["status"], TaskStatus.QUEUED.value)
-        self.assertEqual(proj["meta"]["execution"]["routing_hint"], "cursor")
-        self.assertEqual(proj["meta"]["execution"]["collaboration_mode"], "cursor_primary")
+            )
+            server._handle_task_followups(result["task_id"])
+            proj = project_task_dict(server.conn, result["task_id"], "telegram")
+            self.assertEqual(proj["status"], TaskStatus.QUEUED.value)
+            self.assertEqual(proj["meta"]["execution"]["routing_hint"], "cursor")
+            self.assertEqual(proj["meta"]["execution"]["collaboration_mode"], "cursor_primary")
+            self.assertEqual(proj["meta"]["execution"]["requested_execution_mode"], "agent")
+        finally:
+            server.shutdown_queue_worker()
+            server.conn.close()
+
+    def test_server_followups_repo_review_sets_plan_execution_mode(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        try:
+            result = handle_command(
+                server.conn,
+                {
+                    "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                    "channel": "telegram",
+                    "external_id": "tg-cursor-plan-mode",
+                    "payload": {
+                        "text": "@Cursor inspect the repo and summarize the likely failing tests",
+                        "routing_text": "inspect the repo and summarize the likely failing tests",
+                        "routing_hint": "cursor",
+                        "collaboration_mode": "cursor_primary",
+                        "mention_targets": ["cursor"],
+                        "chat_id": 1,
+                        "message_id": 32,
+                    },
+                },
+            )
+            server._handle_task_followups(result["task_id"])
+            proj = project_task_dict(server.conn, result["task_id"], "telegram")
+            self.assertEqual(proj["status"], TaskStatus.QUEUED.value)
+            self.assertEqual(proj["meta"]["telegram"]["requested_execution_mode"], "plan")
+            self.assertEqual(proj["meta"]["execution"]["requested_execution_mode"], "plan")
+        finally:
+            server.shutdown_queue_worker()
+            server.conn.close()
 
     def test_server_followups_explicit_model_mention_marks_preferred_lane(self) -> None:
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
@@ -4538,6 +4657,71 @@ class TestAndreaSync(unittest.TestCase):
             os.environ.pop("ANDREA_TELEGRAM_CURSOR_PLAN_FIRST", None)
             os.environ.pop("ANDREA_TELEGRAM_CURSOR_PLANNER_MODEL", None)
             os.environ.pop("ANDREA_TELEGRAM_CURSOR_EXECUTOR_MODEL", None)
+            if "server" in locals():
+                server.shutdown_queue_worker()
+                server.conn.close()
+
+    def test_server_cursor_plan_mode_runs_read_only_without_planner_pass(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        os.environ["ANDREA_TELEGRAM_CURSOR_PLAN_FIRST"] = "1"
+        os.environ["ANDREA_TELEGRAM_CURSOR_PLANNER_MODEL"] = "planner-model"
+        os.environ["ANDREA_TELEGRAM_CURSOR_EXECUTOR_MODEL"] = "executor-model"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = None
+        try:
+            server = SyncServer()
+            result = handle_command(
+                server.conn,
+                {
+                    "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                    "channel": "telegram",
+                    "external_id": "tg-plan-mode-launch",
+                    "payload": {
+                        "text": "Please inspect the repo and summarize the likely failing tests.",
+                        "chat_id": 1,
+                        "message_id": 51,
+                        "requested_execution_mode": "plan",
+                    },
+                },
+            )
+            task_id = result["task_id"]
+            calls: list[tuple[str, dict[str, object]]] = []
+
+            def create_side_effect(prompt: str, **kwargs: object) -> dict[str, object]:
+                calls.append((prompt, dict(kwargs)))
+                return {
+                    "agent_id": "plan-agent",
+                    "backend": "api",
+                    "status": "SUBMITTED",
+                }
+
+            with (
+                mock.patch.object(server, "_create_cursor_job", side_effect=create_side_effect),
+                mock.patch.object(server, "_finalize_cursor_agent_poll_for_task") as finalize,
+            ):
+                server._run_cursor_job(task_id)
+            self.assertEqual(len(calls), 1)
+            self.assertTrue(calls[0][1].get("read_only"))
+            self.assertIsNone(calls[0][1].get("branch"))
+            self.assertEqual(calls[0][1].get("model"), "executor-model")
+            finalize.assert_called_once()
+            self.assertEqual(
+                finalize.call_args.kwargs["cursor_trace"]["requested_execution_mode"],
+                "plan",
+            )
+            self.assertEqual(
+                finalize.call_args.kwargs["cursor_trace"]["cursor_strategy"],
+                "single_pass",
+            )
+        finally:
+            os.environ.pop("ANDREA_TELEGRAM_CURSOR_PLAN_FIRST", None)
+            os.environ.pop("ANDREA_TELEGRAM_CURSOR_PLANNER_MODEL", None)
+            os.environ.pop("ANDREA_TELEGRAM_CURSOR_EXECUTOR_MODEL", None)
+            if server is not None:
+                server.shutdown_queue_worker()
+                server.conn.close()
 
     def test_cursor_report_rejects_non_object_payload(self) -> None:
         created = handle_command(
@@ -5401,6 +5585,30 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(classify_turn_intent_class(text), "cursor_control_plane")
         self.assertEqual(lane.lane, "local_stateful_answer")
         self.assertEqual(lane.reason, "explicit_cursor_control_plane")
+
+    def test_arbitrate_answer_lane_prefers_heavy_lift_for_mixed_schedule_and_repo_action(self) -> None:
+        from services.andrea_sync.turn_intelligence import (
+            arbitrate_answer_lane,
+            build_direct_answer_policy,
+            build_turn_plan,
+            classify_turn_intent_class,
+        )
+
+        text = "Ask @openclaw what's on my schedule today, and also inspect the repo and open a PR."
+        plan = build_turn_plan(
+            text,
+            scenario_id="mixedResourceGoal",
+            projection_has_continuity_state=False,
+        )
+        policy = build_direct_answer_policy(
+            text,
+            scenario_id="mixedResourceGoal",
+            turn_plan=plan,
+        )
+        lane = arbitrate_answer_lane(text=text, turn_plan=plan, direct_policy=policy)
+        self.assertEqual(classify_turn_intent_class(text), "assistant_state_query")
+        self.assertEqual(plan.domain, "personal_agenda")
+        self.assertEqual(lane.lane, "heavy_lift_delegated_execution")
 
     def test_build_turn_plan_recognizes_explicit_openclaw_schedule_query(self) -> None:
         from services.andrea_sync.turn_intelligence import (

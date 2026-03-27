@@ -525,6 +525,12 @@ def arbitrate_answer_lane(
             "explicit_cursor_control_plane",
             openclaw_primary=False,
         )
+    if bool(turn_plan.force_delegate) or is_execution_heavy_or_repo_action(clean):
+        return LaneArbitrationDecision(
+            "heavy_lift_delegated_execution",
+            "execution_heavy_or_forced_delegate",
+            openclaw_primary=False,
+        )
     if intent_class == "assistant_state_query":
         return LaneArbitrationDecision(
             "local_stateful_answer",
@@ -539,12 +545,6 @@ def arbitrate_answer_lane(
         return LaneArbitrationDecision("lightweight_direct", "lightweight_conversational", openclaw_primary=False)
     if is_simple_direct_utility_question(clean):
         return LaneArbitrationDecision("lightweight_direct", "simple_direct_utility", openclaw_primary=False)
-    if bool(turn_plan.force_delegate) or is_execution_heavy_or_repo_action(clean):
-        return LaneArbitrationDecision(
-            "heavy_lift_delegated_execution",
-            "execution_heavy_or_forced_delegate",
-            openclaw_primary=False,
-        )
     if direct_policy.lookup_eligible or domain in {"external_information", "technical_guidance"}:
         return LaneArbitrationDecision(
             "grounded_research_guidance",

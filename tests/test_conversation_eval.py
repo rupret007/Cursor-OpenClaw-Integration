@@ -270,6 +270,34 @@ class ConversationEvalDetectorTests(unittest.TestCase):
         codes = {h["issue_code"] for h in hits}
         self.assertIn("conversation_delegated_role_confusion", codes)
 
+    def test_detects_simple_utility_overcomplicated_surface(self) -> None:
+        cap = {
+            "raw_reply_text": (
+                "I couldn't verify live lookup capability right now, so I can only give a general answer.\n\n"
+                "Next options:\n- Retry grounded lookup in a moment when connectivity is stable."
+            ),
+            "user_turn": "How many gigs are in 1024 mb?",
+            "turn_plan_domain": "casual_conversation",
+            "assistant_reason": "grounded_research_unavailable",
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap)
+        codes = {h["issue_code"] for h in hits}
+        self.assertIn("conversation_simple_utility_overcomplicated_surface", codes)
+
+    def test_detects_agenda_day_plan_lane_miss(self) -> None:
+        cap = {
+            "raw_reply_text": "I can help with that.",
+            "user_turn": "What are my plans today?",
+            "turn_plan_domain": "casual_conversation",
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap)
+        codes = {h["issue_code"] for h in hits}
+        self.assertIn("conversation_agenda_day_plan_lane_miss", codes)
+
     def test_detects_stateful_domain_hijack_outside_status_domains(self) -> None:
         cap = {
             "raw_reply_text": "I’m not finding a recent clean Cursor result to recap from this thread.",
@@ -1059,6 +1087,10 @@ class ConversationCoreScenariosTests(unittest.TestCase):
         ids = {r.scenario_id for r in rows}
         self.assertIn("conversation_core::hi_andrea", ids)
         self.assertIn("conversation_core::news_today", ids)
+        self.assertIn("conversation_core::simple_math_direct", ids)
+        self.assertIn("conversation_core::simple_conversion_direct", ids)
+        self.assertIn("conversation_core::plans_today", ids)
+        self.assertIn("conversation_core::weather_current_conditions", ids)
         self.assertIn("conversation_core::technical_guidance_timeout", ids)
         self.assertIn("conversation_core::short_technical_question_not_social", ids)
         self.assertIn("conversation_core::technical_guidance_lookup_unavailable_next_steps", ids)

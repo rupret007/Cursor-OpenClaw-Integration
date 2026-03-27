@@ -192,6 +192,20 @@ class BlueprintPlatformTests(unittest.TestCase):
         self.assertEqual(plan_planned_today.domain, "personal_agenda")
         self.assertEqual(plan_planned_today.context_boundary, "personal_agenda_state")
 
+        plan_my_plans_today = build_turn_plan(
+            "What are my plans today?",
+            scenario_id="statusFollowupContinue",
+            projection_has_continuity_state=True,
+        )
+        self.assertEqual(plan_my_plans_today.domain, "personal_agenda")
+
+        plan_schedule_today = build_turn_plan(
+            "What's on my schedule today?",
+            scenario_id="statusFollowupContinue",
+            projection_has_continuity_state=True,
+        )
+        self.assertEqual(plan_schedule_today.domain, "personal_agenda")
+
         plan_attention = build_turn_plan(
             "What do I need to pay attention to today?",
             scenario_id="statusFollowupContinue",

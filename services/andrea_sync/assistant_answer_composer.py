@@ -2717,9 +2717,6 @@ def try_composer_early_short_circuit(
     Deterministic direct replies that should win before the model (first slice domains).
     Returns (reply_text, reason) or None.
     """
-    sid = str(scenario_id or "").strip()
-    if sid not in _STATUS_SCENARIOS:
-        return None
     domain = turn_plan.domain
     hist = list(history or [])
     mem = list(memory_notes or [])
@@ -2731,6 +2728,10 @@ def try_composer_early_short_circuit(
     if domain == "attention_today":
         text = build_attention_reply_from_state(conn, task_id)
         return text, "composer_attention_today_state"
+
+    sid = str(scenario_id or "").strip()
+    if sid not in _STATUS_SCENARIOS:
+        return None
 
     if domain in {"project_status", "approval_state"} and turn_plan.continuity_focus == "blocked_state":
         text = build_blocked_state_reply_from_state(conn, task_id)

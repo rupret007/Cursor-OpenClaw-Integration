@@ -100,6 +100,7 @@ from .turn_intelligence import (
     arbitrate_answer_lane,
     build_direct_answer_policy,
     build_turn_plan,
+    is_everyday_utility_lookup_question,
     is_execution_heavy_or_repo_action,
     resolve_answer_family_profile,
 )
@@ -3238,6 +3239,8 @@ class SyncServer:
         lines = [str(x or "").strip() for x in evidence_lines if str(x or "").strip()]
         if not lines:
             return ""
+        if guidance_class == "everyday_utility":
+            return shared_sanitize_user_surface_text(lines[0], fallback=lines[0], limit=420).strip()
         if answer_mode == "strong_evidence_answer" and len(lines) >= 3:
             head = lines[0].rstrip(".")
             second = _cause_fragment(lines[1])
@@ -3263,6 +3266,8 @@ class SyncServer:
     ) -> str:
         if answer_mode == "strong_evidence_answer":
             return ""
+        if guidance_class == "everyday_utility":
+            return "I can't verify current conditions right now."
         if answer_mode == "partial_evidence_helpful_answer":
             return "I can narrow this further if you share one concrete detail from your exact setup."
         return "I can only give a general direction until live lookup is available again."
@@ -3270,6 +3275,8 @@ class SyncServer:
     def _grounded_lookup_guidance_class(self, *, classify_text: str, turn_domain: str = "") -> str:
         qt = str(classify_text or "").strip().lower()
         dom = str(turn_domain or "").strip().lower()
+        if is_everyday_utility_lookup_question(classify_text) and dom != "technical_guidance":
+            return "everyday_utility"
         if any(k in qt for k in ("ssl", "tls", "certificate")) and any(
             k in qt for k in ("error", "warning", "trust", "expired", "expiry")
         ):
@@ -3316,6 +3323,8 @@ class SyncServer:
         gc = str(guidance_class or "").strip() or self._grounded_lookup_guidance_class(
             classify_text=classify_text
         )
+        if gc == "everyday_utility":
+            return []
         if mode == "strong_evidence_answer":
             return []
         if mode == "partial_evidence_helpful_answer":
@@ -3437,6 +3446,8 @@ class SyncServer:
                 turn_domain=str(turn_plan.domain or ""),
             )
             unavailable_base = "I couldn't verify live lookup capability right now, so I can only give a general answer."
+            if guidance_class == "everyday_utility":
+                unavailable_base = "I can't verify current conditions right now."
             if guidance_class == "certificate_tls":
                 unavailable_base += " For SSL or certificate warnings, I can still help you triage likely causes from the exact warning details."
             n_opts = self._grounded_lookup_next_step_options(
@@ -3444,7 +3455,7 @@ class SyncServer:
                 classify_text=classify_text,
                 guidance_class=guidance_class,
             )[:2]
-            unavailable = format_reply_with_next_step_options(unavailable_base, n_opts)
+            unavailable = unavailable_base if not n_opts else format_reply_with_next_step_options(unavailable_base, n_opts)
             ug, bmw = brevity_profile_for_answer_mode("truthful_fallback_with_next_steps")
             contract = {
                 "family": family_profile.family,
@@ -3520,23 +3531,25 @@ class SyncServer:
         if uncertainty_boundary and answer_mode != "strong_evidence_answer":
             shaped_fallback = f"{shaped_fallback} {uncertainty_boundary}".strip()
         ug, bmw = brevity_profile_for_answer_mode(answer_mode)
-        realized = maybe_realize_grounded_technical_reply(
-            user_text=classify_text,
-            answer_family=str(family_profile.family or "grounded_research"),
-            evidence_lines=evidence_lines,
-            fallback_reply=shaped_fallback,
-            required_anchors=required_anchors,
-            evidence_strength=evidence_strength,
-            answer_mode=answer_mode,
-            uncertainty_mode=uncertainty_mode,
-            next_step_options=next_opts,
-            guidance_class=guidance_class,
-            primary_finding=primary_finding,
-            supporting_evidence_lines=evidence_lines[1:4],
-            uncertainty_boundary=uncertainty_boundary,
-            retrieval_source="brave-api-search",
-            query=str(classify_text or "").strip(),
-        )
+        realized = None
+        if guidance_class != "everyday_utility":
+            realized = maybe_realize_grounded_technical_reply(
+                user_text=classify_text,
+                answer_family=str(family_profile.family or "grounded_research"),
+                evidence_lines=evidence_lines,
+                fallback_reply=shaped_fallback,
+                required_anchors=required_anchors,
+                evidence_strength=evidence_strength,
+                answer_mode=answer_mode,
+                uncertainty_mode=uncertainty_mode,
+                next_step_options=next_opts,
+                guidance_class=guidance_class,
+                primary_finding=primary_finding,
+                supporting_evidence_lines=evidence_lines[1:4],
+                uncertainty_boundary=uncertainty_boundary,
+                retrieval_source="brave-api-search",
+                query=str(classify_text or "").strip(),
+            )
         final_reply = shared_sanitize_user_surface_text(
             str(realized or shaped_fallback or summary).strip(),
             fallback=shaped_fallback or summary,

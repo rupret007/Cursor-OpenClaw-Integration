@@ -81,7 +81,11 @@ _AGENDA_RE = re.compile(
     r"anything\s+on\s+(?:the\s+)?agenda|"
     r"what'?s\s+planned\s+(?:for\s+)?today|"
     r"what\s+is\s+planned\s+(?:for\s+)?today|"
-    r"planned\s+for\s+today"
+    r"planned\s+for\s+today|"
+    r"what\s+are\s+my\s+plans\s+today|"
+    r"what'?s\s+on\s+my\s+schedule\s+today|"
+    r"what\s+is\s+on\s+my\s+schedule\s+today|"
+    r"what\s+do\s+i\s+have\s+today"
     r")\b",
     re.I,
 )
@@ -231,6 +235,25 @@ _DIRECT_SUBSTANTIVE_HINT_RE = re.compile(
     r"tool|system|code|concept|difference|"
     r"explain|meaning|mean|latest|news|headline|"
     r"fix|best\s+practice|recommend"
+    r")\b",
+    re.I,
+)
+_SIMPLE_MATH_EXPRESSION_RE = re.compile(
+    r"^\s*(?:what(?:'s|\s+is)\s+)?(?:-?\d+(?:\.\d+)?\s*[\+\-\*/]\s*)+-?\d+(?:\.\d+)?\s*\??\s*$",
+    re.I,
+)
+_SIMPLE_CONVERSION_RE = re.compile(
+    r"\b("
+    r"how\s+many\s+[a-z]{1,18}s?\s+are\s+in\s+\d+(?:\.\d+)?\s+[a-z]{1,18}s?|"
+    r"convert\s+\d+(?:\.\d+)?\s+[a-z]{1,18}s?\s+to\s+[a-z]{1,18}s?"
+    r")\b",
+    re.I,
+)
+_EVERYDAY_LOOKUP_RE = re.compile(
+    r"\b("
+    r"weather|forecast|temperature|current\s+conditions?|"
+    r"rain(?:ing)?\s+(?:today|now)|"
+    r"snow(?:ing)?\s+(?:today|now)"
     r")\b",
     re.I,
 )
@@ -424,6 +447,8 @@ def arbitrate_answer_lane(
         return LaneArbitrationDecision("lightweight_direct", "casual_social", openclaw_primary=False)
     if is_tooling_identity_question(clean):
         return LaneArbitrationDecision("lightweight_direct", "tooling_identity", openclaw_primary=False)
+    if is_simple_direct_utility_question(clean):
+        return LaneArbitrationDecision("lightweight_direct", "simple_direct_utility", openclaw_primary=False)
     if bool(turn_plan.force_delegate) or is_execution_heavy_or_repo_action(clean):
         return LaneArbitrationDecision(
             "heavy_lift_delegated_execution",
@@ -461,10 +486,41 @@ def is_execution_heavy_or_repo_action(text: str) -> bool:
     return bool(_EXECUTION_HEAVY_OR_REPO_RE.search(clean))
 
 
+def is_simple_direct_utility_question(text: str) -> bool:
+    clean = str(text or "").strip()
+    if not clean:
+        return False
+    if _SIMPLE_MATH_EXPRESSION_RE.match(clean):
+        return True
+    if _SIMPLE_CONVERSION_RE.search(clean):
+        return True
+    return False
+
+
+def is_everyday_utility_lookup_question(text: str) -> bool:
+    clean = str(text or "").strip()
+    if not clean:
+        return False
+    return bool(_EVERYDAY_LOOKUP_RE.search(clean))
+
+
+def is_agenda_day_plan_question(text: str) -> bool:
+    clean = str(text or "").strip()
+    if not clean:
+        return False
+    return bool(_AGENDA_RE.search(clean))
+
+
 def is_substantive_non_social_question(text: str) -> bool:
     clean = str(text or "").strip()
     if not clean or is_casual_social_only_turn(clean):
         return False
+    if is_simple_direct_utility_question(clean):
+        return False
+    if is_agenda_day_plan_question(clean):
+        return True
+    if is_everyday_utility_lookup_question(clean):
+        return True
     if is_recent_outcome_history_question(clean):
         return True
     if is_approval_state_question(clean):
@@ -506,6 +562,18 @@ def build_direct_answer_policy(
             allow_casual_social_fallback=False,
             lookup_eligible=False,
             preferred_lookup_domain="",
+        )
+    if is_simple_direct_utility_question(clean):
+        return DirectAnswerPolicy(
+            allow_casual_social_fallback=False,
+            lookup_eligible=False,
+            preferred_lookup_domain="",
+        )
+    if is_everyday_utility_lookup_question(clean):
+        return DirectAnswerPolicy(
+            allow_casual_social_fallback=False,
+            lookup_eligible=True,
+            preferred_lookup_domain="external_information",
         )
     if dom in {"external_information", "technical_guidance"}:
         return DirectAnswerPolicy(
@@ -615,6 +683,10 @@ def build_turn_plan(
             domain = "external_information"
             context_boundary = "external_world_only"
             prefer_state_reply = False
+        elif is_everyday_utility_lookup_question(clean):
+            domain = "external_information"
+            context_boundary = "external_world_only"
+            prefer_state_reply = False
         elif is_approval_state_question(clean):
             domain = "approval_state"
             context_boundary = "approval_and_plan_state"
@@ -654,6 +726,9 @@ def build_turn_plan(
         if _STATUS_EXTERNAL_NEWS_RE.search(clean):
             domain = "external_information"
             context_boundary = "external_world_only"
+        elif is_everyday_utility_lookup_question(clean):
+            domain = "external_information"
+            context_boundary = "external_world_only"
         elif is_approval_state_question(clean):
             domain = "approval_state"
             context_boundary = "approval_and_plan_state"
@@ -691,6 +766,9 @@ def build_turn_plan(
     elif _AGENDA_RE.search(clean):
         domain = "personal_agenda"
         context_boundary = "personal_agenda_state"
+    elif is_everyday_utility_lookup_question(clean):
+        domain = "external_information"
+        context_boundary = "external_world_only"
 
     if domain in {"external_information", "technical_guidance"}:
         prefer_state_reply = False

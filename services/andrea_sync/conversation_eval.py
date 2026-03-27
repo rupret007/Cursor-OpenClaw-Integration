@@ -56,9 +56,12 @@ from .store import (
 )
 from .turn_intelligence import (
     build_turn_plan,
+    is_agenda_day_plan_question,
+    is_everyday_utility_lookup_question,
     is_execution_heavy_or_repo_action,
     is_casual_social_only_turn,
     is_openclaw_collaboration_state_question,
+    is_simple_direct_utility_question,
     is_substantive_non_social_question,
     is_tooling_identity_question,
     resolve_answer_family_profile,
@@ -600,6 +603,9 @@ def run_deterministic_detectors(
             }
         )
     substantive_turn = is_substantive_non_social_question(user)
+    simple_utility_turn = is_simple_direct_utility_question(user)
+    agenda_day_plan_turn = is_agenda_day_plan_question(user)
+    everyday_lookup_turn = is_everyday_utility_lookup_question(user)
     if substantive_turn:
         if assistant_reason == "greeting_or_social" or (
             "pretty good, thanks for asking" in low and "how are you doing" in low
@@ -638,6 +644,71 @@ def run_deterministic_detectors(
                 "issue_code": "conversation_unnecessary_heavy_lift_escalation",
                 "severity": "high",
                 "detail": "substantive informational turn escalated to heavy-lift delegate route",
+            }
+        )
+    if simple_utility_turn:
+        lane_domain = str(capture.get("turn_plan_domain") or "")
+        if lane_domain in {"technical_guidance", "project_status", "approval_state"} or assistant_route == "delegate":
+            findings.append(
+                {
+                    "family": "wrong_domain_contamination",
+                    "issue_code": "conversation_simple_utility_wrong_lane",
+                    "severity": "high",
+                    "detail": "simple utility question was routed into a heavy lane",
+                }
+            )
+        if (
+            "next options" in low
+            or "i couldn't verify live lookup capability" in low
+            or "general answer" in low
+            or "retry grounded lookup" in low
+        ):
+            findings.append(
+                {
+                    "family": "overly_mechanical_wording",
+                    "issue_code": "conversation_simple_utility_overcomplicated_surface",
+                    "severity": "medium",
+                    "detail": "simple utility answer included unnecessary lookup/next-step boilerplate",
+                }
+            )
+    if agenda_day_plan_turn and str(capture.get("turn_plan_domain") or "") != "personal_agenda":
+        findings.append(
+            {
+                "family": "wrong_domain_contamination",
+                "issue_code": "conversation_agenda_day_plan_lane_miss",
+                "severity": "high",
+                "detail": "agenda/day-plan question did not route to personal_agenda",
+            }
+        )
+    if agenda_day_plan_turn and is_generic_direct_reply(text):
+        findings.append(
+            {
+                "family": "generic_fallback_leak",
+                "issue_code": "conversation_agenda_day_plan_generic_fallback",
+                "severity": "medium",
+                "detail": "agenda/day-plan answer fell back to generic direct reply",
+            }
+        )
+    if everyday_lookup_turn and str(capture.get("turn_plan_domain") or "") not in {"external_information"}:
+        findings.append(
+            {
+                "family": "wrong_domain_contamination",
+                "issue_code": "conversation_everyday_lookup_domain_miss",
+                "severity": "high",
+                "detail": "everyday lookup question did not route to external_information",
+            }
+        )
+    if everyday_lookup_turn and (
+        "i couldn't verify live lookup capability right now" in low
+        or "general answer" in low
+        or "retry grounded lookup" in low
+    ):
+        findings.append(
+            {
+                "family": "overly_mechanical_wording",
+                "issue_code": "conversation_everyday_lookup_overtechnical_fallback",
+                "severity": "medium",
+                "detail": "everyday lookup fallback used technical retrieval scaffolding",
             }
         )
     approval_inventory_only = bool(
@@ -2691,6 +2762,43 @@ CONVERSATION_CORE_CASES: tuple[ConversationCaseSpec, ...] = (
         first_message_id=28004,
     ),
     ConversationCaseSpec(
+        case_id="plans_today",
+        title="What are my plans today?",
+        behavior_family="personal_agenda",
+        turns=("What are my plans today?",),
+        chat_id=88041,
+        from_id=99041,
+        first_update_id=18041,
+        first_message_id=28041,
+        required_turn_domains=("personal_agenda",),
+    ),
+    ConversationCaseSpec(
+        case_id="simple_math_direct",
+        title="Simple math stays direct",
+        behavior_family="casual_conversation",
+        turns=("What is 58 + 30?",),
+        chat_id=88042,
+        from_id=99042,
+        first_update_id=18042,
+        first_message_id=28042,
+        required_reply_markers=("88",),
+        forbidden_reply_markers=("next options", "retry grounded lookup", "general answer"),
+        required_turn_domains=("casual_conversation",),
+    ),
+    ConversationCaseSpec(
+        case_id="simple_conversion_direct",
+        title="Simple conversion avoids technical scaffolding",
+        behavior_family="casual_conversation",
+        turns=("How many gigs are in 1024 mb?",),
+        chat_id=88043,
+        from_id=99043,
+        first_update_id=18043,
+        first_message_id=28043,
+        required_reply_markers=("1 gb",),
+        forbidden_reply_markers=("next options", "retry grounded lookup", "general answer"),
+        required_turn_domains=("casual_conversation",),
+    ),
+    ConversationCaseSpec(
         case_id="attention_today",
         title="Attention today",
         behavior_family="attention_today",
@@ -2723,6 +2831,27 @@ CONVERSATION_CORE_CASES: tuple[ConversationCaseSpec, ...] = (
         first_message_id=28007,
         patch_openclaw_news=True,
         expect_external_domain=True,
+    ),
+    ConversationCaseSpec(
+        case_id="weather_current_conditions",
+        title="Weather/current conditions stays concise",
+        behavior_family="external_information",
+        turns=("What's the weather right now?",),
+        chat_id=88044,
+        from_id=99044,
+        first_update_id=18044,
+        first_message_id=28044,
+        patch_openclaw_summary="Current conditions: 61F with light clouds and a mild breeze.",
+        required_assistant_reasons=("grounded_research_lookup",),
+        required_turn_domains=("external_information",),
+        required_reply_markers=("current conditions",),
+        forbidden_reply_markers=(
+            "i couldn't verify live lookup capability right now",
+            "next options",
+            "retry grounded lookup",
+        ),
+        expect_external_domain=True,
+        forbid_unnecessary_delegate=True,
     ),
     ConversationCaseSpec(
         case_id="technical_guidance_timeout",

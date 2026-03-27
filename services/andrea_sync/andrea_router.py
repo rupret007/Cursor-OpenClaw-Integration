@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import ast
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -130,7 +131,7 @@ META_ANSWERING_RE = re.compile(
 )
 HYBRID_SKILL_RE = re.compile(
     r"\b(remind me|reminder|note|notes|calendar|schedule|todo|to-do|task list|message someone|"
-    r"send a message|draft a message|email|inbox|search the web|search online|weather|"
+    r"send a message|draft a message|email|inbox|search the web|search online|"
     r"summarize this|summarise this)\b",
     re.I,
 )
@@ -157,7 +158,11 @@ AGENDA_OR_DAY_PLAN_RE = re.compile(
     r"anything\s+on\s+(?:the\s+)?agenda|"
     r"my\s+agenda|"
     r"(?:the\s+)?day'?s\s+plan|"
-    r"plan\s+for\s+today"
+    r"plan\s+for\s+today|"
+    r"what\s+are\s+my\s+plans\s+today|"
+    r"what'?s\s+on\s+my\s+schedule\s+today|"
+    r"what\s+is\s+on\s+my\s+schedule\s+today|"
+    r"what\s+do\s+i\s+have\s+today"
     r")\b",
     re.I,
 )
@@ -537,6 +542,87 @@ def _heuristic_reply(text: str, history: list[dict[str, str]] | None = None) -> 
     )
 
 
+def _safe_eval_arithmetic(expr: str) -> float | None:
+    allowed_binops = (ast.Add, ast.Sub, ast.Mult, ast.Div)
+    allowed_unary = (ast.UAdd, ast.USub)
+    try:
+        tree = ast.parse(expr, mode="eval")
+    except Exception:
+        return None
+
+    def _walk(node: ast.AST) -> float:
+        if isinstance(node, ast.Expression):
+            return _walk(node.body)
+        if isinstance(node, ast.BinOp):
+            if not isinstance(node.op, allowed_binops):
+                raise ValueError("unsupported-op")
+            left = _walk(node.left)
+            right = _walk(node.right)
+            if isinstance(node.op, ast.Add):
+                return left + right
+            if isinstance(node.op, ast.Sub):
+                return left - right
+            if isinstance(node.op, ast.Mult):
+                return left * right
+            return left / right
+        if isinstance(node, ast.UnaryOp):
+            if not isinstance(node.op, allowed_unary):
+                raise ValueError("unsupported-unary")
+            val = _walk(node.operand)
+            return val if isinstance(node.op, ast.UAdd) else -val
+        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+            return float(node.value)
+        raise ValueError("unsupported-node")
+
+    try:
+        return _walk(tree)
+    except Exception:
+        return None
+
+
+def _format_numeric_reply(value: float) -> str:
+    if abs(value - round(value)) < 1e-9:
+        return str(int(round(value)))
+    text = f"{value:.6f}".rstrip("0").rstrip(".")
+    return text if text else str(value)
+
+
+def _simple_direct_utility_reply(text: str) -> str:
+    clean = _normalize(text).strip()
+    if not clean:
+        return ""
+    math_match = re.match(
+        r"^\s*(?:what(?:'s|\s+is)\s+)?((?:-?\d+(?:\.\d+)?\s*[\+\-\*/]\s*)+-?\d+(?:\.\d+)?)\s*\??\s*$",
+        clean,
+        re.I,
+    )
+    if math_match:
+        value = _safe_eval_arithmetic(math_match.group(1))
+        if value is not None:
+            return _format_numeric_reply(value)
+
+    gb_from_mb = re.search(
+        r"\bhow\s+many\s+(?:gigs?|gb)\s+are\s+in\s+(\d+(?:\.\d+)?)\s*(?:mb|mib)\b",
+        clean,
+        re.I,
+    )
+    if gb_from_mb:
+        mb = float(gb_from_mb.group(1))
+        gb = mb / 1024.0
+        return f"{_format_numeric_reply(gb)} GB"
+
+    mb_to_gb = re.search(
+        r"\bconvert\s+(\d+(?:\.\d+)?)\s*(?:mb|mib)\s+to\s+(?:gigs?|gb)\b",
+        clean,
+        re.I,
+    )
+    if mb_to_gb:
+        mb = float(mb_to_gb.group(1))
+        gb = mb / 1024.0
+        return f"{_format_numeric_reply(gb)} GB"
+    return ""
+
+
 def _scrub_history_for_direct(history: list[dict[str, str]] | None) -> list[dict[str, str]]:
     """Drop poisoned assistant turns and strip internal lines before OpenAI direct."""
     if not history:
@@ -708,6 +794,9 @@ def build_direct_reply(
     inject_durable_memory: bool = True,
 ) -> str:
     clean = _normalize(text)
+    utility_direct = _simple_direct_utility_reply(clean)
+    if utility_direct:
+        return utility_direct
     has_memory = bool(
         inject_durable_memory and memory_notes and any(str(n).strip() for n in memory_notes)
     )

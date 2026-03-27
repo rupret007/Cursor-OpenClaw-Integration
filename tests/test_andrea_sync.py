@@ -5232,6 +5232,28 @@ class TestAndreaSync(unittest.TestCase):
             )
         self.assertEqual(reply, "Pretty good, thanks for asking. How are you doing?")
 
+    def test_build_direct_reply_handles_simple_math_deterministically(self) -> None:
+        from services.andrea_sync.andrea_router import build_direct_reply
+
+        reply = build_direct_reply(
+            "What is 58 + 30?",
+            history=[],
+            memory_notes=[],
+            turn_domain="casual_conversation",
+        )
+        self.assertEqual(reply, "88")
+
+    def test_build_direct_reply_handles_mb_to_gb_conversion(self) -> None:
+        from services.andrea_sync.andrea_router import build_direct_reply
+
+        reply = build_direct_reply(
+            "How many gigs are in 1024 mb?",
+            history=[],
+            memory_notes=[],
+            turn_domain="casual_conversation",
+        )
+        self.assertEqual(reply, "1 GB")
+
     def test_build_direct_answer_policy_promotes_substantive_mixed_question(self) -> None:
         from services.andrea_sync.turn_intelligence import (
             arbitrate_answer_lane,
@@ -5323,6 +5345,45 @@ class TestAndreaSync(unittest.TestCase):
         lane = arbitrate_answer_lane(text=text, turn_plan=plan, direct_policy=policy)
         self.assertEqual(lane.lane, "heavy_lift_delegated_execution")
 
+    def test_build_direct_answer_policy_keeps_simple_math_lightweight(self) -> None:
+        from services.andrea_sync.turn_intelligence import (
+            arbitrate_answer_lane,
+            build_direct_answer_policy,
+            build_turn_plan,
+        )
+
+        text = "What is 58 + 30?"
+        plan = build_turn_plan(
+            text,
+            scenario_id="mixedResourceGoal",
+            projection_has_continuity_state=False,
+        )
+        policy = build_direct_answer_policy(
+            text,
+            scenario_id="mixedResourceGoal",
+            turn_plan=plan,
+        )
+        self.assertFalse(policy.lookup_eligible)
+        lane = arbitrate_answer_lane(text=text, turn_plan=plan, direct_policy=policy)
+        self.assertEqual(lane.lane, "lightweight_direct")
+
+    def test_build_turn_plan_recognizes_plans_today_and_weather(self) -> None:
+        from services.andrea_sync.turn_intelligence import build_turn_plan
+
+        agenda = build_turn_plan(
+            "What are my plans today?",
+            scenario_id="mixedResourceGoal",
+            projection_has_continuity_state=False,
+        )
+        self.assertEqual(agenda.domain, "personal_agenda")
+
+        weather = build_turn_plan(
+            "What's the weather right now?",
+            scenario_id="mixedResourceGoal",
+            projection_has_continuity_state=False,
+        )
+        self.assertEqual(weather.domain, "external_information")
+
 
 class SyncServerGroundedUsefulnessTests(unittest.TestCase):
     def test_split_grounded_lookup_evidence_lines_prefers_newlines(self) -> None:
@@ -5405,6 +5466,37 @@ class SyncServerGroundedUsefulnessTests(unittest.TestCase):
         self.assertGreater(int(contract.get("brevity_max_words_soft") or 0), 0)
         self.assertEqual(contract.get("answer_mode"), "truthful_fallback_with_next_steps")
         self.assertEqual(contract.get("guidance_class"), "certificate_tls")
+
+    def test_grounded_research_unavailable_weather_is_concise_without_next_steps(self) -> None:
+        os.environ["ANDREA_GROUNDED_RESEARCH_ENABLED"] = "1"
+        from services.andrea_sync.server import SyncServer
+        from services.andrea_sync.turn_intelligence import build_turn_plan
+
+        server = SyncServer()
+        plan = build_turn_plan(
+            "What's the weather right now?",
+            scenario_id="mixedResourceGoal",
+            projection_has_continuity_state=False,
+        )
+        with mock.patch.object(
+            server,
+            "_resolve_runtime_skill",
+            return_value={"skill_key": "brave-api-search", "truth": {"status": "unavailable"}},
+        ):
+            out = server._maybe_grounded_research_reply(
+                "t-weather-unavail",
+                classify_text="What's the weather right now?",
+                turn_plan=plan,
+                scenario_id="mixedResourceGoal",
+            )
+        self.assertIsNotNone(out)
+        assert out is not None
+        text, reason, contract = out
+        self.assertEqual(reason, "grounded_research_unavailable")
+        self.assertIn("can't verify current conditions", text.lower())
+        self.assertNotIn("next options", text.lower())
+        self.assertEqual(contract.get("guidance_class"), "everyday_utility")
+        self.assertEqual(tuple(contract.get("next_step_options") or ()), ())
 
 
 if __name__ == "__main__":

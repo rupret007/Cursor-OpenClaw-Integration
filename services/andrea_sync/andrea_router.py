@@ -130,7 +130,7 @@ META_ANSWERING_RE = re.compile(
     re.I,
 )
 HYBRID_SKILL_RE = re.compile(
-    r"\b(remind me|reminder|note|notes|calendar|schedule|todo|to-do|task list|message someone|"
+    r"\b(remind me|reminder|note|notes|todo|to-do|task list|message someone|"
     r"send a message|draft a message|email|inbox|search the web|search online|"
     r"summarize this|summarise this)\b",
     re.I,
@@ -252,6 +252,7 @@ class AndreaRouteDecision:
     reply_text: str = ""
     delegate_target: str = ""
     collaboration_mode: str = "auto"
+    prelude_reply_text: str = ""
 
 
 def _default_delegate_target() -> str:

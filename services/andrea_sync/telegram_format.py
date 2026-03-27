@@ -1,6 +1,7 @@
 """Format Telegram-facing Andrea replies from projected task state."""
 from __future__ import annotations
 
+import os
 import re
 from typing import Any, Dict
 
@@ -74,6 +75,11 @@ def _model_label(provider: str = "", model: str = "") -> str:
     return clean_model or clean_provider
 
 
+def _debug_enabled() -> bool:
+    raw = (os.environ.get("ANDREA_TELEGRAM_DEBUG_DETAILS") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def _preferred_model_note(preferred_model_label: str = "") -> str:
     clean = _normalize_whitespace(preferred_model_label)
     if not clean:
@@ -110,9 +116,9 @@ def _routing_note(routing_hint: str, collaboration_mode: str) -> str:
     hint = str(routing_hint or "").strip().lower()
     collab = str(collaboration_mode or "").strip().lower()
     if hint == "andrea":
-        return "- You addressed Andrea directly, so I kept this in the assistant lane."
+        return "- You addressed Andrea directly, so I kept this with the assistant."
     if hint == "cursor":
-        return "- You asked Andrea to use the Cursor execution lane for the heavy work."
+        return "- You asked me to use Cursor for the heavier work."
     if hint == "collaborate" or collab == "collaborative":
         return "- You asked Andrea and Cursor to work together on this."
     return ""
@@ -127,6 +133,8 @@ def _footer_lines(
     last_error: str = "",
     openclaw_session_id: str = "",
 ) -> list[str]:
+    if not _debug_enabled():
+        return []
     lines = [
         "Technical details:",
         f"- Task: {task_id}",
@@ -171,46 +179,45 @@ def format_ack_message(
     routing_hint: str = "",
     collaboration_mode: str = "",
     preferred_model_label: str = "",
+    prelude_reply_text: str = "",
 ) -> str:
     routing_note = _routing_note(routing_hint, collaboration_mode)
     preferred_model_note = _preferred_model_note(preferred_model_label)
+    prelude = _normalize_whitespace(str(prelude_reply_text or ""))
+    footer = _footer_lines(task_id, "queued")
     if worker_label == "OpenClaw":
-        execution_line = "- OpenClaw will be started automatically."
+        execution_line = "- OpenClaw is starting now."
         if not auto_start:
-            execution_line = "- OpenClaw is queued for manual start or a later retry."
+            execution_line = "- OpenClaw is queued and waiting to start."
         body = [
             "Andrea:",
-            "OpenClaw is taking point — it coordinates first, then delegates to Cursor when the repo needs execution.",
+            *([prelude, ""] if prelude else []),
+            "I started that and OpenClaw is taking point.",
             "",
             "What happens next:",
-            "- OpenClaw runs the coordination / handoff pass (same flow as before).",
+            "- OpenClaw will coordinate the work and bring in Cursor only if the repo needs heavier execution.",
             execution_line,
-            "- Status updates are threaded under your message so this chat stays readable.",
+            "- I’ll keep the updates in this thread.",
             *([preferred_model_note] if preferred_model_note else []),
             *([routing_note] if routing_note else []),
-            "",
-            "Technical details:",
-            f"- Task: {task_id}",
-            "- Status: queued",
+            *(["", *footer] if footer else []),
         ]
         return "\n".join(body)
-    execution_line = "- Cursor will be started automatically."
+    execution_line = "- Cursor is starting now."
     if not auto_start:
-        execution_line = "- Cursor is queued for execution, but auto-start is currently disabled."
+        execution_line = "- Cursor is queued and waiting to start."
     return "\n".join(
         [
             "Andrea:",
-            "I got your message and queued it for Cursor.",
+            *([prelude, ""] if prelude else []),
+            "I started that and Cursor is queued for the heavier work.",
             "",
             "What happens next:",
-            "- Andrea created a task and will keep this thread updated.",
             execution_line,
+            "- I’ll bring the result back here.",
             *([preferred_model_note] if preferred_model_note else []),
             *([routing_note] if routing_note else []),
-            "",
-            "Technical details:",
-            f"- Task: {task_id}",
-            "- Status: queued",
+            *(["", *footer] if footer else []),
         ]
     )
 
@@ -225,21 +232,16 @@ def format_continuation_notice(
 ) -> str:
     """Short Telegram copy when a follow-up message was merged onto the current task."""
     preview = _clip(chunk_preview, 100)
-    lane_line = "OpenClaw keeps one coordination run"
-    if worker_label == "OpenClaw and Cursor":
-        lane_line = "OpenClaw and Cursor stay on one shared heavy-lift workstream"
-    elif worker_label == "Cursor":
-        lane_line = "Cursor stays on one execution run"
     routing_note = _routing_note(routing_hint, collaboration_mode)
     lines = [
         "Andrea:",
-        f"I folded this into the current heavy-lift task `{task_id}` so Andrea and Cursor stay on one workstream (no duplicate job).",
-        f"{lane_line}. I'll treat your latest message as the next instruction and keep the result in the same thread.",
+        "I added that to the active request and I’ll keep everything together in this thread.",
     ]
     if preview:
-        lines.append(f"Latest chunk: {preview}")
+        lines.append(f"Latest instruction: {preview}")
     if routing_note:
         lines.append(routing_note.strip())
+    lines.extend(_footer_lines(task_id, "continuation"))
     return "\n".join(lines)
 
 
@@ -254,18 +256,18 @@ def format_late_chunk_notice(task_id: str, *, worker_label: str = "OpenClaw") ->
     else:
         headline = "I received another message while OpenClaw was already running for this task."
         meaning = "- Your latest text is saved on the task timeline, but the in-flight OpenClaw run may not include it."
-    return "\n".join(
-        [
-            "Andrea:",
-            headline,
-            "",
-            "What this means:",
-            meaning,
-            "- For a follow-up that must change execution, send a new request after this one finishes.",
-            "",
-            f"Task: `{task_id}`",
-        ]
-    )
+    lines = [
+        "Andrea:",
+        headline,
+        "",
+        "What this means:",
+        meaning,
+        "- For a follow-up that must change execution, send a new request after this one finishes.",
+    ]
+    footer = _footer_lines(task_id, "late_chunk")
+    if footer:
+        lines.extend(["", *footer])
+    return "\n".join(lines)
 
 
 def format_progress_message(
@@ -499,19 +501,16 @@ def format_final_message(
             note_body = preferred_model_note[2:] if preferred_model_note.startswith("- ") else preferred_model_note
             lines.extend(["", note_body])
 
-    lines.extend(
-        [
-            "",
-            *_footer_lines(
-                task_id,
-                status,
-                agent_url=agent_url,
-                pr_url=pr_url,
-                last_error=last_error,
-                openclaw_session_id=openclaw_session_id,
-            ),
-        ]
+    footer = _footer_lines(
+        task_id,
+        status,
+        agent_url=agent_url,
+        pr_url=pr_url,
+        last_error=last_error,
+        openclaw_session_id=openclaw_session_id,
     )
+    if footer:
+        lines.extend(["", *footer])
     return "\n".join(lines)
 
 
@@ -559,16 +558,13 @@ def format_alexa_session_summary(
         lines.append(f"- Failure: {_clip(last_error, 220)}")
     if summary_excerpt:
         lines.extend(["", "Summary:", summary_excerpt])
-    lines.extend(
-        [
-            "",
-            *_footer_lines(
-                task_id,
-                status,
-                agent_url=agent_url,
-                pr_url=pr_url,
-                last_error=last_error,
-            ),
-        ]
+    footer = _footer_lines(
+        task_id,
+        status,
+        agent_url=agent_url,
+        pr_url=pr_url,
+        last_error=last_error,
     )
+    if footer:
+        lines.extend(["", *footer])
     return "\n".join(lines)

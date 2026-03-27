@@ -2294,17 +2294,16 @@ class TestAndreaSync(unittest.TestCase):
         text = format_ack_message("tsk_demo")
         self.assertIn("Andrea:", text)
         self.assertIn("What happens next:", text)
-        self.assertIn("Technical details:", text)
-        self.assertIn("Task: tsk_demo", text)
-        self.assertIn("Status: queued", text)
+        self.assertNotIn("Technical details:", text)
+        self.assertIn("Cursor is queued for the heavier work", text)
 
     def test_telegram_ack_message_format_for_openclaw(self) -> None:
         text = format_ack_message("tsk_demo", worker_label="OpenClaw")
         self.assertIn("OpenClaw", text)
         low = text.lower()
-        self.assertIn("coordinates first", low)
-        self.assertIn("delegates to cursor", low)
-        self.assertIn("threaded under your message", low)
+        self.assertIn("coordinate the work", low)
+        self.assertIn("cursor", low)
+        self.assertIn("keep the updates in this thread", low)
 
     def test_telegram_ack_message_mentions_cursor_request(self) -> None:
         text = format_ack_message(
@@ -2313,7 +2312,7 @@ class TestAndreaSync(unittest.TestCase):
             routing_hint="cursor",
             collaboration_mode="cursor_primary",
         )
-        self.assertIn("Cursor execution lane", text)
+        self.assertIn("use Cursor for the heavier work", text)
 
     def test_telegram_ack_message_mentions_preferred_model_lane(self) -> None:
         text = format_ack_message(
@@ -2325,14 +2324,14 @@ class TestAndreaSync(unittest.TestCase):
 
     def test_telegram_ack_message_mentions_manual_cursor_start_when_disabled(self) -> None:
         text = format_ack_message("tsk_demo", worker_label="Cursor", auto_start=False)
-        self.assertIn("auto-start is currently disabled", text)
+        self.assertIn("queued and waiting to start", text)
 
     def test_telegram_running_message_format(self) -> None:
         text = format_running_message("tsk_demo", agent_url="https://cursor.com/agents/demo")
         self.assertIn("Andrea:", text)
         self.assertIn("Cursor is actively working", text)
-        self.assertIn("Technical details:", text)
-        self.assertIn("Agent: https://cursor.com/agents/demo", text)
+        self.assertNotIn("Technical details:", text)
+        self.assertNotIn("Agent: https://cursor.com/agents/demo", text)
 
     def test_telegram_running_message_format_for_openclaw(self) -> None:
         text = format_running_message("tsk_demo", worker_label="OpenClaw")
@@ -2406,8 +2405,9 @@ class TestAndreaSync(unittest.TestCase):
         self.assertIn("Andrea:", text)
         self.assertIn("What happened:", text)
         self.assertNotIn("Cursor said:", text)
-        self.assertIn("Technical details:", text)
-        self.assertIn("PR: https://github.com/example/repo/pull/1", text)
+        self.assertNotIn("Technical details:", text)
+        self.assertNotIn("PR: https://github.com/example/repo/pull/1", text)
+        self.assertIn("PR is available for review", text)
         self.assertNotIn("### What changed", text)
 
     def test_telegram_final_message_for_openclaw_only(self) -> None:
@@ -2454,7 +2454,7 @@ class TestAndreaSync(unittest.TestCase):
             routing_hint="cursor",
             collaboration_mode="cursor_primary",
         )
-        self.assertIn("Cursor execution lane", text)
+        self.assertIn("use Cursor for the heavier work", text)
 
     def test_telegram_final_message_full_visibility_shows_curated_collaboration_trace(self) -> None:
         text = format_final_message(
@@ -2492,7 +2492,7 @@ class TestAndreaSync(unittest.TestCase):
         )
         self.assertIn("could not complete", text)
         self.assertIn("Failure:", text)
-        self.assertIn("Error: cursor_status_failed", text)
+        self.assertNotIn("Error: cursor_status_failed", text)
 
     def test_telegram_final_message_failed_hybrid_mentions_both_workers(self) -> None:
         text = format_final_message(
@@ -4924,46 +4924,50 @@ class TestAndreaSync(unittest.TestCase):
         from services.andrea_sync.server import SyncServer  # noqa: E402
 
         server = SyncServer()
-        created = handle_command(
-            server.conn,
-            {
-                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
-                "channel": "telegram",
-                "external_id": "tg-continuation-running",
-                "payload": {
-                    "text": "first chunk",
-                    "chat_id": 10002,
-                    "message_id": 1,
-                    "from_user": 7,
+        try:
+            created = handle_command(
+                server.conn,
+                {
+                    "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                    "channel": "telegram",
+                    "external_id": "tg-continuation-running",
+                    "payload": {
+                        "text": "first chunk",
+                        "chat_id": 10002,
+                        "message_id": 1,
+                        "from_user": 7,
+                    },
                 },
-            },
-        )
-        append_event(
-            server.conn,
-            created["task_id"],
-            EventType.JOB_STARTED,
-            {"backend": "openclaw", "runner": "openclaw", "execution_lane": "openclaw_hybrid"},
-        )
-        append_event(
-            server.conn,
-            created["task_id"],
-            EventType.USER_MESSAGE,
-            {
-                "text": "second chunk",
-                "routing_text": "second chunk",
-                "chat_id": 10002,
-                "message_id": 2,
-                "from_user": 7,
-                "telegram_continuation": True,
-            },
-        )
-        snapshot = server._task_snapshot(created["task_id"])
-        assert snapshot is not None
-        with mock.patch.object(tg_adapt, "send_text_message") as send_mock:
-            server._handle_telegram_followups(created["task_id"], snapshot)
-        sent_texts = [call.kwargs["text"] for call in send_mock.call_args_list]
-        self.assertTrue(any("folded this into the current heavy-lift task" in text for text in sent_texts))
-        self.assertFalse(any("may not include it" in text for text in sent_texts))
+            )
+            append_event(
+                server.conn,
+                created["task_id"],
+                EventType.JOB_STARTED,
+                {"backend": "openclaw", "runner": "openclaw", "execution_lane": "openclaw_hybrid"},
+            )
+            append_event(
+                server.conn,
+                created["task_id"],
+                EventType.USER_MESSAGE,
+                {
+                    "text": "second chunk",
+                    "routing_text": "second chunk",
+                    "chat_id": 10002,
+                    "message_id": 2,
+                    "from_user": 7,
+                    "telegram_continuation": True,
+                },
+            )
+            snapshot = server._task_snapshot(created["task_id"])
+            assert snapshot is not None
+            with mock.patch.object(tg_adapt, "send_text_message") as send_mock:
+                server._handle_telegram_followups(created["task_id"], snapshot)
+            sent_texts = [call.kwargs["text"] for call in send_mock.call_args_list]
+            self.assertTrue(any("added that to the active request" in text.lower() for text in sent_texts))
+            self.assertFalse(any("may not include it" in text for text in sent_texts))
+        finally:
+            server.shutdown_queue_worker()
+            server.conn.close()
 
     def test_publish_capability_requires_internal_channel(self) -> None:
         r = handle_command(

@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from .adapters.telegram import MENTION_RE
 from .andrea_router import is_standalone_casual_social_turn
+from .intents import classify_intent_envelope
 from .projector import project_task_dict
 from .schema import TaskStatus
 from .store import (
@@ -215,6 +216,12 @@ def attach_continuation_if_applicable(conn: Any, cmd: Dict[str, Any]) -> bool:
     social_line = str(payload.get("routing_text") or payload.get("text") or "").strip()
     if is_standalone_casual_social_turn(social_line):
         return False
+    envelope = classify_intent_envelope(str(payload.get("text") or payload.get("routing_text") or ""))
+    if envelope.has_protected_assistant_intent or envelope.has_control_plane_intent:
+        return False
+    if envelope.explicit_lane in {"openclaw", "andrea"} and not envelope.is_explicit_continuation:
+        if envelope.has_protected_assistant_intent:
+            return False
 
     window_sec = float(os.environ.get("ANDREA_TELEGRAM_CONTINUATION_WINDOW_SECONDS", "180"))
     scan_limit = int(os.environ.get("ANDREA_TELEGRAM_CONTINUATION_SCAN_LIMIT", "25"))

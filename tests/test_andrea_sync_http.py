@@ -1905,7 +1905,7 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
             agent_url="https://cursor.com/agents/demo",
         )
         self.assertIn("Cursor said:", text)
-        self.assertIn("Technical details:", text)
+        self.assertNotIn("Technical details:", text)
         self.assertLess(len(text), 1600)
 
     def test_telegram_final_message_for_openclaw_only_lane(self) -> None:

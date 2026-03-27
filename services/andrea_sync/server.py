@@ -37,6 +37,8 @@ from .assistant_answer_composer import (
     same_chat_has_cursor_continuation_viability,
     try_composer_early_short_circuit,
 )
+from .backends.calendar_service import build_today_schedule_reply
+from .backends.cursor_control import cancel_all_jobs, list_active_jobs, list_all_jobs
 from .goal_runtime import (
     build_goal_continuity_reply,
     ensure_delegate_goal_link,
@@ -105,6 +107,7 @@ from .turn_intelligence import (
     is_lightweight_conversational_question,
     resolve_answer_family_profile,
 )
+from .intents import IntentEnvelope, classify_intent_envelope
 from .store import (
     append_event,
     complete_execution_attempt,
@@ -807,6 +810,101 @@ class SyncServer:
 
         return self.with_lock(read)
 
+    def _task_timezone_name(self, task_id: str) -> str:
+        prefs = self._principal_preferences(task_id)
+        return str(
+            prefs.get("timezone")
+            or prefs.get("time_zone")
+            or os.environ.get("TZ")
+            or ""
+        ).strip()
+
+    def _format_cursor_control_reply(self, result: Any) -> str:
+        action = str(getattr(result, "action", "") or "").strip()
+        rows = list(getattr(result, "results", ()) or [])
+        if action == "cancel_jobs":
+            if not rows:
+                return "There were no active Cursor jobs to cancel."
+            parts = [f"Canceled {int(getattr(result, 'canceled_count', 0) or 0)} Cursor job(s)."]
+            already = int(getattr(result, "terminal_already_count", 0) or 0)
+            failed = int(getattr(result, "failed_count", 0) or 0)
+            if already:
+                parts.append(f"{already} were already finished.")
+            if failed:
+                parts.append(f"{failed} could not be canceled.")
+            details = []
+            for item in rows[:8]:
+                suffix = f" ({item.reason})" if getattr(item, "reason", "") else ""
+                details.append(f"- {item.id}: {item.status}{suffix}")
+            return "\n".join([" ".join(parts), *details])
+        if action == "list_active_jobs":
+            if not rows:
+                return "No Cursor jobs are still running."
+            lines = ["Active Cursor jobs:"]
+            for item in rows[:8]:
+                lines.append(f"- {item.id}: {item.status}")
+            return "\n".join(lines)
+        if action == "list_jobs":
+            if not rows:
+                return "I don't see any Cursor jobs right now."
+            lines = ["Cursor jobs:"]
+            for item in rows[:8]:
+                lines.append(f"- {item.id}: {item.status}")
+            return "\n".join(lines)
+        return "I couldn't summarize the Cursor control request cleanly."
+
+    def _direct_intent_bundle_reply(self, task_id: str, envelope: IntentEnvelope) -> str:
+        parts: list[str] = []
+        handled = False
+        for intent in envelope.intents:
+            if intent.action == "get_schedule_today":
+                handled = True
+                principal_id = self._task_principal_id(task_id)
+                reply_text, _meta = self.with_lock(
+                    lambda c: build_today_schedule_reply(
+                        c,
+                        principal_id=principal_id,
+                        timezone_name=self._task_timezone_name(task_id),
+                    )
+                )
+                if reply_text:
+                    parts.append(reply_text)
+                continue
+            if intent.action == "get_time":
+                handled = True
+                now = dt.datetime.now().astimezone()
+                clock = now.strftime("%I:%M %p").lstrip("0") or now.strftime("%H:%M")
+                parts.append(f"It’s {clock} right now.")
+                continue
+            if intent.action == "cancel_jobs":
+                handled = True
+                parts.append(
+                    self._format_cursor_control_reply(
+                        cancel_all_jobs(repo_root=self.repo_root)
+                    )
+                )
+                continue
+            if intent.action == "list_active_jobs":
+                handled = True
+                parts.append(
+                    self._format_cursor_control_reply(
+                        list_active_jobs(repo_root=self.repo_root)
+                    )
+                )
+                continue
+            if intent.action == "list_jobs":
+                handled = True
+                parts.append(
+                    self._format_cursor_control_reply(
+                        list_all_jobs(repo_root=self.repo_root)
+                    )
+                )
+                continue
+        if not handled:
+            return ""
+        cleaned = [str(part or "").strip() for part in parts if str(part or "").strip()]
+        return "\n\n".join(cleaned)
+
     def _principal_memory_notes(self, task_id: str) -> list[str]:
         principal_id = self._task_principal_id(task_id)
         if not principal_id:
@@ -1278,6 +1376,10 @@ class SyncServer:
                                 or telegram_meta.get("preferred_model_label")
                                 or ""
                             ),
+                            prelude_reply_text=str(
+                                self._projection_meta(projection, "execution").get("prelude_reply_text")
+                                or ""
+                            ),
                         ),
                     )
                 except Exception as exc:  # noqa: BLE001
@@ -1435,6 +1537,35 @@ class SyncServer:
                 classify_text = str(expanded_route).strip()
             execution_prompt = self._extract_cursor_prompt(task_id)
             principal_prefs = self._principal_preferences(task_id)
+            intent_text = str(user_payload.get("text") or classify_text or "")
+            intent_envelope = classify_intent_envelope(intent_text)
+            direct_intent_reply = self._direct_intent_bundle_reply(task_id, intent_envelope)
+            bundle_prelude_text = ""
+            if direct_intent_reply and not intent_envelope.has_code_plane_intent:
+                decision = AndreaRouteDecision(
+                    mode="direct",
+                    reason="protected_or_control_intent",
+                    reply_text=direct_intent_reply,
+                    collaboration_mode=str(
+                        user_payload.get("collaboration_mode")
+                        or principal_prefs.get("collaboration_mode")
+                        or "auto"
+                    ),
+                )
+                applied = self._append_task_event(
+                    task_id,
+                    EventType.ASSISTANT_REPLIED,
+                    {
+                        "text": decision.reply_text,
+                        "route": "direct",
+                        "reason": decision.reason,
+                    },
+                )
+                if applied:
+                    self.with_lock(lambda c: set_meta(c, marker, str(time.time())))
+                return decision, applied
+            if direct_intent_reply and intent_envelope.has_code_plane_intent:
+                bundle_prelude_text = direct_intent_reply
             effective_history = history if history is not None else self._recent_task_history(task_id)
             gid_for_scenario = self.with_lock(
                 lambda c: get_goal_id_for_task(c, task_id) or ""
@@ -1956,6 +2087,10 @@ class SyncServer:
                     context_boundary=effective_turn_plan.context_boundary,
                     inject_durable_memory=effective_turn_plan.inject_durable_memory,
                 )
+            if bundle_prelude_text and decision.mode == "delegate":
+                decision.prelude_reply_text = bundle_prelude_text
+            elif bundle_prelude_text and decision.mode == "direct":
+                decision.reply_text = f"{bundle_prelude_text}\n\n{decision.reply_text}".strip()
             resolution, scenario_contract = resolve_scenario(
                 classify_text,
                 goal_id=gid_for_scenario,
@@ -2187,6 +2322,8 @@ class SyncServer:
                         or ""
                     ),
                 }
+                if decision.prelude_reply_text:
+                    job_payload["prelude_reply_text"] = decision.prelude_reply_text
                 if goal_id:
                     job_payload["goal_id"] = goal_id
                 job_payload.update(

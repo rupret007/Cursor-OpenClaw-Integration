@@ -166,7 +166,7 @@ _TOOLING_IDENTITY_Q_RE = re.compile(
 )
 
 _CURSOR_FOLLOWUP_HEAVY_RE = re.compile(
-    r"@cursor|\bopenclaw\b|"
+    r"@cursor|"
     r"continue\s+(?:that|the|this)\s+cursor\s+task|"
     r"continue\s+(?:the\s+)?cursor\s+task|"
     r"resume\s+(?:the\s+)?cursor\s+task|"

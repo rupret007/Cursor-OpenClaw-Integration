@@ -1360,6 +1360,8 @@ def fold_projection(
             execution_meta["preferred_model_family"] = str(payload["preferred_model_family"])
         if payload.get("preferred_model_label"):
             execution_meta["preferred_model_label"] = str(payload["preferred_model_label"])
+        if payload.get("prelude_reply_text"):
+            execution_meta["prelude_reply_text"] = str(payload.get("prelude_reply_text"))[:2000]
         if payload.get("goal_id"):
             goal_meta = proj.meta.setdefault("goal", {})
             goal_meta["goal_id"] = str(payload["goal_id"])

@@ -9,7 +9,9 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, Optional
 
-MENTION_RE = re.compile(r"(?<!\w)@(andrea|cursor)\b", re.I)
+from ..intents import classify_intent_envelope
+
+MENTION_RE = re.compile(r"(?<!\w)@(andrea|openclaw|cursor)\b", re.I)
 MODEL_MENTION_RE = re.compile(r"(?<!\w)@(gemini|minimax|openai|gpt)\b", re.I)
 COLLABORATION_RE = re.compile(
     r"\b(work together|team up|collaborate|both of you|double-?check|second opinion)\b",
@@ -30,6 +32,7 @@ def extract_routing_hints(text: str) -> Dict[str, Any]:
     raw_text = str(text or "").strip()
     matches = [m.group(1).lower() for m in MENTION_RE.finditer(raw_text)]
     mention_targets = sorted(set(matches))
+    envelope = classify_intent_envelope(raw_text)
     model_aliases = {"gemini": "gemini", "minimax": "minimax", "openai": "openai", "gpt": "openai"}
     model_labels = {"gemini": "Gemini", "minimax": "MiniMax", "openai": "OpenAI"}
     model_mentions: list[str] = []
@@ -42,11 +45,12 @@ def extract_routing_hints(text: str) -> Dict[str, Any]:
             preferred_model_family = family
     preferred_model_label = model_labels.get(preferred_model_family, "")
     routing_hint = "auto"
-    if mention_targets == ["andrea"]:
+    mention_set = set(mention_targets)
+    if mention_set in ({"andrea"}, {"openclaw"}, {"andrea", "openclaw"}):
         routing_hint = "andrea"
-    elif mention_targets == ["cursor"]:
+    elif mention_set == {"cursor"}:
         routing_hint = "cursor"
-    elif mention_targets == ["andrea", "cursor"]:
+    elif "cursor" in mention_set and mention_set & {"andrea", "openclaw"}:
         routing_hint = "collaborate"
     cleaned = _normalize_spaces(MODEL_MENTION_RE.sub(" ", MENTION_RE.sub(" ", raw_text)))
     collaboration_mode = "auto"
@@ -69,7 +73,9 @@ def extract_routing_hints(text: str) -> Dict[str, Any]:
         if masterclass_collab:
             visibility_mode = "full"
     requested_capability = "assistant"
-    if routing_hint == "cursor":
+    if envelope.control_plane_flag:
+        requested_capability = "cursor_control"
+    elif routing_hint == "cursor":
         requested_capability = "cursor_execution"
     elif routing_hint == "collaborate" or collaboration_mode == "collaborative":
         requested_capability = "collaboration"
@@ -84,6 +90,8 @@ def extract_routing_hints(text: str) -> Dict[str, Any]:
         "collaboration_mode": collaboration_mode,
         "visibility_mode": visibility_mode,
         "requested_capability": requested_capability,
+        "explicit_lane": envelope.explicit_lane,
+        "intent_envelope": envelope.to_dict(),
     }
 
 
@@ -119,6 +127,8 @@ def update_to_command(update: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "collaboration_mode": routing["collaboration_mode"],
         "visibility_mode": routing["visibility_mode"],
         "requested_capability": routing["requested_capability"],
+        "explicit_lane": routing.get("explicit_lane", ""),
+        "intent_envelope": routing.get("intent_envelope", {}),
         "chat_id": chat_id,
         "chat_type": chat.get("type"),
         "message_id": message_id,

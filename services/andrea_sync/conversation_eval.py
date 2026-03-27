@@ -60,6 +60,7 @@ from .turn_intelligence import (
     is_everyday_utility_lookup_question,
     is_execution_heavy_or_repo_action,
     is_casual_social_only_turn,
+    is_lightweight_conversational_question,
     is_openclaw_collaboration_state_question,
     is_simple_direct_utility_question,
     is_substantive_non_social_question,
@@ -606,6 +607,7 @@ def run_deterministic_detectors(
     simple_utility_turn = is_simple_direct_utility_question(user)
     agenda_day_plan_turn = is_agenda_day_plan_question(user)
     everyday_lookup_turn = is_everyday_utility_lookup_question(user)
+    lightweight_conversational_turn = is_lightweight_conversational_question(user)
     if substantive_turn:
         if assistant_reason == "greeting_or_social" or (
             "pretty good, thanks for asking" in low and "how are you doing" in low
@@ -709,6 +711,60 @@ def run_deterministic_detectors(
                 "issue_code": "conversation_everyday_lookup_overtechnical_fallback",
                 "severity": "medium",
                 "detail": "everyday lookup fallback used technical retrieval scaffolding",
+            }
+        )
+    if lightweight_conversational_turn:
+        lane_domain = str(capture.get("turn_plan_domain") or "")
+        if lane_domain in {"technical_guidance", "external_information", "project_status", "approval_state"}:
+            findings.append(
+                {
+                    "family": "wrong_domain_contamination",
+                    "issue_code": "conversation_lightweight_conversational_wrong_lane",
+                    "severity": "high",
+                    "detail": "lightweight conversational question was routed into a non-conversational lane",
+                }
+            )
+        if (
+            "next options" in low
+            or "grounded lookup" in low
+            or "verify live lookup capability" in low
+            or "general answer" in low
+        ):
+            findings.append(
+                {
+                    "family": "overly_mechanical_wording",
+                    "issue_code": "conversation_lightweight_conversational_technical_boilerplate",
+                    "severity": "medium",
+                    "detail": "lightweight conversational answer included technical/retrieval boilerplate",
+                }
+            )
+    if (
+        agenda_day_plan_turn
+        and bool(capture.get("projection_has_continuity_state"))
+        and (
+            "connected calendar view" in low
+            or "can't see your real schedule" in low
+            or "cannot see your real schedule" in low
+        )
+        and not any(
+            tok in low
+            for tok in (
+                "upcoming reminders",
+                "follow-through",
+                "recent receipt",
+                "open loop",
+                "follow-up suggestion",
+                "current phase",
+                "pending reminders in queue",
+            )
+        )
+    ):
+        findings.append(
+            {
+                "family": "thin_summary",
+                "issue_code": "conversation_agenda_assistant_usefulness_miss",
+                "severity": "medium",
+                "detail": "agenda/day-plan answer stayed generic despite available continuity state",
             }
         )
     approval_inventory_only = bool(
@@ -2771,6 +2827,24 @@ CONVERSATION_CORE_CASES: tuple[ConversationCaseSpec, ...] = (
         first_update_id=18041,
         first_message_id=28041,
         required_turn_domains=("personal_agenda",),
+    ),
+    ConversationCaseSpec(
+        case_id="meaning_of_life_lightweight",
+        title="Meaning of life stays lightweight",
+        behavior_family="opinion_reflection",
+        turns=("What is the meaning of life?",),
+        chat_id=88045,
+        from_id=99045,
+        first_update_id=18045,
+        first_message_id=28045,
+        required_turn_domains=("opinion_reflection",),
+        required_reply_markers=("42",),
+        forbidden_reply_markers=(
+            "next options",
+            "grounded lookup",
+            "verify live lookup capability",
+            "general answer",
+        ),
     ),
     ConversationCaseSpec(
         case_id="simple_math_direct",

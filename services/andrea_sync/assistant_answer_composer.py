@@ -2528,7 +2528,7 @@ def _build_personal_runtime_reply(
 ) -> str:
     """
     Honest agenda or attention-style answer from reminders, receipts, follow-through,
-    ledger rows, and projection meta. Does not substitute goal continuity for calendar data.
+    ledger rows, projection meta, and concise active-plan context.
     """
     meta = _projection_meta(conn, task_id)
     principal_id = get_task_principal_id(conn, task_id) or ""
@@ -2549,6 +2549,7 @@ def _build_personal_runtime_reply(
     dp = _daily_pack_section(meta)
     outcome = _outcome_section(meta)
     proactive = _proactive_section(meta)
+    goal_context = build_goal_continuity_reply(conn, task_id, user_text="what are my plans today?")
     tm = _telegram_section(meta)
     cont_records = (
         tm.get("continuation_records") if isinstance(tm.get("continuation_records"), list) else []
@@ -2573,13 +2574,34 @@ def _build_personal_runtime_reply(
             lines.append(f"Latest assistant receipt snapshot: {summary}")
 
     def reminder_block() -> None:
+        def _format_due_label(due_at: float) -> str:
+            due = float(due_at or 0.0)
+            if due <= 0:
+                return "unscheduled"
+            now = time.time()
+            delta = int(due - now)
+            if abs(delta) < 90:
+                return "now"
+            if delta > 0:
+                if delta < 3600:
+                    return f"in {max(1, delta // 60)} min"
+                if delta < 86400:
+                    return f"in {max(1, delta // 3600)} hr"
+                return time.strftime("%b %d %H:%M", time.localtime(due))
+            lag = abs(delta)
+            if lag < 3600:
+                return f"{max(1, lag // 60)} min ago"
+            if lag < 86400:
+                return f"{max(1, lag // 3600)} hr ago"
+            return time.strftime("%b %d %H:%M", time.localtime(due))
+
         if reminders:
             lines.append("Upcoming reminders I have on file:")
             for row in reminders[:8]:
                 msg = str(row.get("message") or "").strip()
                 due = float(row.get("due_at") or 0.0)
                 if msg:
-                    lines.append(f"• {msg} (due_at={due:.0f})")
+                    lines.append(f"• {msg} (due {_format_due_label(due)})")
 
     def loop_block() -> None:
         for row in loops:
@@ -2645,6 +2667,24 @@ def _build_personal_runtime_reply(
         if pr > 0:
             lines.append(f"Pending reminders in queue: {pr}")
 
+    def goal_block() -> None:
+        raw = sanitize_user_surface_text(str(goal_context or "").strip(), fallback="", limit=360).strip()
+        if not raw:
+            return
+        low = raw.lower()
+        if any(
+            frag in low
+            for frag in (
+                "i do not see active tracked work right now",
+                "i'm not seeing any approval requests waiting on you right now",
+                "i don't have enough clean stored cursor recap detail",
+            )
+        ):
+            return
+        if raw.lower() in "\n".join(lines).lower():
+            return
+        lines.append(f"Active plan context: {raw}")
+
     if attention_first:
         ft_block()
         loop_block()
@@ -2656,6 +2696,7 @@ def _build_personal_runtime_reply(
         ledger_block()
         continuation_block()
         outcome_block()
+        goal_block()
         proactive_block()
     else:
         reminder_block()
@@ -2667,6 +2708,7 @@ def _build_personal_runtime_reply(
         closure_block()
         continuation_block()
         outcome_block()
+        goal_block()
 
     if lines:
         lines.append(

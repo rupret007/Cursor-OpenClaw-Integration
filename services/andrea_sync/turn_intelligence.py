@@ -110,6 +110,14 @@ _OPINION_RE = re.compile(
     r"\b(what(?:'s|s|\s+do)\s+you\s+think|your\s+(opinion|view)|what(?:'s|s)\s+your\s+take)\b",
     re.I,
 )
+_LIGHTWEIGHT_CONVERSATIONAL_RE = re.compile(
+    r"\b("
+    r"meaning\s+of\s+life|purpose\s+of\s+life|"
+    r"why\s+do\s+we\s+exist|"
+    r"life,\s+the\s+universe\s+and\s+everything"
+    r")\b",
+    re.I,
+)
 # Blocker / stuck — deterministic state-first lane (must beat generic status fallbacks).
 _BLOCKED_STATE_RE = re.compile(
     r"\b("
@@ -447,6 +455,8 @@ def arbitrate_answer_lane(
         return LaneArbitrationDecision("lightweight_direct", "casual_social", openclaw_primary=False)
     if is_tooling_identity_question(clean):
         return LaneArbitrationDecision("lightweight_direct", "tooling_identity", openclaw_primary=False)
+    if is_lightweight_conversational_question(clean):
+        return LaneArbitrationDecision("lightweight_direct", "lightweight_conversational", openclaw_primary=False)
     if is_simple_direct_utility_question(clean):
         return LaneArbitrationDecision("lightweight_direct", "simple_direct_utility", openclaw_primary=False)
     if bool(turn_plan.force_delegate) or is_execution_heavy_or_repo_action(clean):
@@ -511,9 +521,38 @@ def is_agenda_day_plan_question(text: str) -> bool:
     return bool(_AGENDA_RE.search(clean))
 
 
+def is_lightweight_conversational_question(text: str) -> bool:
+    clean = str(text or "").strip()
+    if not clean:
+        return False
+    if is_casual_social_only_turn(clean):
+        return False
+    if is_execution_heavy_or_repo_action(clean):
+        return False
+    if (
+        is_approval_state_question(clean)
+        or is_recent_outcome_history_question(clean)
+        or is_openclaw_collaboration_state_question(clean)
+        or is_everyday_utility_lookup_question(clean)
+        or is_agenda_day_plan_question(clean)
+        or _ATTENTION_TODAY_RE.search(clean)
+        or _STATUS_EXTERNAL_NEWS_RE.search(clean)
+        or _TECHNICAL_GUIDANCE_RE.search(clean)
+        or _TOOLING_IDENTITY_Q_RE.match(clean)
+    ):
+        return False
+    if _OPINION_RE.search(clean):
+        return True
+    if _LIGHTWEIGHT_CONVERSATIONAL_RE.search(clean):
+        return True
+    return False
+
+
 def is_substantive_non_social_question(text: str) -> bool:
     clean = str(text or "").strip()
     if not clean or is_casual_social_only_turn(clean):
+        return False
+    if is_lightweight_conversational_question(clean):
         return False
     if is_simple_direct_utility_question(clean):
         return False
@@ -563,6 +602,12 @@ def build_direct_answer_policy(
             lookup_eligible=False,
             preferred_lookup_domain="",
         )
+    if is_lightweight_conversational_question(clean):
+        return DirectAnswerPolicy(
+            allow_casual_social_fallback=False,
+            lookup_eligible=False,
+            preferred_lookup_domain="",
+        )
     if is_simple_direct_utility_question(clean):
         return DirectAnswerPolicy(
             allow_casual_social_fallback=False,
@@ -581,7 +626,13 @@ def build_direct_answer_policy(
             lookup_eligible=True,
             preferred_lookup_domain=dom,
         )
-    if dom in {"project_status", "approval_state", "attention_today", "personal_agenda"}:
+    if dom in {
+        "project_status",
+        "approval_state",
+        "attention_today",
+        "personal_agenda",
+        "opinion_reflection",
+    }:
         return DirectAnswerPolicy(
             allow_casual_social_fallback=False,
             lookup_eligible=False,
@@ -696,6 +747,9 @@ def build_turn_plan(
         elif _AGENDA_RE.search(clean):
             domain = "personal_agenda"
             context_boundary = "personal_agenda_state"
+        elif is_lightweight_conversational_question(clean):
+            domain = "opinion_reflection"
+            context_boundary = "recent_thread_only"
         elif _OPINION_RE.search(clean):
             domain = "opinion_reflection"
             context_boundary = "recent_thread_only"
@@ -741,6 +795,9 @@ def build_turn_plan(
         elif _AGENDA_RE.search(clean):
             domain = "personal_agenda"
             context_boundary = "personal_agenda_state"
+        elif is_lightweight_conversational_question(clean):
+            domain = "opinion_reflection"
+            context_boundary = "recent_thread_only"
         elif _OPINION_RE.search(clean):
             domain = "opinion_reflection"
             context_boundary = "recent_thread_only"
@@ -766,6 +823,9 @@ def build_turn_plan(
     elif _AGENDA_RE.search(clean):
         domain = "personal_agenda"
         context_boundary = "personal_agenda_state"
+    elif is_lightweight_conversational_question(clean):
+        domain = "opinion_reflection"
+        context_boundary = "recent_thread_only"
     elif is_everyday_utility_lookup_question(clean):
         domain = "external_information"
         context_boundary = "external_world_only"

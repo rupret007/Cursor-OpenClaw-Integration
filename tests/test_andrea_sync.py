@@ -5254,6 +5254,17 @@ class TestAndreaSync(unittest.TestCase):
         )
         self.assertEqual(reply, "1 GB")
 
+    def test_build_direct_reply_handles_meaning_of_life_lightweight(self) -> None:
+        from services.andrea_sync.andrea_router import build_direct_reply
+
+        reply = build_direct_reply(
+            "What is the meaning of life?",
+            history=[],
+            memory_notes=[],
+            turn_domain="casual_conversation",
+        )
+        self.assertEqual(reply, "42.")
+
     def test_build_direct_answer_policy_promotes_substantive_mixed_question(self) -> None:
         from services.andrea_sync.turn_intelligence import (
             arbitrate_answer_lane,
@@ -5384,6 +5395,29 @@ class TestAndreaSync(unittest.TestCase):
         )
         self.assertEqual(weather.domain, "external_information")
 
+    def test_build_turn_plan_and_policy_keep_meaning_of_life_lightweight(self) -> None:
+        from services.andrea_sync.turn_intelligence import (
+            arbitrate_answer_lane,
+            build_direct_answer_policy,
+            build_turn_plan,
+        )
+
+        text = "What is the meaning of life?"
+        plan = build_turn_plan(
+            text,
+            scenario_id="mixedResourceGoal",
+            projection_has_continuity_state=False,
+        )
+        self.assertEqual(plan.domain, "opinion_reflection")
+        policy = build_direct_answer_policy(
+            text,
+            scenario_id="mixedResourceGoal",
+            turn_plan=plan,
+        )
+        self.assertFalse(policy.lookup_eligible)
+        lane = arbitrate_answer_lane(text=text, turn_plan=plan, direct_policy=policy)
+        self.assertEqual(lane.lane, "lightweight_direct")
+
 
 class SyncServerGroundedUsefulnessTests(unittest.TestCase):
     def test_split_grounded_lookup_evidence_lines_prefers_newlines(self) -> None:
@@ -5497,6 +5531,29 @@ class SyncServerGroundedUsefulnessTests(unittest.TestCase):
         self.assertNotIn("next options", text.lower())
         self.assertEqual(contract.get("guidance_class"), "everyday_utility")
         self.assertEqual(tuple(contract.get("next_step_options") or ()), ())
+
+    def test_personal_assistant_synthesis_uses_openclaw_only_when_rich(self) -> None:
+        os.environ["ANDREA_PERSONAL_ASSISTANT_SYNTHESIS_ENABLED"] = "1"
+        from services.andrea_sync.server import SyncServer
+
+        server = SyncServer()
+        with mock.patch.object(
+            server,
+            "_run_direct_openclaw_lookup",
+            return_value=("Prioritize two reminders first, then resolve the open loop.", "assistant_state_synthesis_ready"),
+        ) as mocked:
+            out = server._maybe_openclaw_personal_assistant_synthesis(
+                "task-pa-synth",
+                classify_text="What should I focus on today?",
+                state_lines=[
+                    "Upcoming reminders I have on file:",
+                    "• Review deploy checklist",
+                    "Follow-through: needs user attention",
+                    "Open loop (task): waiting for confirmation",
+                ],
+            )
+        self.assertTrue(out.lower().startswith("prioritize"))
+        self.assertTrue(mocked.called)
 
 
 if __name__ == "__main__":

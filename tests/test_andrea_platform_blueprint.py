@@ -231,6 +231,13 @@ class BlueprintPlatformTests(unittest.TestCase):
         self.assertEqual(plan_opinion.domain, "opinion_reflection")
         self.assertFalse(plan_opinion.allow_goal_continuity_repair)
 
+        plan_meaning = build_turn_plan(
+            "What is the meaning of life?",
+            scenario_id="mixedResourceGoal",
+            projection_has_continuity_state=False,
+        )
+        self.assertEqual(plan_meaning.domain, "opinion_reflection")
+
         plan_status = build_turn_plan(
             "What are we working on right now?",
             scenario_id="statusFollowupContinue",

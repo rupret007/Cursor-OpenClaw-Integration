@@ -298,6 +298,37 @@ class ConversationEvalDetectorTests(unittest.TestCase):
         codes = {h["issue_code"] for h in hits}
         self.assertIn("conversation_agenda_day_plan_lane_miss", codes)
 
+    def test_detects_lightweight_conversational_technical_boilerplate(self) -> None:
+        cap = {
+            "raw_reply_text": (
+                "I couldn't verify live lookup capability right now, so I can only give a general answer.\n\n"
+                "Next options:\n- Retry grounded lookup in a moment when connectivity is stable."
+            ),
+            "user_turn": "What is the meaning of life?",
+            "turn_plan_domain": "opinion_reflection",
+            "assistant_reason": "grounded_research_unavailable",
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap)
+        codes = {h["issue_code"] for h in hits}
+        self.assertIn("conversation_lightweight_conversational_technical_boilerplate", codes)
+
+    def test_detects_agenda_assistant_usefulness_miss_with_state(self) -> None:
+        cap = {
+            "raw_reply_text": (
+                "I don't have a connected calendar view in this chat, so I can't see your real schedule here."
+            ),
+            "user_turn": "What's on my schedule today?",
+            "turn_plan_domain": "personal_agenda",
+            "projection_has_continuity_state": True,
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap)
+        codes = {h["issue_code"] for h in hits}
+        self.assertIn("conversation_agenda_assistant_usefulness_miss", codes)
+
     def test_detects_stateful_domain_hijack_outside_status_domains(self) -> None:
         cap = {
             "raw_reply_text": "I’m not finding a recent clean Cursor result to recap from this thread.",
@@ -1090,6 +1121,7 @@ class ConversationCoreScenariosTests(unittest.TestCase):
         self.assertIn("conversation_core::simple_math_direct", ids)
         self.assertIn("conversation_core::simple_conversion_direct", ids)
         self.assertIn("conversation_core::plans_today", ids)
+        self.assertIn("conversation_core::meaning_of_life_lightweight", ids)
         self.assertIn("conversation_core::weather_current_conditions", ids)
         self.assertIn("conversation_core::technical_guidance_timeout", ids)
         self.assertIn("conversation_core::short_technical_question_not_social", ids)

@@ -102,6 +102,7 @@ from .turn_intelligence import (
     build_turn_plan,
     is_everyday_utility_lookup_question,
     is_execution_heavy_or_repo_action,
+    is_lightweight_conversational_question,
     resolve_answer_family_profile,
 )
 from .store import (
@@ -1598,6 +1599,18 @@ class SyncServer:
             )
             if early:
                 early_text, early_reason = early
+                if early_reason in {"composer_personal_agenda_state", "composer_attention_today_state"}:
+                    merged_reply, state_lines = self._merge_personal_assistant_goal_context(
+                        task_id,
+                        classify_text=classify_text,
+                        base_reply=early_text,
+                    )
+                    synthesized = self._maybe_openclaw_personal_assistant_synthesis(
+                        task_id,
+                        classify_text=classify_text,
+                        state_lines=state_lines,
+                    )
+                    early_text = synthesized or merged_reply or early_text
                 gid = self.with_lock(lambda c: get_goal_id_for_task(c, task_id) or "")
                 self._append_task_event(
                     task_id,
@@ -2006,15 +2019,36 @@ class SyncServer:
                 if self._is_casual_social_fallback_reply(
                     text=decision.reply_text, reason=decision.reason
                 ):
-                    decision = AndreaRouteDecision(
-                        mode="direct",
-                        reason="direct_policy_truthful_clarifier",
-                        reply_text=(
-                            "This sounds like a substantive question, and I do not want to answer casually or guess. "
-                            "If you want, I can run a grounded lookup and give a concise answer."
-                        ),
-                        collaboration_mode=decision.collaboration_mode,
-                    )
+                    if is_lightweight_conversational_question(classify_text):
+                        low_q = str(classify_text or "").strip().lower()
+                        lightweight_reply = (
+                            "42."
+                            if any(
+                                tok in low_q
+                                for tok in (
+                                    "meaning of life",
+                                    "purpose of life",
+                                    "why do we exist",
+                                )
+                            )
+                            else "Happy to give a quick take—ask however you like and I’ll keep it concise."
+                        )
+                        decision = AndreaRouteDecision(
+                            mode="direct",
+                            reason="lightweight_conversational_fallback",
+                            reply_text=lightweight_reply,
+                            collaboration_mode=decision.collaboration_mode,
+                        )
+                    else:
+                        decision = AndreaRouteDecision(
+                            mode="direct",
+                            reason="direct_policy_truthful_clarifier",
+                            reply_text=(
+                                "This sounds like a substantive question, and I do not want to answer casually or guess. "
+                                "If you want, I can run a grounded lookup and give a concise answer."
+                            ),
+                            collaboration_mode=decision.collaboration_mode,
+                        )
             self._append_task_event(
                 task_id,
                 EventType.SCENARIO_RESOLVED,
@@ -3416,6 +3450,96 @@ class SyncServer:
         if clean == "pretty good, thanks for asking. how are you doing?":
             return True
         return False
+
+    def _build_personal_assistant_synthesis_prompt(
+        self,
+        *,
+        user_text: str,
+        state_lines: Sequence[str],
+    ) -> str:
+        packed = "\n".join(f"- {ln}" for ln in list(state_lines or [])[:10] if str(ln or "").strip())
+        return (
+            "You are assisting Andrea with a personal-assistant style day-plan synthesis.\n"
+            "Use only the supplied assistant-state lines.\n"
+            "Do not invent calendar entries, reminders, statuses, or outcomes.\n"
+            "Prioritize practical today guidance in 2-4 short sentences.\n"
+            "Do not include internal runtime language.\n\n"
+            f"User request: {str(user_text or '').strip()}\n"
+            "Assistant-state lines:\n"
+            f"{packed}\n"
+        )
+
+    def _assistant_state_richness_score(self, lines: Sequence[str]) -> int:
+        score = 0
+        for ln in list(lines or []):
+            low = str(ln or "").lower()
+            if not low:
+                continue
+            if any(tok in low for tok in ("upcoming reminders", "follow-through", "open loop", "stale / at-risk")):
+                score += 2
+            elif any(tok in low for tok in ("recent receipt", "current phase", "continuation note", "follow-up suggestion")):
+                score += 1
+        return score
+
+    def _merge_personal_assistant_goal_context(
+        self,
+        task_id: str,
+        *,
+        classify_text: str,
+        base_reply: str,
+    ) -> tuple[str, list[str]]:
+        base = shared_sanitize_user_surface_text(str(base_reply or "").strip(), fallback="", limit=1600).strip()
+        if not base:
+            return "", []
+        goal_hint = self.with_lock(lambda c: try_goal_status_nl_reply(c, task_id, classify_text) or "")
+        if not goal_hint:
+            goal_hint = self.with_lock(
+                lambda c: build_goal_continuity_reply(c, task_id, user_text=classify_text)
+            )
+        safe_goal = shared_sanitize_user_surface_text(str(goal_hint or "").strip(), fallback="", limit=420).strip()
+        skip_fragments = (
+            "i do not see active tracked work right now",
+            "i'm not seeing any approval requests waiting on you right now",
+            "i don't have enough clean stored",
+        )
+        if safe_goal and not any(frag in safe_goal.lower() for frag in skip_fragments):
+            if safe_goal.lower() not in base.lower():
+                base = f"{base}\nAssistant planning context: {safe_goal}"
+        state_lines = [
+            str(ln).strip() for ln in str(base).splitlines() if len(str(ln).strip()) > 6
+        ][:12]
+        return base, state_lines
+
+    def _maybe_openclaw_personal_assistant_synthesis(
+        self,
+        task_id: str,
+        *,
+        classify_text: str,
+        state_lines: Sequence[str],
+    ) -> str:
+        if not _env_bool("ANDREA_PERSONAL_ASSISTANT_SYNTHESIS_ENABLED", False):
+            return ""
+        lines = [str(ln).strip() for ln in list(state_lines or []) if str(ln).strip()]
+        if self._assistant_state_richness_score(lines) < 3:
+            return ""
+        summary, reason = self._run_direct_openclaw_lookup(
+            task_id,
+            prompt=self._build_personal_assistant_synthesis_prompt(
+                user_text=classify_text,
+                state_lines=lines,
+            ),
+            route_reason="structured_personal_assistant_synthesis",
+            success_reason="assistant_state_synthesis_ready",
+            success_fallback="",
+            failure_reason="assistant_state_synthesis_failed",
+            failure_reply="",
+        )
+        if reason.endswith("_failed") or reason.endswith("_contaminated"):
+            return ""
+        safe = shared_sanitize_user_surface_text(str(summary or "").strip(), fallback="", limit=900).strip()
+        if not safe or _is_generic_openclaw_summary(safe):
+            return ""
+        return safe
 
     def _maybe_grounded_research_reply(
         self,

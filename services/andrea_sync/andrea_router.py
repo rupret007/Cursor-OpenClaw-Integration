@@ -477,6 +477,9 @@ def _heuristic_reply(text: str, history: list[dict[str, str]] | None = None) -> 
         return "Hi! Good to hear from you. How can I help?"
     if AGENDA_OR_DAY_PLAN_RE.search(clean):
         return DIRECT_AGENDA_NO_CALENDAR_REPLY
+    lightweight_convo = _lightweight_conversational_reply(clean)
+    if lightweight_convo:
+        return lightweight_convo
     if OPINION_OR_TAKE_RE.search(clean):
         h = _history_hint(history)
         if h and len(h) > 12 and (
@@ -620,6 +623,19 @@ def _simple_direct_utility_reply(text: str) -> str:
         mb = float(mb_to_gb.group(1))
         gb = mb / 1024.0
         return f"{_format_numeric_reply(gb)} GB"
+    return ""
+
+
+def _lightweight_conversational_reply(text: str) -> str:
+    clean = _normalize(text).strip()
+    if not clean:
+        return ""
+    if re.search(
+        r"\b(what(?:'s|\s+is)\s+(?:the\s+)?(?:meaning|purpose)\s+of\s+life|why\s+do\s+we\s+exist)\b",
+        clean,
+        re.I,
+    ):
+        return "42."
     return ""
 
 
@@ -794,6 +810,9 @@ def build_direct_reply(
     inject_durable_memory: bool = True,
 ) -> str:
     clean = _normalize(text)
+    lightweight_convo = _lightweight_conversational_reply(clean)
+    if lightweight_convo:
+        return lightweight_convo
     utility_direct = _simple_direct_utility_reply(clean)
     if utility_direct:
         return utility_direct

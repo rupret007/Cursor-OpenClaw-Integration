@@ -396,6 +396,13 @@ def choose_semantic_state_reply(
         turn_plan.allow_goal_continuity_repair
     ):
         return None
+    # Raw text vs forced upstream plan: agenda/attention wording must not be
+    # answered via project_status / approval_state state machinery (hijack guard).
+    if raw_text_plan.domain in {"personal_agenda", "attention_today"} and interpretation.domain in {
+        "project_status",
+        "approval_state",
+    }:
+        return None
 
     if is_casual_social_only_turn(text) or is_tooling_identity_question(text):
         return None

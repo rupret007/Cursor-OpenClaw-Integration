@@ -1148,10 +1148,18 @@ def legal_task_transition(
             return True, TaskStatus.RUNNING
         if current == TaskStatus.RUNNING:
             return True, None
+        if current == TaskStatus.COMPLETED:
+            # Routing may emit ASSISTANT_REPLIED (terminal complete) before a deferred
+            # delegated runner executes (e.g. experience harness calling _run_delegated_job).
+            return True, TaskStatus.RUNNING
         return False, None
     if event == EventType.JOB_COMPLETED:
-        if current in (TaskStatus.CANCELLED, TaskStatus.FAILED, TaskStatus.COMPLETED):
+        if current in (TaskStatus.CANCELLED, TaskStatus.FAILED):
             return False, None
+        if current == TaskStatus.COMPLETED:
+            # Allow meta/summary refresh when a second completion event arrives after terminal
+            # assistant receipt (same overall completed status).
+            return True, None
         return True, TaskStatus.COMPLETED
     if event == EventType.ASSISTANT_REPLIED:
         if current in (TaskStatus.CANCELLED, TaskStatus.FAILED, TaskStatus.COMPLETED):
@@ -1609,6 +1617,10 @@ def fold_projection(
             openclaw_meta["model"] = str(payload["model"])
         if payload.get("visibility_mode"):
             execution_meta["visibility_mode"] = str(payload["visibility_mode"])
+        if payload.get("collaboration_mode"):
+            execution_meta["collaboration_mode"] = str(payload["collaboration_mode"])
+        if payload.get("routing_hint"):
+            execution_meta["routing_hint"] = str(payload["routing_hint"])
         if payload.get("preferred_model_family"):
             execution_meta["preferred_model_family"] = str(payload["preferred_model_family"])
         if payload.get("preferred_model_label"):
@@ -1655,6 +1667,10 @@ def fold_projection(
             openclaw_meta["model"] = str(payload["model"])
         if payload.get("visibility_mode"):
             execution_meta["visibility_mode"] = str(payload["visibility_mode"])
+        if payload.get("collaboration_mode"):
+            execution_meta["collaboration_mode"] = str(payload["collaboration_mode"])
+        if payload.get("routing_hint"):
+            execution_meta["routing_hint"] = str(payload["routing_hint"])
         if payload.get("preferred_model_family"):
             execution_meta["preferred_model_family"] = str(payload["preferred_model_family"])
         if payload.get("preferred_model_label"):

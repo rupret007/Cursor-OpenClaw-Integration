@@ -5145,6 +5145,28 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(plan.domain, "project_status")
         self.assertEqual(plan.continuity_focus, "blocked_state")
 
+    def test_build_turn_plan_classifies_openclaw_working_on_as_blocked_state(self) -> None:
+        from services.andrea_sync.turn_intelligence import build_turn_plan
+
+        plan = build_turn_plan(
+            "What is OpenClaw working on?",
+            scenario_id="statusFollowupContinue",
+            projection_has_continuity_state=True,
+        )
+        self.assertEqual(plan.domain, "project_status")
+        self.assertEqual(plan.continuity_focus, "blocked_state")
+
+    def test_build_turn_plan_classifies_openclaw_waiting_on_as_blocked_state(self) -> None:
+        from services.andrea_sync.turn_intelligence import build_turn_plan
+
+        plan = build_turn_plan(
+            "What is OpenClaw waiting on?",
+            scenario_id="statusFollowupContinue",
+            projection_has_continuity_state=True,
+        )
+        self.assertEqual(plan.domain, "project_status")
+        self.assertEqual(plan.continuity_focus, "blocked_state")
+
     def test_build_turn_plan_classifies_openclaw_thread_recap_as_recent_outcome_history(self) -> None:
         from services.andrea_sync.turn_intelligence import build_turn_plan
 

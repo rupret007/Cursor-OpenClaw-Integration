@@ -9,6 +9,7 @@ from .assistant_answer_composer import (
     CONTINUATION_NO_VIABLE_WORKSTREAM_FALLBACK,
     RECALL_NO_CLEAN_CURSOR_RECAP_FALLBACK,
     build_blocked_state_reply_from_state,
+    is_generic_execution_wrapper_text,
     build_recent_outcome_history_reply_from_state,
     build_stateful_summary_bundle,
     cursor_followup_context_reply_with_fallback,
@@ -115,6 +116,8 @@ def _looks_thin_cursor_recap(text: str) -> bool:
     low = str(text or "").strip().lower()
     if not low:
         return True
+    if is_generic_execution_wrapper_text(text):
+        return True
     return "not finding a strong stored summary" in low
 
 
@@ -214,8 +217,15 @@ def _contract_is_admissible(
         return False
     if contract.required_anchors and contract.evidence_strength >= 3:
         for anchor in contract.required_anchors:
-            if anchor and anchor not in low:
-                return False
+            if not anchor:
+                continue
+            if anchor in low:
+                continue
+            # Blocked-state surfaces often use "blocker" phrasing while the
+            # family anchor uses "blocked". Treat this set as equivalent.
+            if anchor == "blocked" and any(tok in low for tok in ("blocker", "blocking", "blocked")):
+                continue
+            return False
     return True
 
 

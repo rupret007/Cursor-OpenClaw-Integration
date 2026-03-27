@@ -96,6 +96,44 @@ def _reply_word_count(text: str) -> int:
     return len(re.findall(r"\b\w+\b", str(text or "")))
 
 
+def _user_requests_action_guidance(text: str) -> bool:
+    low = str(text or "").strip().lower()
+    if not low:
+        return False
+    return bool(
+        re.search(
+            r"\b("
+            r"what\s+should\s+i\s+do|what\s+do\s+i\s+do|"
+            r"next\s+step|next\s+move|how\s+do\s+i|how\s+should\s+i|"
+            r"how\s+can\s+i|how\s+to\s+unblock|how\s+to\s+fix|"
+            r"what\s+now|what\s+should\s+we\s+do|what\s+is\s+the\s+best\s+next"
+            r")\b",
+            low,
+        )
+    )
+
+
+def _should_include_stateful_next_steps(
+    *,
+    turn_domain: str,
+    family: str,
+    answer_mode: str,
+    user_text: str,
+    options: Sequence[str],
+) -> bool:
+    if not options:
+        return False
+    if _user_requests_action_guidance(user_text):
+        return True
+    if answer_mode == "strong_evidence_answer":
+        return False
+    if turn_domain in {"personal_agenda", "attention_today"}:
+        return False
+    if family == "blocked_state":
+        return False
+    return True
+
+
 def _split_next_options_suffix(text: str) -> tuple[str, str]:
     t = str(text or "")
     low = t.lower()
@@ -554,6 +592,14 @@ def maybe_realize_stateful_reply(
             brevity_max_words_soft = 0
     if not utility_goal or brevity_max_words_soft <= 0:
         utility_goal, brevity_max_words_soft = _local_brevity_profile(answer_mode)
+    if not _should_include_stateful_next_steps(
+        turn_domain=str(turn_plan.domain or ""),
+        family=str(effective_family or ""),
+        answer_mode=str(answer_mode or ""),
+        user_text=str(user_text or ""),
+        options=next_step_options,
+    ):
+        next_step_options = ()
     inp = StatefulRealizationInput(
         source=str(source or ""),
         deterministic_reply=str(deterministic_reply or "").strip(),
@@ -599,8 +645,8 @@ def maybe_realize_stateful_reply(
         mode_rules = (
             "7) ANSWER_MODE allows partial help: state only verified facts from EVIDENCE_LINES first, "
             "then briefly name the uncertainty boundary.\n"
-            "8) NEXT_STEP_OPTIONS lists approved actions only—rephrase at most one or two of them naturally; "
-            "do NOT add new options or new facts.\n"
+            "8) Include NEXT_STEP_OPTIONS only if the user asked for an action/next move or uncertainty is blocking progress; "
+            "if included, rephrase at most one or two naturally and do NOT add new options or new facts.\n"
         )
     brevity_rule = ""
     if inp.brevity_max_words_soft > 0:

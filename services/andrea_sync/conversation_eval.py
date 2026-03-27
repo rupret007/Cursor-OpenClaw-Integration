@@ -767,6 +767,35 @@ def run_deterministic_detectors(
                 "detail": "agenda/day-plan answer stayed generic despite available continuity state",
             }
         )
+    if (
+        agenda_day_plan_turn
+        and contract_evidence_strength >= 4
+        and (
+            _looks_fallback_shaped_reply(text)
+            or (
+                "connected calendar view" in low
+                and not any(
+                    tok in low
+                    for tok in (
+                        "top plan items",
+                        "upcoming reminders",
+                        "follow-through",
+                        "open loop",
+                        "recent receipt",
+                        "current phase",
+                    )
+                )
+            )
+        )
+    ):
+        findings.append(
+            {
+                "family": "thin_summary",
+                "issue_code": "conversation_agenda_assistant_thin_under_contract_evidence",
+                "severity": "high",
+                "detail": "agenda/day-plan surface stayed thin despite strong assistant-state contract evidence",
+            }
+        )
     approval_inventory_only = bool(
         str(capture.get("turn_plan_domain") or "") == "approval_state"
         and (
@@ -1353,6 +1382,7 @@ def run_deterministic_detectors(
     if is_openclaw_collaboration_state_question(user):
         low_user = user.lower()
         blocker_ask = any(tok in low_user for tok in ("block", "blocked", "blocker", "holding", "stuck"))
+        work_status_ask = any(tok in low_user for tok in ("working on", "waiting on", "doing", "status"))
         if blocker_ask:
             looks_continuation_fallback = any(
                 p in low
@@ -1387,6 +1417,56 @@ def run_deterministic_detectors(
                         "issue_code": "conversation_openclaw_blocker_detail_miss_under_state",
                         "severity": "high",
                         "detail": "explicit OpenClaw blocker ask missed the strongest stored blocker detail in contract evidence",
+                    }
+                )
+        if work_status_ask:
+            looks_continuation_fallback = any(
+                p in low
+                for p in (
+                    "not finding a recent cursor workstream",
+                    "i do not see active tracked work right now",
+                    "start a new one from your latest instruction",
+                )
+            )
+            if looks_continuation_fallback:
+                findings.append(
+                    {
+                        "family": "thin_summary",
+                        "issue_code": "conversation_openclaw_work_status_fallback_under_state",
+                        "severity": "high",
+                        "detail": "OpenClaw work-status ask returned continuation/no-work fallback wording",
+                    }
+                )
+            elif (
+                len(text.strip()) < 180
+                and not any(
+                    tok in low
+                    for tok in (
+                        "working on",
+                        "waiting on",
+                        "current phase",
+                        "phase:",
+                        "blocked",
+                        "blocker",
+                        "result state",
+                    )
+                )
+            ):
+                findings.append(
+                    {
+                        "family": "thin_summary",
+                        "issue_code": "conversation_openclaw_work_status_vague_under_state",
+                        "severity": "medium",
+                        "detail": "OpenClaw work-status ask stayed vague despite collaboration-state context",
+                    }
+                )
+            elif contract_primary_finding and not _reply_reflects_primary_finding(text, contract_primary_finding):
+                findings.append(
+                    {
+                        "family": "thin_summary",
+                        "issue_code": "conversation_openclaw_work_status_detail_miss_under_state",
+                        "severity": "high",
+                        "detail": "OpenClaw work-status ask missed the strongest stored work-status detail in contract evidence",
                     }
                 )
         recap_ask = any(tok in low_user for tok in ("what happened", "what did cursor say", "cursor thread", "summary", "recap"))
@@ -3361,6 +3441,38 @@ CONVERSATION_CORE_CASES: tuple[ConversationCaseSpec, ...] = (
         from_id=99290,
         first_update_id=18994,
         first_message_id=6894,
+        setup_fn=_seed_openclaw_blocker_carryover_state,
+        required_reply_markers=("internal collaboration limitation",),
+        forbidden_reply_markers=(
+            "not finding a recent cursor workstream",
+            "start a new one from your latest instruction",
+        ),
+    ),
+    ConversationCaseSpec(
+        case_id="openclaw_collaboration_working_on_turn_still_works",
+        title="OpenClaw working-on phrasing surfaces collaboration work-status",
+        behavior_family="blocked_state",
+        turns=("What is OpenClaw working on?",),
+        chat_id=88190,
+        from_id=99290,
+        first_update_id=18995,
+        first_message_id=6895,
+        setup_fn=_seed_openclaw_blocker_carryover_state,
+        required_reply_markers=("internal collaboration limitation",),
+        forbidden_reply_markers=(
+            "not finding a recent cursor workstream",
+            "start a new one from your latest instruction",
+        ),
+    ),
+    ConversationCaseSpec(
+        case_id="openclaw_collaboration_waiting_on_turn_still_works",
+        title="OpenClaw waiting-on phrasing surfaces collaboration work-status",
+        behavior_family="blocked_state",
+        turns=("What is OpenClaw waiting on?",),
+        chat_id=88190,
+        from_id=99290,
+        first_update_id=18996,
+        first_message_id=6896,
         setup_fn=_seed_openclaw_blocker_carryover_state,
         required_reply_markers=("internal collaboration limitation",),
         forbidden_reply_markers=(

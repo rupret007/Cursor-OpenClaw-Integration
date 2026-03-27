@@ -179,6 +179,10 @@ _OPENCLAW_COLLAB_ASK_RE = re.compile(
     r"what\s+did\s+(?:openclaw|cursor)\s+(?:do|say)|"
     r"what\s+happened\s+(?:with|to|in)\s+(?:openclaw|cursor)|"
     r"why\s+(?:is|was)\s+(?:openclaw|cursor)\s+blocked|"
+    r"what\s+is\s+(?:openclaw|cursor)\s+(?:working|waiting)\s+on|"
+    r"what'?s\s+(?:openclaw|cursor)\s+(?:working|waiting)\s+on|"
+    r"what\s+is\s+(?:openclaw|cursor)\s+doing|"
+    r"(?:openclaw|cursor)\s+status|"
     r"openclaw\s+(?:blocked|failure|failed|error)|"
     r"cross[-\s]?model\s+handoff|"
     r"collaboration\s+(?:state|status|blocked|failure)"
@@ -187,7 +191,19 @@ _OPENCLAW_COLLAB_ASK_RE = re.compile(
 )
 _COLLAB_BLOCKER_RE = re.compile(
     r"\b("
-    r"blocked|blocker|blocking|blocked\s+on|holding\s+that\s+up|holding\s+it\s+up|stuck"
+    r"blocked|blocker|blocking|blocked\s+on|holding\s+that\s+up|holding\s+it\s+up|stuck|"
+    r"waiting\s+on|waiting\s+for"
+    r")\b",
+    re.I,
+)
+_COLLAB_WORK_STATUS_RE = re.compile(
+    r"\b("
+    r"what\s+is\s+(?:openclaw|cursor)\s+working\s+on|"
+    r"what'?s\s+(?:openclaw|cursor)\s+working\s+on|"
+    r"what\s+is\s+(?:openclaw|cursor)\s+doing|"
+    r"what\s+is\s+(?:openclaw|cursor)\s+waiting\s+on|"
+    r"what'?s\s+(?:openclaw|cursor)\s+waiting\s+on|"
+    r"work(?:ing)?\s+status"
     r")\b",
     re.I,
 )
@@ -345,7 +361,12 @@ def is_openclaw_collaboration_state_question(text: str) -> bool:
     if _OPENCLAW_COLLAB_ASK_RE.search(clean):
         return True
     if "openclaw" in clean.lower() and (
-        "blocked" in clean.lower() or "happened" in clean.lower() or "continue" in clean.lower()
+        "blocked" in clean.lower()
+        or "happened" in clean.lower()
+        or "continue" in clean.lower()
+        or "working on" in clean.lower()
+        or "waiting on" in clean.lower()
+        or "status" in clean.lower()
     ):
         return True
     return False
@@ -357,6 +378,8 @@ def classify_openclaw_collaboration_focus(text: str) -> ContinuityFocus:
     if not clean or not is_openclaw_collaboration_state_question(clean):
         return "none"
     if _COLLAB_BLOCKER_RE.search(clean):
+        return "blocked_state"
+    if _COLLAB_WORK_STATUS_RE.search(clean):
         return "blocked_state"
     if _COLLAB_RECAP_RE.search(clean):
         return "recent_outcome_history"
@@ -593,6 +616,12 @@ def build_direct_answer_policy(
     if social:
         return DirectAnswerPolicy(
             allow_casual_social_fallback=True,
+            lookup_eligible=False,
+            preferred_lookup_domain="",
+        )
+    if is_tooling_identity_question(clean):
+        return DirectAnswerPolicy(
+            allow_casual_social_fallback=False,
             lookup_eligible=False,
             preferred_lookup_domain="",
         )

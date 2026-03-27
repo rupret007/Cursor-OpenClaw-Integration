@@ -159,6 +159,53 @@ class TestAssistantAnswerComposer(unittest.TestCase):
         self.assertIn("dentist", text.lower())
         self.assertIn("reminder", text.lower())
 
+    @mock.patch("services.andrea_sync.assistant_answer_composer.summarize_execution_attempt_for_user")
+    def test_agenda_reply_surfaces_top_plan_bundle_with_execution_context(
+        self,
+        mock_exec: mock.MagicMock,
+    ) -> None:
+        from services.andrea_sync.assistant_answer_composer import (  # noqa: E402
+            build_agenda_reply_from_state,
+        )
+
+        mock_exec.return_value = {
+            "ok": True,
+            "lane": "openclaw_collaboration_state_answer",
+            "status": "blocked",
+        }
+        r0 = handle_command(
+            self.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "comp-ag-priority-1",
+                "payload": {
+                    "text": "hi",
+                    "routing_text": "hi",
+                    "chat_id": 77002,
+                    "message_id": 2,
+                },
+            },
+        )
+        tid = r0["task_id"]
+        link_task_principal(self.conn, tid, "pri_agenda_priority_comp", channel="telegram")
+        create_reminder(
+            self.conn,
+            principal_id="pri_agenda_priority_comp",
+            channel="telegram",
+            delivery_target="",
+            message="Review deploy checklist",
+            due_at=1_700_000_200.0,
+            status="scheduled",
+            source_task_id=tid,
+        )
+        text = build_agenda_reply_from_state(self.conn, tid)
+        low = text.lower()
+        self.assertIn("top plan items i can see right now", low)
+        self.assertIn("review deploy checklist", low)
+        self.assertIn("execution context", low)
+        self.assertIn("full calendar view", low)
+
     def test_gather_repair_includes_state_rich_goal_when_receipt_snippets_exist(self) -> None:
         r0 = handle_command(
             self.conn,

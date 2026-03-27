@@ -228,6 +228,72 @@ class SemanticAnswerEngineTests(unittest.TestCase):
         )
         self.assertEqual(decision, "allow")
 
+    def test_openclaw_blocker_role_is_excluded_on_cursor_continue_focus(self) -> None:
+        decision = openclaw_role_relevance_for_turn(
+            source="blocked_state_reply",
+            candidate_text="The main blocker right now is: cross-model handoff stalled.",
+            user_text="continue that Cursor task",
+            turn_plan=self._turn_plan(focus="cursor_followup_heavy_lift"),
+        )
+        self.assertEqual(decision, "exclude")
+
+    @mock.patch("services.andrea_sync.semantic_answer_engine.build_goal_continuity_reply")
+    @mock.patch("services.andrea_sync.semantic_answer_engine.try_goal_status_nl_reply")
+    @mock.patch("services.andrea_sync.semantic_answer_engine.build_blocked_state_reply_from_state")
+    @mock.patch("services.andrea_sync.semantic_answer_engine.maybe_realize_stateful_reply")
+    def test_blocked_state_admissibility_accepts_blocker_wording(
+        self,
+        mock_realize: mock.MagicMock,
+        mock_blocked: mock.MagicMock,
+        mock_goal_status: mock.MagicMock,
+        mock_goal_cont: mock.MagicMock,
+    ) -> None:
+        mock_realize.return_value = None
+        mock_blocked.return_value = "The main blocker right now is: staging credentials are missing."
+        mock_goal_status.return_value = None
+        mock_goal_cont.return_value = None
+
+        result = choose_semantic_state_reply(
+            conn=object(),
+            task_id="t-blocker-admissibility",
+            user_text="What is OpenClaw blocked on?",
+            turn_plan=self._turn_plan(focus="blocked_state"),
+            scenario_id="statusFollowupContinue",
+        )
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.source, "blocked_state_reply")
+        self.assertIn("blocker", result.reply_text.lower())
+
+    @mock.patch("services.andrea_sync.semantic_answer_engine.build_goal_continuity_reply")
+    @mock.patch("services.andrea_sync.semantic_answer_engine.try_goal_status_nl_reply")
+    @mock.patch(
+        "services.andrea_sync.semantic_answer_engine.cursor_followup_context_reply_with_fallback"
+    )
+    @mock.patch("services.andrea_sync.semantic_answer_engine.maybe_realize_stateful_reply")
+    def test_anaphoric_continue_prefers_cursor_heavy_lane_over_blocked_copy(
+        self,
+        mock_realize: mock.MagicMock,
+        mock_heavy: mock.MagicMock,
+        mock_goal_status: mock.MagicMock,
+        mock_goal_cont: mock.MagicMock,
+    ) -> None:
+        mock_realize.return_value = None
+        mock_heavy.return_value = "I'm keeping this on the current heavy-lift workstream."
+        mock_goal_status.return_value = "The main blocker right now is: cross-model handoff stalled."
+        mock_goal_cont.return_value = "Goal `g1` status: running."
+        result = choose_semantic_state_reply(
+            conn=object(),
+            task_id="t-continue",
+            user_text="continue that Cursor task",
+            turn_plan=self._turn_plan(focus="cursor_followup_heavy_lift"),
+            scenario_id="statusFollowupContinue",
+        )
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.source, "cursor_heavy_lift_context")
+        self.assertIn("heavy-lift", result.reply_text.lower())
+
     @mock.patch("services.andrea_sync.semantic_answer_engine.build_goal_continuity_reply")
     @mock.patch("services.andrea_sync.semantic_answer_engine.try_goal_status_nl_reply")
     def test_approval_family_excludes_goal_continuity_source(

@@ -2281,7 +2281,13 @@ def build_blocked_state_reply_from_state(conn: Any, task_id: str) -> str:
 
     phase_bits = phase_summary or phase
     if phase_bits:
-        lines.append(f"The task is in: {phase_bits}" + (f" (result: {result_kind})" if result_kind else "."))
+        if blocked_reason or pending or followthrough_needs_user_attention(ft):
+            lines.append(f"The task is in: {phase_bits}" + (f" (result: {result_kind})" if result_kind else "."))
+        else:
+            lines.append(
+                "I do not see a concrete blocker right now. "
+                f"Current phase: {phase_bits}" + (f" (result: {result_kind})" if result_kind else ".")
+            )
     elif result_kind:
         lines.append(f"Current result state: **{result_kind}**.")
 
@@ -2550,10 +2556,86 @@ def _build_personal_runtime_reply(
     outcome = _outcome_section(meta)
     proactive = _proactive_section(meta)
     goal_context = build_goal_continuity_reply(conn, task_id, user_text="what are my plans today?")
+    exec_attempt = summarize_execution_attempt_for_user(conn, task_id)
     tm = _telegram_section(meta)
     cont_records = (
         tm.get("continuation_records") if isinstance(tm.get("continuation_records"), list) else []
     )
+
+    def _format_due_label(due_at: float) -> str:
+        due = float(due_at or 0.0)
+        if due <= 0:
+            return "unscheduled"
+        now = time.time()
+        delta = int(due - now)
+        if abs(delta) < 90:
+            return "now"
+        if delta > 0:
+            if delta < 3600:
+                return f"in {max(1, delta // 60)} min"
+            if delta < 86400:
+                return f"in {max(1, delta // 3600)} hr"
+            return time.strftime("%b %d %H:%M", time.localtime(due))
+        lag = abs(delta)
+        if lag < 3600:
+            return f"{max(1, lag // 60)} min ago"
+        if lag < 86400:
+            return f"{max(1, lag // 3600)} hr ago"
+        return time.strftime("%b %d %H:%M", time.localtime(due))
+
+    def priority_block() -> None:
+        top: List[str] = []
+        if reminders:
+            now = time.time()
+            ranked = sorted(
+                reminders,
+                key=lambda row: (
+                    0 if float(row.get("due_at") or 0.0) > 0 and float(row.get("due_at") or 0.0) <= now else 1,
+                    abs(float(row.get("due_at") or 0.0) - now) if float(row.get("due_at") or 0.0) > 0 else 10**12,
+                ),
+            )
+            for row in ranked:
+                msg = str(row.get("message") or "").strip()
+                due = float(row.get("due_at") or 0.0)
+                if msg:
+                    top.append(f"{msg} ({_format_due_label(due)})")
+                if len(top) >= 2:
+                    break
+        if followthrough_needs_user_attention(ft):
+            reason = str(ft.get("last_closure_reason") or ft.get("last_open_loop_state") or "").strip()
+            top.append(f"Follow-through still needs your input{(': ' + reason[:120]) if reason else ''}.")
+        if loops:
+            row = loops[0]
+            lk = str(row["loop_kind"] or "").strip()
+            st = str(row["open_loop_state"] or "").strip()
+            ore = str(row["opened_reason"] or "").strip()[:140]
+            if lk or st or ore:
+                top.append(f"Open loop ({lk or 'item'}): {st or ore or 'still open'}.")
+        if followups:
+            row = followups[0]
+            act = str(row["recommended_action"] or "").strip()[:180]
+            why = str(row["why_now"] or "").strip()[:120]
+            if act:
+                top.append(f"Suggested next move: {act}" + (f" ({why})" if why else ""))
+        if isinstance(exec_attempt, dict) and exec_attempt.get("ok"):
+            status = str(exec_attempt.get("status") or "").strip()
+            lane = str(exec_attempt.get("lane") or "").strip()
+            if status or lane:
+                top.append(
+                    "Execution context: "
+                    + " ".join(
+                        x
+                        for x in (
+                            f"lane `{lane}`" if lane else "",
+                            f"is {status}" if status else "",
+                        )
+                        if x
+                    ).strip()
+                )
+        if top:
+            lines.append("Top plan items I can see right now:")
+            for item in top[:3]:
+                lines.append(f"• {item}")
 
     def ft_block() -> None:
         fk = str(ft.get("last_loop_kind") or "").strip()
@@ -2574,37 +2656,16 @@ def _build_personal_runtime_reply(
             lines.append(f"Latest assistant receipt snapshot: {summary}")
 
     def reminder_block() -> None:
-        def _format_due_label(due_at: float) -> str:
-            due = float(due_at or 0.0)
-            if due <= 0:
-                return "unscheduled"
-            now = time.time()
-            delta = int(due - now)
-            if abs(delta) < 90:
-                return "now"
-            if delta > 0:
-                if delta < 3600:
-                    return f"in {max(1, delta // 60)} min"
-                if delta < 86400:
-                    return f"in {max(1, delta // 3600)} hr"
-                return time.strftime("%b %d %H:%M", time.localtime(due))
-            lag = abs(delta)
-            if lag < 3600:
-                return f"{max(1, lag // 60)} min ago"
-            if lag < 86400:
-                return f"{max(1, lag // 3600)} hr ago"
-            return time.strftime("%b %d %H:%M", time.localtime(due))
-
         if reminders:
             lines.append("Upcoming reminders I have on file:")
-            for row in reminders[:8]:
+            for row in reminders[:5]:
                 msg = str(row.get("message") or "").strip()
                 due = float(row.get("due_at") or 0.0)
                 if msg:
                     lines.append(f"• {msg} (due {_format_due_label(due)})")
 
     def loop_block() -> None:
-        for row in loops:
+        for row in loops[:2]:
             lk = str(row["loop_kind"] or "").strip()
             st = str(row["open_loop_state"] or "").strip()
             ore = str(row["opened_reason"] or "").strip()[:140]
@@ -2614,7 +2675,7 @@ def _build_personal_runtime_reply(
                 )
 
     def stale_block() -> None:
-        for row in stales:
+        for row in stales[:1]:
             sk = str(row["staleness_kind"] or "").strip()
             rsn = str(row["reason"] or "").strip()[:160]
             if sk or rsn:
@@ -2638,7 +2699,7 @@ def _build_personal_runtime_reply(
                 break
 
     def ledger_block() -> None:
-        for row in ledger_receipts[:5]:
+        for row in ledger_receipts[:3]:
             summ = str(row["summary"] or "").strip()[:200]
             kind = str(row["receipt_kind"] or "").strip()
             if summ:
@@ -2686,6 +2747,7 @@ def _build_personal_runtime_reply(
         lines.append(f"Active plan context: {raw}")
 
     if attention_first:
+        priority_block()
         ft_block()
         loop_block()
         stale_block()
@@ -2699,6 +2761,7 @@ def _build_personal_runtime_reply(
         goal_block()
         proactive_block()
     else:
+        priority_block()
         reminder_block()
         pack_meta()
         ledger_block()
@@ -2712,8 +2775,8 @@ def _build_personal_runtime_reply(
 
     if lines:
         lines.append(
-            "I do not have a full calendar view here—this is what I can ground on from "
-            "reminders and assistant state."
+            "I do not have a full calendar view here yet—this is the best grounded plan I can "
+            "build from reminders and assistant state."
         )
         return "\n".join(lines)
     if attention_first:
@@ -2760,18 +2823,18 @@ def try_composer_early_short_circuit(
     Returns (reply_text, reason) or None.
     """
     domain = turn_plan.domain
+    sid = str(scenario_id or "").strip()
     hist = list(history or [])
     mem = list(memory_notes or [])
 
-    if domain == "personal_agenda":
+    if domain == "personal_agenda" and sid in _STATUS_SCENARIOS:
         text = build_agenda_reply_from_state(conn, task_id)
         return text, "composer_personal_agenda_state"
 
-    if domain == "attention_today":
+    if domain == "attention_today" and sid in _STATUS_SCENARIOS:
         text = build_attention_reply_from_state(conn, task_id)
         return text, "composer_attention_today_state"
 
-    sid = str(scenario_id or "").strip()
     if sid not in _STATUS_SCENARIOS:
         return None
 

@@ -329,6 +329,26 @@ class ConversationEvalDetectorTests(unittest.TestCase):
         codes = {h["issue_code"] for h in hits}
         self.assertIn("conversation_agenda_assistant_usefulness_miss", codes)
 
+    def test_detects_agenda_thin_under_contract_evidence(self) -> None:
+        cap = {
+            "raw_reply_text": "I don't have a connected calendar view in this chat.",
+            "user_turn": "What are my plans today?",
+            "turn_plan_domain": "personal_agenda",
+            "assistant_reason": "semantic_state_goal_status",
+            "semantic_turn_contract": {
+                "family": "general_status",
+                "source": "goal_status",
+                "evidence_strength": 6,
+                "primary_finding": "Top plan item: Review deploy checklist and confirm release notes.",
+            },
+            "projection_has_continuity_state": True,
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap)
+        codes = {h["issue_code"] for h in hits}
+        self.assertIn("conversation_agenda_assistant_thin_under_contract_evidence", codes)
+
     def test_detects_stateful_domain_hijack_outside_status_domains(self) -> None:
         cap = {
             "raw_reply_text": "I’m not finding a recent clean Cursor result to recap from this thread.",
@@ -477,6 +497,21 @@ class ConversationEvalDetectorTests(unittest.TestCase):
         hits = run_deterministic_detectors(cap)
         codes = {h["issue_code"] for h in hits}
         self.assertIn("conversation_openclaw_blocker_vague_under_state", codes)
+
+    def test_detects_openclaw_work_status_vague_under_state(self) -> None:
+        cap = {
+            "raw_reply_text": "OpenClaw has activity in progress.",
+            "rendered_reply_sanitized": "OpenClaw has activity in progress.",
+            "user_turn": "What is OpenClaw working on?",
+            "turn_plan_domain": "project_status",
+            "assistant_reason": "semantic_state_goal_status",
+            "meta_openclaw_present": True,
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap)
+        codes = {h["issue_code"] for h in hits}
+        self.assertIn("conversation_openclaw_work_status_vague_under_state", codes)
 
     def test_detects_anaphoric_continue_thin(self) -> None:
         cap = {
@@ -1123,6 +1158,8 @@ class ConversationCoreScenariosTests(unittest.TestCase):
         self.assertIn("conversation_core::plans_today", ids)
         self.assertIn("conversation_core::meaning_of_life_lightweight", ids)
         self.assertIn("conversation_core::weather_current_conditions", ids)
+        self.assertIn("conversation_core::openclaw_collaboration_working_on_turn_still_works", ids)
+        self.assertIn("conversation_core::openclaw_collaboration_waiting_on_turn_still_works", ids)
         self.assertIn("conversation_core::technical_guidance_timeout", ids)
         self.assertIn("conversation_core::short_technical_question_not_social", ids)
         self.assertIn("conversation_core::technical_guidance_lookup_unavailable_next_steps", ids)

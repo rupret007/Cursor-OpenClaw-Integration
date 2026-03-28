@@ -3571,6 +3571,104 @@ class TestAndreaSync(unittest.TestCase):
         event_types = [event_type for _seq, _ts, event_type, _payload in load_events_for_task(server.conn, result["task_id"])]
         self.assertNotIn(EventType.JOB_QUEUED.value, event_types)
 
+    def test_parse_outbound_rejects_tell_to_after_stripped_openclaw_mention(self) -> None:
+        """routing_text after Telegram mention strip: Tell to … must not be SMS outbound."""
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        cleaned = "Tell to Add to my to do list to get tax stuff to CPA"
+        self.assertIsNone(server._parse_outbound_message_request(cleaned))
+
+    def test_server_followups_tell_openclaw_todo_routing_text_not_outbound_draft(self) -> None:
+        """Cleaned Tell @openclaw todo ask must not draft SMS or block delegation."""
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        result = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-openclaw-todo-ask",
+                "payload": {
+                    "text": "Tell @openclaw to Add to my to do list to get tax stuff to CPA",
+                    "routing_text": "Tell to Add to my to do list to get tax stuff to CPA",
+                    "routing_hint": "andrea",
+                    "collaboration_mode": "andrea_primary",
+                    "mention_targets": ["openclaw"],
+                    "chat_id": 9010,
+                    "message_id": 501,
+                },
+            },
+        )
+        server._handle_task_followups(result["task_id"])
+        self.assertFalse(server._load_pending_outbound_draft(result["task_id"]))
+        proj = project_task_dict(server.conn, result["task_id"], "telegram")
+        self.assertNotEqual(
+            proj["meta"]["assistant"]["reason"],
+            "outbound_message_drafted",
+        )
+        self.assertNotEqual(
+            proj["meta"]["assistant"]["reason"],
+            "outbound_message_pending",
+        )
+
+    def test_server_clears_outbound_draft_on_todo_list_clarification(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        first = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-todo-clarify-1",
+                "payload": {
+                    "text": "Tell Candace hi from you",
+                    "chat_id": 9011,
+                    "message_id": 510,
+                },
+            },
+        )
+        with mock.patch.object(
+            server,
+            "_resolve_messaging_capability",
+            return_value={
+                "skill_key": "bluebubbles",
+                "label": "text messaging",
+                "truth": {"status": "verified_available"},
+            },
+        ):
+            server._handle_task_followups(first["task_id"])
+        self.assertTrue(server._load_pending_outbound_draft(first["task_id"]))
+        second = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-todo-clarify-2",
+                "payload": {
+                    "text": "No this for my to do list.",
+                    "routing_text": "No this for my to do list.",
+                    "chat_id": 9011,
+                    "message_id": 511,
+                },
+            },
+        )
+        server._handle_task_followups(second["task_id"])
+        self.assertFalse(server._load_pending_outbound_draft(second["task_id"]))
+        proj = project_task_dict(server.conn, second["task_id"], "telegram")
+        self.assertNotEqual(
+            proj["meta"]["assistant"]["reason"],
+            "outbound_message_pending",
+        )
+
     def test_server_drafts_outbound_message_before_send(self) -> None:
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
         os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"

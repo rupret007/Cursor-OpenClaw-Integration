@@ -312,6 +312,13 @@ OUTBOUND_CANCEL_RE = re.compile(
 )
 PHONE_TARGET_RE = re.compile(r"^\+?[\d()\-\s.]{7,}$")
 AMBIGUOUS_TARGETS = {"her", "him", "them", "someone", "somebody", "that person"}
+# Telegram strips @mentions to spaces, so "Tell @openclaw to …" becomes "Tell to …" and the
+# tell-target regex must not treat the infinitive "to" as an SMS recipient.
+OUTBOUND_INVALID_TARGETS = frozenset({"to"})
+OUTBOUND_DRAFT_TODO_CLARIFICATION_RE = re.compile(
+    r"\b(?:to\s*do|todo)\s+list\b",
+    re.I,
+)
 PENDING_OUTBOUND_DRAFT_TTL_SECONDS = 1800.0
 USER_SURFACE_INTERNAL_RE = re.compile(
     r"\b("
@@ -2992,6 +2999,8 @@ class SyncServer:
             target_key = target.strip().lower()
             if not target:
                 return {"error": "missing_target"}
+            if target_key in OUTBOUND_INVALID_TARGETS:
+                continue
             if target_key in AMBIGUOUS_TARGETS:
                 return {"error": "ambiguous_target", "target": target}
             if PHONE_TARGET_RE.match(target):
@@ -4207,7 +4216,9 @@ class SyncServer:
             if OUTBOUND_CONFIRM_RE.match(text):
                 return self._send_pending_outbound_message(task_id, pending_draft)
             lowered = text.lower()
-            if not (
+            if OUTBOUND_DRAFT_TODO_CLARIFICATION_RE.search(lowered):
+                self._clear_pending_outbound_draft(task_id)
+            elif not (
                 MESSAGING_CAPABILITY_RE.search(text)
                 or self._parse_outbound_message_request(text)
                 or lowered.startswith("remember")

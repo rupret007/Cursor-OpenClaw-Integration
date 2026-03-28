@@ -127,6 +127,18 @@ _LIGHTWEIGHT_CONVERSATIONAL_RE = re.compile(
     r")\b",
     re.I,
 )
+# Ultra-short anaphoric clarifications (e.g. after "42" from math) — not web research.
+_BARE_DIALOGUE_CLARIFICATION_RE = re.compile(
+    r"^\s*(?:"
+    r"which\s+is\s+what|"
+    r"what\s+is\s+that|what'?s\s+that|"
+    r"what\s+does\s+that\s+mean|what\s+do\s+you\s+mean|"
+    r"which\s+one|"
+    r"huh|"
+    r"come\s+again"
+    r")\s*[?.!…]*\s*$",
+    re.I,
+)
 # Blocker / stuck — deterministic state-first lane (must beat generic status fallbacks).
 _BLOCKED_STATE_RE = re.compile(
     r"\b("
@@ -638,6 +650,8 @@ def is_lightweight_conversational_question(text: str) -> bool:
         or is_tooling_identity_question(clean)
     ):
         return False
+    if _BARE_DIALOGUE_CLARIFICATION_RE.match(clean):
+        return True
     if _OPINION_RE.search(clean):
         return True
     if _LIGHTWEIGHT_CONVERSATIONAL_RE.search(clean):
@@ -648,6 +662,8 @@ def is_lightweight_conversational_question(text: str) -> bool:
 def is_substantive_non_social_question(text: str) -> bool:
     clean = str(text or "").strip()
     if not clean or is_casual_social_only_turn(clean):
+        return False
+    if _BARE_DIALOGUE_CLARIFICATION_RE.match(clean):
         return False
     if is_lightweight_conversational_question(clean):
         return False

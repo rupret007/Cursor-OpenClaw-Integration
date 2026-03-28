@@ -14,6 +14,7 @@ Examples:
 - `routing_matrix::casual_conversation::rm_casual_hows`
 - `routing_matrix::meta_stack::rm_meta_openclaw_whats_up`
 - `routing_matrix::control_plane::rm_control_cancel_no_jobs`
+- `routing_matrix::casual_conversation::rm_math_then_which_clarification`
 
 ## Dimensions (taxonomy)
 
@@ -25,6 +26,7 @@ Examples:
 | **Environment** | Calendar JSON env, OpenClaw stubs, `mock_cancel_all_jobs`, BlueBubbles patches (via `ConversationCaseSpec` flags) |
 | **Wait policy** | `terminal_reply` (default) vs `routing_smoke` (allows queued/running) |
 | **Stack / placement** | Questions like “is that in OpenClaw or Andrea?” are classified as **tooling identity** in [`turn_intelligence.py`](services/andrea_sync/turn_intelligence.py) (`is_tooling_identity_question`) so they stay **lightweight direct** and avoid grounded-research “next steps” tails. |
+| **Anaphoric clarification** | Ultra-short lines such as “Which is what?” / “What’s that?” match `_BARE_DIALOGUE_CLARIFICATION_RE` in [`turn_intelligence.py`](services/andrea_sync/turn_intelligence.py) so they are **lightweight conversational** (not substantive / lookup-eligible). [`andrea_router.py`](services/andrea_sync/andrea_router.py) routes them as **`lightweight_followup_direct`** and answers from **recent assistant history** when possible. |
 
 ## Data capture
 
@@ -71,5 +73,6 @@ ANDREA_ROUTING_EVAL_EXPORT=./artifacts/routing_captures.ndjson python3 scripts/a
 - Explicit `@openclaw` schedule with calendar stub
 - Control plane cancel (stubbed CLI) + intent flags
 - Greeting then agenda (multi-turn)
+- Math then anaphoric “which is what?” (multi-turn; contract on final turn)
 
 Phase B can add continuation-attachment cases, mixed bundles, and grounded/news variants.

@@ -4335,6 +4335,29 @@ ROUTING_MATRIX_CASES: tuple[ConversationCaseSpec, ...] = (
         capture_tags=("multi_turn", "agenda"),
         required_reply_markers=("calendar",),
     ),
+    ConversationCaseSpec(
+        case_id="rm_math_then_which_clarification",
+        title="After math, anaphoric 'which is what?' stays direct with thread carryover",
+        behavior_family="casual_conversation",
+        turns=("What is 6 times 7?", "Which is what?"),
+        chat_id=91007,
+        from_id=91007,
+        first_update_id=191007,
+        first_message_id=291007,
+        capture_tags=("multi_turn", "anaphoric_clarification", "math_carryover"),
+        routing_contract_turn_index=1,
+        routing_expected_assistant_route="direct",
+        routing_expect_delegate=False,
+        required_reply_markers=("meant what i just said",),
+        forbidden_reply_markers=(
+            "retry grounded lookup",
+            "grounded lookup",
+            "say a bit more about what you want",
+            "royal air force",
+            "general answer",
+        ),
+        wait_policy="routing_smoke",
+    ),
 )
 
 

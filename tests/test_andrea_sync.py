@@ -5524,6 +5524,61 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(lane.lane, "openclaw_collaboration_state_answer")
         self.assertTrue(lane.openclaw_primary)
 
+    def test_bare_dialogue_clarification_is_lightweight_not_substantive(self) -> None:
+        from services.andrea_sync.turn_intelligence import (
+            is_lightweight_conversational_question,
+            is_substantive_non_social_question,
+        )
+
+        for text in (
+            "Which is what?",
+            "what's that?",
+            "What does that mean?",
+            "which one?",
+            "huh?",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(
+                    is_lightweight_conversational_question(text),
+                    msg=f"expected lightweight: {text!r}",
+                )
+                self.assertFalse(
+                    is_substantive_non_social_question(text),
+                    msg=f"expected not substantive: {text!r}",
+                )
+
+    def test_arbitrate_answer_lane_bare_dialogue_clarification_lightweight_direct(self) -> None:
+        from services.andrea_sync.turn_intelligence import (
+            arbitrate_answer_lane,
+            build_direct_answer_policy,
+            build_turn_plan,
+        )
+
+        text = "Which is what?"
+        plan = build_turn_plan(
+            text,
+            scenario_id="mixedResourceGoal",
+            projection_has_continuity_state=True,
+        )
+        policy = build_direct_answer_policy(
+            text,
+            scenario_id="mixedResourceGoal",
+            turn_plan=plan,
+        )
+        self.assertFalse(policy.lookup_eligible)
+        lane = arbitrate_answer_lane(text=text, turn_plan=plan, direct_policy=policy)
+        self.assertEqual(lane.lane, "lightweight_direct")
+        self.assertEqual(lane.reason, "lightweight_conversational")
+
+    def test_route_message_bare_dialogue_clarification_carries_history(self) -> None:
+        history = [{"role": "assistant", "content": "42."}]
+        decision = route_message("Which is what?", history=history)
+        self.assertEqual(decision.mode, "direct")
+        self.assertEqual(decision.reason, "lightweight_followup_direct")
+        self.assertIn("42", decision.reply_text)
+        low = decision.reply_text.lower()
+        self.assertNotIn("say a bit more about what you want", low)
+
     def test_arbitrate_answer_lane_tooling_identity_openclaw_or_andrea(self) -> None:
         from services.andrea_sync.turn_intelligence import (
             arbitrate_answer_lane,

@@ -10,6 +10,10 @@ import urllib.request
 from dataclasses import dataclass
 
 from .orchestration_boundary import should_answer_before_delegate
+from .turn_intelligence import (
+    _BARE_DIALOGUE_CLARIFICATION_RE,
+    is_lightweight_conversational_question,
+)
 from .user_surface import is_stale_openclaw_narrative, sanitize_user_surface_text
 
 
@@ -343,6 +347,13 @@ def classify_route(
         return "direct", "explicit_andrea_mention" if andrea_preferred else "short_help_request", "", "andrea_primary" if andrea_preferred else collab
     if preferred_model_family:
         return "delegate", "explicit_model_mention", "openclaw_hybrid", "andrea_primary" if collab == "auto" else collab
+    if is_lightweight_conversational_question(text):
+        return (
+            "direct",
+            "explicit_andrea_mention" if andrea_preferred else "lightweight_followup_direct",
+            "",
+            "andrea_primary" if andrea_preferred else collab,
+        )
     if word_count <= 18:
         return "direct", "explicit_andrea_mention" if andrea_preferred else "short_general_request", "", "andrea_primary" if andrea_preferred else collab
     if word_count >= 45:
@@ -493,6 +504,24 @@ def _heuristic_reply(text: str, history: list[dict[str, str]] | None = None) -> 
     lightweight_convo = _lightweight_conversational_reply(clean)
     if lightweight_convo:
         return lightweight_convo
+    raw_turn = str(text or "").strip()
+    if _BARE_DIALOGUE_CLARIFICATION_RE.match(raw_turn):
+        h = _history_hint(history)
+        if h and h.strip():
+            fragment = h.strip()
+            if fragment[-1] not in ".!?":
+                fragment += "."
+            reply = (
+                f"I meant what I just said: {fragment} "
+                "If something in that answer was unclear, point at the bit you want unpacked."
+            )
+            safe = sanitize_user_surface_text(reply, fallback="", limit=2000)
+            return safe or (
+                "I'm referring to my previous message—say which part is confusing."
+            )
+        return (
+            "I'm referring to what I said just above—if something was unclear, tell me which part."
+        )
     if OPINION_OR_TAKE_RE.search(clean):
         h = _history_hint(history)
         if h and len(h) > 12 and (
@@ -826,6 +855,12 @@ def build_direct_reply(
     lightweight_convo = _lightweight_conversational_reply(clean)
     if lightweight_convo:
         return lightweight_convo
+    if is_lightweight_conversational_question(str(text or "")):
+        return _finalize_direct_surface_reply(
+            _heuristic_reply(text, history=history),
+            user_seed=text,
+            history=history,
+        )
     utility_direct = _simple_direct_utility_reply(clean)
     if utility_direct:
         return utility_direct

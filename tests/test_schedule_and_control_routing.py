@@ -4,8 +4,16 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
+
+
+def _calendar_events_json_for_today(*, title: str, hour_utc: int = 15) -> str:
+    """Single event on today's UTC calendar day so bounds match the test host clock."""
+    day = datetime.now(timezone.utc).date()
+    start = f"{day.isoformat()}T{hour_utc:02d}:00:00+00:00"
+    return json.dumps([{"title": title, "start": start}])
 
 from services.andrea_sync.adapters import telegram as tg_adapt
 from services.andrea_sync.backends.cursor_control import CursorControlItemResult, CursorControlResult
@@ -85,8 +93,8 @@ class TestScheduleAndControlRouting(unittest.TestCase):
         return str(result["task_id"])
 
     def test_openclaw_schedule_query_routes_direct_with_schedule_answer(self) -> None:
-        os.environ["ANDREA_CALENDAR_EVENTS_JSON"] = json.dumps(
-            [{"title": "Design review", "start": "2026-03-27T14:00:00-05:00"}]
+        os.environ["ANDREA_CALENDAR_EVENTS_JSON"] = _calendar_events_json_for_today(
+            title="Design review", hour_utc=15
         )
         task_id = self._telegram_submit(2001, "Ask @openclaw what's on my schedule today")
         decision, applied = self.server._route_task_with_decision(
@@ -137,8 +145,8 @@ class TestScheduleAndControlRouting(unittest.TestCase):
             canceled_count=1,
             results=(CursorControlItemResult(id="job_1", status="canceled"),),
         )
-        os.environ["ANDREA_CALENDAR_EVENTS_JSON"] = json.dumps(
-            [{"title": "1:1", "start": "2026-03-27T10:00:00-05:00"}]
+        os.environ["ANDREA_CALENDAR_EVENTS_JSON"] = _calendar_events_json_for_today(
+            title="1:1", hour_utc=10
         )
         task_id = self._telegram_submit(
             2003,

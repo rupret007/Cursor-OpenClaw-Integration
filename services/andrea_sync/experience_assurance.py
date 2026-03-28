@@ -1179,8 +1179,8 @@ def _scenario_what_llm_is_answering(harness: ExperienceHarness, scenario: Experi
         text="What LLM is answering?",
         update_id=503,
         message_id=903,
-        reply_keyword="andrea",
-        required_substrings=("directly",),
+        reply_keyword="model",
+        required_substrings=("answer",),
         forbidden_substrings=("execution lane",),
     )
 

@@ -24,6 +24,7 @@ Examples:
 | **Principal state** | default harness principal; optional `setup_fn` for goals/reminders |
 | **Environment** | Calendar JSON env, OpenClaw stubs, `mock_cancel_all_jobs`, BlueBubbles patches (via `ConversationCaseSpec` flags) |
 | **Wait policy** | `terminal_reply` (default) vs `routing_smoke` (allows queued/running) |
+| **Stack / placement** | Questions like “is that in OpenClaw or Andrea?” are classified as **tooling identity** in [`turn_intelligence.py`](services/andrea_sync/turn_intelligence.py) (`is_tooling_identity_question`) so they stay **lightweight direct** and avoid grounded-research “next steps” tails. |
 
 ## Data capture
 

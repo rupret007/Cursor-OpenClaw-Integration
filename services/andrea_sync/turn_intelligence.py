@@ -164,13 +164,22 @@ _ANAPHORIC_OUTCOME_RE = re.compile(
     re.I,
 )
 # Heavy-lift / Cursor thread follow-ups (orchestration language, not raw plumbing).
-# Short identity questions about the tooling — not heavy-lift continuation.
+# Short meta questions about the stack — not heavy-lift continuation.
 _TOOLING_IDENTITY_Q_RE = re.compile(
     r"^\s*(?:"
     r"is\s+this\s+openclaw|is\s+this\s+cursor|"
     r"what\s+is\s+openclaw|what\s+is\s+cursor|"
     r"are\s+you\s+openclaw|are\s+you\s+cursor"
     r")\s*\??\s*$",
+    re.I,
+)
+# Longer Telegram phrasing, e.g. "Ok so is that in OpenClaw or Andrea or how?"
+_TOOLING_IDENTITY_SUBSTRING_RE = re.compile(
+    r"\b(?:"
+    r"is\s+(?:this|that|it)\s+in\s+(?:openclaw|cursor|andrea)\b|"
+    r"openclaw\s+or\s+andrea\b|"
+    r"andrea\s+or\s+openclaw\b"
+    r")",
     re.I,
 )
 
@@ -384,7 +393,15 @@ def is_casual_social_only_turn(text: str) -> bool:
 
 
 def is_tooling_identity_question(text: str) -> bool:
-    return bool(_TOOLING_IDENTITY_Q_RE.match(str(text or "").strip()))
+    clean = str(text or "").strip()
+    if not clean:
+        return False
+    if _TOOLING_IDENTITY_Q_RE.match(clean):
+        return True
+    # Avoid routing stack-placement questions into grounded-research next-step tails.
+    if "?" not in clean:
+        return False
+    return bool(_TOOLING_IDENTITY_SUBSTRING_RE.search(clean))
 
 
 def is_openclaw_collaboration_state_question(text: str) -> bool:
@@ -618,7 +635,7 @@ def is_lightweight_conversational_question(text: str) -> bool:
         or _ATTENTION_TODAY_RE.search(clean)
         or _STATUS_EXTERNAL_NEWS_RE.search(clean)
         or _TECHNICAL_GUIDANCE_RE.search(clean)
-        or _TOOLING_IDENTITY_Q_RE.match(clean)
+        or is_tooling_identity_question(clean)
     ):
         return False
     if _OPINION_RE.search(clean):
@@ -648,7 +665,7 @@ def is_substantive_non_social_question(text: str) -> bool:
         return True
     if _STATUS_EXTERNAL_NEWS_RE.search(clean):
         return True
-    if _TOOLING_IDENTITY_Q_RE.match(clean):
+    if is_tooling_identity_question(clean):
         return True
     if _OPINION_RE.search(clean):
         return True
@@ -756,7 +773,7 @@ def classify_continuity_focus(text: str) -> ContinuityFocus:
         return collab_focus
     if is_recent_outcome_history_question(clean):
         return "recent_outcome_history"
-    if _TOOLING_IDENTITY_Q_RE.match(clean):
+    if is_tooling_identity_question(clean):
         return "none"
     if classify_turn_intent_class(clean) in {"assistant_state_query", "cursor_control_plane"}:
         return "none"

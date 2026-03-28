@@ -5524,6 +5524,29 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(lane.lane, "openclaw_collaboration_state_answer")
         self.assertTrue(lane.openclaw_primary)
 
+    def test_arbitrate_answer_lane_tooling_identity_openclaw_or_andrea(self) -> None:
+        from services.andrea_sync.turn_intelligence import (
+            arbitrate_answer_lane,
+            build_direct_answer_policy,
+            build_turn_plan,
+        )
+
+        text = "Ok so is that in OpenClaw or Andrea or how?"
+        plan = build_turn_plan(
+            text,
+            scenario_id="mixedResourceGoal",
+            projection_has_continuity_state=True,
+        )
+        policy = build_direct_answer_policy(
+            text,
+            scenario_id="mixedResourceGoal",
+            turn_plan=plan,
+        )
+        self.assertFalse(policy.lookup_eligible)
+        lane = arbitrate_answer_lane(text=text, turn_plan=plan, direct_policy=policy)
+        self.assertEqual(lane.lane, "lightweight_direct")
+        self.assertEqual(lane.reason, "tooling_identity")
+
     def test_arbitrate_answer_lane_keeps_casual_turn_lightweight(self) -> None:
         from services.andrea_sync.turn_intelligence import (
             arbitrate_answer_lane,

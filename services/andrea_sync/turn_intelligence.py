@@ -8,6 +8,11 @@ from typing import Literal
 from .user_surface import is_internal_runtime_text, is_stale_openclaw_narrative
 
 
+def _normalize_user_turn_apostrophes(text: str) -> str:
+    """Align smart/mobile apostrophes with ASCII for classification regexes."""
+    return str(text or "").replace("\u2019", "'").replace("`", "'")
+
+
 ContinuityFocus = Literal[
     "none",
     "blocked_state",
@@ -631,7 +636,7 @@ def is_agenda_day_plan_question(text: str) -> bool:
 
 
 def is_lightweight_conversational_question(text: str) -> bool:
-    clean = str(text or "").strip()
+    clean = _normalize_user_turn_apostrophes(str(text or "").strip())
     if not clean:
         return False
     if is_casual_social_only_turn(clean):
@@ -660,7 +665,7 @@ def is_lightweight_conversational_question(text: str) -> bool:
 
 
 def is_substantive_non_social_question(text: str) -> bool:
-    clean = str(text or "").strip()
+    clean = _normalize_user_turn_apostrophes(str(text or "").strip())
     if not clean or is_casual_social_only_turn(clean):
         return False
     if _BARE_DIALOGUE_CLARIFICATION_RE.match(clean):

@@ -139,6 +139,32 @@ class TestLightweightFollowupClassifyRoute(unittest.TestCase):
         self.assertEqual(reason, "explicit_andrea_mention")
 
 
+class TestBareDialoguePunctuationAndNegatives(unittest.TestCase):
+    """Cycle 2: punctuation variants and non-matching substantive phrasing."""
+
+    def test_which_is_what_without_question_mark(self) -> None:
+        self.assertTrue(is_lightweight_conversational_question("which is what"))
+
+    def test_huh_with_ellipsis_unicode(self) -> None:
+        self.assertTrue(is_lightweight_conversational_question("huh…"))
+
+    def test_which_library_is_not_bare_clarification(self) -> None:
+        text = "Which library should I use for async Python?"
+        self.assertFalse(
+            is_lightweight_conversational_question(text),
+            msg="substantive technical question must not collapse to lightweight",
+        )
+        self.assertTrue(is_substantive_non_social_question(text))
+
+    def test_route_message_prefers_latest_substantive_assistant_line(self) -> None:
+        history = [
+            {"role": "user", "content": "What is 6*7?"},
+            {"role": "assistant", "content": "42."},
+        ]
+        d = route_message("Come again?", history=history)
+        self.assertIn("42", d.reply_text)
+
+
 class TestBareClarificationDetectorHygiene(unittest.TestCase):
     """Cycle 4: good bare-clarification surfaces should not trip generic-fallback detector."""
 

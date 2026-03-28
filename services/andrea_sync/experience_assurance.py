@@ -3465,18 +3465,26 @@ def run_experience_assurance(
 ) -> Dict[str, Any]:
     ensure_system_task(conn)
     selected: List[ExperienceScenario]
-    if str(suite or "").strip().lower() == "conversation_core":
+    suite_l = str(suite or "").strip().lower()
+    if suite_l == "conversation_core":
         from .conversation_eval import conversation_core_scenarios
 
         selected = conversation_core_scenarios(conversation_eval_options or {})
+    elif suite_l == "routing_matrix":
+        from .conversation_eval import routing_matrix_scenarios
+
+        selected = routing_matrix_scenarios(conversation_eval_options or {})
     else:
         selected = list(scenarios or default_experience_scenarios())
     started = time.time()
     checks: List[ExperienceCheckResult] = []
-    preserve_openai = bool((conversation_eval_options or {}).get("llm_eval")) or bool(
-        (conversation_eval_options or {}).get("adjudicate_ambiguous")
+    eval_opts = (
+        conversation_eval_options if suite_l in ("conversation_core", "routing_matrix") else None
     )
-    fail_fast = bool((conversation_eval_options or {}).get("fail_fast"))
+    preserve_openai = bool((eval_opts or {}).get("llm_eval")) or bool(
+        (eval_opts or {}).get("adjudicate_ambiguous")
+    )
+    fail_fast = bool((eval_opts or {}).get("fail_fast"))
     with ExperienceHarness(preserve_openai_for_eval=preserve_openai) as harness:
         for scenario in selected:
             try:
@@ -3540,16 +3548,16 @@ def run_experience_assurance(
         "scenario_executed": len(checks),
         "suite": str(suite or "") or "default",
     }
-    if conversation_eval_options:
-        run_metadata["conversation_eval_options"] = dict(conversation_eval_options)
-    if str(suite or "").strip().lower() == "conversation_core":
+    if eval_opts:
+        run_metadata["conversation_eval_options"] = dict(eval_opts)
+    if suite_l in ("conversation_core", "routing_matrix"):
         from .conversation_eval import attach_conversation_eval_report
 
         attach_conversation_eval_report(
             run_metadata,
             checks,
-            prepare_fix_brief=bool((conversation_eval_options or {}).get("prepare_fix_brief")),
-            fix_brief_handoff=bool((conversation_eval_options or {}).get("fix_brief_handoff")),
+            prepare_fix_brief=bool((eval_opts or {}).get("prepare_fix_brief")),
+            fix_brief_handoff=bool((eval_opts or {}).get("fix_brief_handoff")),
         )
     run = ExperienceRun(
         run_id=new_experience_run_id(),

@@ -8,3 +8,6 @@ skills/cursor_handoff/.env
 
 # Andrea lockstep local SQLite
 data/
+
+# Routing eval NDJSON exports (local / CI artifacts)
+artifacts/

@@ -1,7 +1,7 @@
 """Conversational quality evaluation: suites, capture, deterministic detectors, LLM roles, fix briefs.
 
-Used by experience assurance when ``suite=conversation_core``. Runtime semantic adjudication
-helpers are gated behind ``ANDREA_RUNTIME_SEMANTIC_ADJUDICATOR``.
+Used by experience assurance when ``suite=conversation_core`` or ``suite=routing_matrix``.
+Runtime semantic adjudication helpers are gated behind ``ANDREA_RUNTIME_SEMANTIC_ADJUDICATOR``.
 """
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import os
 import random
 import time
 import re
+from datetime import datetime, timezone
 from collections import Counter
 import urllib.error
 import urllib.request
@@ -29,6 +30,7 @@ from .assistant_answer_composer import (
     is_cursor_thread_recall_question,
     is_strict_cursor_domain_recall_question,
 )
+from .backends.cursor_control import CursorControlResult
 from .bus import handle_command
 from .experience_assurance import (
     HarnessInfraError,
@@ -36,6 +38,7 @@ from .experience_assurance import (
     experience_progress_enabled,
 )
 from .experience_types import ExperienceCheckResult, ExperienceObservation, ExperienceScenario
+from .intents import classify_intent_envelope
 from .model_router import model_for_role
 from .projector import project_task_dict
 from .scenario_runtime import resolve_scenario
@@ -1795,6 +1798,18 @@ class ConversationCaseSpec:
     forbid_unnecessary_delegate: bool = False
     # terminal_reply: wait for completed/failed (meaningful capture). routing_smoke: allow queued/running.
     wait_policy: str = "terminal_reply"
+    # --- Routing matrix (optional contracts; defaults preserve conversation_core behavior) ---
+    capture_tags: tuple[str, ...] = ()
+    routing_contract_turn_index: int = -1
+    routing_expected_assistant_route: str = ""
+    routing_expect_delegate: bool | None = None
+    routing_required_execution_lane_substr: str = ""
+    routing_required_meta_paths: tuple[str, ...] = ()
+    routing_expect_intent_control_plane: bool | None = None
+    routing_expect_intent_family: str = ""
+    routing_expect_intent_action: str = ""
+    routing_calendar_events_json: str | None = None
+    routing_mock_cancel_all_jobs: bool = False
 
 
 def _wait_statuses_for_policy(wait_policy: str) -> tuple[str, ...]:
@@ -1807,6 +1822,188 @@ def _wait_statuses_for_policy(wait_policy: str) -> tuple[str, ...]:
             TaskStatus.RUNNING.value,
         )
     return (TaskStatus.COMPLETED.value, TaskStatus.FAILED.value)
+
+
+def _routing_event_type_counts_from_detail(detail: Mapping[str, Any]) -> Dict[str, int]:
+    rows = detail.get("events") if isinstance(detail.get("events"), list) else []
+    counts: Counter[str] = Counter()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        et = row.get("event_type") or row.get("type")
+        if et is not None:
+            counts[str(et)] += 1
+    return dict(counts)
+
+
+def _routing_execution_lane_from_detail(detail: Mapping[str, Any]) -> str:
+    task = detail.get("task") if isinstance(detail.get("task"), dict) else {}
+    meta = task.get("meta") if isinstance(task.get("meta"), dict) else {}
+    ex = meta.get("execution") if isinstance(meta.get("execution"), dict) else {}
+    return str(ex.get("lane") or "")
+
+
+def _meta_path_exists(meta: Mapping[str, Any], path: str) -> bool:
+    parts = [p for p in str(path or "").strip().split(".") if p]
+    cur: Any = meta
+    for p in parts:
+        if not isinstance(cur, Mapping) or p not in cur:
+            return False
+        cur = cur[p]
+    return True
+
+
+def build_routing_matrix_export_row(
+    *,
+    scenario_id: str,
+    case: ConversationCaseSpec,
+    turn_index: int,
+    user_text: str,
+    cap: Mapping[str, Any],
+    detail: Mapping[str, Any],
+) -> Dict[str, Any]:
+    last_reply = str(
+        cap.get("rendered_reply_sanitized")
+        or cap.get("formatted_reply_text")
+        or cap.get("raw_reply_text")
+        or ""
+    )
+    task = detail.get("task") if isinstance(detail.get("task"), dict) else {}
+    meta = task.get("meta") if isinstance(task.get("meta"), dict) else {}
+    exec_meta = meta.get("execution") if isinstance(meta.get("execution"), dict) else {}
+    oc = meta.get("openclaw") if isinstance(meta.get("openclaw"), dict) else {}
+    cur = meta.get("cursor") if isinstance(meta.get("cursor"), dict) else {}
+    evt = cap.get("routing_event_type_counts") if isinstance(cap.get("routing_event_type_counts"), dict) else {}
+    ht = cap.get("harness_timing") if isinstance(cap.get("harness_timing"), dict) else {}
+    return {
+        "scenario_id": scenario_id,
+        "case_id": case.case_id,
+        "behavior_family": case.behavior_family,
+        "capture_tags": list(case.capture_tags),
+        "turn_index": turn_index,
+        "user_text": user_text,
+        "assistant_last_reply": _clip(last_reply, 2000),
+        "assistant_route": str(cap.get("assistant_route") or ""),
+        "assistant_reason": str(cap.get("assistant_reason") or ""),
+        "turn_plan_domain": str(cap.get("turn_plan_domain") or ""),
+        "turn_plan_continuity_focus": str(cap.get("turn_plan_continuity_focus") or ""),
+        "task_status": str(cap.get("task_status") or ""),
+        "execution_lane": str(cap.get("routing_execution_lane") or ""),
+        "meta_execution_lane": str(exec_meta.get("lane") or ""),
+        "meta_openclaw_keys": sorted(oc.keys())[:12],
+        "meta_cursor_keys": sorted(cur.keys())[:12],
+        "event_type_counts": dict(evt),
+        "harness_timing": dict(ht),
+    }
+
+
+def collect_routing_contract_findings(
+    case: ConversationCaseSpec,
+    cap: Mapping[str, Any],
+    *,
+    user_text: str,
+) -> List[Dict[str, Any]]:
+    findings: List[Dict[str, Any]] = []
+    exp_route = str(case.routing_expected_assistant_route or "").strip()
+    if exp_route:
+        actual = str(cap.get("assistant_route") or "")
+        if actual != exp_route:
+            fam = "delegation_miss" if exp_route == "delegate" else "wrong_domain_contamination"
+            findings.append(
+                {
+                    "family": fam,
+                    "issue_code": "routing_contract_assistant_route",
+                    "severity": "high",
+                    "detail": f"expected assistant_route={exp_route!r} got {actual!r}",
+                }
+            )
+
+    ed = case.routing_expect_delegate
+    if ed is not None:
+        ar = str(cap.get("assistant_route") or "")
+        st = str(cap.get("task_status") or "").lower()
+        delegated_shape = ar == "delegate" or st in ("queued", "running")
+        if ed and not delegated_shape:
+            findings.append(
+                {
+                    "family": "delegation_miss",
+                    "issue_code": "routing_contract_expect_delegate",
+                    "severity": "high",
+                    "detail": f"expected delegate-shaped outcome; route={ar!r} status={st!r}",
+                }
+            )
+        if not ed and delegated_shape:
+            findings.append(
+                {
+                    "family": "wrong_domain_contamination",
+                    "issue_code": "routing_contract_forbid_delegate",
+                    "severity": "high",
+                    "detail": f"forbidden delegate-shaped outcome; route={ar!r} status={st!r}",
+                }
+            )
+
+    lane_needle = str(case.routing_required_execution_lane_substr or "").strip()
+    if lane_needle:
+        lane = str(cap.get("routing_execution_lane") or "")
+        if lane_needle.lower() not in lane.lower():
+            findings.append(
+                {
+                    "family": "delegation_miss",
+                    "issue_code": "routing_contract_execution_lane",
+                    "severity": "high",
+                    "detail": f"expected lane substr {lane_needle!r} in {lane!r}",
+                }
+            )
+
+    tmeta = cap.get("routing_task_meta") if isinstance(cap.get("routing_task_meta"), dict) else {}
+    for path in case.routing_required_meta_paths:
+        p = str(path or "").strip()
+        if not p:
+            continue
+        if not _meta_path_exists(tmeta, p):
+            findings.append(
+                {
+                    "family": "wrong_domain_contamination",
+                    "issue_code": "routing_contract_meta_path",
+                    "severity": "high",
+                    "detail": f"missing meta path {p!r}",
+                }
+            )
+
+    env = classify_intent_envelope(user_text)
+    icp = case.routing_expect_intent_control_plane
+    if icp is not None:
+        actual_cp = bool(env.control_plane_flag or env.has_control_plane_intent)
+        if icp != actual_cp:
+            findings.append(
+                {
+                    "family": "wrong_domain_contamination",
+                    "issue_code": "routing_contract_intent_control_plane",
+                    "severity": "high",
+                    "detail": f"expected control_plane envelope={icp} got {actual_cp}",
+                }
+            )
+    fam_exp = str(case.routing_expect_intent_family or "").strip()
+    if fam_exp and str(env.intent_family or "") != fam_exp:
+        findings.append(
+            {
+                "family": "wrong_domain_contamination",
+                "issue_code": "routing_contract_intent_family",
+                "severity": "high",
+                "detail": f"expected intent_family={fam_exp!r} got {env.intent_family!r}",
+            }
+        )
+    act_exp = str(case.routing_expect_intent_action or "").strip()
+    if act_exp and str(env.action or "") != act_exp:
+        findings.append(
+            {
+                "family": "wrong_domain_contamination",
+                "issue_code": "routing_contract_intent_action",
+                "severity": "high",
+                "detail": f"expected intent action={act_exp!r} got {env.action!r}",
+            }
+        )
+    return findings
 
 
 # Representative subset for fast harness health checks (real webhook + local correlation).
@@ -2749,13 +2946,29 @@ def run_conversation_case(
         )
     if case.expect_external_domain and not case.patch_openclaw_news:
         patches.append(_resolve_skill_patch(server))
+    if case.routing_mock_cancel_all_jobs:
+        patches.append(
+            mock.patch(
+                "services.andrea_sync.server.cancel_all_jobs",
+                return_value=CursorControlResult(action="cancel_jobs", canceled_count=0, results=()),
+            )
+        )
 
     captures: List[Dict[str, Any]] = []
+    routing_captures: List[Dict[str, Any]] = []
     harness_timings: List[Dict[str, Any]] = []
+    routing_export_path = os.environ.get("ANDREA_ROUTING_EVAL_EXPORT", "").strip()
     try:
         with ExitStack() as stack:
             for p in patches:
                 stack.enter_context(p)
+            if case.routing_calendar_events_json is not None:
+                stack.enter_context(
+                    mock.patch.dict(
+                        os.environ,
+                        {"ANDREA_CALENDAR_EVENTS_JSON": case.routing_calendar_events_json},
+                    )
+                )
             if case.setup_fn is not None:
                 case.setup_fn(harness)
             uid = case.first_update_id
@@ -2843,6 +3056,25 @@ def run_conversation_case(
                     harness=harness, task_id=task_id, user_text=text, detail=detail_for_cap
                 )
                 cap["harness_timing"] = harness_timings[-1]
+                task_meta = detail_for_cap.get("task", {}).get("meta")
+                cap["routing_task_meta"] = task_meta if isinstance(task_meta, dict) else {}
+                cap["routing_event_type_counts"] = _routing_event_type_counts_from_detail(detail_for_cap)
+                cap["routing_execution_lane"] = _routing_execution_lane_from_detail(detail_for_cap)
+                rm_row = build_routing_matrix_export_row(
+                    scenario_id=scenario.scenario_id,
+                    case=case,
+                    turn_index=turn_idx,
+                    user_text=text,
+                    cap=cap,
+                    detail=detail_for_cap,
+                )
+                routing_captures.append(rm_row)
+                if routing_export_path:
+                    parent = os.path.dirname(os.path.abspath(routing_export_path))
+                    if parent:
+                        os.makedirs(parent, exist_ok=True)
+                    with open(routing_export_path, "a", encoding="utf-8") as fh:
+                        fh.write(json.dumps(rm_row, ensure_ascii=False) + "\n")
                 captures.append(cap)
                 findings = run_deterministic_detectors(
                     cap,
@@ -2877,6 +3109,7 @@ def run_conversation_case(
                             "harness_infra": True,
                             "harness_timings": harness_timings,
                             "captures": captures,
+                            "routing_captures": routing_captures,
                             "last_task_status": last_status,
                         },
                         started_at=started,
@@ -2903,6 +3136,7 @@ def run_conversation_case(
                 "harness_infra_metadata": exc.metadata,
                 "harness_timings": harness_timings,
                 "captures": captures,
+                "routing_captures": routing_captures,
             },
             started_at=started,
             completed_at=time.time(),
@@ -2975,6 +3209,18 @@ def run_conversation_case(
                     "severity": "high",
                     "detail": f"turn_plan_continuity_focus={final_focus!r} not in {tuple(case.required_continuity_focuses)!r}",
                 }
+            )
+        contract_idx = int(case.routing_contract_turn_index)
+        if contract_idx < 0:
+            contract_idx = len(captures) + contract_idx
+        if 0 <= contract_idx < len(captures):
+            ut_contract = (
+                case.turns[contract_idx] if contract_idx < len(case.turns) else ""
+            )
+            all_findings.extend(
+                collect_routing_contract_findings(
+                    case, captures[contract_idx], user_text=str(ut_contract)
+                )
             )
 
     high = [f for f in all_findings if f.get("severity") == "high"]
@@ -3052,6 +3298,7 @@ def run_conversation_case(
         "semantic_adjudication": adjudication,
         "harness_timings": harness_timings,
         "wait_policy": case.wait_policy,
+        "routing_captures": routing_captures,
     }
     result = ExperienceCheckResult.from_observations(
         scenario,
@@ -3976,6 +4223,158 @@ CONVERSATION_CORE_CASES: tuple[ConversationCaseSpec, ...] = (
 )
 
 
+ROUTING_MATRIX_SMOKE_CASE_IDS: tuple[str, ...] = (
+    "rm_casual_hows",
+    "rm_openclaw_schedule_stub",
+    "rm_control_cancel_mock",
+)
+
+
+def _routing_matrix_schedule_stub_calendar_json() -> str:
+    """Single all-day-ish event on today's UTC date so harnesses stay green across timezones."""
+    d = datetime.now(timezone.utc).date()
+    start = f"{d.isoformat()}T15:00:00+00:00"
+    return json.dumps([{"title": "Design review", "start": start}])
+
+
+ROUTING_MATRIX_CASES: tuple[ConversationCaseSpec, ...] = (
+    ConversationCaseSpec(
+        case_id="rm_casual_hows",
+        title="Casual check-in — avoid generic-assistant fallback tone",
+        behavior_family="casual_conversation",
+        turns=("how's it going",),
+        chat_id=91001,
+        from_id=91001,
+        first_update_id=191001,
+        first_message_id=291001,
+        capture_tags=("casual", "short_social"),
+        forbidden_reply_markers=(
+            "as an ai",
+            "i don't have access to your personal life",
+        ),
+    ),
+    ConversationCaseSpec(
+        case_id="rm_meta_openclaw_ping",
+        title="OpenClaw presence ping stays conversational / meta",
+        behavior_family="meta_stack",
+        turns=("openclaw you there?",),
+        chat_id=91002,
+        from_id=91002,
+        first_update_id=191002,
+        first_message_id=291002,
+        capture_tags=("openclaw_ping", "meta"),
+        forbidden_reply_markers=(
+            "pull request",
+            "repo-wide issue",
+            "i can implement",
+        ),
+    ),
+    ConversationCaseSpec(
+        case_id="rm_agenda_calendar_empty",
+        title="Empty calendar today mentions calendar explicitly",
+        behavior_family="agenda_calendar",
+        turns=("What's on my calendar today?",),
+        chat_id=91003,
+        from_id=91003,
+        first_update_id=191003,
+        first_message_id=291003,
+        routing_calendar_events_json="[]",
+        capture_tags=("calendar", "agenda", "empty_provider"),
+        required_reply_markers=("calendar",),
+    ),
+    ConversationCaseSpec(
+        case_id="rm_openclaw_schedule_stub",
+        title="@openclaw schedule with stubbed calendar JSON",
+        behavior_family="agenda_calendar",
+        turns=("Ask @openclaw what's on my schedule today",),
+        chat_id=91004,
+        from_id=91004,
+        first_update_id=191004,
+        first_message_id=291004,
+        routing_calendar_events_json=_routing_matrix_schedule_stub_calendar_json(),
+        capture_tags=("explicit_openclaw", "schedule", "stub_provider"),
+        required_reply_markers=("what you have today",),
+        routing_expect_delegate=False,
+        routing_expected_assistant_route="direct",
+    ),
+    ConversationCaseSpec(
+        case_id="rm_control_cancel_mock",
+        title="Cursor cancel-all jobs stays control-plane (CLI stubbed)",
+        behavior_family="control_plane",
+        turns=("Ask @cursor to cancel all jobs.",),
+        chat_id=91005,
+        from_id=91005,
+        first_update_id=191005,
+        first_message_id=291005,
+        routing_mock_cancel_all_jobs=True,
+        capture_tags=("control_plane", "cursor_cancel", "stub_cli"),
+        required_assistant_reasons=("cursor_control_plane_command",),
+        forbid_unnecessary_delegate=True,
+        forbidden_reply_markers=(
+            "pull request",
+            "repo-wide issue",
+            "i can implement",
+            "code patch",
+        ),
+        routing_expected_assistant_route="direct",
+        routing_expect_delegate=False,
+        routing_expect_intent_control_plane=True,
+        routing_expect_intent_family="control_plane",
+        routing_expect_intent_action="cancel_jobs",
+    ),
+    ConversationCaseSpec(
+        case_id="rm_greeting_then_agenda",
+        title="Greeting then agenda — final turn still surfaces calendar",
+        behavior_family="agenda_calendar",
+        turns=("Hey", "What's on my agenda today?"),
+        chat_id=91006,
+        from_id=91006,
+        first_update_id=191006,
+        first_message_id=291006,
+        routing_calendar_events_json="[]",
+        capture_tags=("multi_turn", "agenda"),
+        required_reply_markers=("calendar",),
+    ),
+)
+
+
+def routing_matrix_scenarios(conversation_eval_options: Mapping[str, Any] | None = None) -> List[ExperienceScenario]:
+    opts = dict(conversation_eval_options or {})
+    smoke = bool(opts.get("smoke"))
+    smoke_ids = set(ROUTING_MATRIX_SMOKE_CASE_IDS) if smoke else None
+    scoped_ids_raw = opts.get("scenario_ids")
+    scoped_ids: set[str] | None = None
+    if isinstance(scoped_ids_raw, list):
+        tmp = {str(x).strip() for x in scoped_ids_raw if str(x).strip()}
+        scoped_ids = tmp if tmp else None
+    elif isinstance(scoped_ids_raw, str) and str(scoped_ids_raw).strip():
+        scoped_ids = {x.strip() for x in str(scoped_ids_raw).split(",") if x.strip()}
+    out: List[ExperienceScenario] = []
+    for case in ROUTING_MATRIX_CASES:
+        if smoke_ids is not None and case.case_id not in smoke_ids:
+            continue
+        if scoped_ids is not None and case.case_id not in scoped_ids:
+            continue
+        out.append(
+            ExperienceScenario(
+                scenario_id=f"routing_matrix::{case.case_id}",
+                title=case.title,
+                description=f"Routing matrix eval · {case.behavior_family}",
+                category="conversation",
+                tags=["conversation_eval", "routing_matrix", case.behavior_family, *case.capture_tags],
+                suspected_files=[
+                    "services/andrea_sync/server.py",
+                    "services/andrea_sync/andrea_router.py",
+                    "services/andrea_sync/intents/classifier.py",
+                    "services/andrea_sync/turn_intelligence.py",
+                ],
+                runner=_make_runner(case),
+                metadata={"conversation_eval_options": opts},
+            )
+        )
+    return out
+
+
 def conversation_core_scenarios(conversation_eval_options: Mapping[str, Any] | None = None) -> List[ExperienceScenario]:
     opts = dict(conversation_eval_options or {})
     smoke = bool(opts.get("smoke"))
@@ -4255,18 +4654,25 @@ def build_cursor_fix_brief(
             "services/andrea_sync/server.py",
             "services/andrea_sync/turn_intelligence.py",
         ]
-    target_case_ids = sorted(
-        {
-            str(cid).split("conversation_core::", 1)[-1]
-            for cid in scenario_ids
-            if str(cid).strip()
-        }
+    def _suite_and_case(sid: str) -> tuple[str, str]:
+        s = str(sid).strip()
+        if s.startswith("routing_matrix::"):
+            return "routing_matrix", s.split("routing_matrix::", 1)[-1]
+        if s.startswith("conversation_core::"):
+            return "conversation_core", s.split("conversation_core::", 1)[-1]
+        return "conversation_core", s
+
+    target_case_ids = sorted({_suite_and_case(cid)[1] for cid in scenario_ids if str(cid).strip()})
+    rerun_suite = (
+        "routing_matrix"
+        if any(str(sid).strip().startswith("routing_matrix::") for sid in scenario_ids)
+        else "conversation_core"
     )
     rerun_cmd = (
-        "python3 scripts/andrea_experience_cycle.py --suite conversation_core --prepare-fix-brief "
+        f"python3 scripts/andrea_experience_cycle.py --suite {rerun_suite} --prepare-fix-brief "
         f"--scenario-ids {','.join(target_case_ids)}"
         if target_case_ids
-        else "python3 scripts/andrea_experience_cycle.py --suite conversation_core --prepare-fix-brief"
+        else f"python3 scripts/andrea_experience_cycle.py --suite {rerun_suite} --prepare-fix-brief"
     )
     cursor_handoff_ready = bool(
         target_case_ids
@@ -4293,14 +4699,14 @@ def build_cursor_fix_brief(
         "targeted_rerun_command": rerun_cmd,
         "scope_instruction": "Modify 1-3 files; avoid runtime env toggles unless necessary.",
         "acceptance_criteria": [
-            "targeted conversation_core scenario subset returns full_pass for this cluster signature",
-            "full conversation_core run does not add new fail/weak_pass regressions",
+            f"targeted {rerun_suite} scenario subset returns full_pass for this cluster signature",
+            f"full {rerun_suite} run does not add new fail/weak_pass regressions",
             "no new metadata or echo regressions on casual + status turns",
         ],
         "cursor_handoff_ready": cursor_handoff_ready,
         "human_review_required": not cursor_handoff_ready,
         "baseline_vs_candidate": {
-            "note": "Re-run scripts/andrea_experience_cycle.py with --suite conversation_core "
+            "note": f"Re-run scripts/andrea_experience_cycle.py with --suite {rerun_suite} "
             "and compare verification_report.checks metadata before/after change.",
             "compare_helper": "services/andrea_sync/repair_executor.py::compare_verification_reports",
         },
@@ -4340,11 +4746,16 @@ def attach_conversation_eval_report(
 __all__ = [
     "FAILURE_FAMILIES",
     "CONVERSATION_SMOKE_CASE_IDS",
+    "ROUTING_MATRIX_CASES",
+    "ROUTING_MATRIX_SMOKE_CASE_IDS",
     "attach_conversation_eval_report",
     "build_cursor_fix_brief",
+    "build_routing_matrix_export_row",
     "build_turn_capture",
     "cluster_failed_checks",
+    "collect_routing_contract_findings",
     "conversation_core_scenarios",
+    "routing_matrix_scenarios",
     "runtime_adjudication_enabled",
     "runtime_adjudication_gate",
     "run_conversation_case",

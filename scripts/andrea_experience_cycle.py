@@ -35,25 +35,25 @@ def main() -> int:
     parser.add_argument(
         "--suite",
         default="",
-        help="Experience suite id (e.g. conversation_core for conversational self-eval).",
+        help="Experience suite id (e.g. conversation_core, routing_matrix).",
     )
     parser.add_argument(
         "--llm-eval",
         action="store_true",
         default=False,
-        help="When running conversation_core, call verifier-slot LLM on weak/failed turns (needs OPENAI_API_KEY).",
+        help="When running conversation_core or routing_matrix, call verifier-slot LLM on weak/failed turns (needs OPENAI_API_KEY).",
     )
     parser.add_argument(
         "--adjudicate-ambiguous",
         action="store_true",
         default=False,
-        help="When running conversation_core, run semantic adjudicator on ambiguous/weak cases.",
+        help="When running conversation_core or routing_matrix, run semantic adjudicator on ambiguous/weak cases.",
     )
     parser.add_argument(
         "--prepare-fix-brief",
         action="store_true",
         default=False,
-        help="When running conversation_core, attach gated Cursor fix briefs to run metadata.",
+        help="When running conversation_core or routing_matrix, attach gated Cursor fix briefs to run metadata.",
     )
     parser.add_argument(
         "--fix-brief-handoff",
@@ -64,7 +64,7 @@ def main() -> int:
     parser.add_argument(
         "--scenario-ids",
         default="",
-        help="Comma-separated conversation_core case ids to run as a targeted subset.",
+        help="Comma-separated case ids (no suite prefix) for conversation_core or routing_matrix subsets.",
     )
     parser.add_argument(
         "--sample-pass-evals",
@@ -76,17 +76,18 @@ def main() -> int:
         "--smoke",
         action="store_true",
         default=False,
-        help="With --suite conversation_core, run a small smoke subset (fast harness health check).",
+        help="With --suite conversation_core or routing_matrix, run a small smoke subset (fast harness check).",
     )
     parser.add_argument(
         "--fail-fast",
         action="store_true",
         default=False,
-        help="With --suite conversation_core, stop after the first failed scenario.",
+        help="With --suite conversation_core or routing_matrix, stop after the first failed scenario.",
     )
     args = parser.parse_args()
 
     suite = str(args.suite or "").strip() or None
+    suite_l = str(suite or "").strip().lower()
     conversation_eval_options = {
         "llm_eval": bool(args.llm_eval),
         "adjudicate_ambiguous": bool(args.adjudicate_ambiguous),
@@ -111,12 +112,14 @@ def main() -> int:
             source_task_id=str(args.source_task_id or ""),
             write_report=not bool(args.no_write_report),
             suite=suite,
-            conversation_eval_options=conversation_eval_options if suite == "conversation_core" else None,
+            conversation_eval_options=conversation_eval_options
+            if suite_l in ("conversation_core", "routing_matrix")
+            else None,
         )
         print(json.dumps(payload, indent=2, ensure_ascii=False))
         report = payload.get("verification_report", {}) or {}
         passed = bool(report.get("passed"))
-        if str(suite or "").strip().lower() == "conversation_core":
+        if suite_l in ("conversation_core", "routing_matrix"):
             passed = bool((report.get("metadata") or {}).get("quality_passed", passed))
         return 0 if payload.get("ok") and passed else 1
     finally:

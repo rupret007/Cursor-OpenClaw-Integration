@@ -1,0 +1,34 @@
+# Scheduled routing-matrix catalog checks; uploads pytest JUnit for triage.
+# Full harness: `python3 scripts/andrea_experience_cycle.py --suite routing_matrix --smoke`
+# NDJSON export: `ANDREA_ROUTING_EVAL_EXPORT=artifacts/routing_captures.ndjson` (same command).
+name: Routing matrix eval
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1"
+
+jobs:
+  routing-matrix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pytest
+        run: python3 -m pip install --upgrade pip pytest
+
+      - name: Routing matrix tests + JUnit
+        run: |
+          mkdir -p artifacts
+          python3 -m pytest tests/test_routing_matrix_eval.py -v --junit-xml=artifacts/routing_matrix_junit.xml
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: routing-matrix-artifacts
+          path: artifacts/

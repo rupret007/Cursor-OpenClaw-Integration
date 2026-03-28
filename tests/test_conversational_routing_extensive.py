@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
@@ -25,6 +26,7 @@ from services.andrea_sync.turn_intelligence import (  # noqa: E402
     build_turn_plan,
     is_lightweight_conversational_question,
     is_substantive_non_social_question,
+    lightweight_conversational_kind,
 )
 
 # Phrases that must match _BARE_DIALOGUE_CLARIFICATION_RE (full-line).
@@ -198,6 +200,73 @@ class TestRoutingMatrixAndDetectorContracts(unittest.TestCase):
         hits = run_deterministic_detectors(cap)
         codes = {h["issue_code"] for h in hits}
         self.assertIn("conversation_lightweight_conversational_technical_boilerplate", codes)
+
+
+class TestPersonalityAndCollaborativeDayPlan(unittest.TestCase):
+    """Personality feedback and assistant-directed day planning stay lightweight direct."""
+
+    def test_lightweight_kind_personality_and_collaborative(self) -> None:
+        self.assertEqual(
+            lightweight_conversational_kind(
+                "I think you were trying to be funny. We need more of your personality to show."
+            ),
+            "personality_feedback",
+        )
+        self.assertEqual(
+            lightweight_conversational_kind("What do you want to do today."),
+            "collaborative_day_plan",
+        )
+
+    def test_not_substantive_for_collaborative_day_plan(self) -> None:
+        text = "What should we do today?"
+        self.assertTrue(is_lightweight_conversational_question(text))
+        self.assertFalse(is_substantive_non_social_question(text))
+
+    def test_classify_route_lightweight_followup_direct(self) -> None:
+        for text in (
+            "Show more personality please.",
+            "What would you like to do today?",
+        ):
+            with self.subTest(text=text):
+                mode, reason, _t, _c = classify_route(text)
+                self.assertEqual(mode, "direct")
+                self.assertEqual(reason, "lightweight_followup_direct")
+
+    @mock.patch(
+        "services.andrea_sync.andrea_router._openai_direct_reply",
+        side_effect=RuntimeError("openai_direct_disabled_for_test"),
+    )
+    def test_build_direct_reply_heuristic_warm_not_generic(self, _mock: object) -> None:
+        p = build_direct_reply(
+            "We need more of your personality to show.",
+            history=[],
+        )
+        low = p.lower()
+        self.assertNotIn("say a bit more about what you want", low)
+        self.assertTrue("warmer" in low or "playful" in low or "personality" in low)
+
+        c = build_direct_reply("What do you want to do today?", history=[])
+        cl = c.lower()
+        self.assertNotIn("say a bit more about what you want", cl)
+        self.assertTrue("quick win" in cl or "focus" in cl)
+
+    def test_lookup_policy_ineligible_mixed_resource_goal(self) -> None:
+        for text in (
+            "Be more playful.",
+            "What are we doing today?",
+        ):
+            with self.subTest(text=text):
+                plan = build_turn_plan(
+                    text,
+                    scenario_id="mixedResourceGoal",
+                    projection_has_continuity_state=True,
+                )
+                policy = build_direct_answer_policy(
+                    text,
+                    scenario_id="mixedResourceGoal",
+                    turn_plan=plan,
+                )
+                self.assertFalse(policy.lookup_eligible)
 
 
 class TestBareClarificationDetectorHygiene(unittest.TestCase):

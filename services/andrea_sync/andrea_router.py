@@ -12,8 +12,11 @@ from dataclasses import dataclass
 from .orchestration_boundary import should_answer_before_delegate
 from .turn_intelligence import (
     _BARE_DIALOGUE_CLARIFICATION_RE,
+    _COLLABORATIVE_DAY_PLAN_RE,
     _normalize_user_turn_apostrophes,
+    _PERSONALITY_FEEDBACK_RE,
     is_lightweight_conversational_question,
+    lightweight_conversational_kind,
 )
 from .user_surface import is_stale_openclaw_narrative, sanitize_user_surface_text
 
@@ -523,6 +526,16 @@ def _heuristic_reply(text: str, history: list[dict[str, str]] | None = None) -> 
         return (
             "I'm referring to what I said just above—if something was unclear, tell me which part."
         )
+    if _PERSONALITY_FEEDBACK_RE.search(clean):
+        return (
+            "Fair — I can turn the personality up a notch. "
+            "Tell me if you want me drier, warmer, or more playful and I'll match it on the next reply."
+        )
+    if _COLLABORATIVE_DAY_PLAN_RE.search(clean):
+        return (
+            "I'm in. If we're keeping it light: a 15-minute quick win, one real focus block, "
+            "then something actually fun. Prefer work-first, life-admin-first, or recharge-first today?"
+        )
     if OPINION_OR_TAKE_RE.search(clean):
         h = _history_hint(history)
         if h and len(h) > 12 and (
@@ -712,6 +725,7 @@ def _openai_direct_reply(
     turn_domain: str = "",
     context_boundary: str = "",
     inject_durable_memory: bool = True,
+    style_extra: str = "",
 ) -> str:
     api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
     if not api_key or not _env_truthy("OPENAI_API_ENABLED", False):
@@ -778,7 +792,7 @@ def _openai_direct_reply(
                 "but do not claim memories beyond what is provided in this chat context. "
                 "Do not treat unrelated prior assistant turns as the answer to a new question. "
                 "Keep replies short and useful for chat or voice."
-                f"{news_extra}{boundary_extra}"
+                f"{news_extra}{boundary_extra}{style_extra}"
             ),
         }
     ]
@@ -856,6 +870,39 @@ def build_direct_reply(
     lightweight_convo = _lightweight_conversational_reply(clean)
     if lightweight_convo:
         return lightweight_convo
+    lwk = lightweight_conversational_kind(str(text or ""))
+    if lwk in {"personality_feedback", "collaborative_day_plan"}:
+        style_extra = (
+            " The user is giving feedback on tone, humor, or personality: respond with a little more warmth "
+            "and voice—playful is OK—without sounding generic. Do not say things like 'say a bit more about "
+            "what you want' or 'tell me what you need'. No web search, grounded lookup, or retry-lookup language."
+            if lwk == "personality_feedback"
+            else " The user is asking what you want to do today or what you should do together: answer as Andrea "
+            "with a few concrete, conversational ideas (quick win, focus block, fun break). Do not pivot to "
+            "their calendar unless they explicitly ask about their schedule. No grounded-research scaffolding."
+        )
+        eff_domain = str(turn_domain or "").strip() or "opinion_reflection"
+        try:
+            reply = _openai_direct_reply(
+                text,
+                history=history,
+                memory_notes=memory_notes,
+                turn_domain=eff_domain,
+                context_boundary=context_boundary,
+                inject_durable_memory=inject_durable_memory,
+                style_extra=style_extra,
+            )
+            return _finalize_direct_surface_reply(
+                reply,
+                user_seed=text,
+                history=history,
+            )
+        except Exception:
+            return _finalize_direct_surface_reply(
+                _heuristic_reply(text, history=history),
+                user_seed=text,
+                history=history,
+            )
     if is_lightweight_conversational_question(str(text or "")):
         return _finalize_direct_surface_reply(
             _heuristic_reply(text, history=history),

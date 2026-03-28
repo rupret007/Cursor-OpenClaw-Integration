@@ -3726,6 +3726,10 @@ class SyncServer:
     ) -> tuple[str, str, dict[str, Any]] | None:
         if not _env_bool("ANDREA_GROUNDED_RESEARCH_ENABLED", True):
             return None
+        # Lightweight conversational turns (personality feedback, collaborative day plan, etc.) must never
+        # pick up grounded-research scaffolding even if domain was promoted upstream.
+        if is_lightweight_conversational_question(str(classify_text or "")):
+            return None
         dom = str(turn_plan.domain or "")
         if dom not in {"external_information", "technical_guidance"} and str(scenario_id or "") != "researchSummary":
             return None

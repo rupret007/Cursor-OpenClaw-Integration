@@ -314,6 +314,22 @@ class ConversationEvalDetectorTests(unittest.TestCase):
         codes = {h["issue_code"] for h in hits}
         self.assertIn("conversation_lightweight_conversational_technical_boilerplate", codes)
 
+    def test_detects_lightweight_boilerplate_on_personality_feedback_turn(self) -> None:
+        cap = {
+            "raw_reply_text": (
+                "I couldn't verify live lookup capability right now, so I can only give a general answer.\n\n"
+                "Next options:\n- Retry grounded lookup in a moment when connectivity is stable."
+            ),
+            "user_turn": "Show more personality.",
+            "turn_plan_domain": "opinion_reflection",
+            "assistant_reason": "grounded_research_unavailable",
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap)
+        codes = {h["issue_code"] for h in hits}
+        self.assertIn("conversation_lightweight_conversational_technical_boilerplate", codes)
+
     def test_detects_agenda_assistant_usefulness_miss_with_state(self) -> None:
         cap = {
             "raw_reply_text": (
@@ -1200,7 +1216,7 @@ class ConversationCoreSuitePersistenceTests(unittest.TestCase):
 class ConversationCoreScenariosTests(unittest.TestCase):
     def test_conversation_core_scenario_count(self) -> None:
         rows = conversation_core_scenarios({})
-        self.assertGreaterEqual(len(rows), 18)
+        self.assertGreaterEqual(len(rows), 20)
         ids = {r.scenario_id for r in rows}
         self.assertIn("conversation_core::hi_andrea", ids)
         self.assertIn("conversation_core::news_today", ids)
@@ -1221,6 +1237,8 @@ class ConversationCoreScenariosTests(unittest.TestCase):
         self.assertIn("conversation_core::technical_guidance_multiline_partial_evidence", ids)
         self.assertIn("conversation_core::cursor_control_plane_cancel_jobs_no_codegen", ids)
         self.assertIn("conversation_core::cursor_recall_thin_thread_next_steps", ids)
+        self.assertIn("conversation_core::personality_feedback_more_voice", ids)
+        self.assertIn("conversation_core::collaborative_day_plan_assistant", ids)
 
     def test_conversation_smoke_subset_size(self) -> None:
         rows = conversation_core_scenarios({"smoke": True})

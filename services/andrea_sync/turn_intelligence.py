@@ -5,6 +5,15 @@ from dataclasses import dataclass
 import re
 from typing import Literal
 
+LightweightConversationalKind = Literal[
+    "none",
+    "personality_feedback",
+    "collaborative_day_plan",
+    "bare_dialogue_clarification",
+    "opinion_reflection",
+    "meaning_of_life_style",
+]
+
 from .user_surface import is_internal_runtime_text, is_stale_openclaw_narrative
 
 
@@ -129,6 +138,34 @@ _LIGHTWEIGHT_CONVERSATIONAL_RE = re.compile(
     r"meaning\s+of\s+life|purpose\s+of\s+life|"
     r"why\s+do\s+we\s+exist|"
     r"life,\s+the\s+universe\s+and\s+everything"
+    r")\b",
+    re.I,
+)
+# Meta-feedback on tone / humor — stay direct conversational, not lookup or generic clarifier.
+_PERSONALITY_FEEDBACK_RE = re.compile(
+    r"\b("
+    r"(?:need|want)\s+more\s+(?:of\s+)?(?:your\s+)?personality|"
+    r"show\s+(?:me\s+)?(?:more\s+)?personality|"
+    r"more\s+of\s+your\s+personality|"
+    r"trying\s+to\s+be\s+funny|"
+    r"be\s+(?:more\s+)?(?:funny|playful|humorous)|"
+    r"(?:be\s+)?funnier|"
+    r"less\s+robotic|"
+    r"more\s+human\b|"
+    r"that\s+was\s+(?:flat|boring)\b|"
+    r"sense\s+of\s+humor|"
+    r"humor\s+in\s+your"
+    r")\b",
+    re.I,
+)
+# Asking the assistant (or "we") what to do today — not the user's calendar agenda.
+_COLLABORATIVE_DAY_PLAN_RE = re.compile(
+    r"\b("
+    r"what\s+do\s+you\s+want\s+to\s+do\s+(?:today|tonight|right\s+now)\b|"
+    r"what\s+should\s+we\s+do\s+(?:today|tonight)?|"
+    r"what\s+are\s+we\s+doing\s+(?:today|tonight)?|"
+    r"what\s+would\s+you\s+like\s+to\s+do\s+(?:today|tonight)?|"
+    r"what\s+do\s+you\s+feel\s+like\s+doing\s+(?:today|tonight)?"
     r")\b",
     re.I,
 )
@@ -635,14 +672,15 @@ def is_agenda_day_plan_question(text: str) -> bool:
     return bool(_AGENDA_RE.search(clean))
 
 
-def is_lightweight_conversational_question(text: str) -> bool:
+def lightweight_conversational_kind(text: str) -> LightweightConversationalKind:
+    """Stable subtype for direct conversational routing, eval, and grounded-skip guards."""
     clean = _normalize_user_turn_apostrophes(str(text or "").strip())
     if not clean:
-        return False
+        return "none"
     if is_casual_social_only_turn(clean):
-        return False
+        return "none"
     if is_execution_heavy_or_repo_action(clean):
-        return False
+        return "none"
     if (
         is_approval_state_question(clean)
         or is_recent_outcome_history_question(clean)
@@ -654,14 +692,22 @@ def is_lightweight_conversational_question(text: str) -> bool:
         or _TECHNICAL_GUIDANCE_RE.search(clean)
         or is_tooling_identity_question(clean)
     ):
-        return False
+        return "none"
+    if _PERSONALITY_FEEDBACK_RE.search(clean):
+        return "personality_feedback"
+    if _COLLABORATIVE_DAY_PLAN_RE.search(clean):
+        return "collaborative_day_plan"
     if _BARE_DIALOGUE_CLARIFICATION_RE.match(clean):
-        return True
+        return "bare_dialogue_clarification"
     if _OPINION_RE.search(clean):
-        return True
+        return "opinion_reflection"
     if _LIGHTWEIGHT_CONVERSATIONAL_RE.search(clean):
-        return True
-    return False
+        return "meaning_of_life_style"
+    return "none"
+
+
+def is_lightweight_conversational_question(text: str) -> bool:
+    return lightweight_conversational_kind(text) != "none"
 
 
 def is_substantive_non_social_question(text: str) -> bool:

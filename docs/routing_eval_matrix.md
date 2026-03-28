@@ -15,6 +15,8 @@ Examples:
 - `routing_matrix::meta_stack::rm_meta_openclaw_whats_up`
 - `routing_matrix::control_plane::rm_control_cancel_no_jobs`
 - `routing_matrix::casual_conversation::rm_math_then_which_clarification`
+- `routing_matrix::opinion_reflection::rm_personality_feedback_voice`
+- `routing_matrix::casual_conversation::rm_collaborative_day_plan`
 
 ## Dimensions (taxonomy)
 
@@ -28,6 +30,8 @@ Examples:
 | **Stack / placement** | Questions like “is that in OpenClaw or Andrea?” are classified as **tooling identity** in [`turn_intelligence.py`](services/andrea_sync/turn_intelligence.py) (`is_tooling_identity_question`) so they stay **lightweight direct** and avoid grounded-research “next steps” tails. |
 | **Anaphoric clarification** | Ultra-short lines such as “Which is what?” / “What’s that?” match `_BARE_DIALOGUE_CLARIFICATION_RE` in [`turn_intelligence.py`](services/andrea_sync/turn_intelligence.py) so they are **lightweight conversational** (not substantive / lookup-eligible). [`andrea_router.py`](services/andrea_sync/andrea_router.py) routes them as **`lightweight_followup_direct`** and answers from **recent assistant history** when possible. |
 | **Apostrophe normalization** | Classification normalizes Unicode apostrophes (`’`, backtick) to ASCII in [`turn_intelligence.py`](services/andrea_sync/turn_intelligence.py) so mobile “What’s that?” matches the same patterns as a straight-quote spelling. |
+| **Personality / tone feedback** | Meta prompts (e.g. “show more personality”, “trying to be funny”) match `_PERSONALITY_FEEDBACK_RE` → `lightweight_conversational_kind` **`personality_feedback`**: direct lane, **no** grounded lookup ([`server.py`](services/andrea_sync/server.py) skip), warmer heuristic + optional direct LLM polish ([`andrea_router.py`](services/andrea_sync/andrea_router.py)). |
+| **Collaborative day plan** | Assistant-directed “what do **you** want to do today / what should **we** do” matches `_COLLABORATIVE_DAY_PLAN_RE` → **`collaborative_day_plan`**: same lightweight + no-lookup treatment (distinct from user **calendar** agenda patterns in `_AGENDA_RE`). |
 
 ## Data capture
 
@@ -75,5 +79,9 @@ ANDREA_ROUTING_EVAL_EXPORT=./artifacts/routing_captures.ndjson python3 scripts/a
 - Control plane cancel (stubbed CLI) + intent flags
 - Greeting then agenda (multi-turn)
 - Math then anaphoric “which is what?” (multi-turn; contract on final turn)
+- Personality feedback (`rm_personality_feedback_voice`)
+- Collaborative what-to-do-today (`rm_collaborative_day_plan`)
 
 Phase B can add continuation-attachment cases, mixed bundles, and grounded/news variants.
+
+`conversation_core` also includes **`personality_feedback_more_voice`** and **`collaborative_day_plan_assistant**` for the same prompt families without the `routing_matrix::` prefix.

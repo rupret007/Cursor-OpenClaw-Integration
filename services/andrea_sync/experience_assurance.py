@@ -315,6 +315,7 @@ class ExperienceHarness:
             "ANDREA_EXPERIENCE_TASK_TERMINAL_TIMEOUT_SECONDS",
             "ANDREA_EXPERIENCE_POLL_INTERVAL_SECONDS",
             "ANDREA_EXPERIENCE_PROGRESS_ENABLED",
+            "ANDREA_ROUTING_EVAL_EXPORT",
         )
         _exp_harness_saved = {k: os.environ.get(k) for k in _exp_harness_env_keys}
 
@@ -386,6 +387,9 @@ class ExperienceHarness:
                 if saved is not None and str(saved).strip() != ""
                 else default
             )
+        routing_eval_export = _exp_harness_saved.get("ANDREA_ROUTING_EVAL_EXPORT")
+        if routing_eval_export is not None and str(routing_eval_export).strip():
+            env_patch["ANDREA_ROUTING_EVAL_EXPORT"] = str(routing_eval_export).strip()
         if not self._preserve_openai_for_eval:
             env_patch["OPENAI_API_ENABLED"] = "0"
             env_patch["OPENAI_API_KEY"] = ""

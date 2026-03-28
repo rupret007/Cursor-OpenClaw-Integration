@@ -15,7 +15,10 @@ from services.andrea_sync.andrea_router import (  # noqa: E402
     classify_route,
     route_message,
 )
-from services.andrea_sync.conversation_eval import run_deterministic_detectors  # noqa: E402
+from services.andrea_sync.conversation_eval import (  # noqa: E402
+    ROUTING_MATRIX_CASES,
+    run_deterministic_detectors,
+)
 from services.andrea_sync.turn_intelligence import (  # noqa: E402
     arbitrate_answer_lane,
     build_direct_answer_policy,
@@ -163,6 +166,29 @@ class TestBareDialoguePunctuationAndNegatives(unittest.TestCase):
         ]
         d = route_message("Come again?", history=history)
         self.assertIn("42", d.reply_text)
+
+
+class TestRoutingMatrixAndDetectorContracts(unittest.TestCase):
+    """Cycle 3: catalog presence and detectors for bad surfaces on lightweight turns."""
+
+    def test_routing_matrix_includes_math_then_which_clarification(self) -> None:
+        ids = {c.case_id for c in ROUTING_MATRIX_CASES}
+        self.assertIn("rm_math_then_which_clarification", ids)
+
+    def test_grounded_boilerplate_on_which_is_what_trips_lightweight_detector(self) -> None:
+        cap = {
+            "raw_reply_text": (
+                "I couldn't verify live lookup capability right now, so I can only give a general answer.\n\n"
+                "Next options:\n- Retry grounded lookup in a moment when connectivity is stable."
+            ),
+            "user_turn": "Which is what?",
+            "turn_plan_domain": "opinion_reflection",
+            "leak_internal_runtime": False,
+            "leak_sanitized_empty": False,
+        }
+        hits = run_deterministic_detectors(cap)
+        codes = {h["issue_code"] for h in hits}
+        self.assertIn("conversation_lightweight_conversational_technical_boilerplate", codes)
 
 
 class TestBareClarificationDetectorHygiene(unittest.TestCase):

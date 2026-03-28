@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from .orchestration_boundary import should_answer_before_delegate
 from .turn_intelligence import (
     _BARE_DIALOGUE_CLARIFICATION_RE,
+    _normalize_user_turn_apostrophes,
     is_lightweight_conversational_question,
 )
 from .user_surface import is_stale_openclaw_narrative, sanitize_user_surface_text
@@ -504,7 +505,7 @@ def _heuristic_reply(text: str, history: list[dict[str, str]] | None = None) -> 
     lightweight_convo = _lightweight_conversational_reply(clean)
     if lightweight_convo:
         return lightweight_convo
-    raw_turn = str(text or "").strip()
+    raw_turn = _normalize_user_turn_apostrophes(str(text or "").strip())
     if _BARE_DIALOGUE_CLARIFICATION_RE.match(raw_turn):
         h = _history_hint(history)
         if h and h.strip():

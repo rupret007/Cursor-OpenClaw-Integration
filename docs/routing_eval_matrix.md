@@ -27,6 +27,7 @@ Examples:
 | **Wait policy** | `terminal_reply` (default) vs `routing_smoke` (allows queued/running) |
 | **Stack / placement** | Questions like “is that in OpenClaw or Andrea?” are classified as **tooling identity** in [`turn_intelligence.py`](services/andrea_sync/turn_intelligence.py) (`is_tooling_identity_question`) so they stay **lightweight direct** and avoid grounded-research “next steps” tails. |
 | **Anaphoric clarification** | Ultra-short lines such as “Which is what?” / “What’s that?” match `_BARE_DIALOGUE_CLARIFICATION_RE` in [`turn_intelligence.py`](services/andrea_sync/turn_intelligence.py) so they are **lightweight conversational** (not substantive / lookup-eligible). [`andrea_router.py`](services/andrea_sync/andrea_router.py) routes them as **`lightweight_followup_direct`** and answers from **recent assistant history** when possible. |
+| **Apostrophe normalization** | Classification normalizes Unicode apostrophes (`’`, backtick) to ASCII in [`turn_intelligence.py`](services/andrea_sync/turn_intelligence.py) so mobile “What’s that?” matches the same patterns as a straight-quote spelling. |
 
 ## Data capture
 

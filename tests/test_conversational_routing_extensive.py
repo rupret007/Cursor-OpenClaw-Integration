@@ -74,6 +74,15 @@ class TestBareDialogueRoutingMatrix(unittest.TestCase):
         self.assertIn("88", d.reply_text)
         self.assertNotIn("say a bit more about what you want", d.reply_text.lower())
 
+    def test_route_message_smart_apostrophe_matches_ascii_classify_reason(self) -> None:
+        history = [{"role": "assistant", "content": "The north star metric."}]
+        d_ascii = route_message("What's that?", history=history)
+        d_smart = route_message("What’s that?", history=history)
+        self.assertEqual(d_ascii.reason, "lightweight_followup_direct")
+        self.assertEqual(d_smart.reason, "lightweight_followup_direct")
+        self.assertIn("north star", d_ascii.reply_text.lower())
+        self.assertIn("north star", d_smart.reply_text.lower())
+
     def test_build_direct_reply_no_generic_fallback_for_bare_clarify(self) -> None:
         reply = build_direct_reply(
             "What's that?",

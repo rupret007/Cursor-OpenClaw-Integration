@@ -27,7 +27,7 @@ Remove the **GitHub Grade‑C blocker** first when possible: `gh auth login` (or
 
 | Skill | Skill key | Typical install / auth |
 |------|-----------|-------------------------|
-| BlueBubbles / iMessage | `bluebubbles` | Install/verify through `openclaw skills info bluebubbles`; keep the BlueBubbles bridge healthy and grant any required local messaging permissions before relying on outbound send flows. |
+| BlueBubbles / iMessage | `bluebubbles` | See **[BlueBubbles + Andrea (OpenClaw)](#bluebubbles--andrea-openclaw)** below for the full runbook. |
 | Apple Notes | `apple-notes` | Install **`memo`** CLI (Homebrew: `brew install memo` — confirm with `openclaw skills info apple-notes`). Grant macOS automation/Notes permissions as prompted. |
 | Apple Reminders | `apple-reminders` | Install **`remindctl`** (common tap: `brew install steipete/tap/remindctl`; always verify with `openclaw skills info apple-reminders`). |
 | Things 3 | `things-mac` | Install the **`things`** CLI for Things 3 per upstream instructions (`openclaw skills info things-mac` — may not be in core Homebrew). |
@@ -36,6 +36,45 @@ Remove the **GitHub Grade‑C blocker** first when possible: `gh auth login` (or
 | Session logs | `session-logs` | Requires **`jq`** + **`rg`** (ripgrep) on `PATH` (`openclaw skills info session-logs`). |
 
 **Observability:** `python3 scripts/andrea_capabilities.py --json` includes `skill:*` rows for hybrid skills. Missing requirements surface as **`ready_with_limits`**, not silent **`ready`**.
+
+---
+
+## BlueBubbles + Andrea (OpenClaw)
+
+BlueBubbles is the **primary OpenClaw skill** for **personal iMessage / phone texting** in this stack: capability answers, **recent texts** (structured OpenClaw fetch), and **outbound draft → confirm** when the lane is verified. Andrea resolves it via `MESSAGING_SKILL_CANDIDATES` in [`services/andrea_sync/server.py`](../services/andrea_sync/server.py); delegated messaging-heavy asks should still go through OpenClaw with the **`bluebubbles`** skill when the user means the phone lane, not Telegram-in-chat.
+
+### Install and verify
+
+```bash
+cd /path/to/Cursor-OpenClaw-Integration
+openclaw skills info bluebubbles
+openclaw skills install bluebubbles   # if not already installed
+openclaw skills check
+openclaw gateway restart
+python3 scripts/andrea_capabilities.py --json | rg -i bluebubbles || true
+OPENCLAW_ENFORCE=1 MODEL_GUARD_ON_FAIL=1 bash scripts/andrea_doctor.sh
+```
+
+To **require** BlueBubbles in strict checks, include `bluebubbles` in `ANDREA_OPENCLAW_ELIGIBLE_SKILLS` (see [.env.example](../.env.example)).
+
+### Bridge and macOS
+
+- Keep the **BlueBubbles server/bridge** running and reachable from the machine where **OpenClaw** runs.
+- Grant **Automation**, **Full Disk Access**, or other prompts the skill metadata describes; without them, `openclaw skills info bluebubbles` may show limits and Andrea will surface **installed but not eligible** / unavailable copy instead of implying send/read works.
+
+### What Andrea does today
+
+| User intent | Path | Notes |
+|-------------|------|--------|
+| “Can you read my iMessages / BlueBubbles?” | Direct structured reply | Read-focused capability answer; may mention drafting outbound separately. |
+| “Recent texts / messages today …” | `_fetch_recent_text_messages` → OpenClaw | Uses ephemeral session guardrails where configured; failures stay user-safe. |
+| “Tell Candace …” / text-to-person | Outbound draft → `send it` / `cancel` | BlueBubbles is the default messaging skill key when matched; WhatsApp uses `wacli` when the user asks for WhatsApp. |
+| Stripped `@openclaw` + “Tell to …” | Not treated as SMS recipient `to` | Parser rejects invalid outbound targets so todo-style asks are not drafted as texts. |
+
+### What we do not promise
+
+- **Telegram** chat content is not “your iPhone texts” unless the user clearly asks about the **phone / iMessage** lane.
+- No send or read guarantee if the bridge is down; trust **doctor + capabilities JSON**, not optimistic copy.
 
 ---
 

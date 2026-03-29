@@ -72,5 +72,6 @@ openclaw gateway restart
 
 ## Documentation in repo
 
+- [OpenClaw hybrid skills + BlueBubbles runbook](ANDREA_OPENCLAW_HYBRID_SKILLS.md) — install/verify BlueBubbles, Andrea structured messaging paths, and OpenClaw-first delegation.
 - [Roadmap / phased integration plan](../openclaw-cursor-integration-roadmap.md) (repo root)
 - [Integration proposal / ideas](../openclaw-cursor-integration-proposal.md) (repo root)

@@ -33,6 +33,8 @@ class AndreaSyncOpenClawHybridTests(unittest.TestCase):
         self.assertIn("phase_trace", prompt)
         self.assertIn("planner_summary", prompt)
         self.assertIn("collaboration traces sparse and user-safe", prompt)
+        self.assertIn("bluebubbles", prompt.lower())
+        self.assertIn("iMessage", prompt)
 
     def test_build_prompt_for_cursor_primary_prefers_openclaw_skills(self) -> None:
         prompt = MODULE._build_prompt(

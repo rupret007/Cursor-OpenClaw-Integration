@@ -2,6 +2,8 @@
 
 This doc supports the **Masterclass / hybrid expansion**: enable productivity lanes first, then execution/automation, then optional voice — without destabilizing the core OpenClaw baseline.
 
+**Telegram / Andrea sync:** delegated work is executed through the **OpenClaw hybrid** lane only. The legacy **direct Cursor runner** (`_run_cursor_job` / `direct_cursor` polling) is no longer used for user-initiated jobs; `@cursor` mentions still influence collaboration *mode* copy, but the runtime handoff is OpenClaw-first.
+
 ## Verification commands (after each wave)
 
 ```bash

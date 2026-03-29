@@ -4445,24 +4445,15 @@ class TestAndreaSync(unittest.TestCase):
             "agent_url": "https://cursor.com/agents/demo",
             "pr_url": "https://github.com/example/repo/pull/1",
         }
-        with mock.patch.object(server, "_create_openclaw_job", return_value=oc_ret), mock.patch.object(
-            server,
-            "_poll_cursor_agent_terminal",
-            return_value=(
-                "FINISHED",
-                {},
-                str(oc_ret.get("agent_url") or ""),
-                str(oc_ret.get("pr_url") or ""),
-            ),
-        ):
+        with mock.patch.object(server, "_create_openclaw_job", return_value=oc_ret):
             server._run_delegated_job(result["task_id"])
         proj = project_task_dict(server.conn, result["task_id"], "telegram")
         self.assertEqual(proj["status"], TaskStatus.COMPLETED.value)
-        self.assertTrue(proj["meta"]["execution"]["delegated_to_cursor"])
+        self.assertFalse(proj["meta"]["execution"]["delegated_to_cursor"])
         self.assertEqual(proj["meta"]["cursor"]["agent_url"], "https://cursor.com/agents/demo")
         self.assertEqual(proj["meta"]["cursor"]["pr_url"], "https://github.com/example/repo/pull/1")
 
-    def test_server_cursor_primary_escalates_if_openclaw_does_not_delegate(self) -> None:
+    def test_server_cursor_primary_stays_openclaw_when_hybrid_does_not_hand_off(self) -> None:
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
         os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
         from services.andrea_sync.server import SyncServer  # noqa: E402
@@ -4487,37 +4478,22 @@ class TestAndreaSync(unittest.TestCase):
         )
         server._handle_task_followups(result["task_id"])
 
-        def fake_cursor_run(task_id: str) -> None:
-            server._append_task_event(
-                task_id,
-                EventType.JOB_COMPLETED,
-                {
-                    "summary": "Cursor reviewed the plan and suggested improvements.",
-                    "backend": "cursor",
-                    "delegated_to_cursor": True,
-                    "cursor_agent_id": "bc-fallback",
-                },
-            )
-
-        with (
-            mock.patch.object(
-                server,
-                "_create_openclaw_job",
-                return_value={
-                    "ok": True,
-                    "summary": "OpenClaw reviewed the plan.",
-                    "backend": "openclaw",
-                    "execution_lane": "openclaw_hybrid",
-                    "delegated_to_cursor": False,
-                },
-            ),
-            mock.patch.object(server, "_run_cursor_job", side_effect=fake_cursor_run),
+        with mock.patch.object(
+            server,
+            "_create_openclaw_job",
+            return_value={
+                "ok": True,
+                "summary": "OpenClaw reviewed the plan.",
+                "backend": "openclaw",
+                "execution_lane": "openclaw_hybrid",
+                "delegated_to_cursor": False,
+            },
         ):
             server._run_delegated_job(result["task_id"])
         proj = project_task_dict(server.conn, result["task_id"], "telegram")
         self.assertEqual(proj["status"], TaskStatus.COMPLETED.value)
-        self.assertTrue(proj["meta"]["execution"]["delegated_to_cursor"])
-        self.assertEqual(proj["cursor_agent_id"], "bc-fallback")
+        self.assertFalse(proj["meta"]["execution"]["delegated_to_cursor"])
+        self.assertEqual(proj["summary"], "OpenClaw reviewed the plan.")
 
     def test_server_followups_memory_question_uses_prior_chat_history(self) -> None:
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
@@ -5144,9 +5120,9 @@ class TestAndreaSync(unittest.TestCase):
         marker = server._meta_key("executor_started", "tsk_demo")
         set_meta(server.conn, marker, "123.0")
         with mock.patch.object(server, "_task_execution_lane", return_value="direct_cursor"):
-            with mock.patch.object(server, "_run_cursor_job") as run_cursor:
+            with mock.patch.object(server, "_run_openclaw_job") as run_oc:
                 server._run_delegated_job("tsk_demo")
-        run_cursor.assert_called_once_with("tsk_demo")
+        run_oc.assert_called_once_with("tsk_demo")
         self.assertIsNone(get_meta(server.conn, marker))
 
     def test_telegram_followups_prefer_openclaw_user_summary_when_summary_is_generic(self) -> None:

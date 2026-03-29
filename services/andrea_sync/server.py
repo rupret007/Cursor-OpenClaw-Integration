@@ -432,9 +432,6 @@ class SyncServer:
         self.openclaw_timeout_seconds = _env_int(
             "ANDREA_OPENCLAW_TIMEOUT_SECONDS", 900
         )
-        self.openclaw_fallback_to_cursor = _env_bool(
-            "ANDREA_OPENCLAW_FALLBACK_TO_CURSOR", True
-        )
         self.openclaw_thinking = os.environ.get("ANDREA_OPENCLAW_THINKING", "medium").strip() or "medium"
         # Fresh session per structured lookup (news, recent texts) avoids long-lived OpenClaw transcript bleed.
         self.openclaw_lookup_ephemeral_session = _env_bool(
@@ -991,7 +988,7 @@ class SyncServer:
         if kind == "openclaw":
             return "openclaw_hybrid"
         if kind == "cursor":
-            return "direct_cursor"
+            return "openclaw_hybrid"
         return self.telegram_delegate_lane
 
     def _task_route_reason(self, task_id: str) -> str:
@@ -2302,7 +2299,9 @@ class SyncServer:
                     if applied:
                         self.with_lock(lambda c: set_meta(c, marker, str(time.time())))
                     return decision, applied
-                kind = "openclaw" if execution_lane == "openclaw_hybrid" else "cursor"
+                if execution_lane in {"cursor", "direct_cursor", "cursor_direct"}:
+                    execution_lane = "openclaw_hybrid"
+                kind = "openclaw"
                 ranks = rank_execution_lanes(
                     classify_text,
                     chosen_lane=execution_lane,
@@ -2342,7 +2341,7 @@ class SyncServer:
                     "source": source,
                     "route_reason": decision.reason,
                     "execution_lane": execution_lane,
-                    "runner": "openclaw" if kind == "openclaw" else "cursor",
+                    "runner": "openclaw",
                     "routing_hint": str(user_payload.get("routing_hint") or "auto"),
                     "collaboration_mode": decision.collaboration_mode,
                     "visibility_mode": str(
@@ -4184,7 +4183,7 @@ class SyncServer:
 
         if cancelled <= 0:
             return (
-                "I do not see any active Cursor-side jobs to cancel right now.",
+                "I do not see any active delegated jobs (OpenClaw / hybrid) to cancel right now.",
                 "cursor_control_plane_command",
             )
         job_label = "job" if cancelled == 1 else "jobs"
@@ -4923,11 +4922,8 @@ class SyncServer:
     def _run_delegated_job(self, task_id: str) -> None:
         marker = self._meta_key("executor_started", task_id)
         try:
-            execution_lane = self._task_execution_lane(task_id)
-            if execution_lane == "openclaw_hybrid":
-                self._run_openclaw_job(task_id)
-                return
-            self._run_cursor_job(task_id)
+            # All delegated user work runs through OpenClaw; direct Cursor runner is retired.
+            self._run_openclaw_job(task_id)
         except Exception as exc:  # noqa: BLE001
             self._append_task_event(
                 task_id,
@@ -5024,29 +5020,6 @@ class SyncServer:
                 lane="openclaw",
                 summary="OpenClaw could not start the planning pass cleanly.",
             )
-            if self.openclaw_fallback_to_cursor:
-                self._append_task_event(
-                    task_id,
-                    EventType.JOB_PROGRESS,
-                    {
-                        "message": (
-                            "OpenClaw could not complete the handoff cleanly, so Andrea is "
-                            "falling back to a direct Cursor launch."
-                        ),
-                        "backend": "cursor",
-                        "execution_lane": "direct_cursor",
-                        "runner": "cursor",
-                        "delegated_to_cursor": True,
-                        "routing_hint": routing_hint,
-                        "collaboration_mode": collaboration_mode,
-                        "visibility_mode": visibility_mode,
-                        "preferred_model_family": preferred_model_family,
-                        "preferred_model_label": preferred_model_label,
-                        "force_telegram_note": visibility_mode == "full",
-                    },
-                )
-                self._run_cursor_job(task_id)
-                return
             self._append_task_event(
                 task_id,
                 EventType.JOB_FAILED,
@@ -5121,13 +5094,9 @@ class SyncServer:
                 else []
             )
             progress_message = "OpenClaw completed the coordination pass."
-            if result.get("delegated_to_cursor"):
+            if collaboration_mode in {"cursor_primary", "collaborative"}:
                 progress_message = (
-                    "OpenClaw completed the coordination pass and involved Cursor for the heavier execution."
-                )
-            elif collaboration_mode in {"cursor_primary", "collaborative"}:
-                progress_message = (
-                    "OpenClaw completed the coordination pass, but Andrea may still escalate to Cursor to honor the collaboration request."
+                    "OpenClaw completed the coordination pass (collaboration modes stay inside OpenClaw here)."
                 )
             if trace_excerpt:
                 progress_message += f" Trace: {trace_excerpt}"
@@ -5161,54 +5130,10 @@ class SyncServer:
             self._append_orchestration_step(
                 task_id,
                 "execution",
-                "started",
-                lane="cursor",
+                "completed",
+                lane="openclaw",
                 summary=execution_summary
-                or "Andrea is handing the heavier execution step to Cursor.",
-                provider=str(result.get("provider") or ""),
-                model=str(result.get("model") or ""),
-            )
-            self._append_task_event(
-                task_id,
-                EventType.JOB_PROGRESS,
-                {
-                    "message": (
-                        "OpenClaw completed an initial pass, but Andrea is escalating to Cursor "
-                        "to honor your collaboration request."
-                    ),
-                    "backend": "cursor",
-                    "execution_lane": "direct_cursor",
-                    "runner": "cursor",
-                    "delegated_to_cursor": True,
-                    "routing_hint": routing_hint,
-                    "collaboration_mode": collaboration_mode,
-                    "visibility_mode": visibility_mode,
-                    "preferred_model_family": preferred_model_family,
-                    "preferred_model_label": preferred_model_label,
-                    "force_telegram_note": visibility_mode == "full",
-                },
-            )
-            self._run_cursor_job(task_id)
-            return
-        if (
-            result.get("ok")
-            and result.get("delegated_to_cursor")
-            and result.get("cursor_agent_id")
-        ):
-            agent_id = _clip(result.get("cursor_agent_id"), 200) or ""
-            agent_url = _clip(payload.get("agent_url"), 1000) or ""
-            pr_url = _clip(payload.get("pr_url"), 1000) or ""
-            execution_entry = phase_outputs.get("execution")
-            execution_summary = ""
-            if isinstance(execution_entry, dict):
-                execution_summary = str(execution_entry.get("summary") or "")
-            self._append_orchestration_step(
-                task_id,
-                "execution",
-                "started",
-                lane="cursor",
-                summary=execution_summary
-                or "OpenClaw delegated execution to Cursor; Andrea will poll for terminal status.",
+                or "OpenClaw completed the coordination pass (Cursor runner disabled).",
                 provider=str(result.get("provider") or ""),
                 model=str(result.get("model") or ""),
             )
@@ -5218,14 +5143,12 @@ class SyncServer:
                     EventType.JOB_PROGRESS,
                     {
                         "message": (
-                            "OpenClaw finished coordination and handed execution to Cursor. "
-                            "Andrea is waiting for Cursor to reach a terminal state before completing this task."
+                            "OpenClaw completed the coordination pass. "
+                            "Execution stays in OpenClaw in this deployment."
                         ),
-                        "backend": "cursor",
+                        "backend": "openclaw",
                         "execution_lane": "openclaw_hybrid",
-                        "runner": "cursor",
-                        "delegated_to_cursor": True,
-                        "cursor_agent_id": agent_id or None,
+                        "runner": "openclaw",
                         "routing_hint": routing_hint,
                         "collaboration_mode": collaboration_mode,
                         "visibility_mode": visibility_mode,
@@ -5234,66 +5157,49 @@ class SyncServer:
                         "force_telegram_note": True,
                     },
                 )
-            goal_for_task = self.with_lock(lambda c: get_goal_id_for_task(c, task_id))
-            oc_run = str(payload.get("openclaw_run_id") or "").strip() or None
-            oc_sess = str(payload.get("openclaw_session_id") or "").strip() or None
-            attempt_id = self._register_cursor_execution_attempt(
+        if (
+            result.get("ok")
+            and result.get("delegated_to_cursor")
+            and result.get("cursor_agent_id")
+        ):
+            # OpenClaw may still emit handoff metadata for historical clients; Andrea no longer polls Cursor.
+            result = dict(result)
+            result["delegated_to_cursor"] = False
+            payload["delegated_to_cursor"] = False
+            execution_entry = phase_outputs.get("execution")
+            execution_summary = ""
+            if isinstance(execution_entry, dict):
+                execution_summary = str(execution_entry.get("summary") or "")
+            self._append_orchestration_step(
                 task_id,
-                lane="openclaw_hybrid",
-                agent_id=agent_id,
-                agent_url=agent_url,
-                pr_url=pr_url,
-                openclaw_run_id=oc_run,
-                openclaw_session_id=oc_sess,
+                "execution",
+                "completed",
+                lane="openclaw",
+                summary=execution_summary
+                or "OpenClaw returned coordination output; completing without Cursor polling.",
+                provider=str(result.get("provider") or ""),
+                model=str(result.get("model") or ""),
             )
-            hybrid_started: Dict[str, Any] = {
-                "backend": "cursor",
-                "runner": "cursor",
-                "execution_lane": "openclaw_hybrid",
-                "delegated_to_cursor": True,
-                "cursor_agent_id": agent_id or None,
-                "agent_url": agent_url or None,
-                "pr_url": pr_url or None,
-                "status": "handed_off_from_openclaw",
-                "openclaw_run_id": payload.get("openclaw_run_id"),
-                "openclaw_session_id": payload.get("openclaw_session_id"),
-                "provider": payload.get("provider"),
-                "model": payload.get("model"),
-                "visibility_mode": visibility_mode,
-                "preferred_model_family": preferred_model_family,
-                "preferred_model_label": preferred_model_label,
-                "routing_hint": routing_hint,
-                "collaboration_mode": collaboration_mode,
-            }
-            if attempt_id:
-                hybrid_started["attempt_id"] = attempt_id
-            if goal_for_task:
-                hybrid_started["goal_id"] = goal_for_task
-            self._append_task_event(task_id, EventType.JOB_STARTED, hybrid_started)
-            completion_extra: Dict[str, Any] = {
-                "openclaw_run_id": payload.get("openclaw_run_id"),
-                "openclaw_session_id": payload.get("openclaw_session_id"),
-                "provider": payload.get("provider"),
-                "model": payload.get("model"),
-                "delegated_to_cursor": True,
-                "collaboration_trace": payload.get("collaboration_trace") or [],
-                "machine_collaboration_trace": payload.get("machine_collaboration_trace") or [],
-                "phase_outputs": payload.get("phase_outputs") or {},
-            }
-            self._finalize_cursor_agent_poll_for_task(
-                task_id,
-                agent_id,
-                agent_url,
-                pr_url,
-                visibility_mode=visibility_mode,
-                preferred_model_family=preferred_model_family,
-                preferred_model_label=preferred_model_label,
-                cursor_trace={"cursor_strategy": "openclaw_hybrid_handoff"},
-                attempt_id=attempt_id,
-                execution_lane="openclaw_hybrid",
-                completion_extra=completion_extra,
-            )
-            return
+            if visibility_mode == "full":
+                self._append_task_event(
+                    task_id,
+                    EventType.JOB_PROGRESS,
+                    {
+                        "message": (
+                            "OpenClaw finished coordination. Completing on the OpenClaw summary "
+                            "(Cursor polling is disabled in this deployment)."
+                        ),
+                        "backend": "openclaw",
+                        "execution_lane": "openclaw_hybrid",
+                        "runner": "openclaw",
+                        "routing_hint": routing_hint,
+                        "collaboration_mode": collaboration_mode,
+                        "visibility_mode": visibility_mode,
+                        "preferred_model_family": preferred_model_family,
+                        "preferred_model_label": preferred_model_label,
+                        "force_telegram_note": True,
+                    },
+                )
         if result.get("ok"):
             execution_entry = phase_outputs.get("execution")
             if isinstance(execution_entry, dict):
@@ -5301,7 +5207,7 @@ class SyncServer:
                     task_id,
                     "execution",
                     str(execution_entry.get("status") or "completed"),
-                    lane=str(execution_entry.get("lane") or ("cursor" if result.get("delegated_to_cursor") else "openclaw")),
+                    lane=str(execution_entry.get("lane") or "openclaw"),
                     summary=str(execution_entry.get("summary") or ""),
                     provider=str(result.get("provider") or ""),
                     model=str(result.get("model") or ""),

@@ -32,6 +32,7 @@ Examples:
 | **Apostrophe normalization** | Classification normalizes Unicode apostrophes (`’`, backtick) to ASCII in [`turn_intelligence.py`](services/andrea_sync/turn_intelligence.py) so mobile “What’s that?” matches the same patterns as a straight-quote spelling. |
 | **Personality / tone feedback** | Meta prompts (e.g. “show more personality”, “trying to be funny”) match `_PERSONALITY_FEEDBACK_RE` → `lightweight_conversational_kind` **`personality_feedback`**: direct lane, **no** grounded lookup ([`server.py`](services/andrea_sync/server.py) skip), warmer heuristic + optional direct LLM polish ([`andrea_router.py`](services/andrea_sync/andrea_router.py)). |
 | **Collaborative day plan** | Assistant-directed “what do **you** want to do today / what should **we** do” matches `_COLLABORATIVE_DAY_PLAN_RE` → **`collaborative_day_plan`**: same lightweight + no-lookup treatment (distinct from user **calendar** agenda patterns in `_AGENDA_RE`). |
+| **Structured outbound SMS vs OpenClaw delegation** | Telegram [`extract_routing_hints`](services/andrea_sync/adapters/telegram.py) replaces `@andrea` / `@openclaw` / `@cursor` with a space, so `Tell @openclaw to …` becomes `Tell to …`. The outbound `tell <target> <body>` pattern in [`server.py`](services/andrea_sync/server.py) must **not** treat the infinitive **to** as a recipient (`OUTBOUND_INVALID_TARGETS`). Otherwise structured handling drafts an SMS (`outbound_message_drafted`) **before** delegation. Follow-up lines that mention a **to-do / todo list** clear a mistaken pending draft (`OUTBOUND_DRAFT_TODO_CLARIFICATION_RE`) so the turn can continue without requiring exact `cancel`. |
 
 ## Data capture
 
@@ -81,6 +82,7 @@ ANDREA_ROUTING_EVAL_EXPORT=./artifacts/routing_captures.ndjson python3 scripts/a
 - Math then anaphoric “which is what?” (multi-turn; contract on final turn)
 - Personality feedback (`rm_personality_feedback_voice`)
 - Collaborative what-to-do-today (`rm_collaborative_day_plan`)
+- Tell `@openclaw` to add a to-do item — must **not** become structured SMS draft (`outbound_message_drafted`); regression tests in [`tests/test_andrea_sync.py`](tests/test_andrea_sync.py) (`test_parse_outbound_rejects_tell_to_after_stripped_openclaw_mention`, `test_server_followups_tell_openclaw_todo_routing_text_not_outbound_draft`, `test_server_clears_outbound_draft_on_todo_list_clarification`). A dedicated `routing_matrix::…` harness case is deferred until the experience environment consistently delegates this utterance (today it may still surface generic direct clarification copy).
 
 Phase B can add continuation-attachment cases, mixed bundles, and grounded/news variants.
 

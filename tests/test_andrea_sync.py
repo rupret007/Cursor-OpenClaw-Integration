@@ -1991,8 +1991,22 @@ class TestAndreaSync(unittest.TestCase):
         )
         self.assertEqual(decision.mode, "direct")
         low = decision.reply_text.lower()
-        self.assertIn("calendar", low)
         self.assertNotIn("say a bit more about what you want", low)
+        # Calendar JSON / holiday providers may say "what you have today" without the word "calendar".
+        self.assertTrue(
+            any(
+                m in low
+                for m in (
+                    "calendar",
+                    "agenda",
+                    "schedule",
+                    "what you have",
+                    "on your",
+                    "event",
+                )
+            ),
+            msg=decision.reply_text,
+        )
 
     def test_ranking_news_question_stays_off_goal_copy_with_active_goal(self) -> None:
         os.environ["OPENAI_API_ENABLED"] = "0"

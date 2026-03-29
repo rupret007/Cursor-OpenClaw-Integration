@@ -128,8 +128,8 @@ def _derive_blocked_reason(lockstep_meta: dict[str, Any], clean_text: str) -> st
         )
     if SESSION_ROUTING_RE.search(normalized):
         return (
-            "I can route work to Cursor for you, but the internal session routing is handled behind "
-            "the scenes and should not require anything from you."
+            "OpenClaw handles session routing internally; you should not need session keys or "
+            "runtime labels from me."
         )
     if _is_internal_runtime_text(normalized):
         return (
@@ -310,7 +310,9 @@ def _derive_phase_outputs(
         if not phase_summary and phase == "critique" and collab in {"cursor_primary", "collaborative"}:
             phase_summary = "OpenClaw ran a critique pass before handing off or synthesizing the result."
         if not phase_summary and phase == "execution" and delegated_to_cursor:
-            phase_summary = "Cursor handled the heavier execution step after Andrea/OpenClaw coordination."
+            phase_summary = (
+                "Execution used an OpenClaw skill handoff (for example cursor_handoff) after coordination."
+            )
         if not phase_summary and phase == "synthesis":
             phase_summary = summary
         if not phase_summary:
@@ -318,7 +320,7 @@ def _derive_phase_outputs(
         if phase == "synthesis" and surface_similarity_key(phase_summary) == surface_similarity_key(summary):
             continue
         if not phase_lane:
-            phase_lane = "cursor" if phase == "execution" and delegated_to_cursor else "openclaw"
+            phase_lane = "openclaw"
         out[phase] = {
             "lane": phase_lane,
             "status": "completed",
@@ -342,29 +344,25 @@ def _build_prompt(
     preferred_label = str(preferred_model_label or "").strip()
     if collab == "cursor_primary":
         collaboration_notes = (
-            "- The user explicitly asked for Cursor. You should coordinate the handoff, but you must involve "
-            "Cursor before giving the final answer unless the request is only a routing clarification.\n"
-            "- After Cursor is involved, synthesize the outcome back into a concise assistant answer.\n"
-            "- Use OpenClaw for triage and coordination first, then move the repo-heavy execution into Cursor.\n"
+            "- The user chose a deeper execution / @cursor-style ask. Stay entirely inside OpenClaw: use verified "
+            "skills (including cursor_handoff when repo edits or PRs are truly needed).\n"
+            "- Complete the work in this session when possible; synthesize a concise user-facing outcome.\n"
             "- Never ask the user for session keys, labels, runtime identifiers, or tool routing details.\n"
         )
     elif collab == "collaborative":
         collaboration_notes = (
-            "- The user wants a visible collaboration sprint between Andrea/OpenClaw and Cursor.\n"
-            "- You are the conductor inside this delegated run. Andrea already handled the outer routing and user/channel policy.\n"
-            "- Start with your own reasoning or skills, then involve Cursor for a second pass, heavier repo work, "
-            "browsing/tool use, or implementation.\n"
-            "- Use model strengths deliberately when they are available inside OpenClaw:\n"
+            "- The user wants a visible multi-step collaboration. You are the conductor inside this OpenClaw run; "
+            "Andrea already applied routing and channel policy.\n"
+            "- Start with triage and the best OpenClaw skills for each subtask (calendar, messaging, notes, "
+            "cursor_handoff for repo work, web/search when grounded, etc.).\n"
+            "- Use model strengths when available inside OpenClaw:\n"
             "  - Gemini 2.5 for broad planning, decomposition, and first-pass reasoning.\n"
             "  - Minimax 2.7 for alternative critique, divergence, or second-opinion analysis.\n"
             "  - OpenAI for precise synthesis, instruction following, and tool-friendly substeps.\n"
-            "  - Cursor for the heavy repo execution, code edits, and implementation follow-through.\n"
-            "- Do not call every model for every task. Use only the best model needed for each subtask.\n"
-            "- Stay in one coordinated OpenClaw session unless a real child-session handoff adds value and the runtime supports it.\n"
-            "- When code or config changes happen, include verification in the execution/synthesis story instead of stopping at planning.\n"
-            "- Your final answer should reflect the combined result, not just one side.\n"
-            "- If you provide visible collaboration, keep it sparse and product-level: plan, critique, synthesis, "
-            "execution, or verification. Never emit raw tool chatter.\n"
+            "- Do not call every model for every task. Use only what the subtask needs.\n"
+            "- Stay in one coordinated OpenClaw session unless a supported child-session handoff clearly helps.\n"
+            "- When code or config changes happen, include verification in the execution/synthesis story.\n"
+            "- Your final answer should reflect the combined result. Keep collaboration traces sparse and user-safe.\n"
         )
     preferred_model_note = ""
     if preferred_family:
@@ -377,9 +375,9 @@ def _build_prompt(
         f"You are running inside Andrea's lockstep OpenClaw execution lane for task {task_id}.\n\n"
         f"User request:\n{user_prompt.strip()}\n\n"
         "Execution rules:\n"
-        "- Use OpenClaw skills first when they are the right fit.\n"
-        "- If the task is repo-heavy, coding-heavy, debugging-heavy, or PR-oriented, use the cursor_handoff skill rather than answering from general model reasoning alone.\n"
-        "- If you offload work to Cursor, wait for the useful outcome and summarize it clearly.\n"
+        "- Use OpenClaw skills first when they are the right fit (productivity, search, messaging, repo handoff, etc.).\n"
+        "- If the task is repo-heavy, coding-heavy, debugging-heavy, or PR-oriented, prefer the cursor_handoff skill rather than guessing from base model text alone.\n"
+        "- When a skill or tool run produces the outcome, wait for it to finish and summarize clearly for the user.\n"
         "- Prefer a disciplined flow: triage, plan, critique when useful, execute, verify, then synthesize.\n"
         "- Keep the user-facing answer concise and directly useful.\n"
         "- When collaboration is requested, think like a coordinator: triage first, assign the right model/tool to the right subtask, then synthesize the result.\n"
@@ -391,7 +389,7 @@ def _build_prompt(
         "- End your response with exactly one single-line marker in this format:\n"
         '  LOCKSTEP_JSON: {"delegated_to_cursor":false,"cursor_agent_url":"","cursor_agent_id":"","pr_url":"","summary":"","status":"completed","planner_summary":"","critic_summary":"","execution_summary":"","synthesis_summary":"","phase_trace":[],"collaboration_trace":[],"blocked_reason":"","internal_trace":""}\n'
         "- Fill unknown string fields with an empty string.\n"
-        "- Set delegated_to_cursor=true only if you actually used Cursor or cursor_handoff.\n"
+        "- Set delegated_to_cursor=true only if you actually invoked cursor_handoff or another execution that reports a Cursor agent URL/PR in the lockstep contract.\n"
         "- The summary field should be 1-2 sentences and must describe the final outcome.\n"
         "- planner_summary, critic_summary, execution_summary, and synthesis_summary should stay concise and user-safe.\n"
         "- phase_trace should be a short array of structured step objects when possible, e.g. {\"phase\":\"plan\",\"lane\":\"openclaw\",\"summary\":\"...\"}.\n"

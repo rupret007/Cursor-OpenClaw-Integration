@@ -4,6 +4,8 @@ This doc supports the **Masterclass / hybrid expansion**: enable productivity la
 
 **Telegram / Andrea sync:** delegated work is executed through the **OpenClaw hybrid** lane only. The legacy **direct Cursor runner** (`_run_cursor_job` / `direct_cursor` polling) is no longer used for user-initiated jobs; `@cursor` mentions still influence collaboration *mode* copy, but the runtime handoff is OpenClaw-first.
 
+**Hybrid prompt (`scripts/andrea_sync_openclaw_hybrid.py`):** Andrea shells out to `openclaw agent --json` with a structured system prompt that prioritizes **OpenClaw skills** (calendar, messaging, `cursor_handoff` for repo/PR work, etc.) and ends with a single-line `LOCKSTEP_JSON` contract. Keep this file aligned with whatever your installed `openclaw` CLI supports (flags, session IDs, thinking presets).
+
 ## Verification commands (after each wave)
 
 ```bash

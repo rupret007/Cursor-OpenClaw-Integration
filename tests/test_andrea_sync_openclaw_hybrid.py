@@ -28,13 +28,13 @@ class AndreaSyncOpenClawHybridTests(unittest.TestCase):
         self.assertIn("Gemini 2.5", prompt)
         self.assertIn("Minimax 2.7", prompt)
         self.assertIn("OpenAI", prompt)
-        self.assertIn("Cursor for the heavy repo execution", prompt)
+        self.assertIn("cursor_handoff for repo work", prompt)
         self.assertIn("collaboration_trace", prompt)
         self.assertIn("phase_trace", prompt)
         self.assertIn("planner_summary", prompt)
-        self.assertIn("Never emit raw tool chatter", prompt)
+        self.assertIn("collaboration traces sparse and user-safe", prompt)
 
-    def test_build_prompt_for_cursor_primary_still_requires_cursor(self) -> None:
+    def test_build_prompt_for_cursor_primary_prefers_openclaw_skills(self) -> None:
         prompt = MODULE._build_prompt(
             "tsk_demo",
             "@Cursor fix the repo issues",
@@ -42,8 +42,8 @@ class AndreaSyncOpenClawHybridTests(unittest.TestCase):
             "technical_or_repo_request",
             "cursor_primary",
         )
-        self.assertIn("must involve Cursor", prompt)
-        self.assertIn("repo-heavy execution into Cursor", prompt)
+        self.assertIn("Stay entirely inside OpenClaw", prompt)
+        self.assertIn("cursor_handoff", prompt)
         self.assertIn("session keys", prompt)
 
     def test_build_prompt_respects_preferred_model_lane(self) -> None:
@@ -106,8 +106,8 @@ class AndreaSyncOpenClawHybridTests(unittest.TestCase):
             "I need a sessionKey before I can talk to Cursor.",
             {},
         )
-        self.assertIn("handled behind the scenes", contract["summary"])
-        self.assertIn("handled behind the scenes", contract["blocked_reason"])
+        self.assertIn("OpenClaw handles session routing", contract["summary"])
+        self.assertIn("OpenClaw handles session routing", contract["blocked_reason"])
         self.assertIn("sessionKey", contract["internal_trace"])
 
     def test_derive_contract_builds_machine_trace_and_phase_outputs(self) -> None:

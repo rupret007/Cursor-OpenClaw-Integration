@@ -2,6 +2,8 @@
 # Pre-release / pre-deploy gate: strict security hygiene + readiness grade A/B + full integration tests.
 # Usage: bash scripts/andrea_release_gate.sh
 # Fails on: tracked secrets patterns, readiness grade C, any test_integration step.
+# OpenClaw skill catalog / eligibility (e.g. bluebubbles) is not exercised here; run
+# OPENCLAW_ENFORCE=1 bash scripts/andrea_doctor.sh or scripts/andrea_openclaw_enforce.sh before relying on hybrid skills.
 set -euo pipefail
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

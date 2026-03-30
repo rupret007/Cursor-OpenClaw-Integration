@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import pathlib
+import re
 import sys
 import unittest
 from unittest import mock
@@ -310,6 +311,156 @@ class AndreaSyncOpenClawHybridTests(unittest.TestCase):
         self.assertIn("sess-explicit-1", seen_argv)
         self.assertEqual(out["requested_session_id"], "sess-explicit-1")
         self.assertIn("machine_collaboration_trace", out)
+
+    def test_extract_lockstep_json_last_marker_wins(self) -> None:
+        text = (
+            'First line.\n'
+            'LOCKSTEP_JSON: {"summary":"one","status":"completed"}\n'
+            'LOCKSTEP_JSON: {"summary":"two","status":"completed","delegated_to_cursor":true}\n'
+        )
+        cleaned, meta = MODULE._extract_lockstep_json(text)
+        self.assertEqual(cleaned, "First line.")
+        self.assertEqual(meta.get("summary"), "two")
+        self.assertTrue(meta.get("delegated_to_cursor"))
+
+    def test_extract_lockstep_json_invalid_marker_keeps_line_in_prose(self) -> None:
+        text = "Note.\nLOCKSTEP_JSON: not-valid-json{\nMore."
+        cleaned, meta = MODULE._extract_lockstep_json(text)
+        self.assertIn("LOCKSTEP_JSON:", cleaned)
+        self.assertEqual(meta, {})
+
+    def test_run_openclaw_hybrid_empty_stdout_raises(self) -> None:
+        def fake_run(*_a, **_k):
+            class R:
+                returncode = 0
+                stdout = "   \n"
+                stderr = "openclaw died"
+
+            return R()
+
+        with mock.patch.object(MODULE.subprocess, "run", side_effect=fake_run):
+            with self.assertRaises(RuntimeError) as ctx:
+                MODULE.run_openclaw_hybrid(
+                    task_id="tsk_empty",
+                    prompt="x",
+                    repo_path="/tmp/r",
+                    agent_id="main",
+                    session_id="",
+                    route_reason="test",
+                    collaboration_mode="auto",
+                    preferred_model_family="",
+                    preferred_model_label="",
+                    timeout_seconds=60,
+                    thinking="",
+                )
+        self.assertIn("empty OpenClaw", str(ctx.exception))
+
+    def test_run_openclaw_hybrid_invalid_stdout_json_raises(self) -> None:
+        def fake_run(*_a, **_k):
+            class R:
+                returncode = 0
+                stdout = "NOT_JSON"
+                stderr = ""
+
+            return R()
+
+        with mock.patch.object(MODULE.subprocess, "run", side_effect=fake_run):
+            with self.assertRaises(RuntimeError) as ctx:
+                MODULE.run_openclaw_hybrid(
+                    task_id="tsk_badjson",
+                    prompt="x",
+                    repo_path="/tmp/r",
+                    agent_id="main",
+                    session_id="",
+                    route_reason="test",
+                    collaboration_mode="auto",
+                    preferred_model_family="",
+                    preferred_model_label="",
+                    timeout_seconds=60,
+                    thinking="",
+                )
+        self.assertIn("invalid OpenClaw JSON", str(ctx.exception))
+
+    def test_run_openclaw_hybrid_nonzero_exit_raises(self) -> None:
+        stdout_obj = {"status": "error", "error": "tool timeout", "result": {}}
+
+        def fake_run(*_a, **_k):
+            class R:
+                returncode = 2
+                stdout = json.dumps(stdout_obj)
+                stderr = ""
+
+            return R()
+
+        with mock.patch.object(MODULE.subprocess, "run", side_effect=fake_run):
+            with self.assertRaises(RuntimeError) as ctx:
+                MODULE.run_openclaw_hybrid(
+                    task_id="tsk_rc",
+                    prompt="x",
+                    repo_path="/tmp/r",
+                    agent_id="main",
+                    session_id="",
+                    route_reason="test",
+                    collaboration_mode="auto",
+                    preferred_model_family="",
+                    preferred_model_label="",
+                    timeout_seconds=60,
+                    thinking="",
+                )
+        self.assertIn("tool timeout", str(ctx.exception))
+
+    def test_run_openclaw_hybrid_cursor_agent_url_sets_delegated_even_if_lockstep_false(self) -> None:
+        agent = "https://cursor.com/agents/abc-123"
+        stdout_obj = {
+            "runId": "run-url",
+            "status": "completed",
+            "result": {
+                "payloads": [
+                    {
+                        "text": (
+                            f"Handed off here: {agent}\n"
+                            "LOCKSTEP_JSON: "
+                            '{"delegated_to_cursor":false,"summary":"done","status":"completed"}'
+                        )
+                    }
+                ],
+            },
+        }
+
+        def fake_run(*_a, **_k):
+            class R:
+                returncode = 0
+                stdout = json.dumps(stdout_obj)
+                stderr = ""
+
+            return R()
+
+        with mock.patch.object(MODULE.subprocess, "run", side_effect=fake_run):
+            out = MODULE.run_openclaw_hybrid(
+                task_id="tsk_url",
+                prompt="x",
+                repo_path="/tmp/r",
+                agent_id="main",
+                session_id="",
+                route_reason="test",
+                collaboration_mode="auto",
+                preferred_model_family="",
+                preferred_model_label="",
+                timeout_seconds=60,
+                thinking="",
+            )
+        self.assertTrue(out["delegated_to_cursor"])
+        self.assertEqual(out["agent_url"], agent)
+        self.assertEqual(out["cursor_agent_id"], "abc-123")
+
+    def test_openclaw_enforce_default_includes_bluebubbles(self) -> None:
+        script = (
+            pathlib.Path(__file__).resolve().parent.parent / "scripts" / "andrea_openclaw_enforce.sh"
+        )
+        body = script.read_text()
+        m = re.search(r'_DEFAULT_REQUIRED_SKILLS="([^"]+)"', body)
+        self.assertIsNotNone(m)
+        self.assertIn("bluebubbles", m.group(1))
 
 
 if __name__ == "__main__":

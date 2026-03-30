@@ -82,6 +82,7 @@ ANDREA_ROUTING_EVAL_EXPORT=./artifacts/routing_captures.ndjson python3 scripts/a
 - Math then anaphoric “which is what?” (multi-turn; contract on final turn)
 - Personality feedback (`rm_personality_feedback_voice`)
 - Collaborative what-to-do-today (`rm_collaborative_day_plan`)
+- Personal iMessage / **BlueBubbles** lane (capability ask, recent-text fetch, outbound draft) is documented and enforced at the OpenClaw layer; see [ANDREA_OPENCLAW_HYBRID_SKILLS.md](ANDREA_OPENCLAW_HYBRID_SKILLS.md) and patched harness helpers in [`services/andrea_sync/conversation_eval.py`](services/andrea_sync/conversation_eval.py) (e.g. `patch_bluebubbles`). Phase A matrix rows can grow explicit `routing_matrix::…` cases when the eval environment stubs BlueBubbles consistently.
 - Tell `@openclaw` to add a to-do item — must **not** become structured SMS draft (`outbound_message_drafted`); regression tests in [`tests/test_andrea_sync.py`](tests/test_andrea_sync.py) (`test_parse_outbound_rejects_tell_to_after_stripped_openclaw_mention`, `test_server_followups_tell_openclaw_todo_routing_text_not_outbound_draft`, `test_server_clears_outbound_draft_on_todo_list_clarification`). A dedicated `routing_matrix::…` harness case is deferred until the experience environment consistently delegates this utterance (today it may still surface generic direct clarification copy).
 
 Phase B can add continuation-attachment cases, mixed bundles, and grounded/news variants.

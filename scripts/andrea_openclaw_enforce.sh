@@ -19,7 +19,7 @@ export PATH="${HOME}/.npm-global/bin:${HOME}/bin:/opt/homebrew/bin:/usr/local/bi
 
 OPENCLAW_PROBE_MS="${OPENCLAW_PROBE_MS:-30000}"
 # Default includes hybrid catalog keys (always listed by OpenClaw; use ANDREA_OPENCLAW_ELIGIBLE_SKILLS for strict readiness).
-_DEFAULT_REQUIRED_SKILLS="cursor_handoff,github,gh-issues,telegram,add-minimax-provider,brave-api-search,apple-notes,apple-reminders,things-mac,gog,summarize,session-logs,coding-agent,tmux,peekaboo,voice-call"
+_DEFAULT_REQUIRED_SKILLS="cursor_handoff,github,gh-issues,telegram,add-minimax-provider,brave-api-search,bluebubbles,apple-notes,apple-reminders,things-mac,gog,summarize,session-logs,coding-agent,tmux,peekaboo,voice-call"
 REQUIRED_SKILLS="${ANDREA_REQUIRED_OPENCLAW_SKILLS:-${_DEFAULT_REQUIRED_SKILLS}}"
 ELIGIBLE_SKILLS="${ANDREA_OPENCLAW_ELIGIBLE_SKILLS:-}"
 SYNC_SKILL=1

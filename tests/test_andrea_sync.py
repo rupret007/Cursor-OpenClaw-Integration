@@ -4411,6 +4411,38 @@ class TestAndreaSync(unittest.TestCase):
         self.assertTrue(any("actively working" in text.lower() for text in sent_texts))
         self.assertTrue(any("coordination update" in text.lower() for text in sent_texts))
 
+    def test_server_telegram_what_can_openclaw_do_queues_hybrid_without_lookup(self) -> None:
+        """Capability asks must delegate to OpenClaw hybrid, not structured grounded lookup."""
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        result = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-openclaw-capability-ask",
+                "payload": {
+                    "text": "what can openclaw do?",
+                    "chat_id": 92050,
+                    "message_id": 601,
+                },
+            },
+        )
+
+        def _boom(*_a: Any, **_k: Any) -> None:
+            raise AssertionError("_run_direct_openclaw_lookup must not run for capability asks")
+
+        with mock.patch.object(server, "_run_direct_openclaw_lookup", side_effect=_boom):
+            server._handle_task_followups(result["task_id"])
+        events = load_events_for_task(server.conn, result["task_id"])
+        queued = [pl for _s, _t, et, pl in events if et == EventType.JOB_QUEUED.value]
+        self.assertTrue(queued)
+        self.assertEqual(queued[-1].get("route_reason"), "openclaw_capability_question")
+        self.assertEqual(queued[-1].get("kind"), "openclaw")
+
     def test_server_openclaw_only_job_completes(self) -> None:
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
         os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"

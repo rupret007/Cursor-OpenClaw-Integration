@@ -1517,6 +1517,29 @@ class TestAndreaSync(unittest.TestCase):
         self.assertIn("openclaw", decision.reply_text.lower())
         self.assertIn("collaboration layer", decision.reply_text.lower())
 
+    def test_classify_route_what_can_openclaw_do_delegates(self) -> None:
+        mode, reason, target, collab = classify_route("what can openclaw do?")
+        self.assertEqual(mode, "delegate")
+        self.assertEqual(reason, "openclaw_capability_question")
+        self.assertEqual(target, "openclaw_hybrid")
+        self.assertEqual(collab, "andrea_primary")
+
+    def test_classify_route_openclaw_capabilities_delegates(self) -> None:
+        mode, reason, target, _ = classify_route("What skills does OpenClaw have installed?")
+        self.assertEqual(mode, "delegate")
+        self.assertEqual(reason, "openclaw_capability_question")
+        self.assertEqual(target, "openclaw_hybrid")
+
+    def test_classify_route_aggressive_bias_delegates_short_question(self) -> None:
+        os.environ["ANDREA_OPENCLAW_DELEGATE_BIAS"] = "aggressive"
+        try:
+            mode, reason, target, _ = classify_route("Why is the sky blue?")
+            self.assertEqual(mode, "delegate")
+            self.assertEqual(reason, "openclaw_delegate_bias_aggressive")
+            self.assertEqual(target, "openclaw_hybrid")
+        finally:
+            os.environ.pop("ANDREA_OPENCLAW_DELEGATE_BIAS", None)
+
     def test_router_what_is_cursor_stays_direct(self) -> None:
         decision = route_message("What is Cursor?")
         self.assertEqual(decision.mode, "direct")
@@ -3682,6 +3705,11 @@ class TestAndreaSync(unittest.TestCase):
             proj["meta"]["assistant"]["reason"],
             "outbound_message_pending",
         )
+        self.assertEqual(
+            proj["meta"]["assistant"]["reason"],
+            "outbound_draft_cleared_todo_intent",
+        )
+        self.assertIn("cancelled", proj["meta"]["assistant"]["last_reply"].lower())
 
     def test_server_drafts_outbound_message_before_send(self) -> None:
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
@@ -5708,6 +5736,29 @@ class TestAndreaSync(unittest.TestCase):
         lane = arbitrate_answer_lane(text=text, turn_plan=plan, direct_policy=policy)
         self.assertEqual(lane.lane, "lightweight_direct")
         self.assertEqual(lane.reason, "tooling_identity")
+
+    def test_arbitrate_answer_lane_openclaw_capability_is_heavy_delegate(self) -> None:
+        from services.andrea_sync.turn_intelligence import (
+            arbitrate_answer_lane,
+            build_direct_answer_policy,
+            build_turn_plan,
+        )
+
+        text = "what can openclaw do?"
+        plan = build_turn_plan(
+            text,
+            scenario_id="mixedResourceGoal",
+            projection_has_continuity_state=False,
+        )
+        policy = build_direct_answer_policy(
+            text,
+            scenario_id="mixedResourceGoal",
+            turn_plan=plan,
+        )
+        lane = arbitrate_answer_lane(text=text, turn_plan=plan, direct_policy=policy)
+        self.assertEqual(lane.lane, "heavy_lift_delegated_execution")
+        self.assertEqual(lane.reason, "openclaw_capability_question")
+        self.assertTrue(lane.openclaw_primary)
 
     def test_arbitrate_answer_lane_keeps_casual_turn_lightweight(self) -> None:
         from services.andrea_sync.turn_intelligence import (

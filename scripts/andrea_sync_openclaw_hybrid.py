@@ -371,10 +371,19 @@ def _build_prompt(
             f"- Start in that lane when it is available, unless reliability or tool constraints require a safer fallback.\n"
             "- If you do fall back, say so briefly in the collaboration transcript.\n"
         )
+    rr = str(route_reason or "").strip()
+    openclaw_forward_note = ""
+    if rr in {"openclaw_capability_question", "openclaw_delegate_bias_aggressive"}:
+        openclaw_forward_note = (
+            "- OpenClaw-forward routing: answer from what this OpenClaw session can actually do—concrete skill areas "
+            "(e.g. messaging, calendar, notes, repo handoff) the user could use next. Avoid generic web-search tone or "
+            "phrases like 'verified lookup' unless they asked for live external facts.\n"
+        )
     return (
         f"You are running inside Andrea's lockstep OpenClaw execution lane for task {task_id}.\n\n"
         f"User request:\n{user_prompt.strip()}\n\n"
         "Execution rules:\n"
+        f"{openclaw_forward_note}"
         "- Use OpenClaw skills first when they are the right fit (productivity, search, bluebubbles for personal "
         "iMessage/recent texts when the user means the phone lane, repo handoff, etc.).\n"
         "- If the task is repo-heavy, coding-heavy, debugging-heavy, or PR-oriented, prefer the cursor_handoff skill rather than guessing from base model text alone.\n"

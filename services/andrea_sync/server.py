@@ -316,7 +316,12 @@ AMBIGUOUS_TARGETS = {"her", "him", "them", "someone", "somebody", "that person"}
 # tell-target regex must not treat the infinitive "to" as an SMS recipient.
 OUTBOUND_INVALID_TARGETS = frozenset({"to"})
 OUTBOUND_DRAFT_TODO_CLARIFICATION_RE = re.compile(
-    r"\b(?:to\s*do|todo)\s+list\b",
+    r"\b(?:"
+    r"(?:to\s*[- ]?do|todo)\s+list|"
+    r"for\s+my\s+(?:to\s*[- ]?do|todo)(?:\s+list)?|"
+    r"not\s+(?:a\s+)?(?:text|message|sms)\b|"
+    r"(?:put|add)\s+(?:this|that|it)\s+on\s+my\s+(?:to\s*[- ]?do|todo|task\s+list)\b"
+    r")\b",
     re.I,
 )
 PENDING_OUTBOUND_DRAFT_TTL_SECONDS = 1800.0
@@ -2094,9 +2099,14 @@ class SyncServer:
                     )
                 return decision, applied
             if effective_turn_plan.force_delegate:
+                delegate_reason = (
+                    "openclaw_capability_question"
+                    if lane_decision.reason == "openclaw_capability_question"
+                    else "turn_plan_technical_execution"
+                )
                 decision = AndreaRouteDecision(
                     mode="delegate",
-                    reason="turn_plan_technical_execution",
+                    reason=delegate_reason,
                     delegate_target="openclaw_hybrid",
                     collaboration_mode=str(
                         user_payload.get("collaboration_mode")
@@ -4216,7 +4226,63 @@ class SyncServer:
                 return self._send_pending_outbound_message(task_id, pending_draft)
             lowered = text.lower()
             if OUTBOUND_DRAFT_TODO_CLARIFICATION_RE.search(lowered):
+                draft_message = str(pending_draft.get("message") or "").strip()
                 self._clear_pending_outbound_draft(task_id)
+                reminder = self._parse_reminder_request(text) or (
+                    self._parse_reminder_request(draft_message) if draft_message else None
+                )
+                if reminder:
+                    result = self.with_lock(
+                        lambda c: handle_command(
+                            c,
+                            {
+                                "command_type": "CreateReminder",
+                                "channel": channel,
+                                "task_id": task_id,
+                                "payload": {
+                                    "message": reminder["message"],
+                                    "due_at": reminder["due_at"],
+                                    "note": "structured assistant reminder (from clarified to-do)",
+                                },
+                            },
+                        )
+                    )
+                    if result.get("ok"):
+                        reminders_lane = self._resolve_runtime_skill(
+                            task_id,
+                            skill_key="apple-reminders",
+                            actor="server_reminder",
+                        )
+                        due_text = _format_due_time_local(float(reminder["due_at"]))
+                        if str(result.get("status") or "") == "awaiting_delivery_channel":
+                            return (
+                                f"I cancelled the text draft and saved a reminder for {due_text}, but I still need "
+                                "a deliverable reminder channel for this principal before I can proactively send it.",
+                                "reminder_saved_awaiting_channel_after_outbound_clarify",
+                            )
+                        suffix = ""
+                        if reminder.get("defaulted"):
+                            suffix = " If you want a different time, tell me and I will move it."
+                        return (
+                            self._runtime_skill_grounding_note(
+                                reminders_lane,
+                                label="Apple Reminders",
+                                verified_text=(
+                                    f"I cancelled the text draft and set a reminder for {due_text}: "
+                                    f"{reminder['message']}.{suffix} The Apple Reminders lane is verified and available too."
+                                ),
+                                local_fallback_text=(
+                                    f"I cancelled the text draft and set a reminder for {due_text}: "
+                                    f"{reminder['message']}.{suffix}"
+                                ),
+                            ),
+                            "reminder_created_after_outbound_clarify",
+                        )
+                return (
+                    "Got it — I cancelled that text draft. Say the to-do in one line, or "
+                    "something like ‘remind me tomorrow to …’, and I will put it on your list.",
+                    "outbound_draft_cleared_todo_intent",
+                )
             elif not (
                 MESSAGING_CAPABILITY_RE.search(text)
                 or self._parse_outbound_message_request(text)

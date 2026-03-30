@@ -107,6 +107,9 @@ To **require** BlueBubbles in strict checks, include `bluebubbles` in `ANDREA_OP
 | `ANDREA_REQUIRED_OPENCLAW_SKILLS` | CSV passed to `andrea_openclaw_enforce.sh` — default includes hybrid keys (catalog presence). |
 | `ANDREA_OPENCLAW_ELIGIBLE_SKILLS` | CSV; when non-empty, enforcer verifies each skill is **eligible** via `openclaw skills info <name> --json` + `jq`. |
 | `ANDREA_OPENCLAW_SKILLS_CHECK` | Set to `1` to run `openclaw skills check` during enforce (informational; does not fail the script). |
+| `ANDREA_OPENCLAW_DELEGATE_BIAS` | `standard` (default), `conservative` (same as standard today), or `aggressive` — sends more short/substantive questions to the **OpenClaw hybrid** lane instead of direct lookup. |
+
+**Capability / “what can OpenClaw do” questions** (and similar phrasing) are routed to **delegated OpenClaw** with a skills-forward hybrid prompt, not the generic grounded web-lookup path.
 
 ---
 

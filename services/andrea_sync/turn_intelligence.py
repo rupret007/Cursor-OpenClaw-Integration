@@ -236,6 +236,21 @@ _TOOLING_IDENTITY_SUBSTRING_RE = re.compile(
     r")",
     re.I,
 )
+# User asks what OpenClaw can do / skills installed — must delegate to hybrid, not web lookup.
+_OPENCLAW_CAPABILITY_PHRASE_RE = re.compile(
+    r"\b(?:"
+    r"what\s+can\s+openclaw\b|"
+    r"what\s+does\s+openclaw\b|"
+    r"what\s+is\s+openclaw\s+(?:able|capable)\s+to\b|"
+    r"openclaw\s+capabilit|"
+    r"what\s+skills\s+(?:does\s+openclaw|can\s+openclaw|do\s+i\s+have|are\s+(?:installed|available))\b|"
+    r"list\s+(?:my\s+)?(?:installed\s+)?openclaw\s+skills\b|"
+    r"what\s+tools\s+(?:does\s+openclaw|do\s+you)\s+have\b|"
+    r"how\s+does\s+openclaw\s+work\b|"
+    r"what\s+do\s+you\s+have\s+(?:installed|enabled)\s+(?:in\s+)?openclaw\b"
+    r")\b",
+    re.I,
+)
 
 _CURSOR_FOLLOWUP_HEAVY_RE = re.compile(
     r"@cursor|"
@@ -458,6 +473,16 @@ def is_tooling_identity_question(text: str) -> bool:
     return bool(_TOOLING_IDENTITY_SUBSTRING_RE.search(clean))
 
 
+def is_openclaw_capability_question(text: str) -> bool:
+    """True when the user is asking about OpenClaw abilities/skills (delegate to hybrid, not lookup)."""
+    clean = _normalize_user_turn_apostrophes(str(text or "").strip())
+    if not clean:
+        return False
+    if is_openclaw_collaboration_state_question(clean):
+        return False
+    return bool(_OPENCLAW_CAPABILITY_PHRASE_RE.search(clean))
+
+
 def is_openclaw_collaboration_state_question(text: str) -> bool:
     clean = str(text or "").strip()
     if not clean:
@@ -610,6 +635,12 @@ def arbitrate_answer_lane(
         )
     if is_casual_social_only_turn(clean):
         return LaneArbitrationDecision("lightweight_direct", "casual_social", openclaw_primary=False)
+    if is_openclaw_capability_question(clean):
+        return LaneArbitrationDecision(
+            "heavy_lift_delegated_execution",
+            "openclaw_capability_question",
+            openclaw_primary=True,
+        )
     if is_tooling_identity_question(clean):
         return LaneArbitrationDecision("lightweight_direct", "tooling_identity", openclaw_primary=False)
     if is_lightweight_conversational_question(clean):

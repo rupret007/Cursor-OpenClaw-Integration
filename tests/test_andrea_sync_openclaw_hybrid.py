@@ -63,6 +63,17 @@ class AndreaSyncOpenClawHybridTests(unittest.TestCase):
         self.assertIn("Preferred model family: gemini", prompt)
         self.assertIn("fall back", prompt)
 
+    def test_build_prompt_openclaw_capability_route_adds_skills_forward_note(self) -> None:
+        prompt = MODULE._build_prompt(
+            "tsk_cap",
+            "what can openclaw do?",
+            "/tmp/repo",
+            "openclaw_capability_question",
+            "andrea_primary",
+        )
+        self.assertIn("OpenClaw-forward routing", prompt)
+        self.assertIn("verified lookup", prompt.lower())
+
     def test_derive_contract_prefers_lockstep_summary_and_trace(self) -> None:
         contract = MODULE._derive_openclaw_contract(
             {

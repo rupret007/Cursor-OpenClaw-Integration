@@ -16,6 +16,7 @@ from .turn_intelligence import (
     _normalize_user_turn_apostrophes,
     _PERSONALITY_FEEDBACK_RE,
     is_lightweight_conversational_question,
+    is_openclaw_capability_question,
     lightweight_conversational_kind,
 )
 from .user_surface import is_stale_openclaw_narrative, sanitize_user_surface_text
@@ -36,6 +37,13 @@ def _env_int(name: str, default: int) -> int:
         return max(1, int(raw.strip()))
     except ValueError:
         return default
+
+
+def _openclaw_delegate_bias_level() -> str:
+    raw = (os.environ.get("ANDREA_OPENCLAW_DELEGATE_BIAS") or "standard").strip().lower()
+    if raw in {"aggressive", "conservative", "standard"}:
+        return raw
+    return "standard"
 
 
 def _normalize(text: str) -> str:
@@ -308,6 +316,9 @@ def classify_route(
         if collab == "auto":
             collab = "cursor_primary"
         return "delegate", "explicit_cursor_work_request", "openclaw_hybrid", collab
+    if is_openclaw_capability_question(text):
+        collab_eff = collab if collab != "auto" else "andrea_primary"
+        return "delegate", "openclaw_capability_question", "openclaw_hybrid", collab_eff
     if _meta_stack_question(clean, text):
         return (
             "direct",
@@ -358,6 +369,22 @@ def classify_route(
             "",
             "andrea_primary" if andrea_preferred else collab,
         )
+    if (
+        _openclaw_delegate_bias_level() == "aggressive"
+        and not andrea_preferred
+        and not is_standalone_casual_social_turn(text)
+        and not THANKS_RE.search(clean)
+        and not IDENTITY_RE.search(clean)
+        and not (HELP_RE.search(clean) and word_count <= 6)
+    ):
+        substantive = (
+            "?" in text
+            or bool(HYBRID_SKILL_RE.search(clean))
+            or bool(DELEGATE_KEYWORDS_RE.search(clean))
+        )
+        if word_count <= 44 and word_count >= 4 and substantive:
+            collab_eff = collab if collab != "auto" else "andrea_primary"
+            return "delegate", "openclaw_delegate_bias_aggressive", "openclaw_hybrid", collab_eff
     if word_count <= 18:
         return "direct", "explicit_andrea_mention" if andrea_preferred else "short_general_request", "", "andrea_primary" if andrea_preferred else collab
     if word_count >= 45:

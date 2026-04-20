@@ -22,7 +22,7 @@ Hardened **Cursor Cloud Agents** integration toolkit for **OpenClaw**, shell wor
 
 - **CLI** (`scripts/cursor_openclaw.py`) for Cursor Cloud Agents API operations:
   - Auth / health: `diagnose`, `whoami`, `models`
-  - Agent lifecycle: `create-agent`, `list-agents`, `agent-status`, `followup`, `stop-agent`, `delete-agent`
+  - Agent lifecycle: `create-agent`, `list-agents`, `agent-status`, `followup`, `stop-agent`, `stop-all-jobs`, `delete-agent`
   - Insights: `conversation`, `artifacts`, `artifact-download-url`
 - **Auth fallback:** `--auth-mode auto` tries bearer then basic when the API or docs disagree.
 - **Resilience:** retries with backoff on `429`, `5xx`, and transient **network/SSL** failures.

@@ -14,6 +14,7 @@ import argparse
 import base64
 import json
 import os
+import subprocess
 import sys
 import time
 import urllib.error
@@ -279,12 +280,109 @@ def parse_args() -> argparse.Namespace:
     p_stop = sub.add_parser("stop-agent")
     p_stop.add_argument("--id", required=True)
 
+    p_stop_all = sub.add_parser("stop-all-jobs")
+    p_stop_all.add_argument(
+        "--repo",
+        default=".",
+        help="Local repository path used to detect the origin URL (default: .).",
+    )
+    p_stop_all.add_argument(
+        "--limit",
+        default="100",
+        help="Max agents to scan per page (1-100). Default 100.",
+    )
+    p_stop_all.add_argument(
+        "--max-pages",
+        type=int,
+        default=10,
+        help="Max pages to scan when listing agents (default 10).",
+    )
+    p_stop_all.add_argument(
+        "--include-terminal",
+        action="store_true",
+        help="Also attempt to stop agents already in a terminal state (usually unnecessary).",
+    )
+    p_stop_all.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="List matching agents but do not stop them.",
+    )
+    p_stop_all.add_argument(
+        "--yes",
+        action="store_true",
+        help="Required to actually stop agents (safety guard).",
+    )
+
     p_delete = sub.add_parser("delete-agent")
     p_delete.add_argument("--id", required=True)
 
     p_diag = sub.add_parser("diagnose")
     p_diag.add_argument("--show-key", action="store_true")
     return parser.parse_args()
+
+
+def _run_subprocess(args: list[str], cwd: Path) -> tuple[int, str, str]:
+    proc = subprocess.run(
+        args,
+        cwd=str(cwd),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def _normalize_github_remote(url: str) -> str:
+    value = (url or "").strip()
+    if value.startswith("git@github.com:"):
+        value = "https://github.com/" + value.split("git@github.com:", 1)[1]
+    if value.endswith(".git"):
+        value = value[:-4]
+    return value.rstrip("/")
+
+
+def _detect_repo_origin_url(repo_path: Path) -> str:
+    code, out, err = _run_subprocess(["git", "remote", "get-url", "origin"], cwd=repo_path)
+    if code != 0 or not out.strip():
+        raise ValueError(
+            f"Could not determine repo origin URL from {repo_path} (git remote get-url origin failed). {err.strip()}"
+        )
+    return _normalize_github_remote(out.strip())
+
+
+def _iter_agents(
+    client: CursorApiClient,
+    *,
+    limit: int,
+    max_pages: int,
+) -> list[dict[str, Any]]:
+    agents: list[dict[str, Any]] = []
+    cursor: str = ""
+    for _ in range(max(1, max_pages)):
+        query: Dict[str, str] = {"limit": str(limit)}
+        if cursor:
+            query["cursor"] = cursor
+        status, data, raw, _auth_mode = client.request("GET", "/v0/agents", query=query)
+        if status >= 400:
+            raise RuntimeError(f"list-agents failed (HTTP {status}): {data or raw}")
+        if not isinstance(data, dict):
+            break
+        page = data.get("agents")
+        if not isinstance(page, list) or not page:
+            break
+        for item in page:
+            if isinstance(item, dict):
+                agents.append(item)
+        cursor = str(data.get("cursor") or "").strip()
+        if not cursor:
+            break
+    return agents
+
+
+def _agent_source_repository(agent: dict[str, Any]) -> str:
+    source = agent.get("source") if isinstance(agent.get("source"), dict) else {}
+    repo = source.get("repository")
+    return _normalize_github_remote(str(repo or ""))
 
 
 def handle(cfg: Config, args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
@@ -408,6 +506,83 @@ def handle(cfg: Config, args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
         cursor_api_common.validate_agent_id(args.id)
         status, data, raw, auth_mode = client.request("POST", f"/v0/agents/{args.id}/stop")
         return status, {"status": status, "auth_mode": auth_mode, "response": data or raw}
+
+    if args.command == "stop-all-jobs":
+        try:
+            limit = int(str(args.limit))
+        except ValueError as err:
+            raise ValueError("--limit must be an integer between 1 and 100.") from err
+        if limit < 1 or limit > 100:
+            raise ValueError("--limit must be an integer between 1 and 100.")
+        if args.max_pages <= 0:
+            raise ValueError("--max-pages must be > 0")
+
+        repo_path = Path(str(args.repo or ".")).expanduser().resolve()
+        if not repo_path.is_dir():
+            raise ValueError(f"--repo must be an existing directory: {repo_path}")
+        target_repo = _detect_repo_origin_url(repo_path)
+
+        agents = _iter_agents(client, limit=limit, max_pages=int(args.max_pages))
+        matches: list[dict[str, Any]] = []
+        for ag in agents:
+            if _agent_source_repository(ag) != target_repo:
+                continue
+            matches.append(ag)
+
+        include_terminal = bool(args.include_terminal)
+        dry_run = bool(args.dry_run) or (not bool(args.yes))
+        to_stop: list[dict[str, Any]] = []
+        skipped_terminal: list[dict[str, Any]] = []
+        for ag in matches:
+            status = str(ag.get("status") or "").strip().upper()
+            if status in TERMINAL_STATUSES and not include_terminal:
+                skipped_terminal.append(ag)
+                continue
+            to_stop.append(ag)
+
+        results: list[dict[str, Any]] = []
+        if not dry_run:
+            for ag in to_stop:
+                agent_id = str(ag.get("id") or "").strip()
+                if not agent_id:
+                    results.append({"ok": False, "error": "missing_agent_id", "agent": ag})
+                    continue
+                cursor_api_common.validate_agent_id(agent_id, flag_name="agent id from list-agents")
+                st, data, raw, auth_mode = client.request("POST", f"/v0/agents/{agent_id}/stop")
+                results.append(
+                    {
+                        "id": agent_id,
+                        "http_status": st,
+                        "auth_mode": auth_mode,
+                        "ok": st < 400,
+                        "response": data or raw,
+                    }
+                )
+
+        return 0, {
+            "status": 0,
+            "ok": True,
+            "dry_run": dry_run,
+            "repo_origin": target_repo,
+            "scanned": len(agents),
+            "matched": len(matches),
+            "eligible_to_stop": len(to_stop),
+            "skipped_terminal": len(skipped_terminal),
+            "note": "Pass --yes to execute stops." if (bool(args.dry_run) is False and bool(args.yes) is False) else "",
+            "agents": [
+                {
+                    "id": str(a.get("id") or ""),
+                    "status": str(a.get("status") or ""),
+                    "target_url": (
+                        (a.get("target") or {}).get("url")
+                        if isinstance(a.get("target"), dict)
+                        else None
+                    ),
+                }
+                for a in to_stop
+            ],
+            "results": results,
+        }
 
     if args.command == "delete-agent":
         cursor_api_common.validate_agent_id(args.id)

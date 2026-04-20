@@ -162,6 +162,126 @@ class CursorOpenClawTests(unittest.TestCase):
         self.assertTrue(payload["target"]["openAsCursorGithubApp"])
         self.assertTrue(payload["target"]["skipReviewerRequest"])
 
+    def test_normalize_github_remote(self):
+        self.assertEqual(
+            MODULE._normalize_github_remote("git@github.com:foo/bar.git"),
+            "https://github.com/foo/bar",
+        )
+        self.assertEqual(
+            MODULE._normalize_github_remote("https://github.com/foo/bar.git"),
+            "https://github.com/foo/bar",
+        )
+        self.assertEqual(
+            MODULE._normalize_github_remote("https://github.com/foo/bar/"),
+            "https://github.com/foo/bar",
+        )
+
+    def test_stop_all_jobs_validation(self):
+        cfg = MODULE.Config(
+            base_url="https://api.cursor.com",
+            api_key="k",
+            auth_mode="auto",
+            timeout_seconds=30,
+            retries=0,
+            retry_backoff_seconds=0.0,
+            output_json=True,
+        )
+        args = types.SimpleNamespace(
+            command="stop-all-jobs",
+            limit="0",
+            max_pages=10,
+            repo=".",
+            include_terminal=False,
+            dry_run=False,
+            yes=False,
+        )
+        with self.assertRaises(ValueError):
+            MODULE.handle(cfg, args)
+
+    def test_stop_all_jobs_dry_run_without_yes(self):
+        cfg = MODULE.Config(
+            base_url="https://api.cursor.com",
+            api_key="k",
+            auth_mode="auto",
+            timeout_seconds=30,
+            retries=0,
+            retry_backoff_seconds=0.0,
+            output_json=True,
+        )
+        args = types.SimpleNamespace(
+            command="stop-all-jobs",
+            limit="100",
+            max_pages=2,
+            repo=".",
+            include_terminal=False,
+            dry_run=False,
+            yes=False,
+        )
+
+        calls = []
+
+        class FakeClient:
+            def __init__(self, _cfg):
+                pass
+
+            def request(self, method, path, query=None, body=None):
+                calls.append((method, path, query, body))
+                if method == "GET" and path == "/v0/agents":
+                    return (
+                        200,
+                        {
+                            "agents": [
+                                {
+                                    "id": "ag_running",
+                                    "status": "RUNNING",
+                                    "source": {"repository": "https://github.com/foo/bar"},
+                                    "target": {"url": "https://cursor.com/agents/ag_running"},
+                                },
+                                {
+                                    "id": "ag_done",
+                                    "status": "FINISHED",
+                                    "source": {"repository": "https://github.com/foo/bar"},
+                                    "target": {"url": "https://cursor.com/agents/ag_done"},
+                                },
+                                {
+                                    "id": "ag_other",
+                                    "status": "RUNNING",
+                                    "source": {"repository": "https://github.com/foo/other"},
+                                    "target": {"url": "https://cursor.com/agents/ag_other"},
+                                },
+                            ],
+                            "cursor": "",
+                        },
+                        "{}",
+                        "bearer",
+                    )
+                raise AssertionError(f"Unexpected request: {method} {path}")
+
+        old_client = MODULE.CursorApiClient
+        old_detect = MODULE._detect_repo_origin_url
+        old_validate = MODULE.cursor_api_common.validate_agent_id
+        MODULE.CursorApiClient = FakeClient
+        MODULE._detect_repo_origin_url = lambda _p: "https://github.com/foo/bar"
+        MODULE.cursor_api_common.validate_agent_id = lambda _aid, flag_name="--id": None
+        try:
+            status, payload = MODULE.handle(cfg, args)
+        finally:
+            MODULE.CursorApiClient = old_client
+            MODULE._detect_repo_origin_url = old_detect
+            MODULE.cursor_api_common.validate_agent_id = old_validate
+
+        self.assertEqual(status, 0)
+        self.assertTrue(payload["dry_run"])
+        self.assertEqual(payload["scanned"], 3)
+        self.assertEqual(payload["matched"], 2)
+        self.assertEqual(payload["eligible_to_stop"], 1)
+        self.assertEqual(payload["skipped_terminal"], 1)
+        self.assertEqual(len(payload["results"]), 0)
+        self.assertEqual(len(payload["agents"]), 1)
+        self.assertEqual(payload["agents"][0]["id"], "ag_running")
+        self.assertEqual(calls[0][0], "GET")
+        self.assertEqual(calls[0][1], "/v0/agents")
+
 
 if __name__ == "__main__":
     unittest.main()

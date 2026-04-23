@@ -2,6 +2,8 @@
 
 Hardened **Cursor Cloud Agents** integration toolkit for **OpenClaw**, shell workflows, and the **Andrea** lockstep assistant stack across Telegram and Alexa.
 
+**Yes — OpenClaw is “in here”.** This repo includes OpenClaw-facing scripts and a vendored OpenClaw skill (`skills/cursor_handoff/`) that hands off heavy repo work to Cursor safely.
+
 **Deployment:** use the **`main`** branch as the default production-style baseline. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 ## Contents

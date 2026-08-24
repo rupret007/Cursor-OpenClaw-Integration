@@ -15,6 +15,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from services.andrea_sync.bus import handle_command  # noqa: E402
 from services.andrea_sync.optimizer import (  # noqa: E402
+    _run_subprocess,
     _try_self_heal_plan_first,
     apply_optimization_proposal,
     build_background_regression_report,
@@ -91,6 +92,14 @@ class AndreaSyncOptimizerTests(unittest.TestCase):
             },
         )
         return tid
+
+    def test_missing_runtime_command_fails_closed_without_raising(self) -> None:
+        result = _run_subprocess(["definitely-missing-andrea-runtime-command"])
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["returncode"], 127)
+        self.assertEqual(result["argv"], ["definitely-missing-andrea-runtime-command"])
+        self.assertIn("FileNotFoundError", result["stderr"])
 
     def test_detect_failure_categories_maps_overdelegation(self) -> None:
         categories = detect_failure_categories(

@@ -988,10 +988,16 @@ def _run_stubbed_delegated_scenario(
                     issue_code="cursor_primary_regression",
                 ),
                 _obs(
-                    "projection records delegated_to_cursor",
-                    expected=True,
-                    observed=execution.get("delegated_to_cursor"),
-                    passed=bool(execution.get("delegated_to_cursor")) is True,
+                    "projection records OpenClaw-reported Cursor involvement without reviving direct polling",
+                    expected="delegated_to_cursor false; cursor_invoked true",
+                    observed={
+                        "delegated_to_cursor": execution.get("delegated_to_cursor"),
+                        "cursor_invoked": outcome.get("cursor_invoked"),
+                    },
+                    passed=(
+                        bool(execution.get("delegated_to_cursor")) is False
+                        and bool(outcome.get("cursor_invoked")) is True
+                    ),
                     issue_code="cursor_primary_regression",
                 ),
             ]
@@ -1013,8 +1019,14 @@ def _run_stubbed_delegated_scenario(
                 _obs(
                     "projection records delegated_to_cursor as false",
                     expected=False,
-                    observed=execution.get("delegated_to_cursor"),
-                    passed=bool(execution.get("delegated_to_cursor")) is False,
+                    observed={
+                        "delegated_to_cursor": execution.get("delegated_to_cursor"),
+                        "cursor_invoked": outcome.get("cursor_invoked"),
+                    },
+                    passed=(
+                        bool(execution.get("delegated_to_cursor")) is False
+                        and bool(outcome.get("cursor_invoked")) is False
+                    ),
                     issue_code="unnecessary_cursor_escalation",
                 ),
             ]

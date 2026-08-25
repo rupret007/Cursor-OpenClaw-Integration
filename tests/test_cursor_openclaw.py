@@ -42,10 +42,29 @@ class CursorOpenClawTests(unittest.TestCase):
             {"a.txt": "https://example.com/a"},
         )
         self.assertIn("Cursor Artifact Index", md)
-        self.assertIn("`a.txt`", md)
+        self.assertIn("<code>a.txt</code>", md)
         self.assertIn("[link](https://example.com/a)", md)
-        self.assertIn("`b.txt`", md)
-        self.assertIn("_(unavailable)_", md)
+        self.assertIn("<code>b.txt</code>", md)
+        self.assertIn("_(not requested or unavailable)_", md)
+
+    def test_build_artifact_index_markdown_escapes_api_text(self):
+        md = MODULE._build_artifact_index_markdown(
+            "bc-1",
+            ["report|name<script>\nnext.md"],
+            {"report|name<script>\nnext.md": "https://example.com/a)b|c"},
+        )
+        self.assertIn("report&#124;name&lt;script&gt; next.md", md)
+        self.assertIn("https://example.com/a%29b%7Cc", md)
+        self.assertNotIn("<script>", md)
+
+    def test_artifact_index_download_urls_are_opt_in(self):
+        original_argv = sys.argv[:]
+        try:
+            sys.argv = ["cursor_openclaw.py", "artifact-index", "--id", "bc-1"]
+            parsed = MODULE.parse_args()
+            self.assertFalse(parsed.include_download_urls)
+        finally:
+            sys.argv = original_argv
 
     def test_parse_bool(self):
         self.assertTrue(MODULE.parse_bool("true"))

@@ -72,6 +72,24 @@ def _safe_index_name(agent_id: str) -> str:
     return clean or "agent"
 
 
+def _markdown_table_text(value: str) -> str:
+    """Render untrusted API text without allowing table/HTML injection."""
+    return (
+        str(value)
+        .replace("&", "&amp;")
+        .replace("|", "&#124;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace("\r", " ")
+        .replace("\n", " ")
+    )
+
+
+def _markdown_link_target(url: str) -> str:
+    """Percent-encode delimiters that can escape a Markdown link or table."""
+    return urllib.parse.quote(str(url).strip(), safe=":/?&=%#@+;,~._-")
+
+
 def _build_artifact_index_markdown(agent_id: str, paths: list[str], download_urls: Dict[str, str]) -> str:
     lines = [
         "# Cursor Artifact Index",
@@ -84,10 +102,11 @@ def _build_artifact_index_markdown(agent_id: str, paths: list[str], download_url
     ]
     for path in paths:
         url = download_urls.get(path, "")
+        safe_path = _markdown_table_text(path)
         if url:
-            lines.append(f"| `{path}` | [link]({url}) |")
+            lines.append(f"| <code>{safe_path}</code> | [link]({_markdown_link_target(url)}) |")
         else:
-            lines.append(f"| `{path}` | _(unavailable)_ |")
+            lines.append(f"| <code>{safe_path}</code> | _(not requested or unavailable)_ |")
     lines.append("")
     return "\n".join(lines)
 
@@ -312,8 +331,11 @@ def parse_args() -> argparse.Namespace:
     p_art_idx.add_argument(
         "--include-download-urls",
         type=parse_bool,
-        default=True,
-        help="Include per-artifact download URLs when available (true/false).",
+        default=False,
+        help=(
+            "Explicitly include sensitive, short-lived signed download URLs "
+            "(true/false; default false)."
+        ),
     )
 
     p_create = sub.add_parser("create-agent")
@@ -458,6 +480,7 @@ def handle(cfg: Config, args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
             out_path = Path.cwd() / f"cursor_artifacts_{_safe_index_name(args.id)}.md"
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(markdown, encoding="utf-8")
+        out_path.chmod(0o600)
         return 0, {
             "status": 0,
             "auth_mode": auth_mode,

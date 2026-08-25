@@ -4526,6 +4526,8 @@ class TestAndreaSync(unittest.TestCase):
         self.assertFalse(proj["meta"]["execution"]["delegated_to_cursor"])
         self.assertEqual(proj["meta"]["cursor"]["agent_url"], "https://cursor.com/agents/demo")
         self.assertEqual(proj["meta"]["cursor"]["pr_url"], "https://github.com/example/repo/pull/1")
+        self.assertTrue(proj["meta"]["outcome"]["cursor_invoked"])
+        self.assertEqual(proj["meta"]["outcome"]["executor_steps"], 1)
 
     def test_server_cursor_primary_stays_openclaw_when_hybrid_does_not_hand_off(self) -> None:
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
@@ -5578,6 +5580,27 @@ class TestAndreaSync(unittest.TestCase):
             scenario_id="researchSummary",
         )
         self.assertIsNone(out)
+
+    def test_grounded_research_skipped_for_stack_identity_question(self) -> None:
+        os.environ["ANDREA_GROUNDED_RESEARCH_ENABLED"] = "1"
+        from services.andrea_sync.server import SyncServer
+        from services.andrea_sync.turn_intelligence import build_turn_plan
+
+        server = SyncServer()
+        plan = build_turn_plan(
+            "What LLM is answering?",
+            scenario_id="researchSummary",
+            projection_has_continuity_state=False,
+        )
+        with mock.patch.object(server, "_resolve_runtime_skill") as resolve_skill:
+            out = server._maybe_grounded_research_reply(
+                "t-skip-stack-identity",
+                classify_text="What LLM is answering?",
+                turn_plan=plan,
+                scenario_id="researchSummary",
+            )
+        self.assertIsNone(out)
+        resolve_skill.assert_not_called()
 
     def test_build_direct_reply_does_not_use_social_checkin_for_substantive_turn(self) -> None:
         from services.andrea_sync.andrea_router import build_direct_reply

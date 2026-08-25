@@ -226,6 +226,11 @@ def _meta_stack_question(clean: str, original: str) -> bool:
     return bool(META_STACK_STANDALONE_RE.match(trimmed))
 
 
+def is_stack_or_tooling_question(text: str) -> bool:
+    """Public guard for stack identity questions that never require live research."""
+    return _meta_stack_question(_normalize(text), str(text or ""))
+
+
 def _strip_social_prefix(text: str) -> str:
     trimmed = _normalize(text)
     patterns = (

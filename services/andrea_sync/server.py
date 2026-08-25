@@ -22,7 +22,11 @@ from typing import Any, Callable, Dict, Optional, Sequence
 from .adapters import alexa as alexa_adapt
 from .adapters import telegram as tg_adapt
 from .alexa_request_verify import verify_alexa_http_request
-from .andrea_router import AndreaRouteDecision, route_message
+from .andrea_router import (
+    AndreaRouteDecision,
+    is_stack_or_tooling_question,
+    route_message,
+)
 from .assistant_answer_composer import (
     CONTINUATION_NO_VIABLE_WORKSTREAM_FALLBACK,
     bounded_composer_repair,
@@ -3744,6 +3748,12 @@ class SyncServer:
     ) -> tuple[str, str, dict[str, Any]] | None:
         if not _env_bool("ANDREA_GROUNDED_RESEARCH_ENABLED", True):
             return None
+        # Questions about which assistant/model/tooling layer is answering are
+        # local runtime identity questions. Sending them through grounded
+        # research turns a deterministic direct answer into a false lookup
+        # outage whenever the search skill is unavailable.
+        if is_stack_or_tooling_question(classify_text):
+            return None
         # Lightweight conversational turns (personality feedback, collaborative day plan, etc.) must never
         # pick up grounded-research scaffolding even if domain was promoted upstream.
         if is_lightweight_conversational_question(str(classify_text or "")):
@@ -5232,20 +5242,6 @@ class SyncServer:
             result = dict(result)
             result["delegated_to_cursor"] = False
             payload["delegated_to_cursor"] = False
-            execution_entry = phase_outputs.get("execution")
-            execution_summary = ""
-            if isinstance(execution_entry, dict):
-                execution_summary = str(execution_entry.get("summary") or "")
-            self._append_orchestration_step(
-                task_id,
-                "execution",
-                "completed",
-                lane="openclaw",
-                summary=execution_summary
-                or "OpenClaw returned coordination output; completing without Cursor polling.",
-                provider=str(result.get("provider") or ""),
-                model=str(result.get("model") or ""),
-            )
             if visibility_mode == "full":
                 self._append_task_event(
                     task_id,

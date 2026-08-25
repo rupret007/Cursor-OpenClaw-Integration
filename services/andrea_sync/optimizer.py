@@ -234,13 +234,22 @@ def _clip(value: Any, limit: int = 400) -> str:
 
 
 def _run_subprocess(argv: List[str], *, cwd: Path | None = None) -> Dict[str, Any]:
-    proc = subprocess.run(
-        argv,
-        cwd=str(cwd or REPO_ROOT),
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    try:
+        proc = subprocess.run(
+            argv,
+            cwd=str(cwd or REPO_ROOT),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError as exc:
+        return {
+            "argv": list(argv),
+            "returncode": 127,
+            "stdout": "",
+            "stderr": f"{type(exc).__name__}: {exc}",
+            "ok": False,
+        }
     return {
         "argv": list(argv),
         "returncode": int(proc.returncode),

@@ -97,9 +97,15 @@ expect_fail "andrea_model_guard invalid timeout" \
 bash "${BASE_DIR}/scripts/andrea_openclaw_enforce.sh" --help >/dev/null || fail "andrea_openclaw_enforce --help"
 pass "andrea_openclaw_enforce --help"
 
-bash "${BASE_DIR}/scripts/andrea_openclaw_enforce.sh" --dry-run --required-skills "cursor_handoff,github" >/dev/null \
-  || fail "andrea_openclaw_enforce --dry-run"
-pass "andrea_openclaw_enforce --dry-run"
+if command -v openclaw >/dev/null 2>&1; then
+  # Dry-run intentionally does not sync the repo's cursor_handoff skill, so
+  # validate one catalog skill that should already exist on an installed host.
+  bash "${BASE_DIR}/scripts/andrea_openclaw_enforce.sh" --dry-run --required-skills "github" >/dev/null \
+    || fail "andrea_openclaw_enforce --dry-run"
+  pass "andrea_openclaw_enforce --dry-run"
+else
+  echo "(Skip OpenClaw runtime dry-run: CLI not installed; help and argument validation still run)"
+fi
 
 expect_fail "andrea_openclaw_enforce invalid timeout" \
   bash "${BASE_DIR}/scripts/andrea_openclaw_enforce.sh" --dry-run --probe-timeout-ms nope

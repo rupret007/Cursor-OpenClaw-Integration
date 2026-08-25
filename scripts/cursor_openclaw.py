@@ -681,10 +681,18 @@ def handle(cfg: Config, args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
             for ag in to_stop:
                 agent_id = str(ag.get("id") or "").strip()
                 if not agent_id:
-                    results.append({"ok": False, "error": "missing_agent_id", "agent": ag})
+                    results.append({"id": "", "ok": False, "error": "missing_agent_id"})
                     continue
-                cursor_api_common.validate_agent_id(agent_id, flag_name="agent id from list-agents")
-                st, data, raw, auth_mode = client.request("POST", f"/v0/agents/{agent_id}/stop")
+                try:
+                    cursor_api_common.validate_agent_id(agent_id, flag_name="agent id from list-agents")
+                    st, data, raw, auth_mode = client.request(
+                        "POST", f"/v0/agents/{agent_id}/stop"
+                    )
+                except Exception as err:  # noqa: BLE001
+                    results.append(
+                        {"id": agent_id, "ok": False, "error": str(err) or type(err).__name__}
+                    )
+                    continue
                 results.append(
                     {
                         "id": agent_id,
@@ -695,15 +703,21 @@ def handle(cfg: Config, args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
                     }
                 )
 
-        return 0, {
-            "status": 0,
-            "ok": True,
+        failed_to_stop = sum(1 for result in results if not bool(result.get("ok")))
+        stopped_count = sum(1 for result in results if bool(result.get("ok")))
+        command_status = 502 if (not dry_run and failed_to_stop) else 0
+        return command_status, {
+            "status": command_status,
+            "ok": command_status == 0,
             "dry_run": dry_run,
             "repo_origin": target_repo,
             "scanned": len(agents),
             "matched": len(matches),
             "eligible_to_stop": len(to_stop),
             "skipped_terminal": len(skipped_terminal),
+            "attempted": len(results),
+            "stopped": stopped_count,
+            "failed_to_stop": failed_to_stop,
             "note": "Pass --yes to execute stops." if (bool(args.dry_run) is False and bool(args.yes) is False) else "",
             "agents": [
                 {

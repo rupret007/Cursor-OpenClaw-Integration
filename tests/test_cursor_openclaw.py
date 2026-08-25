@@ -334,6 +334,84 @@ class CursorOpenClawTests(unittest.TestCase):
         self.assertEqual(calls[0][0], "GET")
         self.assertEqual(calls[0][1], "/v0/agents")
 
+    def test_stop_all_jobs_execution_fails_closed_on_partial_error(self):
+        cfg = MODULE.Config(
+            base_url="https://api.cursor.com",
+            api_key="k",
+            auth_mode="auto",
+            timeout_seconds=30,
+            retries=0,
+            retry_backoff_seconds=0.0,
+            output_json=True,
+        )
+        args = types.SimpleNamespace(
+            command="stop-all-jobs",
+            limit="100",
+            max_pages=1,
+            repo=".",
+            include_terminal=False,
+            dry_run=False,
+            yes=True,
+        )
+        calls = []
+
+        class FakeClient:
+            def __init__(self, _cfg):
+                pass
+
+            def request(self, method, path, query=None, body=None):
+                calls.append((method, path))
+                if method == "GET" and path == "/v0/agents":
+                    return (
+                        200,
+                        {
+                            "agents": [
+                                {
+                                    "id": "ag_ok",
+                                    "status": "RUNNING",
+                                    "source": {"repository": "https://github.com/foo/bar"},
+                                },
+                                {
+                                    "id": "ag_fail",
+                                    "status": "RUNNING",
+                                    "source": {"repository": "https://github.com/foo/bar"},
+                                },
+                            ],
+                            "cursor": "",
+                        },
+                        "{}",
+                        "bearer",
+                    )
+                if path.endswith("/ag_ok/stop"):
+                    return 200, {"status": "STOPPED"}, "", "bearer"
+                if path.endswith("/ag_fail/stop"):
+                    return 503, {"error": "unavailable"}, "", "bearer"
+                raise AssertionError(f"Unexpected request: {method} {path}")
+
+        old_client = MODULE.CursorApiClient
+        old_detect = MODULE._detect_repo_origin_url
+        MODULE.CursorApiClient = FakeClient
+        MODULE._detect_repo_origin_url = lambda _p: "https://github.com/foo/bar"
+        try:
+            status, payload = MODULE.handle(cfg, args)
+        finally:
+            MODULE.CursorApiClient = old_client
+            MODULE._detect_repo_origin_url = old_detect
+
+        self.assertEqual(status, 502)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["attempted"], 2)
+        self.assertEqual(payload["stopped"], 1)
+        self.assertEqual(payload["failed_to_stop"], 1)
+        self.assertEqual(
+            calls,
+            [
+                ("GET", "/v0/agents"),
+                ("POST", "/v0/agents/ag_ok/stop"),
+                ("POST", "/v0/agents/ag_fail/stop"),
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

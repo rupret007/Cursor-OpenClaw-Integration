@@ -392,6 +392,12 @@ Heavy Cursor repair uses **bounded polling** on `cursor_handoff.py`. For **`back
 
 See [docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md) for full tables. Cursor API: [Cloud Agents API](https://cursor.com/docs/cloud-agent/api/endpoints).
 
+`stop-all-jobs` is repository-scoped and preview-first. Execution requires
+`--yes`, skips terminal agents by default, reports any partial stop as failure,
+and refuses to mutate anything when its bounded paginated scan has not reached
+the API's final page. Increase `--max-pages` and retry rather than accepting a
+false “all stopped” result.
+
 ## Testing
 
 **Integration CLI + skill (recommended):**

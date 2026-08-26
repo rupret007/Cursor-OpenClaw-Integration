@@ -32,7 +32,7 @@ Subcommands:
 | `create-agent` | `--branch-name`, repo **or** `--pr-url`; **`--prompt` / `--intent` / `--triage-repo`** (see above); **`--model`** (explicit model id from `models` subcommand, or `default`); optional **`--ref`** (git ref when using `--repository`); `--dry-run`, polling flags |
 | `followup` | `--id`, `--prompt` |
 | `stop-agent` | `--id` |
-| `stop-all-jobs` | Preview matching active agents for one repo (defaults to `--repo .`). It never stops without explicit `--yes`, skips terminal agents by default, and exits nonzero if any requested stop fails. |
+| `stop-all-jobs` | Preview matching active agents for one repo (defaults to `--repo .`). It never stops without explicit `--yes`, skips terminal agents by default, and exits nonzero if any requested stop fails. If `--max-pages` ends before the API cursor, the scan is incomplete and **no** stop is attempted. |
 | `delete-agent` | `--id` |
 
 Transient **network/SSL errors** are surfaced as retriable failures (same backoff as `5xx`). Outbound JSON bodies preserve Unicode (UTF-8, not `\\u` escapes).

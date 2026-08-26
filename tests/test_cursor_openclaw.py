@@ -14,6 +14,58 @@ SPEC.loader.exec_module(MODULE)  # type: ignore[attr-defined]
 
 
 class CursorOpenClawTests(unittest.TestCase):
+    def test_coerce_artifact_paths(self):
+        self.assertEqual(MODULE._coerce_artifact_paths(["a.txt", " b.txt "]), ["a.txt", "b.txt"])
+        payload = {
+            "artifacts": [
+                {"path": "reports/out.md"},
+                {"artifactPath": "build/log.txt"},
+                {"name": "screenshot.png"},
+                {"id": "artifact-1"},
+            ]
+        }
+        self.assertEqual(
+            MODULE._coerce_artifact_paths(payload),
+            ["reports/out.md", "build/log.txt", "screenshot.png", "artifact-1"],
+        )
+        self.assertEqual(MODULE._coerce_artifact_paths({"unexpected": 1}), [])
+
+    def test_safe_index_name(self):
+        self.assertEqual(MODULE._safe_index_name("bc-123"), "bc-123")
+        self.assertEqual(MODULE._safe_index_name("bc 123/abc"), "bc-123-abc")
+        self.assertEqual(MODULE._safe_index_name("///"), "agent")
+
+    def test_build_artifact_index_markdown(self):
+        md = MODULE._build_artifact_index_markdown(
+            "bc-1",
+            ["a.txt", "b.txt"],
+            {"a.txt": "https://example.com/a"},
+        )
+        self.assertIn("Cursor Artifact Index", md)
+        self.assertIn("<code>a.txt</code>", md)
+        self.assertIn("[link](https://example.com/a)", md)
+        self.assertIn("<code>b.txt</code>", md)
+        self.assertIn("_(not requested or unavailable)_", md)
+
+    def test_build_artifact_index_markdown_escapes_api_text(self):
+        md = MODULE._build_artifact_index_markdown(
+            "bc-1",
+            ["report|name<script>\nnext.md"],
+            {"report|name<script>\nnext.md": "https://example.com/a)b|c"},
+        )
+        self.assertIn("report&#124;name&lt;script&gt; next.md", md)
+        self.assertIn("https://example.com/a%29b%7Cc", md)
+        self.assertNotIn("<script>", md)
+
+    def test_artifact_index_download_urls_are_opt_in(self):
+        original_argv = sys.argv[:]
+        try:
+            sys.argv = ["cursor_openclaw.py", "artifact-index", "--id", "bc-1"]
+            parsed = MODULE.parse_args()
+            self.assertFalse(parsed.include_download_urls)
+        finally:
+            sys.argv = original_argv
+
     def test_parse_bool(self):
         self.assertTrue(MODULE.parse_bool("true"))
         self.assertTrue(MODULE.parse_bool("YES"))

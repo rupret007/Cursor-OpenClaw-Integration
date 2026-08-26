@@ -100,6 +100,27 @@ class CursorHandoffTests(unittest.TestCase):
         self.assertIn("Dry run", out)
         self.assertNotIn("Handoff submitted successfully", out)
 
+    def test_parse_args_two_way_op(self):
+        original_argv = sys.argv[:]
+        try:
+            sys.argv = [
+                "cursor_handoff.py",
+                "--op",
+                "conversation",
+                "--agent-id",
+                "bc-abc123",
+                "--mode",
+                "api",
+                "--json",
+            ]
+            parsed = MODULE.parse_args()
+            self.assertEqual(parsed.op, "conversation")
+            self.assertEqual(parsed.agent_id, "bc-abc123")
+            self.assertEqual(parsed.mode, "api")
+            self.assertTrue(parsed.json)
+        finally:
+            sys.argv = original_argv
+
 
 if __name__ == "__main__":
     unittest.main()

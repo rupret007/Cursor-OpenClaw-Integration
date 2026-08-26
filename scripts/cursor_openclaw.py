@@ -441,6 +441,23 @@ def _detect_repo_origin_url(repo_path: Path) -> str:
     return _normalize_github_remote(out.strip())
 
 
+def _agent_page_cursor(data: dict[str, Any]) -> str:
+    """Return the documented v0 pagination cursor without trusting ambiguity."""
+    cursors: list[str] = []
+    for key in ("nextCursor", "cursor"):
+        if key not in data:
+            continue
+        raw = data[key]
+        if not isinstance(raw, str):
+            raise RuntimeError(f"list-agents returned a non-string {key}")
+        value = raw.strip()
+        if value:
+            cursors.append(value)
+    if len(set(cursors)) > 1:
+        raise RuntimeError("list-agents returned conflicting pagination cursors")
+    return cursors[0] if cursors else ""
+
+
 def _iter_agents(
     client: CursorApiClient,
     *,
@@ -462,7 +479,7 @@ def _iter_agents(
         page = data.get("agents")
         if not isinstance(page, list):
             raise RuntimeError("list-agents response omitted the agents list")
-        cursor = str(data.get("cursor") or "").strip()
+        cursor = _agent_page_cursor(data)
         if not page:
             complete = not cursor
             break

@@ -76,10 +76,20 @@ class TestAndreaSync(unittest.TestCase):
         os.environ["ANDREA_SYNC_DB"] = str(self.db_path)
         os.environ["ANDREA_SYNC_PUBLIC_BASE"] = ""
         os.environ["ANDREA_SYNC_TELEGRAM_WEBHOOK_AUTOFIX"] = "0"
+        # These unit tests invoke followups synchronously. Do not leak one
+        # background queue thread per SyncServer; HTTP tests cover the live
+        # worker lifecycle separately.
+        self._queue_worker_patch = mock.patch(
+            "services.andrea_sync.server.SyncServer._run_queue",
+            autospec=True,
+            return_value=None,
+        )
+        self._queue_worker_patch.start()
         self.conn = connect(self.db_path)
         migrate(self.conn)
 
     def tearDown(self) -> None:
+        self._queue_worker_patch.stop()
         self.conn.close()
         if self._prev_db is None:
             os.environ.pop("ANDREA_SYNC_DB", None)

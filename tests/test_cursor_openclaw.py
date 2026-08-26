@@ -412,6 +412,57 @@ class CursorOpenClawTests(unittest.TestCase):
             ],
         )
 
+    def test_iter_agents_follows_official_next_cursor_for_two_pages(self):
+        calls = []
+
+        class FakeClient:
+            def request(self, method, path, query=None, body=None):
+                calls.append((method, path, query, body))
+                if len(calls) == 1:
+                    return (
+                        200,
+                        {"agents": [{"id": "ag_first"}], "nextCursor": "page-2"},
+                        "{}",
+                        "bearer",
+                    )
+                if len(calls) == 2:
+                    return (
+                        200,
+                        {"agents": [{"id": "ag_second"}]},
+                        "{}",
+                        "bearer",
+                    )
+                raise AssertionError("Unexpected extra request")
+
+        agents, complete = MODULE._iter_agents(FakeClient(), limit=1, max_pages=2)
+
+        self.assertTrue(complete)
+        self.assertEqual([agent["id"] for agent in agents], ["ag_first", "ag_second"])
+        self.assertEqual(
+            calls,
+            [
+                ("GET", "/v0/agents", {"limit": "1"}, None),
+                ("GET", "/v0/agents", {"limit": "1", "cursor": "page-2"}, None),
+            ],
+        )
+
+    def test_iter_agents_rejects_conflicting_cursor_aliases(self):
+        class FakeClient:
+            def request(self, method, path, query=None, body=None):
+                return (
+                    200,
+                    {
+                        "agents": [{"id": "ag_first"}],
+                        "nextCursor": "official-page-2",
+                        "cursor": "different-page-2",
+                    },
+                    "{}",
+                    "bearer",
+                )
+
+        with self.assertRaisesRegex(RuntimeError, "conflicting pagination cursors"):
+            MODULE._iter_agents(FakeClient(), limit=1, max_pages=2)
+
     def test_stop_all_jobs_refuses_truncated_scan_before_any_stop(self):
         cfg = MODULE.Config(
             base_url="https://api.cursor.com",
@@ -450,7 +501,7 @@ class CursorOpenClawTests(unittest.TestCase):
                                     "source": {"repository": "https://github.com/foo/bar"},
                                 }
                             ],
-                            "cursor": "another-page",
+                            "nextCursor": "another-page",
                         },
                         "{}",
                         "bearer",

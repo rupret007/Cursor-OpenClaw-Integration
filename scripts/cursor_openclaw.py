@@ -441,14 +441,32 @@ def _detect_repo_origin_url(repo_path: Path) -> str:
     return _normalize_github_remote(out.strip())
 
 
+def _agent_page_cursor(data: dict[str, Any]) -> str:
+    """Return the documented v0 pagination cursor without trusting ambiguity."""
+    cursors: list[str] = []
+    for key in ("nextCursor", "cursor"):
+        if key not in data:
+            continue
+        raw = data[key]
+        if not isinstance(raw, str):
+            raise RuntimeError(f"list-agents returned a non-string {key}")
+        value = raw.strip()
+        if value:
+            cursors.append(value)
+    if len(set(cursors)) > 1:
+        raise RuntimeError("list-agents returned conflicting pagination cursors")
+    return cursors[0] if cursors else ""
+
+
 def _iter_agents(
     client: CursorApiClient,
     *,
     limit: int,
     max_pages: int,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], bool]:
     agents: list[dict[str, Any]] = []
     cursor: str = ""
+    complete = False
     for _ in range(max(1, max_pages)):
         query: Dict[str, str] = {"limit": str(limit)}
         if cursor:
@@ -457,17 +475,21 @@ def _iter_agents(
         if status >= 400:
             raise RuntimeError(f"list-agents failed (HTTP {status}): {data or raw}")
         if not isinstance(data, dict):
-            break
+            raise RuntimeError("list-agents returned a non-object response")
         page = data.get("agents")
-        if not isinstance(page, list) or not page:
+        if not isinstance(page, list):
+            raise RuntimeError("list-agents response omitted the agents list")
+        cursor = _agent_page_cursor(data)
+        if not page:
+            complete = not cursor
             break
         for item in page:
             if isinstance(item, dict):
                 agents.append(item)
-        cursor = str(data.get("cursor") or "").strip()
         if not cursor:
+            complete = True
             break
-    return agents
+    return agents, complete
 
 
 def _agent_source_repository(agent: dict[str, Any]) -> str:
@@ -658,7 +680,9 @@ def handle(cfg: Config, args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
             raise ValueError(f"--repo must be an existing directory: {repo_path}")
         target_repo = _detect_repo_origin_url(repo_path)
 
-        agents = _iter_agents(client, limit=limit, max_pages=int(args.max_pages))
+        agents, scan_complete = _iter_agents(
+            client, limit=limit, max_pages=int(args.max_pages)
+        )
         matches: list[dict[str, Any]] = []
         for ag in agents:
             if _agent_source_repository(ag) != target_repo:
@@ -677,7 +701,7 @@ def handle(cfg: Config, args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
             to_stop.append(ag)
 
         results: list[dict[str, Any]] = []
-        if not dry_run:
+        if not dry_run and scan_complete:
             for ag in to_stop:
                 agent_id = str(ag.get("id") or "").strip()
                 if not agent_id:
@@ -705,11 +729,24 @@ def handle(cfg: Config, args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
 
         failed_to_stop = sum(1 for result in results if not bool(result.get("ok")))
         stopped_count = sum(1 for result in results if bool(result.get("ok")))
-        command_status = 502 if (not dry_run and failed_to_stop) else 0
+        note = ""
+        if not scan_complete:
+            command_status = 409
+            note = (
+                "Agent scan hit --max-pages before the API cursor ended; "
+                "no stops were attempted. Increase --max-pages and retry."
+            )
+        elif not dry_run and failed_to_stop:
+            command_status = 502
+        else:
+            command_status = 0
+            if bool(args.dry_run) is False and bool(args.yes) is False:
+                note = "Pass --yes to execute stops."
         return command_status, {
             "status": command_status,
             "ok": command_status == 0,
             "dry_run": dry_run,
+            "scan_complete": scan_complete,
             "repo_origin": target_repo,
             "scanned": len(agents),
             "matched": len(matches),
@@ -718,7 +755,7 @@ def handle(cfg: Config, args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
             "attempted": len(results),
             "stopped": stopped_count,
             "failed_to_stop": failed_to_stop,
-            "note": "Pass --yes to execute stops." if (bool(args.dry_run) is False and bool(args.yes) is False) else "",
+            "note": note,
             "agents": [
                 {
                     "id": str(a.get("id") or ""),

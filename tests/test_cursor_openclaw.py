@@ -412,6 +412,120 @@ class CursorOpenClawTests(unittest.TestCase):
             ],
         )
 
+    def test_iter_agents_follows_official_next_cursor_for_two_pages(self):
+        calls = []
+
+        class FakeClient:
+            def request(self, method, path, query=None, body=None):
+                calls.append((method, path, query, body))
+                if len(calls) == 1:
+                    return (
+                        200,
+                        {"agents": [{"id": "ag_first"}], "nextCursor": "page-2"},
+                        "{}",
+                        "bearer",
+                    )
+                if len(calls) == 2:
+                    return (
+                        200,
+                        {"agents": [{"id": "ag_second"}]},
+                        "{}",
+                        "bearer",
+                    )
+                raise AssertionError("Unexpected extra request")
+
+        agents, complete = MODULE._iter_agents(FakeClient(), limit=1, max_pages=2)
+
+        self.assertTrue(complete)
+        self.assertEqual([agent["id"] for agent in agents], ["ag_first", "ag_second"])
+        self.assertEqual(
+            calls,
+            [
+                ("GET", "/v0/agents", {"limit": "1"}, None),
+                ("GET", "/v0/agents", {"limit": "1", "cursor": "page-2"}, None),
+            ],
+        )
+
+    def test_iter_agents_rejects_conflicting_cursor_aliases(self):
+        class FakeClient:
+            def request(self, method, path, query=None, body=None):
+                return (
+                    200,
+                    {
+                        "agents": [{"id": "ag_first"}],
+                        "nextCursor": "official-page-2",
+                        "cursor": "different-page-2",
+                    },
+                    "{}",
+                    "bearer",
+                )
+
+        with self.assertRaisesRegex(RuntimeError, "conflicting pagination cursors"):
+            MODULE._iter_agents(FakeClient(), limit=1, max_pages=2)
+
+    def test_stop_all_jobs_refuses_truncated_scan_before_any_stop(self):
+        cfg = MODULE.Config(
+            base_url="https://api.cursor.com",
+            api_key="k",
+            auth_mode="auto",
+            timeout_seconds=30,
+            retries=0,
+            retry_backoff_seconds=0.0,
+            output_json=True,
+        )
+        args = types.SimpleNamespace(
+            command="stop-all-jobs",
+            limit="1",
+            max_pages=1,
+            repo=".",
+            include_terminal=False,
+            dry_run=False,
+            yes=True,
+        )
+        calls = []
+
+        class FakeClient:
+            def __init__(self, _cfg):
+                pass
+
+            def request(self, method, path, query=None, body=None):
+                calls.append((method, path))
+                if method == "GET" and path == "/v0/agents":
+                    return (
+                        200,
+                        {
+                            "agents": [
+                                {
+                                    "id": "ag_first",
+                                    "status": "RUNNING",
+                                    "source": {"repository": "https://github.com/foo/bar"},
+                                }
+                            ],
+                            "nextCursor": "another-page",
+                        },
+                        "{}",
+                        "bearer",
+                    )
+                raise AssertionError(f"Unexpected request: {method} {path}")
+
+        old_client = MODULE.CursorApiClient
+        old_detect = MODULE._detect_repo_origin_url
+        MODULE.CursorApiClient = FakeClient
+        MODULE._detect_repo_origin_url = lambda _p: "https://github.com/foo/bar"
+        try:
+            status, payload = MODULE.handle(cfg, args)
+        finally:
+            MODULE.CursorApiClient = old_client
+            MODULE._detect_repo_origin_url = old_detect
+
+        self.assertEqual(status, 409)
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["scan_complete"])
+        self.assertEqual(payload["attempted"], 0)
+        self.assertEqual(payload["stopped"], 0)
+        self.assertIn("no stops were attempted", payload["note"])
+        self.assertEqual(calls, [("GET", "/v0/agents")])
+
 
 if __name__ == "__main__":
     unittest.main()

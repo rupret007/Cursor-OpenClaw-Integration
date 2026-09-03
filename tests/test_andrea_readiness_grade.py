@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 GRADE_SCRIPT = REPO_ROOT / "scripts" / "andrea_readiness_grade.py"
+DOCTOR_SCRIPT = REPO_ROOT / "scripts" / "andrea_doctor.sh"
 
 
 def _load_grade_module():
@@ -95,6 +97,66 @@ class TestAndreaReadinessGrade(unittest.TestCase):
         )
         self.assertEqual(g, "B")
         self.assertIn("github:auth_degraded", reasons)
+
+    def test_readiness_plan_prioritizes_critical_blockers_without_echoing_notes(self) -> None:
+        plan = self._mod.build_readiness_plan(
+            {
+                "rows": [
+                    {
+                        "id": "skill:add-minimax-provider",
+                        "status": "blocked",
+                        "critical": True,
+                        "notes": "must-not-become-the-first-action",
+                    },
+                    {
+                        "id": "binary:optional-tool",
+                        "status": "blocked",
+                        "critical": False,
+                        "notes": "do-not-echo-secret-value",
+                    },
+                    {
+                        "id": "skill:cursor_handoff",
+                        "status": "blocked",
+                        "critical": True,
+                        "notes": "also-do-not-echo",
+                    },
+                ]
+            },
+            "C",
+        )
+        self.assertFalse(plan["safe_for_autonomous_ops"])
+        self.assertEqual(plan["blocker_count"], 3)
+        self.assertEqual(plan["actions"][0]["id"], "skill:cursor_handoff")
+        self.assertIn("docs/OPENCLAW_SKILL.md", plan["next_action"])
+        self.assertNotIn("do-not-echo", str(plan))
+
+    def test_readiness_plan_fails_closed_on_invalid_capability_rows(self) -> None:
+        plan = self._mod.build_readiness_plan({"rows": "not-a-list"}, "C")
+        self.assertFalse(plan["safe_for_autonomous_ops"])
+        self.assertEqual(plan["blocker_count"], 1)
+        self.assertEqual(plan["actions"][0]["id"], "capabilities:payload")
+
+    def test_doctor_help_names_offline_mode_without_running_checks(self) -> None:
+        proc = subprocess.run(
+            ["bash", str(DOCTOR_SCRIPT), "--help"],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("--offline", proc.stdout)
+
+    def test_doctor_rejects_unknown_options(self) -> None:
+        proc = subprocess.run(
+            ["bash", str(DOCTOR_SCRIPT), "--not-real"],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("Unknown option", proc.stderr)
 
 
 if __name__ == "__main__":

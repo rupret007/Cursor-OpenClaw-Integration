@@ -40,7 +40,7 @@ See **confirm-required** table in [ANDREA_AUTONOMY_POLICY.md](ANDREA_AUTONOMY_PO
 cd /path/to/Cursor-OpenClaw-Integration
 bash scripts/andrea_doctor.sh
 # CI / headless: skip live OpenClaw probe
-# SKIP_OPENCLAW_PROBE=1 bash scripts/andrea_doctor.sh
+# bash scripts/andrea_doctor.sh --offline
 # Treat security warnings as failures:
 # STRICT_SECURITY=1 bash scripts/andrea_doctor.sh
 # Auto-remediate failed model probe using profile guard:
@@ -56,6 +56,11 @@ python3 scripts/andrea_capabilities.py
 python3 scripts/andrea_readiness_grade.py   # A/B/C; exits 1 on C
 bash scripts/andrea_security_sanity.sh
 ```
+
+The readiness grade prints one prioritized, code-owned next action and a
+redaction-safe action plan. Its JSON output exposes the same contract under
+`readiness_plan`, so Codex, Grok, Claude, dashboards, and shell automation can
+share blocker truth without parsing the human table or probe notes.
 
 Optional strict gate (fails if critical capabilities blocked):
 

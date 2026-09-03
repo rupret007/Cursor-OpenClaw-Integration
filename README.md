@@ -287,7 +287,8 @@ python3 scripts/andrea_capabilities.py
 
 ```bash
 bash scripts/andrea_doctor.sh
-# SKIP_OPENCLAW_PROBE=1 bash scripts/andrea_doctor.sh
+# Safe offline/headless pass with no live model probe:
+# bash scripts/andrea_doctor.sh --offline
 # STRICT_SECURITY=1 bash scripts/andrea_doctor.sh   # fail on backup warnings too
 # MODEL_GUARD_ON_FAIL=1 bash scripts/andrea_doctor.sh  # auto-remediate failed model probe
 # OPENCLAW_ENFORCE=1 bash scripts/andrea_doctor.sh  # enforce OpenClaw baseline first
@@ -510,6 +511,7 @@ See [.env.example](.env.example) and [skills/cursor_handoff/.env.example](skills
 - `--auth-mode auto` tolerates bearer vs basic inconsistencies.
 - `--retries` + exponential backoff reduce transient failures (including transport-layer errors).
 - `diagnose` redacts secrets.
+- Readiness output includes one prioritized, redaction-safe action plan shared by humans and automation; `andrea_doctor.sh --offline` avoids the live model probe.
 - `create-agent --dry-run` validates payload without network calls.
 - `cursor_handoff` supports `--dry-run` and read-only defaults for safer delegation.
 

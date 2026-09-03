@@ -31,6 +31,9 @@ Hardened **Cursor Cloud Agents** integration toolkit for **OpenClaw**, shell wor
 - **Andrea lockstep bus** (`services/andrea_sync/`): shared task/event timeline for Telegram, Alexa, OpenClaw, and Cursor with Andrea-first routing.
 - **Planner/critic/executor trace:** machine-derived orchestration steps and user-safe collaboration summaries instead of raw runtime chatter.
 - **Principal memory + reminders:** durable identity, memory notes, preferences, and scheduled follow-through across Telegram and Alexa.
+- **Fail-closed personal-message delivery:** Andrea drafts first and sends only
+  after the exact follow-up `send it`, `send it now`, or `send now`; generic
+  agreement such as “yes” or “looks good” leaves the draft pending.
 - **Closed-loop local self-heal:** regression-backed optimization proposals and gated Cursor branch prep via `services/andrea_sync/optimizer.py` and `scripts/andrea_optimize.py`. **`LOCAL_AUTO_HEAL_COMPLETED` means post-handoff detached-worktree verification passed**, not merely that Cursor accepted the handoff (same contract as incident repair; tune with `ANDREA_SELF_HEAL_POST_CURSOR_VERIFY`).
 - **Incident-driven repair loop:** Gemini triage, GPT mini patching, MiniMax challenge, GPT deep-debug planning, isolated verification, rollback, and optional Cursor escalation via `services/andrea_sync/repair_orchestrator.py` and `scripts/andrea_repair_cycle.py`.
 - **Voice + chat coordination**: direct Andrea replies stay concise, delegated work runs through OpenClaw/Cursor, and Alexa sessions can mirror a single compact summary back to Telegram.

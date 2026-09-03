@@ -1,6 +1,29 @@
 # Cursor session handoff snapshot
 
-Last updated: closeout after greeting/casual Telegram guardrail slice.
+Last updated: 2026-09-03 Codex readiness-action-plan product draft (unmerged).
+
+## Current draft handoff
+
+- **Base:** exact `main` `5d7d0daa01e669d6a3b928eece7a5a803a98724e`
+- **Branch:** `codex/cursor-openclaw-product-20260903`
+- **Product change:** `andrea_readiness_grade.py` now emits one prioritized,
+  code-owned next action plus a redaction-safe `readiness_plan` contract that
+  humans, Codex, Grok, Claude, dashboards, and scripts can share. Probe notes
+  and secret values are never copied into the plan.
+- **Operator path:** `bash scripts/andrea_doctor.sh --offline` is the simple
+  no-live-model-probe form. Unknown doctor options now fail instead of being
+  silently ignored.
+- **Verification:** 752 offline tests, 9 vendored handoff-skill tests, all 11
+  integration-gate stages, security sanity, reliability probes, exhaustive
+  CLI validation, shell syntax, Python compile, and diff integrity passed.
+- **Host discovery:** the current Mac reports Grade C because four critical
+  OpenClaw skills are not detected. The plan correctly puts the checked-in
+  `cursor_handoff` install guidance first. This draft did not install skills,
+  alter credentials/settings, contact a provider, or restart the gateway.
+- **Remaining:** Karen leftover+security review, then Jeff decides any merge
+  and separately owns any skill installation or gateway restart.
+
+## Earlier shipped snapshot
 
 ## Git
 

@@ -11,7 +11,7 @@ This file records the **latest verified state** of the Andrea max-autonomy stack
 The following artifacts landed on **2026-03-20** (extended with masterclass hardening):
 
 - `scripts/andrea_capabilities.py` — live capability matrix (`--json`, `--markdown-table`, `--strict`) + `meta` pointers (model policy, probe units, doctor scripts)
-- `scripts/andrea_readiness_grade.py` — **A/B/C** readiness grade from capability JSON (`--json`; exit `1` on **C**)
+- `scripts/andrea_readiness_grade.py` — **A/B/C** readiness grade plus a redaction-safe prioritized action plan from capability JSON (`--json`; exit `1` on **C**)
 - `scripts/andrea_security_sanity.sh` — repo secret-pattern + tracked-file checks (`STRICT=1` fails on backup warnings)
 - `scripts/andrea_slo_check.sh` — grade + optional `openclaw models status --probe` (**timeout in ms**)
 - `scripts/andrea_doctor.sh` — single operator health pass (security → capabilities + grade → reliability probes → optional OpenClaw probe)
@@ -29,7 +29,7 @@ Paste outputs or attach logs:
 
 ```bash
 bash scripts/andrea_doctor.sh
-# or headless: SKIP_OPENCLAW_PROBE=1 bash scripts/andrea_doctor.sh
+# or headless/offline: bash scripts/andrea_doctor.sh --offline
 # optional auto-remediation if model probe fails:
 # MODEL_GUARD_ON_FAIL=1 bash scripts/andrea_doctor.sh
 ```
@@ -65,6 +65,11 @@ STRICT_SECURITY=1 bash scripts/andrea_doctor.sh
 ## 1.1 Readiness grade (SLO gate)
 
 Record the letter grade and reasons:
+
+Also record the first `Next action`. Machine consumers should read
+`readiness_plan.safe_for_autonomous_ops`, `blocker_count`, `next_action`, and
+`actions` from `python3 scripts/andrea_readiness_grade.py --json`; action text
+is code-owned and never copies free-form probe notes or secret values.
 
 | Grade | Meaning |
 |-------|---------|

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Single entry: security + capability grade + reliability probes + optional OpenClaw probe.
 # Usage: bash scripts/andrea_doctor.sh
-#        SKIP_OPENCLAW_PROBE=1 bash scripts/andrea_doctor.sh
+#        bash scripts/andrea_doctor.sh --offline
 #        STRICT_SECURITY=1 bash scripts/andrea_doctor.sh   # fail on security warnings too
 #        MODEL_GUARD_ON_FAIL=1 bash scripts/andrea_doctor.sh
 #        OPENCLAW_ENFORCE=1 bash scripts/andrea_doctor.sh
@@ -13,6 +13,29 @@ export STRICT="${STRICT_SECURITY:-0}"
 SKIP_OPENCLAW="${SKIP_OPENCLAW_PROBE:-0}"
 MODEL_GUARD_ON_FAIL="${MODEL_GUARD_ON_FAIL:-0}"
 OPENCLAW_ENFORCE="${OPENCLAW_ENFORCE:-0}"
+
+usage() {
+  echo "Usage: bash scripts/andrea_doctor.sh [--offline]"
+  echo "  --offline  Run security, capability, grade, and deterministic probes without the live OpenClaw model probe."
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --offline)
+      SKIP_OPENCLAW=1
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
 
 cd "$BASE_DIR"
 
@@ -62,7 +85,7 @@ fi
 
 echo ">>> [4/4] OpenClaw model probe (optional)"
 if [[ "${SKIP_OPENCLAW}" == "1" ]]; then
-  echo "(Skip: SKIP_OPENCLAW_PROBE=1)"
+  echo "(Skip: offline mode / SKIP_OPENCLAW_PROBE=1)"
 elif command -v openclaw >/dev/null 2>&1; then
   _ms="${OPENCLAW_PROBE_MS:-30000}"
   if ! openclaw models status --probe --probe-timeout "${_ms}" --probe-concurrency 1; then

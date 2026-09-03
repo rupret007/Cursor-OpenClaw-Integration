@@ -65,6 +65,9 @@ Before running tools, classify intent:
 - Deleting remote branches, closing issues/PRs as “won’t fix”, merging without CI green (unless user said otherwise).
 - `git push --force` to shared branches.
 - Sending messages that **commit** the org externally (e.g. “we guarantee …”, legal claims).
+- Sending a pending personal-message draft uses an intentionally narrower
+  execution fence: only `send it`, `send it now`, or `send now` authorizes the
+  send. Generic agreement such as “yes,” “go ahead,” or “looks good” does not.
 
 ---
 

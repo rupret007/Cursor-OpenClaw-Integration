@@ -307,7 +307,11 @@ OUTBOUND_SEND_PATTERNS = (
     ),
 )
 OUTBOUND_CONFIRM_RE = re.compile(
-    r"^\s*(yes|y|send it|send it now|yes send it|ok send it|okay send it|go ahead|do it|confirm|looks good)\s*[.!]?\s*$",
+    # This is an execution fence, not sentiment detection. Generic agreement
+    # such as "yes", "looks good", or "go ahead" may refer to any part of a
+    # conversation and must leave the pending draft untouched. These three
+    # phrases are the complete, deliberately small send vocabulary.
+    r"^\s*(?:send it|send it now|send now)\s*[.!]?\s*$",
     re.I,
 )
 OUTBOUND_CANCEL_RE = re.compile(

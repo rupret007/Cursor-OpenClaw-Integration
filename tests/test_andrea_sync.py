@@ -3757,6 +3757,98 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(pending.get("target"), "Candace")
         self.assertEqual(pending.get("message"), "hi from you")
 
+    def test_outbound_confirmation_fence_accepts_only_locked_send_phrases(
+        self,
+    ) -> None:
+        from services.andrea_sync.server import OUTBOUND_CONFIRM_RE  # noqa: E402
+
+        for text in (
+            "send it",
+            "send it now",
+            "send now",
+            " Send It! ",
+            "SEND NOW.",
+        ):
+            with self.subTest(accepted=text):
+                self.assertIsNotNone(OUTBOUND_CONFIRM_RE.fullmatch(text))
+
+        for text in (
+            "yes",
+            "y",
+            "yes send it",
+            "ok send it",
+            "okay send it",
+            "go ahead",
+            "do it",
+            "confirm",
+            "looks good",
+            "send it please",
+            "send now please",
+        ):
+            with self.subTest(rejected=text):
+                self.assertIsNone(OUTBOUND_CONFIRM_RE.fullmatch(text))
+
+    def test_generic_approval_keeps_outbound_draft_pending(self) -> None:
+        """Conversation approval is not authorization to contact a person."""
+
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        first = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-draft-generic-approval-1",
+                "payload": {
+                    "text": "Tell Candace hi from you",
+                    "chat_id": 9012,
+                    "message_id": 52,
+                },
+            },
+        )
+        with mock.patch.object(
+            server,
+            "_resolve_messaging_capability",
+            return_value={
+                "skill_key": "bluebubbles",
+                "label": "text messaging",
+                "truth": {"status": "verified_available"},
+            },
+        ):
+            server._handle_task_followups(first["task_id"])
+
+        second = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-draft-generic-approval-2",
+                "payload": {
+                    "text": "looks good",
+                    "chat_id": 9012,
+                    "message_id": 53,
+                },
+            },
+        )
+        with mock.patch.object(server, "_send_pending_outbound_message") as send:
+            server._handle_task_followups(second["task_id"])
+
+        send.assert_not_called()
+        pending = server._load_pending_outbound_draft(second["task_id"])
+        self.assertEqual(pending.get("target"), "Candace")
+        projection = project_task_dict(server.conn, second["task_id"], "telegram")
+        self.assertEqual(
+            projection["meta"]["assistant"]["reason"],
+            "outbound_message_pending",
+        )
+        self.assertIn(
+            "reply `send it`",
+            projection["meta"]["assistant"]["last_reply"].lower(),
+        )
+
     def test_server_confirmation_sends_pending_outbound_message(self) -> None:
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
         os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"

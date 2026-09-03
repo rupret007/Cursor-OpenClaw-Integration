@@ -68,7 +68,7 @@ To **require** BlueBubbles in strict checks, include `bluebubbles` in `ANDREA_OP
 |-------------|------|--------|
 | “Can you read my iMessages / BlueBubbles?” | Direct structured reply | Read-focused capability answer; may mention drafting outbound separately. |
 | “Recent texts / messages today …” | `_fetch_recent_text_messages` → OpenClaw | Uses ephemeral session guardrails where configured; failures stay user-safe. |
-| “Tell Candace …” / text-to-person | Outbound draft → `send it` / `cancel` | BlueBubbles is the default messaging skill key when matched; WhatsApp uses `wacli` when the user asks for WhatsApp. |
+| “Tell Candace …” / text-to-person | Outbound draft → exact `send it`, `send it now`, or `send now` / `cancel` | BlueBubbles is the default messaging skill key when matched; WhatsApp uses `wacli` when the user asks for WhatsApp. Generic agreement such as “yes,” “go ahead,” “do it,” “confirm,” or “looks good” leaves the draft pending. |
 | Stripped `@openclaw` + “Tell to …” | Not treated as SMS recipient `to` | Parser rejects invalid outbound targets so todo-style asks are not drafted as texts. |
 
 ### What we do not promise

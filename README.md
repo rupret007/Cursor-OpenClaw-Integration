@@ -288,6 +288,21 @@ bash scripts/andrea_doctor.sh --offline
 
 Read the `--- Operator next steps ---` block. It names **Who acts first**, then **Next for Andrea**, **Next for the coding agent (Bob)**, and **Next for the owner**. Grade C still finishes the offline pass and reprints that recap; exit `1` means the owner must clear a blocker. Do not send a message, enable Private API, or restart a gateway unless the owner asks.
 
+For a handoff that Bob, Codex, Grok, Claude, or a dashboard can consume
+without scraping terminal prose, add a receipt path:
+
+```bash
+bash scripts/andrea_doctor.sh --offline \
+  --receipt /tmp/andrea-doctor-receipt.json
+```
+
+The mode-`600` JSON receipt records the security, readiness, reliability, and
+offline-probe stage outcomes; the code-owned actor/action/hold contract; and a
+deterministic fingerprint. It excludes raw probe output, environment values,
+capability notes, and the local repository path. A failed stage or Grade C
+always makes `overall_status` `blocked`. Receipt generation is intentionally
+offline-only and never runs an OpenClaw model probe.
+
 Optional capability table only: `python3 scripts/andrea_capabilities.py`.
 
 **Live doctor** (optional OpenClaw model probe on an owner-approved host). OpenClaw **`--probe-timeout` is in milliseconds** (e.g. 30s → `30000`).
@@ -516,7 +531,7 @@ See [.env.example](.env.example) and [skills/cursor_handoff/.env.example](skills
 - `--auth-mode auto` tolerates bearer vs basic inconsistencies.
 - `--retries` + exponential backoff reduce transient failures (including transport-layer errors).
 - `diagnose` redacts secrets.
-- Readiness output leads with a marked operator recap (`Who acts first` plus Next for Andrea / Bob / owner) and fail-closed holds. `bash scripts/andrea_doctor.sh --offline` is the operator command: it prints that recap, runs deterministic probes, reprints the recap, and skips the live model probe. Grade C still completes the offline pass; exit `1` means the owner must act.
+- Readiness output leads with a marked operator recap (`Who acts first` plus Next for Andrea / Bob / owner) and fail-closed holds. `bash scripts/andrea_doctor.sh --offline` is the operator command: it prints that recap, runs deterministic probes, reprints the recap, and skips the live model probe. Grade C still completes the offline pass; exit `1` means the owner must act. Add `--receipt /tmp/andrea-doctor-receipt.json` for one redaction-safe, fingerprinted cross-agent artifact; a failed stage is always `blocked`.
 - `create-agent --dry-run` validates payload without network calls.
 - `cursor_handoff` supports `--dry-run` and read-only defaults for safer delegation.
 

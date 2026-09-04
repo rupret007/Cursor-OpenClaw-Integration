@@ -15,6 +15,7 @@ The following artifacts landed on **2026-03-20** (extended with masterclass hard
 - `scripts/andrea_security_sanity.sh` — repo secret-pattern + tracked-file checks (`STRICT=1` fails on backup warnings)
 - `scripts/andrea_slo_check.sh` — grade + optional `openclaw models status --probe` (**timeout in ms**)
 - `scripts/andrea_doctor.sh --offline` — operator health pass (security → readiness recap → reliability probes; reprints Andrea/Bob/owner next steps even on Grade C)
+- `scripts/andrea_doctor_receipt.py` — allowlisted, mode-`600` JSON receipt builder for the offline doctor; fingerprints stage and actor/action/hold truth without raw probe output
 - `scripts/andrea_reliability_probes.sh` — deterministic `diagnose` probe + capability JSON shape
 - `docs/ANDREA_SECURITY.md`, `ANDREA_MODEL_POLICY.md`, `ANDREA_CAPABILITY_MATRIX.md`, `ANDREA_AUTONOMY_POLICY.md`, `ANDREA_DEVOPS_RUNBOOK.md`, `ANDREA_COMMS_PRODUCTIVITY.md`, `ANDREA_OPERATIONS_PLAYBOOK.md`
 - `README.md` — Andrea section + integration hook (`test_integration.sh` includes security sanity + readiness grade smoke)
@@ -29,6 +30,9 @@ Paste outputs or attach logs:
 
 ```bash
 bash scripts/andrea_doctor.sh --offline
+# cross-agent/dashboard artifact from the same offline run:
+bash scripts/andrea_doctor.sh --offline \
+  --receipt /tmp/andrea-doctor-receipt.json
 # live model probe (owner-approved host only):
 # bash scripts/andrea_doctor.sh
 # optional auto-remediation if model probe fails:
@@ -77,6 +81,12 @@ operator recap. Machine consumers should read
 and never copies free-form probe notes or secret values. Grade A still emits a
 concrete next action instead of leaving the field empty. Offline doctor still
 completes and reprints that recap when the grade is C.
+
+The optional doctor receipt adds deterministic stage outcomes and the same
+actor contract under `handoff`. Validate `receipt_fingerprint`, then branch on
+`overall_status`: `blocked` is a hard stop. The artifact never includes raw
+probe output, capability notes, environment values, or `repo_root`, and the
+doctor refuses `--receipt` without `--offline`.
 
 | Grade | Meaning |
 |-------|---------|

@@ -1,20 +1,22 @@
 # Cursor session handoff snapshot
 
-Last updated: 2026-09-04 offline doctor operator-testable draft.
+Last updated: 2026-09-04 offline doctor machine-receipt product pass.
 
 ## Current draft handoff
 
-- **Base:** exact `main` `494ccf8a4bda6fb6952d6d33965bb953c411c651` (merged leftover #16).
-- **Product change:** offline doctor / readiness is operator-testable. Human
-  grade output leads with a marked recap (`Who acts first` plus Next for
-  Andrea / Bob / owner). `bash scripts/andrea_doctor.sh --offline` continues
-  through probes on Grade C, reprints that recap, and is the command README
-  and the playbook tell an operator to run. A unit test executes that exact
-  command. Live doctor still fail-closes immediately on Grade C.
+- **Base:** exact `main` `58f63ca65b95805c109cd07b5d741397bbdbcf01` (merged #17).
+- **Product change:** the existing operator-testable offline doctor can also
+  write one mode-`600`, fingerprinted JSON receipt for Bob, Codex, Grok,
+  Claude, dashboards, and scripts. It carries allowlisted stage outcomes and
+  the same Andrea / coding-agent / owner action contract; raw probe output,
+  environment values, capability notes, and checkout paths are absent. Grade
+  C or any failed stage is always `blocked`. Human output remains unchanged.
 - **Fence:** `OUTBOUND_CONFIRM_RE` is unchanged. `services/andrea_sync/server.py`
   blob `8c5efa82` is identical to base. `conversation_eval` is unchanged.
-- **Operator path:** `bash scripts/andrea_doctor.sh --offline` then read
-  `--- Operator next steps ---`.
+- **Operator path:** `bash scripts/andrea_doctor.sh --offline --receipt
+  /tmp/andrea-doctor-receipt.json`, then read `--- Operator next steps ---`
+  and hand the JSON artifact to the next agent. The receipt option refuses to
+  run without `--offline`.
 - **Holds:** no live send, Private API off, no BlueBubbles live send, no
   credential writes, no merge/tag/deploy/gateway restart unless the owner asks.
 

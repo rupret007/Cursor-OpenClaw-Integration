@@ -401,6 +401,11 @@ def format_readiness_human(payload: dict) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser(description="Andrea readiness grade from capability matrix")
     ap.add_argument("--json", action="store_true", help="Print machine-readable grade payload")
+    ap.add_argument(
+        "--json-out",
+        type=Path,
+        help="Also write the same safe machine-readable payload to this file",
+    )
     args = ap.parse_args()
 
     data = run_capabilities()
@@ -415,8 +420,13 @@ def main() -> int:
         "readiness_plan": readiness_plan,
     }
 
+    json_payload = json.dumps(payload, indent=2)
+    if args.json_out:
+        args.json_out.write_text(json_payload + "\n", encoding="utf-8")
+        args.json_out.chmod(0o600)
+
     if args.json:
-        print(json.dumps(payload, indent=2))
+        print(json_payload)
     else:
         print(format_readiness_human(payload))
 

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -242,6 +244,27 @@ class TestAndreaReadinessGrade(unittest.TestCase):
         self.assertNotIn("must-not-appear", text)
         self.assertNotIn("fix blocked rows above", text)
 
+    def test_json_out_matches_stdout_payload_and_is_private(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "readiness.json"
+            proc = subprocess.run(
+                [
+                    "python3",
+                    str(GRADE_SCRIPT),
+                    "--json",
+                    "--json-out",
+                    str(output),
+                ],
+                cwd=str(REPO_ROOT),
+                capture_output=True,
+                text=True,
+                timeout=180,
+                check=False,
+            )
+            self.assertIn(proc.returncode, {0, 1}, proc.stderr)
+            self.assertEqual(json.loads(proc.stdout), json.loads(output.read_text(encoding="utf-8")))
+            self.assertEqual(output.stat().st_mode & 0o777, 0o600)
+
     def test_doctor_script_leads_with_next_step_contract_not_clipped_table(self) -> None:
         script = DOCTOR_SCRIPT.read_text(encoding="utf-8")
         self.assertNotIn("head -20", script)
@@ -267,6 +290,8 @@ class TestAndreaReadinessGrade(unittest.TestCase):
         self.assertIn("Bob", proc.stdout)
         self.assertIn("operator-testable", proc.stdout)
         self.assertIn("Grade C", proc.stdout)
+        self.assertIn("--receipt", proc.stdout)
+        self.assertIn("Grok", proc.stdout)
 
     def test_doctor_rejects_unknown_options(self) -> None:
         proc = subprocess.run(

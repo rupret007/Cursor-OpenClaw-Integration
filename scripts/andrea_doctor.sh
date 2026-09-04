@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Single entry: security + readiness next-step contract + reliability probes + optional OpenClaw probe.
-# Usage: bash scripts/andrea_doctor.sh
-#        bash scripts/andrea_doctor.sh --offline
+# Usage: bash scripts/andrea_doctor.sh --offline
+#        bash scripts/andrea_doctor.sh
 #        STRICT_SECURITY=1 bash scripts/andrea_doctor.sh   # fail on security warnings too
 #        MODEL_GUARD_ON_FAIL=1 bash scripts/andrea_doctor.sh
 #        OPENCLAW_ENFORCE=1 bash scripts/andrea_doctor.sh
@@ -18,6 +18,16 @@ usage() {
   echo "Usage: bash scripts/andrea_doctor.sh [--offline]"
   echo "  --offline  Run security, the readiness next-step contract (Andrea / Bob / owner),"
   echo "             and deterministic probes without the live OpenClaw model probe."
+  echo "             Prints and reprints the operator recap even on Grade C; exit 1 still"
+  echo "             means Grade C (owner must act). This is the operator-testable path."
+}
+
+reprint_operator_recap() {
+  awk '
+    /^--- Operator next steps ---$/ {keep=1}
+    keep {print}
+    /^--- End operator next steps ---$/ {if (keep) exit}
+  '
 }
 
 while [[ $# -gt 0 ]]; do
@@ -51,11 +61,17 @@ echo ""
 
 echo ">>> [2/4] Readiness grade + Andrea/Bob next-step contract"
 echo "Full capability table (optional): python3 scripts/andrea_capabilities.py"
-python3 "${BASE_DIR}/scripts/andrea_readiness_grade.py" || {
-  echo "Grade C — follow Next action / Next for Andrea / Next for the coding agent (Bob) above." >&2
+GRADE_RC=0
+GRADE_OUT="$(python3 "${BASE_DIR}/scripts/andrea_readiness_grade.py")" || GRADE_RC=$?
+printf '%s\n' "${GRADE_OUT}"
+if [[ "${GRADE_RC}" -ne 0 ]]; then
+  echo "Grade C — follow Next for the owner first, then Next for Andrea / Next for the coding agent (Bob)." >&2
   echo "Do not hunt a capability table, send a message, install a skill, or restart a gateway unless the owner acts." >&2
-  exit 1
-}
+  if [[ "${SKIP_OPENCLAW}" != "1" ]]; then
+    exit "${GRADE_RC}"
+  fi
+  echo "Continuing the offline doctor so probes and the operator recap still run." >&2
+fi
 echo ""
 
 echo ">>> [3/4] Reliability probes (deterministic)"
@@ -96,9 +112,13 @@ else
 fi
 echo ""
 
+echo "=== Operator recap (Andrea / Bob / owner) ==="
+printf '%s\n' "${GRADE_OUT}" | reprint_operator_recap
+echo ""
+
 if [[ "${SKIP_OPENCLAW}" == "1" ]]; then
   echo "Offline doctor complete."
-  echo "Use the Next for Andrea / Next for the coding agent (Bob) / Next for the owner lines from the readiness grade."
+  echo "Use the Next for Andrea / Next for the coding agent (Bob) / Next for the owner lines above."
   echo "Holds: no live send, Private API stays off, no BlueBubbles live send, no credential writes, no gateway restart unless the owner asks."
 else
   echo "Sprint readiness note:"
@@ -110,3 +130,7 @@ echo ""
 
 echo "=== Andrea doctor complete ==="
 echo "Docs: docs/ANDREA_OPERATIONS_PLAYBOOK.md | docs/ANDREA_SECURITY.md | docs/ANDREA_MODEL_POLICY.md | docs/ANDREA_LOCKSTEP_ARCHITECTURE.md"
+
+if [[ "${GRADE_RC}" -ne 0 ]]; then
+  exit "${GRADE_RC}"
+fi

@@ -167,7 +167,7 @@ Commands without `idempotency_key` use a deterministic hash of `channel`, `exter
 
 ### Suggested self-improvement cadence
 
-1. Run `bash scripts/andrea_doctor.sh` so the capability, readiness, and model baseline are explicit before a sprint.
+1. Run `bash scripts/andrea_doctor.sh --offline` so the Andrea / Bob / owner next-step recap is explicit before a sprint. Use live `bash scripts/andrea_doctor.sh` only when the owner wants a model probe.
 2. Run `python3 scripts/andrea_experience_cycle.py --repo "$PWD"` to replay the deterministic direct and delegated scenarios.
 3. If a scenario regresses, inspect the dashboard/runtime snapshot first, then use `python3 scripts/andrea_repair_cycle.py --repo "$PWD"` or the broader `bash scripts/andrea_autonomy_cycle.sh` with the existing budgets and safety gates.
 4. Watch the projected task phase hints and collaboration traces instead of raw runtime chatter to understand whether a long run is stuck in coordination, execution, or synthesis.

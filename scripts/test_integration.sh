@@ -85,6 +85,7 @@ echo "[8/11] Andrea reliability probes..."
 bash "${BASE_DIR}/scripts/andrea_reliability_probes.sh"
 
 echo "[9/11] Readiness grade (informational; may be B/C on minimal env)..."
+echo "Operator path bash scripts/andrea_doctor.sh --offline is asserted in tests/test_andrea_readiness_grade.py"
 python3 "${BASE_DIR}/scripts/andrea_readiness_grade.py" || true
 
 echo "[10/11] Exhaustive offline feature check..."

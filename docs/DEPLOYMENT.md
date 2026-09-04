@@ -61,7 +61,8 @@ export CURSOR_API_KEY="..."   # use read -s in real use
 python3 scripts/cursor_openclaw.py --json diagnose
 python3 scripts/cursor_openclaw.py --json whoami
 bash scripts/andrea_services.sh status all
-python3 scripts/andrea_capabilities.py        # Andrea readiness snapshot
+bash scripts/andrea_doctor.sh --offline         # operator readiness recap + probes
+python3 scripts/andrea_capabilities.py        # optional full capability table
 bash scripts/andrea_reliability_probes.sh       # deterministic probes (+ optional RUN_LIVE_PROBES=1)
 bash scripts/test_integration.sh
 bash skills/cursor_handoff/scripts/test_handoff.sh

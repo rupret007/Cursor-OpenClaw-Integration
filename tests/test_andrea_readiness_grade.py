@@ -121,6 +121,7 @@ class TestAndreaReadinessGrade(unittest.TestCase):
         self.assertEqual(plan["actions"][0]["id"], "binary:openclaw")
         self.assertIn("Install the required openclaw binary", plan["next_action"])
         self.assertEqual(plan["owner_next_action"], plan["next_action"])
+        self.assertEqual(plan["who_acts_first"], self._mod.WHO_ACTS_FIRST_OWNER)
         self.assertNotIn("do-not-echo", str(plan))
 
     def test_readiness_plan_prioritizes_critical_blockers_without_echoing_notes(self) -> None:
@@ -164,6 +165,7 @@ class TestAndreaReadinessGrade(unittest.TestCase):
         self.assertEqual(plan["owner_next_action"], self._mod.RESTORE_MATRIX)
         self.assertIn("Do not run autonomous", plan["andrea_next_action"])
         self.assertIn("Stay offline", plan["coding_agent_next_action"])
+        self.assertEqual(plan["who_acts_first"], self._mod.WHO_ACTS_FIRST_OWNER)
         self.assertIn("Do not send any live message.", plan["holds"])
         self.assertIn("Keep Private API off.", plan["holds"])
         self.assertIn("coding agent (Bob)", plan["routing"]["coding_agent"])
@@ -181,6 +183,7 @@ class TestAndreaReadinessGrade(unittest.TestCase):
         self.assertEqual(plan["actions"], [])
         self.assertEqual(plan["next_action"], self._mod.GRADE_A_NEXT)
         self.assertEqual(plan["owner_next_action"], self._mod.NO_OWNER_SETUP)
+        self.assertEqual(plan["who_acts_first"], self._mod.WHO_ACTS_FIRST_CODING_AGENT)
         self.assertIn("send it / send it now / send now", plan["andrea_next_action"])
         self.assertIn("Continue offline verification", plan["coding_agent_next_action"])
         self.assertNotIn("do-not-echo", str(plan))
@@ -199,6 +202,7 @@ class TestAndreaReadinessGrade(unittest.TestCase):
         self.assertTrue(plan["safe_for_autonomous_ops"])
         self.assertEqual(plan["next_action"], self._mod.REVIEW_LIMITS)
         self.assertEqual(plan["owner_next_action"], self._mod.REVIEW_LIMITS)
+        self.assertEqual(plan["who_acts_first"], self._mod.WHO_ACTS_FIRST_OWNER)
         self.assertIn("verified lanes only", plan["andrea_next_action"])
         self.assertIn("ready-with-limits", plan["coding_agent_next_action"])
         self.assertIn("Do not live-send BlueBubbles.", plan["holds"])
@@ -225,11 +229,15 @@ class TestAndreaReadinessGrade(unittest.TestCase):
                 "readiness_plan": plan,
             }
         )
-        self.assertIn("Next action:", text)
-        self.assertIn("Next for Andrea:", text)
-        self.assertIn("Next for the coding agent (Bob):", text)
-        self.assertIn("Next for the owner:", text)
-        self.assertIn("Holds:", text)
+        self.assertTrue(text.startswith(self._mod.OPERATOR_RECAP_START), text)
+        recap = self._mod.extract_operator_recap(text)
+        self.assertIn("Who acts first: owner", recap)
+        self.assertIn("Next action:", recap)
+        self.assertIn("Next for Andrea:", recap)
+        self.assertIn("Next for the coding agent (Bob):", recap)
+        self.assertIn("Next for the owner:", recap)
+        self.assertIn("Holds:", recap)
+        self.assertLess(text.index("Next for the owner:"), text.index('"blocked": 1'))
         self.assertIn("Routing:", text)
         self.assertNotIn("must-not-appear", text)
         self.assertNotIn("fix blocked rows above", text)
@@ -241,6 +249,9 @@ class TestAndreaReadinessGrade(unittest.TestCase):
         self.assertIn("Next for the coding agent (Bob)", script)
         self.assertIn("Private API stays off", script)
         self.assertIn("readiness next-step contract", script)
+        self.assertIn("Continuing the offline doctor", script)
+        self.assertIn("Operator recap (Andrea / Bob / owner)", script)
+        self.assertIn("reprint_operator_recap", script)
 
     def test_doctor_help_names_offline_mode_without_running_checks(self) -> None:
         proc = subprocess.run(
@@ -254,6 +265,8 @@ class TestAndreaReadinessGrade(unittest.TestCase):
         self.assertIn("--offline", proc.stdout)
         self.assertIn("next-step contract", proc.stdout)
         self.assertIn("Bob", proc.stdout)
+        self.assertIn("operator-testable", proc.stdout)
+        self.assertIn("Grade C", proc.stdout)
 
     def test_doctor_rejects_unknown_options(self) -> None:
         proc = subprocess.run(
@@ -265,6 +278,50 @@ class TestAndreaReadinessGrade(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 2)
         self.assertIn("Unknown option", proc.stderr)
+
+    def test_offline_doctor_completes_and_reprints_andrea_bob_owner_recap(self) -> None:
+        """Run the exact operator command and assert the recap is testable."""
+        proc = subprocess.run(
+            ["bash", str(DOCTOR_SCRIPT), "--offline"],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        combined = f"{proc.stdout}\n{proc.stderr}"
+        self.assertIn(proc.returncode, {0, 1}, combined)
+        self.assertIn(self._mod.OPERATOR_RECAP_START, proc.stdout)
+        self.assertIn(self._mod.OPERATOR_RECAP_END, proc.stdout)
+        recap = self._mod.extract_operator_recap(proc.stdout)
+        self.assertIn("Who acts first:", recap)
+        self.assertIn("Next for Andrea:", recap)
+        self.assertIn("Next for the coding agent (Bob):", recap)
+        self.assertIn("Next for the owner:", recap)
+        self.assertIn("Do not send any live message.", recap)
+        self.assertIn("Keep Private API off.", recap)
+        self.assertGreaterEqual(proc.stdout.count(self._mod.OPERATOR_RECAP_START), 2)
+        self.assertIn(">>> [3/4] Reliability probes (deterministic)", proc.stdout)
+        self.assertIn("(Skip: offline mode / SKIP_OPENCLAW_PROBE=1)", proc.stdout)
+        self.assertIn("Offline doctor complete.", proc.stdout)
+        self.assertIn("Private API stays off", proc.stdout)
+        self.assertNotIn("fix blocked rows above", combined)
+        self.assertNotIn("openclaw models status --probe", proc.stdout)
+        if proc.returncode == 1:
+            self.assertIn("Next for the owner", proc.stderr)
+            self.assertIn("Continuing the offline doctor", proc.stderr)
+
+    def test_operator_docs_lead_with_offline_doctor_command(self) -> None:
+        for rel in (
+            "README.md",
+            "docs/ANDREA_OPERATIONS_PLAYBOOK.md",
+            "docs/ANDREA_READINESS_REPORT.md",
+        ):
+            text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            with self.subTest(doc=rel):
+                self.assertRegex(
+                    text,
+                    r"(?m)^bash scripts/andrea_doctor.sh --offline\s*$",
+                )
 
 
 if __name__ == "__main__":

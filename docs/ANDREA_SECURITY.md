@@ -36,6 +36,13 @@ bash scripts/andrea_security_sanity.sh
 
 This verifies (among other checks) that `.env` is not tracked, scans tracked code for high-signal secret patterns, and warns on common OpenClaw backup files in `$HOME`.
 
+Offline doctor receipts are another redaction boundary: they must stay
+allowlisted and mode `600`, and the next agent must consume them with
+`python3 scripts/andrea_doctor_receipt.py --verify PATH` /
+`--consume PATH --audience bob`. Unknown keys, fingerprint mismatch, or a
+failed security/reliability stage fail closed. Do not paste receipt files
+that were edited by hand into shared chats.
+
 Use **`STRICT=1`** (or `STRICT_SECURITY=1` with `andrea_doctor.sh`) so backup-file warnings fail the check — recommended before releases.
 
 ---

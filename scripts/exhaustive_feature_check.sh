@@ -84,6 +84,8 @@ while IFS= read -r _syncpy; do
 done < <(find "${BASE_DIR}/services" -name "*.py" 2>/dev/null | sort)
 "${ENV_NO_SECRETS[@]}" python3 "${BASE_DIR}/scripts/andrea_sync_health.py" | grep -qE "SKIP|OK" || fail "andrea_sync_health default"
 pass "andrea_sync stack py_compile + health smoke"
+python3 "${BASE_DIR}/scripts/andrea_doctor_receipt.py" --help | grep -q -- "--consume" || fail "andrea_doctor_receipt --help consume"
+pass "andrea_doctor_receipt --help"
 
 bash "${BASE_DIR}/scripts/andrea_model_guard.sh" --help >/dev/null || fail "andrea_model_guard --help"
 pass "andrea_model_guard --help"

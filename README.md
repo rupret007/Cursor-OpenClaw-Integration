@@ -68,6 +68,7 @@ Hardened **Cursor Cloud Agents** integration toolkit for **OpenClaw**, shell wor
 │   ├── andrea_security_sanity.sh     # repo secret-pattern sanity checks
 │   ├── andrea_slo_check.sh         # grade + optional OpenClaw model probe
 │   ├── andrea_doctor.sh            # operator offline: security + Andrea/Bob/owner recap + probes
+│   ├── andrea_doctor_receipt.py    # write/verify/consume redaction-safe doctor handoff receipts
 │   ├── andrea_autonomy_cycle.sh    # closed-loop local autonomy pass
 │   ├── andrea_model_guard.sh       # automatic profile failover + reprobe loop
 │   ├── andrea_openclaw_enforce.sh  # sync skill + required skills + probe/guard
@@ -297,11 +298,25 @@ bash scripts/andrea_doctor.sh --offline \
 ```
 
 The mode-`600` JSON receipt records the security, readiness, reliability, and
-offline-probe stage outcomes; the code-owned actor/action/hold contract; and a
-deterministic fingerprint. It excludes raw probe output, environment values,
-capability notes, and the local repository path. A failed stage or Grade C
-always makes `overall_status` `blocked`. Receipt generation is intentionally
-offline-only and never runs an OpenClaw model probe.
+offline-probe stage outcomes; the code-owned actor/action/hold contract; named
+`blocked_reason` / `failed_stages`; and a deterministic fingerprint. It
+excludes raw probe output, environment values, capability notes, and the local
+repository path. A failed stage or Grade C always makes `overall_status`
+`blocked`. A failed security/reliability stage also overrides leftover Grade A
+next-step text to owner-first fail-closed actions. Receipt generation is
+intentionally offline-only and never runs an OpenClaw model probe.
+
+Bob, Codex, Grok, Claude, and dashboards should consume the artifact through
+the code-owned verifier instead of scraping JSON by hand:
+
+```bash
+python3 scripts/andrea_doctor_receipt.py --verify /tmp/andrea-doctor-receipt.json
+python3 scripts/andrea_doctor_receipt.py --consume /tmp/andrea-doctor-receipt.json --audience bob
+```
+
+`--audience` accepts `andrea`, `coding_agent` (`bob` / `codex` / `grok` /
+`claude`), `owner`, or `dashboard`. Invalid or tampered receipts fail closed to
+an owner-blocked packet.
 
 Optional capability table only: `python3 scripts/andrea_capabilities.py`.
 
@@ -531,7 +546,7 @@ See [.env.example](.env.example) and [skills/cursor_handoff/.env.example](skills
 - `--auth-mode auto` tolerates bearer vs basic inconsistencies.
 - `--retries` + exponential backoff reduce transient failures (including transport-layer errors).
 - `diagnose` redacts secrets.
-- Readiness output leads with a marked operator recap (`Who acts first` plus Next for Andrea / Bob / owner) and fail-closed holds. `bash scripts/andrea_doctor.sh --offline` is the operator command: it prints that recap, runs deterministic probes, reprints the recap, and skips the live model probe. Grade C still completes the offline pass; exit `1` means the owner must act. Add `--receipt /tmp/andrea-doctor-receipt.json` for one redaction-safe, fingerprinted cross-agent artifact; a failed stage is always `blocked`.
+- Readiness output leads with a marked operator recap (`Who acts first` plus Next for Andrea / Bob / owner) and fail-closed holds. `bash scripts/andrea_doctor.sh --offline` is the operator command: it prints that recap, runs deterministic probes, reprints the recap, and skips the live model probe. Grade C still completes the offline pass; exit `1` means the owner must act. Add `--receipt /tmp/andrea-doctor-receipt.json` for one redaction-safe, fingerprinted cross-agent artifact; a failed stage is always `blocked` and overrides next-step text. Consume with `python3 scripts/andrea_doctor_receipt.py --consume PATH --audience bob`.
 - `create-agent --dry-run` validates payload without network calls.
 - `cursor_handoff` supports `--dry-run` and read-only defaults for safer delegation.
 

@@ -1,22 +1,24 @@
 # Cursor session handoff snapshot
 
-Last updated: 2026-09-04 offline doctor machine-receipt product pass.
+Last updated: 2026-09-04 leftover receipt consume / fail-closed next-steps pass.
 
 ## Current draft handoff
 
-- **Base:** exact `main` `58f63ca65b95805c109cd07b5d741397bbdbcf01` (merged #17).
-- **Product change:** the existing operator-testable offline doctor can also
-  write one mode-`600`, fingerprinted JSON receipt for Bob, Codex, Grok,
-  Claude, dashboards, and scripts. It carries allowlisted stage outcomes and
-  the same Andrea / coding-agent / owner action contract; raw probe output,
-  environment values, capability notes, and checkout paths are absent. Grade
-  C or any failed stage is always `blocked`. Human output remains unchanged.
-- **Fence:** `OUTBOUND_CONFIRM_RE` is unchanged. `services/andrea_sync/server.py`
-  blob `8c5efa82` is identical to base. `conversation_eval` is unchanged.
+- **Base:** exact `main` `7eb7b2618ccc0557181fa134bad3d1e5cbac9806` (merged leftover-squash #18).
+- **Product change:** offline doctor receipts now carry named `blocked_reason`
+  / `failed_stages`, override leftover Grade A next-step text when a
+  security/reliability stage is not passed, and expose a code-owned
+  `--verify` / `--consume --audience` path for Bob, Codex, Grok, Claude, and
+  dashboards. Invalid or tampered artifacts fail closed to an owner-blocked
+  packet. Human doctor recap remains intact.
+- **Fence:** `OUTBOUND_CONFIRM_RE` is unchanged
+  (`send it` / `send it now` / `send now`). `services/andrea_sync/server.py`
+  blob `8c5efa82` is identical to base. Private API stays off.
 - **Operator path:** `bash scripts/andrea_doctor.sh --offline --receipt
-  /tmp/andrea-doctor-receipt.json`, then read `--- Operator next steps ---`
-  and hand the JSON artifact to the next agent. The receipt option refuses to
-  run without `--offline`.
+  /tmp/andrea-doctor-receipt.json`, read `--- Operator next steps ---` and the
+  receipt verify summary, then
+  `python3 scripts/andrea_doctor_receipt.py --consume /tmp/andrea-doctor-receipt.json --audience bob`.
+  The receipt option still refuses to run without `--offline`.
 - **Holds:** no live send, Private API off, no BlueBubbles live send, no
   credential writes, no merge/tag/deploy/gateway restart unless the owner asks.
 

@@ -33,7 +33,8 @@ CAP = REPO / "scripts" / "andrea_capabilities.py"
 # core stack can still grade A while optional/hybrid gaps remain visible as ready_with_limits.
 SOFT_LIMITS_THRESHOLD = 65
 ACTION_PRIORITY = {
-    "openclaw:skills_list": 0,
+    "binary:openclaw": 0,
+    "openclaw:skills_list": 5,
     "skill:cursor_handoff": 10,
     "github:auth": 20,
     "skill:github": 30,

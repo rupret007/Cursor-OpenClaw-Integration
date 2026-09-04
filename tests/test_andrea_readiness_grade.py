@@ -98,6 +98,31 @@ class TestAndreaReadinessGrade(unittest.TestCase):
         self.assertEqual(g, "B")
         self.assertIn("github:auth_degraded", reasons)
 
+    def test_readiness_plan_installs_openclaw_binary_before_skills_list(self) -> None:
+        plan = self._mod.build_readiness_plan(
+            {
+                "rows": [
+                    {
+                        "id": "openclaw:skills_list",
+                        "status": "blocked",
+                        "critical": True,
+                        "notes": "do-not-echo-skills-list-note",
+                    },
+                    {
+                        "id": "binary:openclaw",
+                        "status": "blocked",
+                        "critical": True,
+                        "notes": "do-not-echo-binary-note",
+                    },
+                ]
+            },
+            "C",
+        )
+        self.assertEqual(plan["actions"][0]["id"], "binary:openclaw")
+        self.assertIn("Install the required openclaw binary", plan["next_action"])
+        self.assertEqual(plan["owner_next_action"], plan["next_action"])
+        self.assertNotIn("do-not-echo", str(plan))
+
     def test_readiness_plan_prioritizes_critical_blockers_without_echoing_notes(self) -> None:
         plan = self._mod.build_readiness_plan(
             {

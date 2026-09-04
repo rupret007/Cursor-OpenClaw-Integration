@@ -1,18 +1,20 @@
 # Cursor session handoff snapshot
 
-Last updated: 2026-09-04 offline Andrea/Bob next-step contract draft.
+Last updated: 2026-09-04 offline doctor operator-testable draft.
 
 ## Current draft handoff
 
-- **Base:** exact `main` `44b198ef210de1803a87e150d8e80fcdbda616a1` (merged leftover #15 fence).
-- **Product change:** readiness grade and `andrea_doctor.sh --offline` now print
-  unmistakable next steps for Andrea, the coding agent (Bob), and the owner,
-  plus fail-closed holds. Doctor no longer clips the capability table or says
-  “fix blocked rows above.” Grade A always names a next action.
-- **Fence:** `OUTBOUND_CONFIRM_RE` is unchanged. Soft-yes phrases still cannot
-  authorize a send; tests now prove that on the server path.
+- **Base:** exact `main` `494ccf8a4bda6fb6952d6d33965bb953c411c651` (merged leftover #16).
+- **Product change:** offline doctor / readiness is operator-testable. Human
+  grade output leads with a marked recap (`Who acts first` plus Next for
+  Andrea / Bob / owner). `bash scripts/andrea_doctor.sh --offline` continues
+  through probes on Grade C, reprints that recap, and is the command README
+  and the playbook tell an operator to run. A unit test executes that exact
+  command. Live doctor still fail-closes immediately on Grade C.
+- **Fence:** `OUTBOUND_CONFIRM_RE` is unchanged. `services/andrea_sync/server.py`
+  blob `8c5efa82` is identical to base. `conversation_eval` is unchanged.
 - **Operator path:** `bash scripts/andrea_doctor.sh --offline` then read
-  Next for Andrea / Next for the coding agent (Bob) / Next for the owner.
+  `--- Operator next steps ---`.
 - **Holds:** no live send, Private API off, no BlueBubbles live send, no
   credential writes, no merge/tag/deploy/gateway restart unless the owner asks.
 

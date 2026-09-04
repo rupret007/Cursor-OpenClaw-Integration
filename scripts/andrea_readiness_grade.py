@@ -12,6 +12,8 @@ probe notes, keeping the result safe for shared agent and dashboard handoffs.
 
 Every plan also names the next step for Andrea, the coding agent (Bob), and
 the owner, plus fail-closed holds. Grade A never leaves next_action empty.
+Human output leads with a marked operator recap so Andrea vs Bob vs owner is
+obvious before reasons or summary JSON.
 
 Usage:
   python3 scripts/andrea_readiness_grade.py
@@ -72,6 +74,10 @@ GRADE_A_NEXT = (
     "No capability blockers. Continue the assigned offline task; do not send messages, "
     "enable Private API, or restart the gateway unless the owner asks."
 )
+OPERATOR_RECAP_START = "--- Operator next steps ---"
+OPERATOR_RECAP_END = "--- End operator next steps ---"
+WHO_ACTS_FIRST_OWNER = "owner"
+WHO_ACTS_FIRST_CODING_AGENT = "coding_agent"
 
 
 def _safe_capability_id(row: dict) -> str:
@@ -156,6 +162,19 @@ def _coding_agent_next_action(grade: str) -> str:
     )
 
 
+def _who_acts_first(grade: str, actions: list | None = None) -> str:
+    """Name the actor who must move before anyone else treats the stack as ready."""
+    if grade == "C" or actions or grade == "B":
+        return WHO_ACTS_FIRST_OWNER
+    return WHO_ACTS_FIRST_CODING_AGENT
+
+
+def _who_acts_first_label(who: str) -> str:
+    if who == WHO_ACTS_FIRST_CODING_AGENT:
+        return "coding agent (Bob)"
+    return "owner"
+
+
 def attach_actor_contract(plan: dict, grade: str) -> dict:
     """Fill actor lanes and holds so next steps are never implied from a table."""
     actions = plan.get("actions") if isinstance(plan.get("actions"), list) else []
@@ -170,6 +189,7 @@ def attach_actor_contract(plan: dict, grade: str) -> dict:
     plan["owner_next_action"] = owner_next
     plan["andrea_next_action"] = _andrea_next_action(grade)
     plan["coding_agent_next_action"] = _coding_agent_next_action(grade)
+    plan["who_acts_first"] = _who_acts_first(grade, actions)
     plan["holds"] = list(READINESS_HOLDS)
     plan["routing"] = {
         "andrea": ANDREA_ROLE,
@@ -307,30 +327,61 @@ def grade_from_payload(data: dict) -> tuple[str, list[str]]:
     return "A", []
 
 
-def format_readiness_human(payload: dict) -> str:
-    """Render the shared next-step contract without a clipped capability table."""
+def format_operator_recap(payload: dict) -> str:
+    """Compact Andrea / Bob / owner block operators can read without scrolling."""
     plan = payload.get("readiness_plan") if isinstance(payload.get("readiness_plan"), dict) else {}
-    lines = [f"Andrea readiness grade: {payload.get('grade')}"]
-    for reason in payload.get("reasons") or []:
-        lines.append(f"  - {reason}")
-    summary = payload.get("summary")
-    if isinstance(summary, dict) and summary:
-        lines.append(json.dumps(summary, indent=2))
-    lines.append(
-        "Safe for autonomous ops: "
-        + ("yes" if plan.get("safe_for_autonomous_ops") else "no")
-    )
-    lines.append(f"Next action: {plan.get('next_action') or _default_next_action(str(payload.get('grade') or 'C'))}")
-    lines.append(f"Next for Andrea: {plan.get('andrea_next_action') or _andrea_next_action(str(payload.get('grade') or 'C'))}")
-    lines.append(
-        "Next for the coding agent (Bob): "
-        + str(plan.get("coding_agent_next_action") or _coding_agent_next_action(str(payload.get("grade") or "C")))
-    )
-    lines.append(f"Next for the owner: {plan.get('owner_next_action') or NO_OWNER_SETUP}")
-    lines.append("Holds:")
+    grade = str(payload.get("grade") or "C")
+    actions = plan.get("actions") if isinstance(plan.get("actions"), list) else []
+    who = plan.get("who_acts_first") or _who_acts_first(grade, actions)
+    lines = [
+        OPERATOR_RECAP_START,
+        f"Andrea readiness grade: {payload.get('grade')}",
+        "Safe for autonomous ops: " + ("yes" if plan.get("safe_for_autonomous_ops") else "no"),
+        f"Who acts first: {_who_acts_first_label(str(who))}",
+        f"Next action: {plan.get('next_action') or _default_next_action(grade)}",
+        f"Next for Andrea: {plan.get('andrea_next_action') or _andrea_next_action(grade)}",
+        (
+            "Next for the coding agent (Bob): "
+            + str(plan.get("coding_agent_next_action") or _coding_agent_next_action(grade))
+        ),
+        f"Next for the owner: {plan.get('owner_next_action') or NO_OWNER_SETUP}",
+        "Holds:",
+    ]
     holds = plan.get("holds") if isinstance(plan.get("holds"), list) else list(READINESS_HOLDS)
     for hold in holds:
         lines.append(f"  - {hold}")
+    lines.append(OPERATOR_RECAP_END)
+    return "\n".join(lines)
+
+
+def extract_operator_recap(text: str) -> str:
+    """Return the first marked operator recap from doctor or grade output."""
+    captured: list[str] = []
+    keep = False
+    for line in text.splitlines():
+        if line == OPERATOR_RECAP_START:
+            keep = True
+            captured.append(line)
+            continue
+        if keep:
+            captured.append(line)
+            if line == OPERATOR_RECAP_END:
+                break
+    return "\n".join(captured)
+
+
+def format_readiness_human(payload: dict) -> str:
+    """Render the shared next-step contract without a clipped capability table."""
+    plan = payload.get("readiness_plan") if isinstance(payload.get("readiness_plan"), dict) else {}
+    lines = [format_operator_recap(payload)]
+    reasons = payload.get("reasons") or []
+    if reasons:
+        lines.append("Grade reasons:")
+        for reason in reasons:
+            lines.append(f"  - {reason}")
+    summary = payload.get("summary")
+    if isinstance(summary, dict) and summary:
+        lines.append(json.dumps(summary, indent=2))
     routing = plan.get("routing") if isinstance(plan.get("routing"), dict) else {}
     lines.append("Routing:")
     lines.append(f"  Andrea: {routing.get('andrea') or ANDREA_ROLE}")

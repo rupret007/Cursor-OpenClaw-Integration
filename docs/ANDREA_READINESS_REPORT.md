@@ -14,7 +14,7 @@ The following artifacts landed on **2026-03-20** (extended with masterclass hard
 - `scripts/andrea_readiness_grade.py` — **A/B/C** readiness grade plus a redaction-safe prioritized action plan from capability JSON (`--json`; exit `1` on **C**)
 - `scripts/andrea_security_sanity.sh` — repo secret-pattern + tracked-file checks (`STRICT=1` fails on backup warnings)
 - `scripts/andrea_slo_check.sh` — grade + optional `openclaw models status --probe` (**timeout in ms**)
-- `scripts/andrea_doctor.sh` — single operator health pass (security → capabilities + grade → reliability probes → optional OpenClaw probe)
+- `scripts/andrea_doctor.sh --offline` — operator health pass (security → readiness recap → reliability probes; reprints Andrea/Bob/owner next steps even on Grade C)
 - `scripts/andrea_reliability_probes.sh` — deterministic `diagnose` probe + capability JSON shape
 - `docs/ANDREA_SECURITY.md`, `ANDREA_MODEL_POLICY.md`, `ANDREA_CAPABILITY_MATRIX.md`, `ANDREA_AUTONOMY_POLICY.md`, `ANDREA_DEVOPS_RUNBOOK.md`, `ANDREA_COMMS_PRODUCTIVITY.md`, `ANDREA_OPERATIONS_PLAYBOOK.md`
 - `README.md` — Andrea section + integration hook (`test_integration.sh` includes security sanity + readiness grade smoke)
@@ -28,8 +28,9 @@ Re-run verification on **your** machine and paste outputs into §1 below.
 Paste outputs or attach logs:
 
 ```bash
-bash scripts/andrea_doctor.sh
-# or headless/offline: bash scripts/andrea_doctor.sh --offline
+bash scripts/andrea_doctor.sh --offline
+# live model probe (owner-approved host only):
+# bash scripts/andrea_doctor.sh
 # optional auto-remediation if model probe fails:
 # MODEL_GUARD_ON_FAIL=1 bash scripts/andrea_doctor.sh
 ```
@@ -66,14 +67,16 @@ STRICT_SECURITY=1 bash scripts/andrea_doctor.sh
 
 Record the letter grade and reasons:
 
-Also record the first `Next action`, plus `Next for Andrea`, `Next for the
-coding agent (Bob)`, and `Next for the owner`. Machine consumers should read
-`readiness_plan.safe_for_autonomous_ops`, `blocker_count`, `next_action`,
-`andrea_next_action`, `coding_agent_next_action`, `owner_next_action`,
-`holds`, `routing`, and `actions` from
+Also record `Who acts first`, the first `Next action`, plus `Next for Andrea`,
+`Next for the coding agent (Bob)`, and `Next for the owner` from the marked
+operator recap. Machine consumers should read
+`readiness_plan.safe_for_autonomous_ops`, `blocker_count`, `who_acts_first`,
+`next_action`, `andrea_next_action`, `coding_agent_next_action`,
+`owner_next_action`, `holds`, `routing`, and `actions` from
 `python3 scripts/andrea_readiness_grade.py --json`; action text is code-owned
 and never copies free-form probe notes or secret values. Grade A still emits a
-concrete next action instead of leaving the field empty.
+concrete next action instead of leaving the field empty. Offline doctor still
+completes and reprints that recap when the grade is C.
 
 | Grade | Meaning |
 |-------|---------|
@@ -90,7 +93,7 @@ Tune numbers to your environment; record **observed** values in §2 after each r
 | SLO | Target (default) | How to measure |
 |-----|------------------|----------------|
 | **Readiness grade** | **A** preferred; **B** acceptable if no blockers | `python3 scripts/andrea_readiness_grade.py` |
-| **`andrea_doctor` wall time** | &lt; 120s with `SKIP_OPENCLAW_PROBE=1` | `time bash scripts/andrea_doctor.sh` |
+| **`andrea_doctor` wall time** | &lt; 120s with `--offline` | `time bash scripts/andrea_doctor.sh --offline` |
 | **OpenClaw model probe** | Completes within CLI `--probe-timeout` (ms) | `bash scripts/andrea_slo_check.sh` — note `openclaw_probe_wall_ms=…` line |
 | **Telegram Bot API `getMe`** | &lt; 8000ms round-trip | `TELEGRAM_BOT_TOKEN=… bash scripts/andrea_slo_telegram.sh` or `TELEGRAM_SLO=1 bash scripts/andrea_slo_check.sh` |
 | **Integration suite** | Green on `main` | `bash scripts/test_integration.sh` |

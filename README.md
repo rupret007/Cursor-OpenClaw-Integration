@@ -67,7 +67,7 @@ Hardened **Cursor Cloud Agents** integration toolkit for **OpenClaw**, shell wor
 │   ├── andrea_readiness_grade.py   # A/B/C grade from capability JSON
 │   ├── andrea_security_sanity.sh     # repo secret-pattern sanity checks
 │   ├── andrea_slo_check.sh         # grade + optional OpenClaw model probe
-│   ├── andrea_doctor.sh            # one-pass: security + Andrea/Bob next-step + probes + probe
+│   ├── andrea_doctor.sh            # operator offline: security + Andrea/Bob/owner recap + probes
 │   ├── andrea_autonomy_cycle.sh    # closed-loop local autonomy pass
 │   ├── andrea_model_guard.sh       # automatic profile failover + reprobe loop
 │   ├── andrea_openclaw_enforce.sh  # sync skill + required skills + probe/guard
@@ -280,18 +280,20 @@ Full steps and flow: [docs/OPENCLAW_SKILL.md](docs/OPENCLAW_SKILL.md).
 | [docs/ANDREA_ALEXA_USER_SETUP.md](docs/ANDREA_ALEXA_USER_SETUP.md) | Step-by-step Alexa app + Developer Console setup guide for actual users/operators |
 | [docs/ALEXA_CLOUD_EDGE_TEMPLATE.md](docs/ALEXA_CLOUD_EDGE_TEMPLATE.md) | Recommended public-edge forwarding/auth contract for Alexa |
 
-**Startup self-check:**
+**Operator self-check (offline, no live probe):**
 
 ```bash
-python3 scripts/andrea_capabilities.py
+bash scripts/andrea_doctor.sh --offline
 ```
 
-**Masterclass health (one command):** security sanity + capability snapshot + **A/B/C** grade + reliability probes + optional `openclaw models status --probe`. OpenClaw **`--probe-timeout` is in milliseconds** (e.g. 30s → `30000`).
+Read the `--- Operator next steps ---` block. It names **Who acts first**, then **Next for Andrea**, **Next for the coding agent (Bob)**, and **Next for the owner**. Grade C still finishes the offline pass and reprints that recap; exit `1` means the owner must clear a blocker. Do not send a message, enable Private API, or restart a gateway unless the owner asks.
+
+Optional capability table only: `python3 scripts/andrea_capabilities.py`.
+
+**Live doctor** (optional OpenClaw model probe on an owner-approved host). OpenClaw **`--probe-timeout` is in milliseconds** (e.g. 30s → `30000`).
 
 ```bash
 bash scripts/andrea_doctor.sh
-# Safe offline/headless pass with no live model probe:
-# bash scripts/andrea_doctor.sh --offline
 # STRICT_SECURITY=1 bash scripts/andrea_doctor.sh   # fail on backup warnings too
 # MODEL_GUARD_ON_FAIL=1 bash scripts/andrea_doctor.sh  # auto-remediate failed model probe
 # OPENCLAW_ENFORCE=1 bash scripts/andrea_doctor.sh  # enforce OpenClaw baseline first
@@ -514,7 +516,7 @@ See [.env.example](.env.example) and [skills/cursor_handoff/.env.example](skills
 - `--auth-mode auto` tolerates bearer vs basic inconsistencies.
 - `--retries` + exponential backoff reduce transient failures (including transport-layer errors).
 - `diagnose` redacts secrets.
-- Readiness output includes one prioritized, redaction-safe action plan plus unmistakable next steps for Andrea, the coding agent (Bob), and the owner; `andrea_doctor.sh --offline` prints that contract and skips the live model probe.
+- Readiness output leads with a marked operator recap (`Who acts first` plus Next for Andrea / Bob / owner) and fail-closed holds. `bash scripts/andrea_doctor.sh --offline` is the operator command: it prints that recap, runs deterministic probes, reprints the recap, and skips the live model probe. Grade C still completes the offline pass; exit `1` means the owner must act.
 - `create-agent --dry-run` validates payload without network calls.
 - `cursor_handoff` supports `--dry-run` and read-only defaults for safer delegation.
 

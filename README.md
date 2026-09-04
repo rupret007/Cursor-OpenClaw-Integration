@@ -67,7 +67,7 @@ Hardened **Cursor Cloud Agents** integration toolkit for **OpenClaw**, shell wor
 │   ├── andrea_readiness_grade.py   # A/B/C grade from capability JSON
 │   ├── andrea_security_sanity.sh     # repo secret-pattern sanity checks
 │   ├── andrea_slo_check.sh         # grade + optional OpenClaw model probe
-│   ├── andrea_doctor.sh            # one-pass: security + grade + probes + probe
+│   ├── andrea_doctor.sh            # one-pass: security + Andrea/Bob next-step + probes + probe
 │   ├── andrea_autonomy_cycle.sh    # closed-loop local autonomy pass
 │   ├── andrea_model_guard.sh       # automatic profile failover + reprobe loop
 │   ├── andrea_openclaw_enforce.sh  # sync skill + required skills + probe/guard
@@ -514,7 +514,7 @@ See [.env.example](.env.example) and [skills/cursor_handoff/.env.example](skills
 - `--auth-mode auto` tolerates bearer vs basic inconsistencies.
 - `--retries` + exponential backoff reduce transient failures (including transport-layer errors).
 - `diagnose` redacts secrets.
-- Readiness output includes one prioritized, redaction-safe action plan shared by humans and automation; `andrea_doctor.sh --offline` avoids the live model probe.
+- Readiness output includes one prioritized, redaction-safe action plan plus unmistakable next steps for Andrea, the coding agent (Bob), and the owner; `andrea_doctor.sh --offline` prints that contract and skips the live model probe.
 - `create-agent --dry-run` validates payload without network calls.
 - `cursor_handoff` supports `--dry-run` and read-only defaults for safer delegation.
 

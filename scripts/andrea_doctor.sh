@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Single entry: security + capability grade + reliability probes + optional OpenClaw probe.
+# Single entry: security + readiness next-step contract + reliability probes + optional OpenClaw probe.
 # Usage: bash scripts/andrea_doctor.sh
 #        bash scripts/andrea_doctor.sh --offline
 #        STRICT_SECURITY=1 bash scripts/andrea_doctor.sh   # fail on security warnings too
@@ -16,7 +16,8 @@ OPENCLAW_ENFORCE="${OPENCLAW_ENFORCE:-0}"
 
 usage() {
   echo "Usage: bash scripts/andrea_doctor.sh [--offline]"
-  echo "  --offline  Run security, capability, grade, and deterministic probes without the live OpenClaw model probe."
+  echo "  --offline  Run security, the readiness next-step contract (Andrea / Bob / owner),"
+  echo "             and deterministic probes without the live OpenClaw model probe."
 }
 
 while [[ $# -gt 0 ]]; do
@@ -48,17 +49,11 @@ echo ">>> [1/4] Security sanity (repo)"
 bash "${BASE_DIR}/scripts/andrea_security_sanity.sh"
 echo ""
 
-echo ">>> [2/4] Capability matrix summary + readiness grade"
-set +o pipefail
-python3 "${BASE_DIR}/scripts/andrea_capabilities.py" | head -20
-_cap_status=("${PIPESTATUS[@]}")
-set -o pipefail
-if [[ "${_cap_status[0]:-0}" -ne 0 && "${_cap_status[0]:-0}" -ne 141 ]]; then
-  exit "${_cap_status[0]}"
-fi
-echo "…"
+echo ">>> [2/4] Readiness grade + Andrea/Bob next-step contract"
+echo "Full capability table (optional): python3 scripts/andrea_capabilities.py"
 python3 "${BASE_DIR}/scripts/andrea_readiness_grade.py" || {
-  echo "Grade C — fix blocked rows above, then re-run." >&2
+  echo "Grade C — follow Next action / Next for Andrea / Next for the coding agent (Bob) above." >&2
+  echo "Do not hunt a capability table, send a message, install a skill, or restart a gateway unless the owner acts." >&2
   exit 1
 }
 echo ""
@@ -101,9 +96,16 @@ else
 fi
 echo ""
 
-echo "Sprint readiness note:"
-echo "- intentional tri-LLM sprints need a healthy OpenClaw probe and cursor_handoff availability; OPENCLAW_ENFORCE=1 is the strict baseline check"
-echo "- sessions_spawn attachments are optional and only matter for deliberate multi-session handoffs, not normal Telegram chat/news flows"
+if [[ "${SKIP_OPENCLAW}" == "1" ]]; then
+  echo "Offline doctor complete."
+  echo "Use the Next for Andrea / Next for the coding agent (Bob) / Next for the owner lines from the readiness grade."
+  echo "Holds: no live send, Private API stays off, no BlueBubbles live send, no credential writes, no gateway restart unless the owner asks."
+else
+  echo "Sprint readiness note:"
+  echo "- intentional tri-LLM sprints need a healthy OpenClaw probe and cursor_handoff availability; OPENCLAW_ENFORCE=1 is the strict baseline check"
+  echo "- sessions_spawn attachments are optional and only matter for deliberate multi-session handoffs, not normal Telegram chat/news flows"
+  echo "- live send still requires the exact standalone phrases send it / send it now / send now"
+fi
 echo ""
 
 echo "=== Andrea doctor complete ==="

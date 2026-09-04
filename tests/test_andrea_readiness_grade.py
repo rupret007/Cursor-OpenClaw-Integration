@@ -98,6 +98,31 @@ class TestAndreaReadinessGrade(unittest.TestCase):
         self.assertEqual(g, "B")
         self.assertIn("github:auth_degraded", reasons)
 
+    def test_readiness_plan_installs_openclaw_binary_before_skills_list(self) -> None:
+        plan = self._mod.build_readiness_plan(
+            {
+                "rows": [
+                    {
+                        "id": "openclaw:skills_list",
+                        "status": "blocked",
+                        "critical": True,
+                        "notes": "do-not-echo-skills-list-note",
+                    },
+                    {
+                        "id": "binary:openclaw",
+                        "status": "blocked",
+                        "critical": True,
+                        "notes": "do-not-echo-binary-note",
+                    },
+                ]
+            },
+            "C",
+        )
+        self.assertEqual(plan["actions"][0]["id"], "binary:openclaw")
+        self.assertIn("Install the required openclaw binary", plan["next_action"])
+        self.assertEqual(plan["owner_next_action"], plan["next_action"])
+        self.assertNotIn("do-not-echo", str(plan))
+
     def test_readiness_plan_prioritizes_critical_blockers_without_echoing_notes(self) -> None:
         plan = self._mod.build_readiness_plan(
             {
@@ -135,6 +160,87 @@ class TestAndreaReadinessGrade(unittest.TestCase):
         self.assertFalse(plan["safe_for_autonomous_ops"])
         self.assertEqual(plan["blocker_count"], 1)
         self.assertEqual(plan["actions"][0]["id"], "capabilities:payload")
+        self.assertEqual(plan["next_action"], self._mod.RESTORE_MATRIX)
+        self.assertEqual(plan["owner_next_action"], self._mod.RESTORE_MATRIX)
+        self.assertIn("Do not run autonomous", plan["andrea_next_action"])
+        self.assertIn("Stay offline", plan["coding_agent_next_action"])
+        self.assertIn("Do not send any live message.", plan["holds"])
+        self.assertIn("Keep Private API off.", plan["holds"])
+        self.assertIn("coding agent (Bob)", plan["routing"]["coding_agent"])
+
+    def test_grade_a_plan_always_names_andrea_bob_and_owner_next_steps(self) -> None:
+        plan = self._mod.build_readiness_plan(
+            {
+                "rows": [{"id": "binary:python", "status": "ready", "critical": False}],
+                "summary": {"blocked": 0, "ready_with_limits": 0},
+            },
+            "A",
+        )
+        self.assertTrue(plan["safe_for_autonomous_ops"])
+        self.assertEqual(plan["blocker_count"], 0)
+        self.assertEqual(plan["actions"], [])
+        self.assertEqual(plan["next_action"], self._mod.GRADE_A_NEXT)
+        self.assertEqual(plan["owner_next_action"], self._mod.NO_OWNER_SETUP)
+        self.assertIn("send it / send it now / send now", plan["andrea_next_action"])
+        self.assertIn("Continue offline verification", plan["coding_agent_next_action"])
+        self.assertNotIn("do-not-echo", str(plan))
+        self.assertEqual(plan["holds"], list(self._mod.READINESS_HOLDS))
+
+    def test_grade_b_limits_plan_keeps_optional_lanes_off_limits(self) -> None:
+        plan = self._mod.build_readiness_plan(
+            {
+                "rows": [
+                    {"id": "skill:bluebubbles", "status": "ready_with_limits", "critical": False}
+                ],
+                "summary": {"blocked": 0, "ready_with_limits": 1},
+            },
+            "B",
+        )
+        self.assertTrue(plan["safe_for_autonomous_ops"])
+        self.assertEqual(plan["next_action"], self._mod.REVIEW_LIMITS)
+        self.assertEqual(plan["owner_next_action"], self._mod.REVIEW_LIMITS)
+        self.assertIn("verified lanes only", plan["andrea_next_action"])
+        self.assertIn("ready-with-limits", plan["coding_agent_next_action"])
+        self.assertIn("Do not live-send BlueBubbles.", plan["holds"])
+
+    def test_human_format_makes_actor_next_steps_unmistakable(self) -> None:
+        plan = self._mod.build_readiness_plan(
+            {
+                "rows": [
+                    {
+                        "id": "skill:cursor_handoff",
+                        "status": "blocked",
+                        "critical": True,
+                        "notes": "must-not-appear",
+                    }
+                ]
+            },
+            "C",
+        )
+        text = self._mod.format_readiness_human(
+            {
+                "grade": "C",
+                "reasons": ["critical_blocked:skill:cursor_handoff"],
+                "summary": {"blocked": 1},
+                "readiness_plan": plan,
+            }
+        )
+        self.assertIn("Next action:", text)
+        self.assertIn("Next for Andrea:", text)
+        self.assertIn("Next for the coding agent (Bob):", text)
+        self.assertIn("Next for the owner:", text)
+        self.assertIn("Holds:", text)
+        self.assertIn("Routing:", text)
+        self.assertNotIn("must-not-appear", text)
+        self.assertNotIn("fix blocked rows above", text)
+
+    def test_doctor_script_leads_with_next_step_contract_not_clipped_table(self) -> None:
+        script = DOCTOR_SCRIPT.read_text(encoding="utf-8")
+        self.assertNotIn("head -20", script)
+        self.assertNotIn("fix blocked rows above", script)
+        self.assertIn("Next for the coding agent (Bob)", script)
+        self.assertIn("Private API stays off", script)
+        self.assertIn("readiness next-step contract", script)
 
     def test_doctor_help_names_offline_mode_without_running_checks(self) -> None:
         proc = subprocess.run(
@@ -146,6 +252,8 @@ class TestAndreaReadinessGrade(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("--offline", proc.stdout)
+        self.assertIn("next-step contract", proc.stdout)
+        self.assertIn("Bob", proc.stdout)
 
     def test_doctor_rejects_unknown_options(self) -> None:
         proc = subprocess.run(

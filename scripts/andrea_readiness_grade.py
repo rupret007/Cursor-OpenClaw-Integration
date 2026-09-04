@@ -10,6 +10,9 @@ C — Any blocked row (especially critical ones called out in reasons).
 Human and JSON output use code-owned actions rather than copying free-form
 probe notes, keeping the result safe for shared agent and dashboard handoffs.
 
+Every plan also names the next step for Andrea, the coding agent (Bob), and
+the owner, plus fail-closed holds. Grade A never leaves next_action empty.
+
 Usage:
   python3 scripts/andrea_readiness_grade.py
   python3 scripts/andrea_readiness_grade.py --json
@@ -30,7 +33,8 @@ CAP = REPO / "scripts" / "andrea_capabilities.py"
 # core stack can still grade A while optional/hybrid gaps remain visible as ready_with_limits.
 SOFT_LIMITS_THRESHOLD = 65
 ACTION_PRIORITY = {
-    "openclaw:skills_list": 0,
+    "binary:openclaw": 0,
+    "openclaw:skills_list": 5,
     "skill:cursor_handoff": 10,
     "github:auth": 20,
     "skill:github": 30,
@@ -39,6 +43,35 @@ ACTION_PRIORITY = {
     "skill:brave-api-search": 50,
     "skill:add-minimax-provider": 60,
 }
+
+READINESS_HOLDS = (
+    "Do not send any live message.",
+    "Keep Private API off.",
+    "Do not live-send BlueBubbles.",
+    "Do not write credentials into the repository.",
+    "Do not merge, tag, deploy, or restart a gateway unless the owner explicitly asks.",
+)
+
+ANDREA_ROLE = (
+    "Andrea handles Telegram/Alexa operator replies and personal-message drafts. "
+    "Send only after the exact standalone phrases send it / send it now / send now."
+)
+CODING_AGENT_ROLE = (
+    "The coding agent (Bob) handles offline repo work, tests, and draft PRs. "
+    "Bob does not install skills, mutate credentials, or send messages."
+)
+OWNER_ROLE = (
+    "The owner alone installs skills, restores auth, approves gateway restarts, "
+    "and authorizes any live send."
+)
+
+NO_OWNER_SETUP = "No owner setup is required for the current capability matrix."
+REVIEW_LIMITS = "Review the ready-with-limits rows before relying on optional capabilities."
+RESTORE_MATRIX = "Restore a valid capability matrix before autonomous operation."
+GRADE_A_NEXT = (
+    "No capability blockers. Continue the assigned offline task; do not send messages, "
+    "enable Private API, or restart the gateway unless the owner asks."
+)
 
 
 def _safe_capability_id(row: dict) -> str:
@@ -77,22 +110,94 @@ def _action_for_row(row: dict) -> str:
     return f"Inspect blocked capability {capability_id} in the capability matrix, resolve it, and rerun the offline doctor."
 
 
+def _default_next_action(grade: str) -> str:
+    if grade == "C":
+        return RESTORE_MATRIX
+    if grade == "B":
+        return REVIEW_LIMITS
+    return GRADE_A_NEXT
+
+
+def _andrea_next_action(grade: str) -> str:
+    if grade == "C":
+        return (
+            "Do not run autonomous or live communication work. Keep outbound drafts "
+            "pending. Wait for the owner to clear the first Next action, then rerun "
+            "bash scripts/andrea_doctor.sh --offline."
+        )
+    if grade == "B":
+        return (
+            "Stay on verified lanes only. Optional or degraded capabilities are not ready. "
+            "Personal messages still require the exact standalone phrases send it / "
+            "send it now / send now. Do not enable Private API or live-send BlueBubbles."
+        )
+    return (
+        "Verified lanes may be used. Personal messages still require the exact standalone "
+        "phrases send it / send it now / send now. Do not enable Private API or "
+        "live-send BlueBubbles unless the owner asks."
+    )
+
+
+def _coding_agent_next_action(grade: str) -> str:
+    if grade == "C":
+        return (
+            "Stay offline. Do not install skills, restart OpenClaw, mutate credentials, "
+            "or send messages. Report the first Next action to the owner and continue "
+            "only with local code and tests that do not need the blocked lane."
+        )
+    if grade == "B":
+        return (
+            "Continue offline code and tests. Do not treat ready-with-limits rows as ready. "
+            "Do not send messages, enable Private API, or change credentials."
+        )
+    return (
+        "No capability blockers. Continue offline verification or the assigned code task. "
+        "Do not send messages, enable Private API, or restart the gateway unless the owner asks."
+    )
+
+
+def attach_actor_contract(plan: dict, grade: str) -> dict:
+    """Fill actor lanes and holds so next steps are never implied from a table."""
+    actions = plan.get("actions") if isinstance(plan.get("actions"), list) else []
+    next_action = plan.get("next_action") or _default_next_action(grade)
+    if actions:
+        owner_next = next_action
+    elif grade == "A":
+        owner_next = NO_OWNER_SETUP
+    else:
+        owner_next = next_action
+    plan["next_action"] = next_action
+    plan["owner_next_action"] = owner_next
+    plan["andrea_next_action"] = _andrea_next_action(grade)
+    plan["coding_agent_next_action"] = _coding_agent_next_action(grade)
+    plan["holds"] = list(READINESS_HOLDS)
+    plan["routing"] = {
+        "andrea": ANDREA_ROLE,
+        "coding_agent": CODING_AGENT_ROLE,
+        "owner": OWNER_ROLE,
+    }
+    return plan
+
+
 def build_readiness_plan(data: dict, grade: str) -> dict:
     rows = data.get("rows")
     if not isinstance(rows, list):
-        return {
-            "safe_for_autonomous_ops": False,
-            "blocker_count": 1,
-            "next_action": "Restore a valid capability matrix before autonomous operation.",
-            "actions": [
-                {
-                    "id": "capabilities:payload",
-                    "status": "blocked",
-                    "critical": True,
-                    "action": "Restore a valid capability matrix before autonomous operation.",
-                }
-            ],
-        }
+        return attach_actor_contract(
+            {
+                "safe_for_autonomous_ops": False,
+                "blocker_count": 1,
+                "next_action": RESTORE_MATRIX,
+                "actions": [
+                    {
+                        "id": "capabilities:payload",
+                        "status": "blocked",
+                        "critical": True,
+                        "action": RESTORE_MATRIX,
+                    }
+                ],
+            },
+            "C",
+        )
 
     blocked = [row for row in rows if isinstance(row, dict) and row.get("status") == "blocked"]
     blocked.sort(
@@ -131,13 +236,16 @@ def build_readiness_plan(data: dict, grade: str) -> dict:
     ]
     next_action = actions[0]["action"] if actions else None
     if grade == "B" and next_action is None:
-        next_action = "Review the ready-with-limits rows before relying on optional capabilities."
-    return {
-        "safe_for_autonomous_ops": grade != "C",
-        "blocker_count": len(blocked),
-        "next_action": next_action,
-        "actions": actions,
-    }
+        next_action = REVIEW_LIMITS
+    return attach_actor_contract(
+        {
+            "safe_for_autonomous_ops": grade != "C",
+            "blocker_count": len(blocked),
+            "next_action": next_action,
+            "actions": actions,
+        },
+        grade,
+    )
 
 
 def run_capabilities() -> dict:
@@ -199,6 +307,46 @@ def grade_from_payload(data: dict) -> tuple[str, list[str]]:
     return "A", []
 
 
+def format_readiness_human(payload: dict) -> str:
+    """Render the shared next-step contract without a clipped capability table."""
+    plan = payload.get("readiness_plan") if isinstance(payload.get("readiness_plan"), dict) else {}
+    lines = [f"Andrea readiness grade: {payload.get('grade')}"]
+    for reason in payload.get("reasons") or []:
+        lines.append(f"  - {reason}")
+    summary = payload.get("summary")
+    if isinstance(summary, dict) and summary:
+        lines.append(json.dumps(summary, indent=2))
+    lines.append(
+        "Safe for autonomous ops: "
+        + ("yes" if plan.get("safe_for_autonomous_ops") else "no")
+    )
+    lines.append(f"Next action: {plan.get('next_action') or _default_next_action(str(payload.get('grade') or 'C'))}")
+    lines.append(f"Next for Andrea: {plan.get('andrea_next_action') or _andrea_next_action(str(payload.get('grade') or 'C'))}")
+    lines.append(
+        "Next for the coding agent (Bob): "
+        + str(plan.get("coding_agent_next_action") or _coding_agent_next_action(str(payload.get("grade") or "C")))
+    )
+    lines.append(f"Next for the owner: {plan.get('owner_next_action') or NO_OWNER_SETUP}")
+    lines.append("Holds:")
+    holds = plan.get("holds") if isinstance(plan.get("holds"), list) else list(READINESS_HOLDS)
+    for hold in holds:
+        lines.append(f"  - {hold}")
+    routing = plan.get("routing") if isinstance(plan.get("routing"), dict) else {}
+    lines.append("Routing:")
+    lines.append(f"  Andrea: {routing.get('andrea') or ANDREA_ROLE}")
+    lines.append(f"  Coding agent (Bob): {routing.get('coding_agent') or CODING_AGENT_ROLE}")
+    lines.append(f"  Owner: {routing.get('owner') or OWNER_ROLE}")
+    actions = plan.get("actions") if isinstance(plan.get("actions"), list) else []
+    if actions:
+        lines.append("Readiness action plan:")
+        for index, item in enumerate(actions, start=1):
+            if not isinstance(item, dict):
+                continue
+            priority = "critical" if item.get("critical") else item.get("status")
+            lines.append(f"  {index}. {item.get('id')} ({priority}) — {item.get('action')}")
+    return "\n".join(lines)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Andrea readiness grade from capability matrix")
     ap.add_argument("--json", action="store_true", help="Print machine-readable grade payload")
@@ -219,23 +367,7 @@ def main() -> int:
     if args.json:
         print(json.dumps(payload, indent=2))
     else:
-        print(f"Andrea readiness grade: {grade}")
-        if reasons:
-            for r in reasons:
-                print(f"  - {r}")
-        if payload["summary"]:
-            print(json.dumps(payload["summary"], indent=2))
-        print(
-            "Safe for autonomous ops: "
-            + ("yes" if readiness_plan["safe_for_autonomous_ops"] else "no")
-        )
-        if readiness_plan["next_action"]:
-            print(f"Next action: {readiness_plan['next_action']}")
-        if readiness_plan["actions"]:
-            print("Readiness action plan:")
-            for index, item in enumerate(readiness_plan["actions"], start=1):
-                priority = "critical" if item["critical"] else item["status"]
-                print(f"  {index}. {item['id']} ({priority}) — {item['action']}")
+        print(format_readiness_human(payload))
 
     return 0 if grade != "C" else 1
 

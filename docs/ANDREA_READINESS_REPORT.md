@@ -66,10 +66,14 @@ STRICT_SECURITY=1 bash scripts/andrea_doctor.sh
 
 Record the letter grade and reasons:
 
-Also record the first `Next action`. Machine consumers should read
-`readiness_plan.safe_for_autonomous_ops`, `blocker_count`, `next_action`, and
-`actions` from `python3 scripts/andrea_readiness_grade.py --json`; action text
-is code-owned and never copies free-form probe notes or secret values.
+Also record the first `Next action`, plus `Next for Andrea`, `Next for the
+coding agent (Bob)`, and `Next for the owner`. Machine consumers should read
+`readiness_plan.safe_for_autonomous_ops`, `blocker_count`, `next_action`,
+`andrea_next_action`, `coding_agent_next_action`, `owner_next_action`,
+`holds`, `routing`, and `actions` from
+`python3 scripts/andrea_readiness_grade.py --json`; action text is code-owned
+and never copies free-form probe notes or secret values. Grade A still emits a
+concrete next action instead of leaving the field empty.
 
 | Grade | Meaning |
 |-------|---------|

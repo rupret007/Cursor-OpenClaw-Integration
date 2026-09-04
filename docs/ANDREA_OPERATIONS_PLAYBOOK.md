@@ -58,9 +58,12 @@ bash scripts/andrea_security_sanity.sh
 ```
 
 The readiness grade prints one prioritized, code-owned next action and a
-redaction-safe action plan. Its JSON output exposes the same contract under
-`readiness_plan`, so Codex, Grok, Claude, dashboards, and shell automation can
-share blocker truth without parsing the human table or probe notes.
+redaction-safe action plan, then names **Next for Andrea**, **Next for the
+coding agent (Bob)**, and **Next for the owner**, plus fail-closed holds.
+Its JSON output exposes the same contract under `readiness_plan`
+(`andrea_next_action`, `coding_agent_next_action`, `owner_next_action`,
+`holds`, `routing`), so Codex, Grok, Claude, Bob, dashboards, and shell
+automation can share blocker truth without parsing a clipped capability table.
 
 Optional strict gate (fails if critical capabilities blocked):
 

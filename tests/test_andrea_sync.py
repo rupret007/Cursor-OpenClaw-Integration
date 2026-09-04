@@ -3775,12 +3775,21 @@ class TestAndreaSync(unittest.TestCase):
         for text in (
             "yes",
             "y",
+            "yep",
+            "yeah",
+            "ok",
+            "okay",
+            "sure",
             "yes send it",
             "ok send it",
             "okay send it",
             "go ahead",
             "do it",
             "confirm",
+            "approved",
+            "lgtm",
+            "ship it",
+            "sounds good",
             "looks good",
             "send it please",
             "send now please",
@@ -3840,6 +3849,86 @@ class TestAndreaSync(unittest.TestCase):
         pending = server._load_pending_outbound_draft(second["task_id"])
         self.assertEqual(pending.get("target"), "Candace")
         projection = project_task_dict(server.conn, second["task_id"], "telegram")
+        self.assertEqual(
+            projection["meta"]["assistant"]["reason"],
+            "outbound_message_pending",
+        )
+        self.assertIn(
+            "reply `send it`",
+            projection["meta"]["assistant"]["last_reply"].lower(),
+        )
+
+    def test_soft_yes_phrases_never_authorize_outbound_send(self) -> None:
+        """Soft agreement is not send authorization; the draft stays pending."""
+
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        first = handle_command(
+            server.conn,
+            {
+                "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                "channel": "telegram",
+                "external_id": "tg-draft-soft-yes-0",
+                "payload": {
+                    "text": "Tell Candace hi from you",
+                    "chat_id": 9013,
+                    "message_id": 60,
+                },
+            },
+        )
+        with mock.patch.object(
+            server,
+            "_resolve_messaging_capability",
+            return_value={
+                "skill_key": "bluebubbles",
+                "label": "text messaging",
+                "truth": {"status": "verified_available"},
+            },
+        ):
+            server._handle_task_followups(first["task_id"])
+
+        soft_yes = (
+            "yes",
+            "yep",
+            "yeah",
+            "ok",
+            "okay",
+            "sure",
+            "go ahead",
+            "do it",
+            "confirm",
+            "approved",
+            "lgtm",
+            "ship it",
+            "sounds good",
+            "yes send it",
+            "send it please",
+        )
+        with mock.patch.object(server, "_send_pending_outbound_message") as send:
+            for index, text in enumerate(soft_yes, start=1):
+                follow = handle_command(
+                    server.conn,
+                    {
+                        "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                        "channel": "telegram",
+                        "external_id": f"tg-draft-soft-yes-{index}",
+                        "payload": {
+                            "text": text,
+                            "chat_id": 9013,
+                            "message_id": 60 + index,
+                        },
+                    },
+                )
+                server._handle_task_followups(follow["task_id"])
+                pending = server._load_pending_outbound_draft(follow["task_id"])
+                self.assertEqual(pending.get("target"), "Candace", text)
+                self.assertEqual(pending.get("message"), "hi from you", text)
+            send.assert_not_called()
+
+        projection = project_task_dict(server.conn, follow["task_id"], "telegram")
         self.assertEqual(
             projection["meta"]["assistant"]["reason"],
             "outbound_message_pending",

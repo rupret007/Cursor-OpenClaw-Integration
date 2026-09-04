@@ -1,27 +1,20 @@
 # Cursor session handoff snapshot
 
-Last updated: 2026-09-03 Codex readiness-action-plan product draft (unmerged).
+Last updated: 2026-09-04 offline Andrea/Bob next-step contract draft.
 
 ## Current draft handoff
 
-- **Base:** exact `main` `5d7d0daa01e669d6a3b928eece7a5a803a98724e`
-- **Branch:** `codex/cursor-openclaw-product-20260903`
-- **Product change:** `andrea_readiness_grade.py` now emits one prioritized,
-  code-owned next action plus a redaction-safe `readiness_plan` contract that
-  humans, Codex, Grok, Claude, dashboards, and scripts can share. Probe notes
-  and secret values are never copied into the plan.
-- **Operator path:** `bash scripts/andrea_doctor.sh --offline` is the simple
-  no-live-model-probe form. Unknown doctor options now fail instead of being
-  silently ignored.
-- **Verification:** 752 offline tests, 9 vendored handoff-skill tests, all 11
-  integration-gate stages, security sanity, reliability probes, exhaustive
-  CLI validation, shell syntax, Python compile, and diff integrity passed.
-- **Host discovery:** the current Mac reports Grade C because four critical
-  OpenClaw skills are not detected. The plan correctly puts the checked-in
-  `cursor_handoff` install guidance first. This draft did not install skills,
-  alter credentials/settings, contact a provider, or restart the gateway.
-- **Remaining:** Karen leftover+security review, then Jeff decides any merge
-  and separately owns any skill installation or gateway restart.
+- **Base:** exact `main` `44b198ef210de1803a87e150d8e80fcdbda616a1` (merged leftover #15 fence).
+- **Product change:** readiness grade and `andrea_doctor.sh --offline` now print
+  unmistakable next steps for Andrea, the coding agent (Bob), and the owner,
+  plus fail-closed holds. Doctor no longer clips the capability table or says
+  “fix blocked rows above.” Grade A always names a next action.
+- **Fence:** `OUTBOUND_CONFIRM_RE` is unchanged. Soft-yes phrases still cannot
+  authorize a send; tests now prove that on the server path.
+- **Operator path:** `bash scripts/andrea_doctor.sh --offline` then read
+  Next for Andrea / Next for the coding agent (Bob) / Next for the owner.
+- **Holds:** no live send, Private API off, no BlueBubbles live send, no
+  credential writes, no merge/tag/deploy/gateway restart unless the owner asks.
 
 ## Earlier shipped snapshot
 

@@ -15,7 +15,7 @@ The following artifacts landed on **2026-03-20** (extended with masterclass hard
 - `scripts/andrea_security_sanity.sh` — repo secret-pattern + tracked-file checks (`STRICT=1` fails on backup warnings)
 - `scripts/andrea_slo_check.sh` — grade + optional `openclaw models status --probe` (**timeout in ms**)
 - `scripts/andrea_doctor.sh --offline` — operator health pass (security → readiness recap → reliability probes; reprints Andrea/Bob/owner next steps even on Grade C)
-- `scripts/andrea_doctor_receipt.py` — allowlisted, mode-`600` JSON receipt builder for the offline doctor; fingerprints stage and actor/action/hold truth without raw probe output
+- `scripts/andrea_doctor_receipt.py` — allowlisted, mode-`600` JSON receipt builder plus `--verify` / `--consume` / `--summary` for Bob, Codex, Grok, Claude, and dashboards; fingerprints stage and actor/action/hold truth without raw probe output; failed stages override leftover Grade A next steps
 - `scripts/andrea_reliability_probes.sh` — deterministic `diagnose` probe + capability JSON shape
 - `docs/ANDREA_SECURITY.md`, `ANDREA_MODEL_POLICY.md`, `ANDREA_CAPABILITY_MATRIX.md`, `ANDREA_AUTONOMY_POLICY.md`, `ANDREA_DEVOPS_RUNBOOK.md`, `ANDREA_COMMS_PRODUCTIVITY.md`, `ANDREA_OPERATIONS_PLAYBOOK.md`
 - `README.md` — Andrea section + integration hook (`test_integration.sh` includes security sanity + readiness grade smoke)
@@ -83,10 +83,19 @@ concrete next action instead of leaving the field empty. Offline doctor still
 completes and reprints that recap when the grade is C.
 
 The optional doctor receipt adds deterministic stage outcomes and the same
-actor contract under `handoff`. Validate `receipt_fingerprint`, then branch on
-`overall_status`: `blocked` is a hard stop. The artifact never includes raw
-probe output, capability notes, environment values, or `repo_root`, and the
-doctor refuses `--receipt` without `--offline`.
+actor contract under `handoff`, plus `blocked_reason` and `failed_stages`.
+Do not trust the file by inspection. Validate and branch through:
+
+```bash
+python3 scripts/andrea_doctor_receipt.py --verify /tmp/andrea-doctor-receipt.json
+python3 scripts/andrea_doctor_receipt.py --consume /tmp/andrea-doctor-receipt.json --audience dashboard
+```
+
+`blocked` is a hard stop. A failed security/reliability stage also replaces
+Grade A “continue offline” copy with owner-first actions so leftover receipts
+cannot authorize work. The artifact never includes raw probe output, capability
+notes, environment values, or `repo_root`, and the doctor refuses `--receipt`
+without `--offline`.
 
 | Grade | Meaning |
 |-------|---------|

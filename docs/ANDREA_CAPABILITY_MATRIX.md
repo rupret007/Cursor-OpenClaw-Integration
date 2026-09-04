@@ -57,7 +57,7 @@ ANDREA_REPO_ROOT=/path/to/Cursor-OpenClaw-Integration python3 scripts/andrea_cap
 
 - Reliability probes: `bash scripts/andrea_reliability_probes.sh` (deterministic env for CLI checks + capability snapshot).
 - Readiness next-step contract: `python3 scripts/andrea_readiness_grade.py` leads with a marked operator recap (`Who acts first` plus Next for Andrea / Bob / owner) without copying probe notes.
-- Operator doctor: `bash scripts/andrea_doctor.sh --offline` prints that recap, runs deterministic probes, and reprints the recap even on Grade C.
+- Operator doctor: `bash scripts/andrea_doctor.sh --offline` prints that recap, runs deterministic probes, and reprints the recap even on Grade C. Add `--receipt /tmp/andrea-doctor-receipt.json` and consume with `python3 scripts/andrea_doctor_receipt.py --consume /tmp/andrea-doctor-receipt.json --audience bob`.
 - Full integration: `bash scripts/test_integration.sh`.
 
 ## Operations context

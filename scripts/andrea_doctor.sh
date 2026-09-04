@@ -29,6 +29,8 @@ usage() {
   echo "             means Grade C (owner must act). This is the operator-testable path."
   echo "  --receipt  With --offline, atomically write a mode-600, redaction-safe JSON"
   echo "             handoff receipt for Codex, Grok, Claude, dashboards, and scripts."
+  echo "             After write, print a verify summary. Consumers then run"
+  echo "             python3 scripts/andrea_doctor_receipt.py --consume PATH --audience bob"
 }
 
 reprint_operator_recap() {
@@ -214,6 +216,10 @@ FINAL_RC="${GRADE_RC}"
 if [[ -n "${RECEIPT_PATH}" ]]; then
   if emit_receipt "${FINAL_RC}"; then
     echo "Machine handoff receipt: ${RECEIPT_PATH}"
+    if ! python3 "${BASE_DIR}/scripts/andrea_doctor_receipt.py" --summary "${RECEIPT_PATH}"; then
+      echo "FAIL: doctor receipt failed verify/summary; treat as blocked." >&2
+      FINAL_RC=1
+    fi
   else
     echo "FAIL: could not write requested doctor receipt: ${RECEIPT_PATH}" >&2
     FINAL_RC=1

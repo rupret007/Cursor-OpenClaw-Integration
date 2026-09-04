@@ -97,6 +97,13 @@ cannot authorize work. The artifact never includes raw probe output, capability
 notes, environment values, or `repo_root`, and the doctor refuses `--receipt`
 without `--offline`.
 
+The existing local dashboard can consume this contract without a second
+validator or store. Generate `data/andrea-doctor-receipt.json` with the offline
+doctor, then read the top-level **Operator readiness** panel. The API summary
+returns only allowlisted decision fields and no source path/fingerprint/raw
+JSON. Missing or invalid receipts fail closed; verified receipts older than 24
+hours are marked stale and cannot authorize current operation until rerun.
+
 | Grade | Meaning |
 |-------|---------|
 | **A** | No blocked capabilities; limited degradation |

@@ -1,24 +1,25 @@
 # Cursor session handoff snapshot
 
-Last updated: 2026-09-04 leftover receipt consume / fail-closed next-steps pass.
+Last updated: 2026-09-04 operator-readiness dashboard product pass.
 
 ## Current draft handoff
 
-- **Base:** exact `main` `7eb7b2618ccc0557181fa134bad3d1e5cbac9806` (merged leftover-squash #18).
-- **Product change:** offline doctor receipts now carry named `blocked_reason`
-  / `failed_stages`, override leftover Grade A next-step text when a
-  security/reliability stage is not passed, and expose a code-owned
-  `--verify` / `--consume --audience` path for Bob, Codex, Grok, Claude, and
-  dashboards. Invalid or tampered artifacts fail closed to an owner-blocked
-  packet. Human doctor recap remains intact.
+- **Base:** exact `main` `8c6e4710d605751a68e2ffea36db1c0a78b7b25f`
+  (merged leftover-squash #19).
+- **Branch:** `codex/openclaw-dashboard-readiness-20260904`.
+- **Product change:** the existing local dashboard now consumes the existing
+  verified offline-doctor receipt and leads with **Operator readiness**: current
+  trust/status, who acts first, and one next action. Missing, unreadable,
+  tampered, and older-than-24-hour receipts fail closed. The API exposes no
+  receipt path, raw JSON, probe output, or fingerprint.
 - **Fence:** `OUTBOUND_CONFIRM_RE` is unchanged
   (`send it` / `send it now` / `send now`). `services/andrea_sync/server.py`
   blob `8c5efa82` is identical to base. Private API stays off.
 - **Operator path:** `bash scripts/andrea_doctor.sh --offline --receipt
-  /tmp/andrea-doctor-receipt.json`, read `--- Operator next steps ---` and the
-  receipt verify summary, then
-  `python3 scripts/andrea_doctor_receipt.py --consume /tmp/andrea-doctor-receipt.json --audience bob`.
-  The receipt option still refuses to run without `--offline`.
+  data/andrea-doctor-receipt.json`, then open
+  `http://127.0.0.1:8765/dashboard`. The receipt option still refuses to run
+  without `--offline`; the dashboard uses the same code-owned validator as the
+  CLI and does not make a live probe.
 - **Holds:** no live send, Private API off, no BlueBubbles live send, no
   credential writes, no merge/tag/deploy/gateway restart unless the owner asks.
 

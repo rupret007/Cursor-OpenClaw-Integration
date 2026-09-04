@@ -4,22 +4,25 @@ from __future__ import annotations
 import os
 import time
 import urllib.parse
+from pathlib import Path
 from typing import Any, Dict, List
 
+from scripts.andrea_doctor_receipt import consume_receipt
+
 from .adapters import telegram as tg_adapt
-from .collaboration_effectiveness import trusted_operator_summary
-from .kill_switch import kill_switch_status
-from .policy import digest_age_seconds, get_capability_digest
-from .projector import project_task_dict
-from .delegated_lifecycle import build_delegated_lifecycle_contract
-from .optimizer import build_background_regression_report, evaluate_autonomy_gate
-from .repair_policy import configured_safe_repair_roots, repair_enabled
-from .policy_governance import governance_snapshot
-from .resource_vocabulary import infer_resource_lane, verification_story_from_outcome
 from .assistant_domain_rollout import (
     build_daily_pack_operator_snapshot,
     daily_pack_optimizer_hints,
 )
+from .collaboration_effectiveness import trusted_operator_summary
+from .delegated_lifecycle import build_delegated_lifecycle_contract
+from .kill_switch import kill_switch_status
+from .optimizer import build_background_regression_report, evaluate_autonomy_gate
+from .policy import digest_age_seconds, get_capability_digest
+from .policy_governance import governance_snapshot
+from .projector import project_task_dict
+from .repair_policy import configured_safe_repair_roots, repair_enabled
+from .resource_vocabulary import infer_resource_lane, verification_story_from_outcome
 from .scenario_registry import FIRST_SUPPORTED_SCENARIO_IDS, get_contract
 from .schema import EventType
 from .store import (
@@ -27,9 +30,9 @@ from .store import (
     count_active_execution_attempts,
     count_active_memories,
     count_due_reminders,
-    get_latest_experience_run,
     count_pending_reminders,
     count_principals,
+    get_latest_experience_run,
     list_experience_runs,
     list_incidents,
     list_recent_execution_plans,
@@ -37,6 +40,110 @@ from .store import (
     load_events_for_task,
     task_exists,
 )
+
+OPERATOR_RECEIPT_RELATIVE_PATH = Path("data") / "andrea-doctor-receipt.json"
+OPERATOR_RECEIPT_MAX_AGE_SECONDS = 24 * 60 * 60
+OPERATOR_RECEIPT_REFRESH_COMMAND = (
+    "bash scripts/andrea_doctor.sh --offline --receipt "
+    "data/andrea-doctor-receipt.json"
+)
+
+
+def _operator_receipt_path(server: Any) -> Path:
+    repo_root = Path(
+        getattr(server, "repo_root", Path(__file__).resolve().parents[2])
+    ).expanduser()
+    return repo_root / OPERATOR_RECEIPT_RELATIVE_PATH
+
+
+def _refresh_readiness_snapshot(
+    *,
+    receipt_state: str,
+    reason: str,
+    receipt_verified: bool = False,
+    age_seconds: float | None = None,
+) -> Dict[str, Any]:
+    security_review = receipt_state == "invalid"
+    return {
+        "receipt_state": receipt_state,
+        "trusted_receipt": False,
+        "receipt_verified": receipt_verified,
+        "fresh": False,
+        "age_seconds": age_seconds,
+        "max_age_seconds": OPERATOR_RECEIPT_MAX_AGE_SECONDS,
+        "overall_status": "blocked",
+        "blocked_reason": f"{receipt_state}_receipt",
+        "grade": "C",
+        "who_acts_first": "owner" if security_review else "coding_agent",
+        "safe_for_autonomous_ops": False,
+        "may_continue_offline_code": not security_review,
+        "must_wait_for_owner": security_review,
+        "next_action": (
+            "Replace the invalid receipt with a fresh offline doctor result: "
+            if security_review
+            else "Run the offline doctor and refresh this dashboard: "
+        )
+        + OPERATOR_RECEIPT_REFRESH_COMMAND,
+        "failed_stages": [],
+        "reason": reason,
+    }
+
+
+def build_operator_readiness_snapshot(
+    server: Any,
+    *,
+    receipt_path: Path | None = None,
+    now: float | None = None,
+) -> Dict[str, Any]:
+    """Return current, allowlisted doctor truth for the local dashboard.
+
+    Receipt contents are always consumed through the code-owned validator. The
+    source path and raw JSON never enter the dashboard response.
+    """
+    path = receipt_path or _operator_receipt_path(server)
+    path_existed = path.is_file()
+    rc, packet = consume_receipt(path, "dashboard")
+    if rc != 0:
+        reason = str(packet.get("reason") or "invalid_receipt")
+        state = "missing" if not path_existed and reason == "missing_file" else "invalid"
+        return _refresh_readiness_snapshot(receipt_state=state, reason=reason)
+
+    try:
+        modified_at = path.stat().st_mtime
+    except OSError:
+        return _refresh_readiness_snapshot(
+            receipt_state="invalid", reason="receipt_stat_failed"
+        )
+    age_seconds = max(0.0, float(now if now is not None else time.time()) - modified_at)
+    if age_seconds > OPERATOR_RECEIPT_MAX_AGE_SECONDS:
+        return _refresh_readiness_snapshot(
+            receipt_state="stale",
+            reason="receipt_too_old",
+            receipt_verified=True,
+            age_seconds=age_seconds,
+        )
+
+    failed_stages = packet.get("failed_stages")
+    if not isinstance(failed_stages, list):
+        failed_stages = []
+    return {
+        "receipt_state": "current",
+        "trusted_receipt": packet.get("trusted_receipt") is True,
+        "receipt_verified": True,
+        "fresh": True,
+        "age_seconds": age_seconds,
+        "max_age_seconds": OPERATOR_RECEIPT_MAX_AGE_SECONDS,
+        "overall_status": str(packet.get("overall_status") or "blocked"),
+        "blocked_reason": str(packet.get("blocked_reason") or ""),
+        "grade": str(packet.get("grade") or "C"),
+        "who_acts_first": str(packet.get("who_acts_first") or "owner"),
+        "safe_for_autonomous_ops": packet.get("safe_for_autonomous_ops") is True,
+        "may_continue_offline_code": packet.get("may_continue_offline_code") is True,
+        "must_wait_for_owner": packet.get("must_wait_for_owner") is True,
+        "next_action": str(packet.get("next_action") or OPERATOR_RECEIPT_REFRESH_COMMAND),
+        "failed_stages": [str(stage) for stage in failed_stages[:4]],
+        "reason": str(packet.get("reason") or "ok"),
+    }
 
 
 def _redact_webhook_url(url: str) -> str:
@@ -834,6 +941,7 @@ def build_dashboard_summary(
             "repair_safe_roots": list(configured_safe_repair_roots()),
         },
         "runtime": runtime_snapshot,
+        "operator_readiness": build_operator_readiness_snapshot(server),
         "webhook": runtime_snapshot.get("webhook") if isinstance(runtime_snapshot.get("webhook"), dict) else {},
         "capabilities": {
             "summary": digest.get("summary") if isinstance(digest.get("summary"), dict) else {},
@@ -900,10 +1008,16 @@ def render_dashboard_html() -> str:
     .timeline { margin-top: 12px; display: grid; gap: 10px; max-height: 60vh; overflow: auto; }
     .event { border-left: 3px solid #42567f; padding: 8px 10px; background: #0d1427; border-radius: 8px; }
     .event pre { margin: 8px 0 0; white-space: pre-wrap; word-break: break-word; color: #cfe0ff; }
+    .readinessHero { min-height: 0; margin-bottom: 16px; background: linear-gradient(135deg, #131d35, #11182c 60%, #17213b); }
+    .readinessGrid { display: grid; grid-template-columns: minmax(220px, 0.65fr) minmax(0, 1.35fr); gap: 18px; align-items: stretch; margin-top: 14px; }
+    .readinessActor, .readinessAction { border: 1px solid #304267; border-radius: 12px; padding: 14px; background: #0d1427; }
+    .readinessActor strong { display: block; font-size: 22px; margin-top: 8px; }
+    .readinessAction p { color: #e3ebff; font-size: 15px; line-height: 1.45; margin-top: 8px; overflow-wrap: anywhere; }
+    .readinessMeta { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin-top: 12px; }
     button { background: #315efb; color: white; border: 0; border-radius: 10px; padding: 10px 14px; cursor: pointer; font-weight: 600; }
     button:hover { background: #426cff; }
     a { color: #93b2ff; }
-    @media (max-width: 1100px) { .twoCol { grid-template-columns: 1fr; } }
+    @media (max-width: 1100px) { .twoCol, .readinessGrid { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
@@ -918,6 +1032,18 @@ def render_dashboard_html() -> str:
         <p class="subtle" id="lastUpdated">Waiting for first poll...</p>
       </div>
     </div>
+
+    <section class="panel readinessHero">
+      <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap;">
+        <div>
+          <div class="label">Offline machine handoff</div>
+          <h2 style="margin-top:6px;">Operator readiness</h2>
+          <p class="subtle" style="margin-top:6px;">Verified offline evidence only — never approval for a live send.</p>
+        </div>
+        <span class="pill warn" id="operatorReadinessPill">checking</span>
+      </div>
+      <div id="operatorReadiness"></div>
+    </section>
 
     <div class="grid cards" id="cards"></div>
 
@@ -1059,6 +1185,40 @@ def render_dashboard_html() -> str:
           <p class="subtle" style="margin-top:10px;">${escapeHtml(card.note)}</p>
         </div>
       `).join("");
+    }
+
+    function renderOperatorReadiness(data) {
+      const readiness = data.operator_readiness || {};
+      const status = readiness.overall_status || "blocked";
+      const actor = readiness.who_acts_first || "owner";
+      const action = readiness.next_action || "Run the offline doctor before continuing.";
+      const state = readiness.receipt_state || "missing";
+      const ageSeconds = Number(readiness.age_seconds);
+      const age = Number.isFinite(ageSeconds) ? `${Math.max(0, Math.round(ageSeconds / 60))}m old` : "no current receipt";
+      const trust = readiness.trusted_receipt ? "verified + current" : (readiness.receipt_verified ? "verified but stale" : "not trusted");
+      const failed = (readiness.failed_stages || []).length ? `Failed: ${(readiness.failed_stages || []).join(", ")}` : "No failed gate stage recorded";
+      const pill = document.getElementById("operatorReadinessPill");
+      pill.className = `pill ${pillClass(status)}`;
+      pill.textContent = status;
+      document.getElementById("operatorReadiness").innerHTML = `
+        <div class="readinessGrid">
+          <div class="readinessActor">
+            <div class="label">Who acts first</div>
+            <strong>${escapeHtml(actor)}</strong>
+            <div class="readinessMeta">
+              <span class="pill ${readiness.trusted_receipt ? "ready" : "bad"}">${escapeHtml(trust)}</span>
+              <span class="subtle">${escapeHtml(state)} · ${escapeHtml(age)}</span>
+            </div>
+          </div>
+          <div class="readinessAction">
+            <div class="label">One next action</div>
+            <p>${escapeHtml(action)}</p>
+            <div class="readinessMeta">
+              <span class="subtle">Grade ${escapeHtml(readiness.grade || "C")}</span>
+              <span class="subtle">${escapeHtml(failed)}</span>
+            </div>
+          </div>
+        </div>`;
     }
 
     function renderAttention(data) {
@@ -1560,6 +1720,7 @@ def render_dashboard_html() -> str:
 
     async function loadSummary() {
       latestSummary = await fetchJson("/v1/dashboard/summary?limit=30");
+      renderOperatorReadiness(latestSummary);
       renderCards(latestSummary);
       renderAttention(latestSummary);
       renderOptimization(latestSummary);

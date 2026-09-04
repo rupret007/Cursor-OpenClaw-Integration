@@ -318,6 +318,21 @@ python3 scripts/andrea_doctor_receipt.py --consume /tmp/andrea-doctor-receipt.js
 `claude`), `owner`, or `dashboard`. Invalid or tampered receipts fail closed to
 an owner-blocked packet.
 
+To put that same verified decision at the top of the existing local dashboard,
+use its private ignored path and then open `http://127.0.0.1:8765/dashboard`:
+
+```bash
+bash scripts/andrea_doctor.sh --offline \
+  --receipt data/andrea-doctor-receipt.json
+```
+
+The **Operator readiness** panel shows the responsible actor and one next
+action. It never returns the receipt path, raw JSON, probe output, or
+fingerprint. Missing, invalid, or tampered receipts are blocked; a valid
+receipt older than 24 hours is also blocked until the same offline command is
+rerun. A verified receipt can still correctly show `blocked` when its grade or
+security/reliability stages require it.
+
 Optional capability table only: `python3 scripts/andrea_capabilities.py`.
 
 **Live doctor** (optional OpenClaw model probe on an owner-approved host). OpenClaw **`--probe-timeout` is in milliseconds** (e.g. 30s → `30000`).

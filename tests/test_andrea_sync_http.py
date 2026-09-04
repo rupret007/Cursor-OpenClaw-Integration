@@ -195,6 +195,11 @@ class TestAndreaSyncHTTP(unittest.TestCase):
             self.assertEqual(resp.status, 200)
             body = resp.read().decode("utf-8")
         self.assertIn("Andrea Monitor", body)
+        self.assertIn("Operator readiness", body)
+        self.assertIn("Verified offline evidence only", body)
+        self.assertIn("Who acts first", body)
+        self.assertIn("One next action", body)
+        self.assertIn("renderOperatorReadiness", body)
         self.assertIn("/v1/dashboard/summary", body)
 
     def test_dashboard_summary_includes_projected_tasks(self) -> None:
@@ -221,6 +226,10 @@ class TestAndreaSyncHTTP(unittest.TestCase):
         self.assertTrue(data.get("ok"))
         self.assertIn("webhook", data)
         self.assertIn("capabilities", data)
+        self.assertIn("operator_readiness", data)
+        self.assertEqual(data["operator_readiness"]["receipt_state"], "missing")
+        self.assertEqual(data["operator_readiness"]["overall_status"], "blocked")
+        self.assertNotIn("receipt_path", data["operator_readiness"])
         self.assertIn("tasks", data)
         self.assertIn("optimization", data)
         self.assertIn("experience_assurance", data)

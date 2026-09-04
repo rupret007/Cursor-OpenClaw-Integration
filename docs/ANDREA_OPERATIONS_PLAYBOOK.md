@@ -69,6 +69,21 @@ unknown keys, and fail-closes to an owner-blocked packet when the artifact is
 missing, tampered, or internally inconsistent. `blocked` means stop at the
 audience `next_action` and route to `who_acts_first`.
 
+For the local dashboard's action-first view, write the same offline result to
+the ignored repository-local path:
+
+```bash
+bash scripts/andrea_doctor.sh --offline \
+  --receipt data/andrea-doctor-receipt.json
+```
+
+Open `http://127.0.0.1:8765/dashboard` and read **Operator readiness** before
+the lower telemetry. The panel exposes only the allowlisted dashboard packet:
+receipt state, grade/status, responsible actor, failed gate stages, and one
+next action. It blocks missing/invalid receipts and treats verified receipts
+older than 24 hours as stale. Stale status is dashboard freshness policy; it
+does not rewrite or weaken the receipt fingerprint.
+
 Live doctor (optional model probe on an owner-approved host):
 
 ```bash

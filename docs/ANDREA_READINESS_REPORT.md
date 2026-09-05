@@ -37,9 +37,7 @@ Paste outputs or attach logs:
 
 ```bash
 bash scripts/andrea_doctor.sh --offline
-# cross-agent/dashboard artifact from the same offline run:
-bash scripts/andrea_doctor.sh --offline \
-  --receipt /tmp/andrea-doctor-receipt.json
+# default artifact is data/andrea-doctor-receipt.json; override with --receipt PATH
 # live model probe (owner-approved host only):
 # bash scripts/andrea_doctor.sh
 # optional auto-remediation if model probe fails:
@@ -94,8 +92,8 @@ actor contract under `handoff`, plus `blocked_reason` and `failed_stages`.
 Do not trust the file by inspection. Validate and branch through:
 
 ```bash
-python3 scripts/andrea_doctor_receipt.py --verify /tmp/andrea-doctor-receipt.json
-python3 scripts/andrea_doctor_receipt.py --consume /tmp/andrea-doctor-receipt.json --audience dashboard
+python3 scripts/andrea_doctor_receipt.py --verify data/andrea-doctor-receipt.json
+python3 scripts/andrea_doctor_receipt.py --consume data/andrea-doctor-receipt.json --audience dashboard
 ```
 
 `blocked` is a hard stop. A failed security/reliability stage also replaces
@@ -114,8 +112,8 @@ JSON. Missing or invalid receipts fail closed; verified receipts older than 24
 hours are marked stale and cannot authorize current operation until rerun.
 Previously verified owner holds/failed stages remain historical until new
 verified evidence replaces them; expiration or page refresh does not clear a
-blocker. Use the panel's stable `data/` refresh command for this dashboard, not
-the generic CLI `/tmp/` destination. The panel never executes or copies it.
+blocker. Use the panel's stable `data/` refresh command, which is now the same
+command consume/verify/summary emit. The panel never executes or copies it.
 
 | Grade | Meaning |
 |-------|---------|

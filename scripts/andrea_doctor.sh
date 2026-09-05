@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Single entry: security + readiness next-step contract + reliability probes + optional OpenClaw probe.
 # Usage: bash scripts/andrea_doctor.sh --offline
-#        bash scripts/andrea_doctor.sh --offline --receipt /tmp/andrea-doctor-receipt.json
+#        bash scripts/andrea_doctor.sh --offline --receipt data/andrea-doctor-receipt.json
 #        bash scripts/andrea_doctor.sh
 #        STRICT_SECURITY=1 bash scripts/andrea_doctor.sh   # fail on security warnings too
 #        MODEL_GUARD_ON_FAIL=1 bash scripts/andrea_doctor.sh
@@ -30,8 +30,11 @@ usage() {
   echo "             live health checks, or inherited live/remediation options."
   echo "             Prints and reprints the operator recap even on Grade C; exit 1 still"
   echo "             means Grade C (owner must act). This is the operator-testable path."
+  echo "             Writes data/andrea-doctor-receipt.json unless --receipt PATH is set."
   echo "  --receipt  With --offline, atomically write a mode-600, redaction-safe JSON"
   echo "             handoff receipt for Codex, Grok, Claude, dashboards, and scripts."
+  echo "             Default destination is data/andrea-doctor-receipt.json, the same"
+  echo "             ignored path the dashboard and cursor_handoff already consume."
   echo "             After write, print a verify summary. Consumers then run"
   echo "             python3 scripts/andrea_doctor_receipt.py --consume PATH --audience bob"
   echo "             Consume/verify/summary fail closed if the file is older than 24h."
@@ -78,6 +81,10 @@ if [[ -n "${RECEIPT_PATH}" && "${EXPLICIT_OFFLINE}" != "1" ]]; then
   echo "--receipt is offline-only; add --offline so no live probe can run" >&2
   usage >&2
   exit 2
+fi
+
+if [[ "${EXPLICIT_OFFLINE}" == "1" && -z "${RECEIPT_PATH}" ]]; then
+  RECEIPT_PATH="data/andrea-doctor-receipt.json"
 fi
 
 if [[ "${EXPLICIT_OFFLINE}" == "1" ]]; then

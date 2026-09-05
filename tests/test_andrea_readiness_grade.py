@@ -291,6 +291,7 @@ class TestAndreaReadinessGrade(unittest.TestCase):
         self.assertIn("operator-testable", proc.stdout)
         self.assertIn("Grade C", proc.stdout)
         self.assertIn("--receipt", proc.stdout)
+        self.assertIn("data/andrea-doctor-receipt.json", proc.stdout)
         self.assertIn("Grok", proc.stdout)
         self.assertIn("--consume", proc.stdout)
         self.assertIn("audience", proc.stdout)

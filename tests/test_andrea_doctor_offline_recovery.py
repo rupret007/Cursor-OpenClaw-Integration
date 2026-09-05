@@ -235,6 +235,15 @@ class TestOfflineDoctorRecovery(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("Offline doctor complete.", result.stdout)
         self.assert_no_live_calls()
+        canonical = self.root / "data" / "andrea-doctor-receipt.json"
+        self.assertTrue(canonical.is_file(), result.stdout + result.stderr)
+        self.assertEqual(canonical.stat().st_mode & 0o777, 0o600)
+        payload = json.loads(canonical.read_text(encoding="utf-8"))
+        self.assertEqual(payload["schema_version"], 2)
+        self.assertEqual(payload["overall_status"], "blocked")
+        self.assertIn("data/andrea-doctor-receipt.json", payload["commands"]["rerun"])
+        self.assertNotIn("/tmp/", payload["commands"]["rerun"])
+        self.assertIn("Machine handoff receipt: data/andrea-doctor-receipt.json", result.stdout)
 
     def test_default_doctor_still_attempts_owner_invoked_model_probe(self) -> None:
         (self.scripts / "andrea_readiness_grade.py").write_text(

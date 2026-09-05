@@ -49,12 +49,9 @@ and GitHub checks are `not_run`; the owner must approve a separate real check
 before relying on them. Local binary/key-presence and redacted diagnostics
 still run. The legacy model-probe-skip variable alone cannot create a receipt.
 
-For a stable cross-agent/dashboard handoff from that same run:
-
-```bash
-bash scripts/andrea_doctor.sh --offline \
-  --receipt /tmp/andrea-doctor-receipt.json
-```
+The same `--offline` run writes the canonical ignored receipt
+`data/andrea-doctor-receipt.json` that the dashboard and `cursor_handoff`
+already consume. Pass `--receipt PATH` only to override that destination.
 
 The receipt is private-by-default (mode `600`) and contains only allowlisted
 stage status plus the readiness actor/action/hold contract. It does not copy
@@ -65,8 +62,8 @@ next-step text to owner-first actions. Consumers must not scrape the file by
 hand:
 
 ```bash
-python3 scripts/andrea_doctor_receipt.py --verify /tmp/andrea-doctor-receipt.json
-python3 scripts/andrea_doctor_receipt.py --consume /tmp/andrea-doctor-receipt.json --audience bob
+python3 scripts/andrea_doctor_receipt.py --verify data/andrea-doctor-receipt.json
+python3 scripts/andrea_doctor_receipt.py --consume data/andrea-doctor-receipt.json --audience bob
 ```
 
 `--audience` accepts `andrea`, `coding_agent` (`bob` / `codex` / `grok` /
@@ -77,12 +74,11 @@ but correctly signed receipt keeps the last verified owner hold as history and
 is not current authority. `blocked` means stop at the audience `next_action`
 and route to `who_acts_first`.
 
-For the local dashboard's action-first view, write the same offline result to
-the ignored repository-local path:
+For the local dashboard's action-first view, run the same offline doctor
+(it already writes the ignored repository-local path) and open the dashboard:
 
 ```bash
-bash scripts/andrea_doctor.sh --offline \
-  --receipt data/andrea-doctor-receipt.json
+bash scripts/andrea_doctor.sh --offline
 ```
 
 Open `http://127.0.0.1:8765/dashboard` and read **Operator readiness** before
@@ -192,7 +188,7 @@ bash scripts/andrea_slo_check.sh
 | Local monitor dashboard | Open `http://127.0.0.1:8765/dashboard` for live health, webhook, recent tasks, experience assurance, and task timelines. The **Bg autonomy** card and `GET /v1/dashboard/summary` → **`background_autonomy`** show whether the idle background optimizer has **fresh experience-assurance evidence**, regression age vs `ANDREA_SYNC_BACKGROUND_REGRESSION_MAX_AGE_SECONDS`, and current **gate** reasons (no synthetic regression). Task list items include **`delegated_lifecycle`** (unified OpenClaw/Cursor view for follow-up/status/artifacts) plus **`resource_lane`** and **`verification_story`** for quick scripting. The optimization card’s **latest incident** line includes repair **conductor** hints (`conductor_preferred_executor`, `conductor_reasons`, `conductor_outcome_*` for submission/verification/next action, Cursor handoff branch/URL when present). Conductor **`handoff`** may also include **`cursor_strategy`** (`plan_first`, `single_pass`, or **`single_pass_fallback`** when plan-first was enabled but the planner path could not produce a usable plan), **`plan_first_fallback_reason`**, **`planner_model`**, **`executor_model`**, planner/execution agent ids, and a clipped **`plan_summary`** when plan-first ran. For **API** Cursor repair, the orchestrator **polls agent status to a terminal state** (bounded by `ANDREA_REPAIR_CURSOR_POLL_*`) before deciding post-handoff verification—same outcome vocabulary as **Recent auto-heal** (`submission_status`, `terminal_cursor_status`, `verification_status`, `next_action`). **`cursor_handoff_ready`** means submitted or still monitoring without a verified fix; treat **`resolved`** as “post-handoff verification passed” when `ANDREA_REPAIR_POST_CURSOR_VERIFY` is enabled—not “Cursor succeeded.” Telegram task projections surface the same under **`meta.cursor`** on job events. Tune self-heal verify with `ANDREA_SELF_HEAL_POST_CURSOR_VERIFY` (unset → follows repair). The same fields appear under `GET /v1/dashboard/summary` → `optimization.latest_incident` and related auto-heal sections for scripting. |
 | Admin service control | `bash scripts/andrea_services.sh status all` for the current runtime, `bash scripts/andrea_services.sh status sync` for the daemon's process-authoritative runtime/webhook truth, `bash scripts/andrea_services.sh restart all` to bounce sync+tunnel+gateway, and `bash scripts/andrea_services.sh bootstrap` to rerun the login heal chain on demand |
 | Full operator cycle (local) | From repo: `export ANDREA_SYNC_INTERNAL_TOKEN=…` then `bash scripts/andrea_full_cycle.sh` (pull, health, status, runtime snapshot, publish digest, policy, gateway restart, smoke, kill-switch drill). Skips: `SKIP_GIT=1`, `SKIP_GATEWAY_RESTART=1`, `SKIP_COMM_SMOKE=1`, `SKIP_KILL_DRILL=1`, `SKIP_TELEGRAM_E2E=1`. |
-| Masterclass doctor (operator) | `bash scripts/andrea_doctor.sh --offline`; add `--receipt /tmp/andrea-doctor-receipt.json` then `python3 scripts/andrea_doctor_receipt.py --consume /tmp/andrea-doctor-receipt.json --audience bob` |
+| Masterclass doctor (operator) | `bash scripts/andrea_doctor.sh --offline` writes `data/andrea-doctor-receipt.json`; consume with `python3 scripts/andrea_doctor_receipt.py --consume data/andrea-doctor-receipt.json --audience bob` |
 | Closed-loop autonomy pass | `export ANDREA_SYNC_URL=… ANDREA_SYNC_INTERNAL_TOKEN=… && bash scripts/andrea_autonomy_cycle.sh` |
 | Experience assurance replay | `python3 scripts/andrea_experience_cycle.py --repo "$PWD"` for deterministic Andrea UX/routing replay across both direct and delegated OpenClaw/Cursor lanes; add `--repair-on-fail` to feed failing scenarios into the existing repair loop |
 | Security sanity (repo) | `bash scripts/andrea_security_sanity.sh` |

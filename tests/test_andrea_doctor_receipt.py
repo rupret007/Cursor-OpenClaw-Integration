@@ -128,6 +128,10 @@ class TestAndreaDoctorReceipt(unittest.TestCase):
         self.assertNotIn("private/path-that-must-not-be-copied", serialized)
         self.assertNotIn("probe_notes", serialized)
         self.assertIn("--offline --receipt", first["commands"]["rerun"])
+        self.assertIn("data/andrea-doctor-receipt.json", first["commands"]["rerun"])
+        self.assertNotIn("/tmp/", first["commands"]["rerun"])
+        self.assertNotIn("/tmp/", first["commands"]["verify"])
+        self.assertNotIn("/tmp/", first["commands"]["consume"])
         self.assertIn("--verify", first["commands"]["verify"])
         self.assertIn("--consume", first["commands"]["consume"])
         self.assertIn("coding_agent", first["commands"]["consume"])
@@ -147,6 +151,8 @@ class TestAndreaDoctorReceipt(unittest.TestCase):
         self.assertEqual(receipt["handoff"]["who_acts_first"], "owner")
         self.assertEqual(receipt["stages"]["security"]["status"], "failed")
         self.assertIn("Doctor stage failed (security, reliability)", receipt["handoff"]["next_action"])
+        self.assertIn("data/andrea-doctor-receipt.json", receipt["handoff"]["next_action"])
+        self.assertNotIn("/tmp/", receipt["handoff"]["next_action"])
         self.assertNotIn("Continue the assigned offline test.", receipt["handoff"]["next_action"])
         self.assertIn("Do not treat this host as ready", receipt["handoff"]["coding_agent_next_action"])
         self.assertIn("Keep outbound drafts", receipt["handoff"]["andrea_next_action"])
@@ -572,6 +578,8 @@ class TestAndreaDoctorReceipt(unittest.TestCase):
             self.assertEqual(stale["last_verified"]["grade"], "A")
             self.assertEqual(stale["last_verified"]["overall_status"], "ready")
             self.assertIn("older than 24 hours", stale["next_action"])
+            self.assertIn("data/andrea-doctor-receipt.json", stale["next_action"])
+            self.assertNotIn("/tmp/", stale["next_action"])
             self.assertEqual(path.read_bytes(), original_bytes)
             self.assertNotIn("receipt_path", stale)
             self.assertNotIn(str(path), json.dumps(stale))
@@ -754,6 +762,25 @@ class TestAndreaDoctorReceipt(unittest.TestCase):
             )
             self.assertEqual(forced_source, "explicit")
             self.assertEqual(forced, explicit_tmp)
+
+    def test_recovery_commands_share_canonical_data_destination(self) -> None:
+        from services.andrea_sync.dashboard import OPERATOR_RECEIPT_REFRESH_COMMAND
+
+        self.assertEqual(self._mod.CANONICAL_RECEIPT_ARG, "data/andrea-doctor-receipt.json")
+        self.assertEqual(self._mod.RERUN_COMMAND, OPERATOR_RECEIPT_REFRESH_COMMAND)
+        self.assertEqual(
+            self._mod.RERUN_COMMAND,
+            "bash scripts/andrea_doctor.sh --offline --receipt data/andrea-doctor-receipt.json",
+        )
+        self.assertIn("data/andrea-doctor-receipt.json", self._mod.VERIFY_COMMAND)
+        self.assertIn("data/andrea-doctor-receipt.json", self._mod.CONSUME_COMMAND)
+        self.assertNotIn("/tmp/", self._mod.RERUN_COMMAND)
+        self.assertNotIn("/tmp/", self._mod.VERIFY_COMMAND)
+        self.assertNotIn("/tmp/", self._mod.CONSUME_COMMAND)
+        self.assertIn("/tmp/", self._mod.LEGACY_TMP_RERUN_COMMAND)
+        failed = self._mod.stage_failed_next_action(["security"])
+        self.assertIn(self._mod.RERUN_COMMAND, failed)
+        self.assertNotIn("/tmp/", failed)
 
     def test_receipt_help_names_consume_path(self) -> None:
         proc = subprocess.run(

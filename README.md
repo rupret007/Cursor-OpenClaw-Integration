@@ -297,13 +297,11 @@ This is still a local diagnostic, not a fixture-only command; it checks local
 binary and environment-key presence without printing secret values. It does
 not install skills, restart services, or change settings.
 
-For a handoff that Bob, Codex, Grok, Claude, or a dashboard can consume
-without scraping terminal prose, add a receipt path:
-
-```bash
-bash scripts/andrea_doctor.sh --offline \
-  --receipt /tmp/andrea-doctor-receipt.json
-```
+`--offline` writes the same ignored receipt the dashboard and
+`cursor_handoff` already consume (`data/andrea-doctor-receipt.json`).
+Pass `--receipt PATH` only to override that destination. Bob, Codex,
+Grok, Claude, and dashboards can consume the artifact without scraping
+terminal prose.
 
 The mode-`600` JSON receipt records the security, readiness, reliability, and
 offline-probe stage outcomes; the code-owned actor/action/hold contract; named
@@ -319,8 +317,8 @@ Bob, Codex, Grok, Claude, and dashboards should consume the artifact through
 the code-owned verifier instead of scraping JSON by hand:
 
 ```bash
-python3 scripts/andrea_doctor_receipt.py --verify /tmp/andrea-doctor-receipt.json
-python3 scripts/andrea_doctor_receipt.py --consume /tmp/andrea-doctor-receipt.json --audience bob
+python3 scripts/andrea_doctor_receipt.py --verify data/andrea-doctor-receipt.json
+python3 scripts/andrea_doctor_receipt.py --consume data/andrea-doctor-receipt.json --audience bob
 ```
 
 `--audience` accepts `andrea`, `coding_agent` (`bob` / `codex` / `grok` /
@@ -333,11 +331,11 @@ check uses local mtime only; it is not cryptographic provenance. The dashboard
 uses this same consume contract.
 
 To put that same verified decision at the top of the existing local dashboard,
-use its private ignored path and then open `http://127.0.0.1:8765/dashboard`:
+open `http://127.0.0.1:8765/dashboard` after the offline doctor. The ignored
+canonical file is already the default write destination:
 
 ```bash
-bash scripts/andrea_doctor.sh --offline \
-  --receipt data/andrea-doctor-receipt.json
+bash scripts/andrea_doctor.sh --offline
 ```
 
 The **Operator readiness** panel shows the responsible actor and one next
@@ -361,12 +359,12 @@ that does not allow offline code also blocks local CLI submit. Diagnose and
 dry-run report the consult and do not launch work.
 
 The panel shows one selectable, code-owned refresh command targeting the same
-`data/andrea-doctor-receipt.json` file it reads, including when a failed-stage
-receipt's generic CLI guidance used `/tmp/`. The command field retains focus
-and text selection while the monitor polls. It has no execute or clipboard
-handler. Follow the named actor/hold, run the command in this checkout's
-terminal if permitted, then choose **Refresh now**. Refreshing the page alone
-does not run a check or clear a blocker. See
+`data/andrea-doctor-receipt.json` file it reads. Leftover `/tmp/` guidance in
+older receipt copy is remapped on this surface only. The command field retains
+focus and text selection while the monitor polls. It has no execute or
+clipboard handler. Follow the named actor/hold, run the command in this
+checkout's terminal if permitted, then choose **Refresh now**. Refreshing the
+page alone does not run a check or clear a blocker. See
 [the operator recovery handoff](docs/OPERATOR_RECOVERY.md).
 
 The monitor now distinguishes **Current** overview data from **Unavailable**
@@ -618,7 +616,7 @@ See [.env.example](.env.example) and [skills/cursor_handoff/.env.example](skills
 - `--auth-mode auto` tolerates bearer vs basic inconsistencies.
 - `--retries` + exponential backoff reduce transient failures (including transport-layer errors).
 - `diagnose` redacts secrets.
-- Readiness output leads with a marked operator recap (`Who acts first` plus Next for Andrea / Bob / owner) and fail-closed holds. `bash scripts/andrea_doctor.sh --offline` is the operator command: it prints that recap, runs deterministic probes, reprints the recap, and skips the live model probe. Grade C still completes the offline pass; exit `1` means the owner must act. Add `--receipt /tmp/andrea-doctor-receipt.json` for one redaction-safe, fingerprinted cross-agent artifact; a failed stage is always `blocked` and overrides next-step text. Consume with `python3 scripts/andrea_doctor_receipt.py --consume PATH --audience bob`.
+- Readiness output leads with a marked operator recap (`Who acts first` plus Next for Andrea / Bob / owner) and fail-closed holds. `bash scripts/andrea_doctor.sh --offline` is the operator command: it prints that recap, runs deterministic probes, reprints the recap, skips the live model probe, and writes `data/andrea-doctor-receipt.json` for Bob/Codex/Grok/Claude/dashboard/handoff. Grade C still completes the offline pass; exit `1` means the owner must act. A failed stage is always `blocked` and overrides next-step text. Consume with `python3 scripts/andrea_doctor_receipt.py --consume data/andrea-doctor-receipt.json --audience bob`.
 - `create-agent --dry-run` validates payload without network calls.
 - `cursor_handoff` supports `--dry-run` and read-only defaults for safer delegation.
 

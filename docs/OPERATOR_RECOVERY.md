@@ -1,9 +1,9 @@
 # Operator readiness recovery
 
-This product slice starts from main `173789a7ae05d38408b4a90e0c2cdf762bc645b3`
-after #22. It makes the existing doctor-receipt consume path and OpenClaw
-handoff share the dashboard's current-authority rules; it does not deploy or
-start a runtime.
+This product slice starts from main `d9246d61ee8253b82dbba3ed4605baf1d89f9cb4`
+after #23. It makes the offline doctor write the same canonical
+`data/andrea-doctor-receipt.json` that the dashboard and `cursor_handoff`
+already consume; it does not deploy or start a runtime.
 
 ## The useful path
 
@@ -51,10 +51,12 @@ passing local code tests never supplies that approval.
 ## Logic and compatibility
 
 - Reuses `consume_receipt` and its code-owned actor/hold contract. No new store,
-  validator, schema bump, or receipt/fingerprint rewrite. Consume, verify, and
-  summary now apply the same 24-hour mtime freshness the dashboard already used,
-  so Bob/Codex/Grok/Claude cannot treat yesterday's green receipt as current
-  authority. `cursor_handoff` consults that packet before a live submit.
+  validator, schema bump, or receipt/fingerprint rewrite. `--offline` now writes
+  the canonical ignored `data/` receipt by default so consume/verify/summary,
+  the dashboard, and `cursor_handoff` discovery share one destination. Following
+  a stale or failed-stage next action refreshes the file those surfaces read.
+  `cursor_handoff` still never auto-reads `/tmp`. Explicit `--receipt PATH`
+  remains an override.
 - Failed-stage expiration preserves the owner hold and disallows continued
   offline code under the existing failed-stage policy. Grade C remains distinct:
   unrelated offline code can still be allowed while its owner readiness gate
@@ -62,10 +64,10 @@ passing local code tests never supplies that approval.
 - The monitor projects a bounded `last_verified` record only from verified
   stale evidence. Missing, invalid, unreadable, or replaced-invalid artifacts
   have no invented history. A new verified result supersedes old history.
-- `refresh_command` is fixed source-owned text; arbitrary receipt commands,
-  raw probe output, local absolute paths, and fingerprints are not exposed.
-  Only the monitor's displayed generic `/tmp/` rerun text is adapted to its
-  canonical `data/` destination. Other receipt consumers keep their contract.
+- `refresh_command` is the same source-owned `RERUN_COMMAND` string used by
+  consume/verify/summary. Arbitrary receipt commands, raw probe output, local
+  absolute paths, and fingerprints are not exposed. Leftover `/tmp/` rerun
+  text from older receipts is remapped on the dashboard only.
 - Current Grade B remains **ready with limits**, not blocked. A stale previous
   Grade A/B result is labeled historical and cannot become current readiness.
 - Receipt freshness still uses the existing local file modification time.

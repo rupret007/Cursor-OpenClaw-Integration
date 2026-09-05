@@ -9,8 +9,9 @@ This file records the **latest verified state** of the Andrea max-autonomy stack
 Workflow note (September 5, 2026; **not** a new host sign-off): explicit offline
 doctor checks now skip external probes and inherited live/remediation options.
 Unexecuted critical capabilities are `not_run` and keep Grade C/no-go without
-claiming missing software or failed authentication. Record the evidence mode
-alongside any grade. See [OPERATOR_RECOVERY.md](OPERATOR_RECOVERY.md).
+claiming missing software or failed authentication. Consume/verify/summary and
+the dashboard share a 24-hour current-authority window. Record the evidence
+mode alongside any grade. See [OPERATOR_RECOVERY.md](OPERATOR_RECOVERY.md).
 
 ## 0. Max-autonomy rollout (implementation)
 
@@ -99,9 +100,11 @@ python3 scripts/andrea_doctor_receipt.py --consume /tmp/andrea-doctor-receipt.js
 
 `blocked` is a hard stop. A failed security/reliability stage also replaces
 Grade A “continue offline” copy with owner-first actions so leftover receipts
-cannot authorize work. The artifact never includes raw probe output, capability
-notes, environment values, or `repo_root`, and the doctor refuses `--receipt`
-without `--offline`.
+cannot authorize work. A correctly signed receipt older than 24 hours is
+`stale` on `--verify` / `--consume` / `--summary` as well as the dashboard:
+signature can still be noted, but it is not current authority. The artifact
+never includes raw probe output, capability notes, environment values, or
+`repo_root`, and the doctor refuses `--receipt` without `--offline`.
 
 The existing local dashboard can consume this contract without a second
 validator or store. Generate `data/andrea-doctor-receipt.json` with the offline

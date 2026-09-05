@@ -72,8 +72,10 @@ python3 scripts/andrea_doctor_receipt.py --consume /tmp/andrea-doctor-receipt.js
 `--audience` accepts `andrea`, `coding_agent` (`bob` / `codex` / `grok` /
 `claude`), `owner`, or `dashboard`. Verify recomputes the fingerprint, rejects
 unknown keys, and fail-closes to an owner-blocked packet when the artifact is
-missing, tampered, or internally inconsistent. `blocked` means stop at the
-audience `next_action` and route to `who_acts_first`.
+missing, tampered, internally inconsistent, or older than 24 hours. A stale
+but correctly signed receipt keeps the last verified owner hold as history and
+is not current authority. `blocked` means stop at the audience `next_action`
+and route to `who_acts_first`.
 
 For the local dashboard's action-first view, write the same offline result to
 the ignored repository-local path:
@@ -87,8 +89,9 @@ Open `http://127.0.0.1:8765/dashboard` and read **Operator readiness** before
 the lower telemetry. The panel exposes only the allowlisted dashboard packet:
 receipt state, grade/status, responsible actor, failed gate stages, and one
 next action. It blocks missing/invalid receipts and treats verified receipts
-older than 24 hours as stale. Stale status is dashboard freshness policy; it
-does not rewrite or weaken the receipt fingerprint. Stale verified failures
+older than 24 hours as stale. Stale status is the shared consume freshness
+policy, not a dashboard-only overlay; it does not rewrite or weaken the
+receipt fingerprint. Stale verified failures
 retain their previous owner hold under a historical label, not a fake cleared
 state. The stable selectable command points to this same `data/` receipt;
 polling never runs it or copies it automatically. Refresh after the named actor

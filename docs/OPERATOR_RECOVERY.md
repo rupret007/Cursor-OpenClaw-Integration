@@ -1,8 +1,9 @@
 # Operator readiness recovery
 
-This product slice starts from main `10863501a421fb3d17e52e8b02f0423ccc2318ff`
-after #21. It improves the existing local monitor and doctor workflow; it does
-not deploy or start a runtime.
+This product slice starts from main `173789a7ae05d38408b4a90e0c2cdf762bc645b3`
+after #22. It makes the existing doctor-receipt consume path and OpenClaw
+handoff share the dashboard's current-authority rules; it does not deploy or
+start a runtime.
 
 ## The useful path
 
@@ -50,7 +51,10 @@ passing local code tests never supplies that approval.
 ## Logic and compatibility
 
 - Reuses `consume_receipt` and its code-owned actor/hold contract. No new store,
-  validator, schema bump, or receipt/fingerprint rewrite.
+  validator, schema bump, or receipt/fingerprint rewrite. Consume, verify, and
+  summary now apply the same 24-hour mtime freshness the dashboard already used,
+  so Bob/Codex/Grok/Claude cannot treat yesterday's green receipt as current
+  authority. `cursor_handoff` consults that packet before a live submit.
 - Failed-stage expiration preserves the owner hold and disallows continued
   offline code under the existing failed-stage policy. Grade C remains distinct:
   unrelated offline code can still be allowed while its owner readiness gate
@@ -74,7 +78,7 @@ Use the pinned Python test dependency and Node runtime from the README. In a
 credential-free, isolated checkout, run:
 
 ```sh
-python3 -m pytest -q tests/test_andrea_dashboard_readiness.py tests/test_andrea_doctor_offline_recovery.py tests/test_andrea_dashboard_runtime.py
+python3 -m pytest -q tests/test_andrea_dashboard_readiness.py tests/test_andrea_doctor_receipt.py tests/test_andrea_doctor_offline_recovery.py tests/test_andrea_dashboard_runtime.py skills/cursor_handoff/tests/test_cursor_handoff.py
 bash scripts/test_integration.sh
 ```
 

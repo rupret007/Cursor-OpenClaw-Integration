@@ -61,7 +61,8 @@ API contract aligns with Cursor's [legacy v0 Cloud Agents API](https://cursor.co
 | `--timeout-seconds`, `--api-retries`, `--api-retry-backoff-seconds` | API resilience |
 | `--cli-timeout-seconds` | CLI backend only; subprocess limit (`0` = none). Default `3600` |
 | `--version` / `-V` | Print version and exit |
-| `--diagnose` | No handoff; env + optional `/me` and `/agents?limit=1`; JSON `checks` includes `dotenv_files_loaded`, `openai_api_key_present`, `openai_api_enabled`, `openai_api_key_redacted` |
+| `--receipt` | Optional offline doctor receipt to consult before a live submit. If omitted, `ANDREA_DOCTOR_RECEIPT` or a local `data/andrea-doctor-receipt.json` is used when present. `/tmp` is never auto-read. Diagnose/dry-run report the consult; live API submit requires current `safe_for_autonomous_ops` when a receipt was consulted |
+| `--diagnose` | No handoff; env + optional `/me` and `/agents?limit=1`; JSON `checks` includes `dotenv_files_loaded`, `openai_api_key_present`, `openai_api_enabled`, `openai_api_key_redacted`, and `doctor_receipt` |
 | `--show-key` | With `--diagnose` only: redacted previews for Cursor/OpenAI keys in JSON |
 | `--dry-run` | Validate and show payload; works even if no backend configured (`backend: unavailable`) |
 

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import importlib.util
 import json
 import os
 import re
@@ -44,7 +45,7 @@ import env_loader  # noqa: E402
 import cursor_api_common  # noqa: E402
 import handoff_context  # noqa: E402
 
-VERSION = "1.3.1"
+VERSION = "1.4.0"
 
 EXIT_OK = 0
 EXIT_VALIDATION = 2
@@ -309,6 +310,130 @@ class CursorApiClient:
         return status, data, raw, "basic"
 
 
+def load_doctor_receipt_module(search_roots: list[Optional[Path]]) -> Any:
+    """Load the repo-owned receipt validator. Never invent a second checker."""
+    seen: set[Path] = set()
+    for root in search_roots:
+        if root is None:
+            continue
+        try:
+            resolved = Path(root).expanduser().resolve()
+        except OSError:
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        script = resolved / "scripts" / "andrea_doctor_receipt.py"
+        if not script.is_file():
+            continue
+        spec = importlib.util.spec_from_file_location(
+            "andrea_doctor_receipt_handoff", str(script)
+        )
+        if spec is None or spec.loader is None:
+            continue
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    return None
+
+
+def consult_doctor_receipt(
+    *,
+    explicit: str,
+    local_repo: Optional[Path],
+    search_roots: list[Optional[Path]],
+    now: Optional[float] = None,
+    environ: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    """Consult an existing offline doctor receipt. Missing evidence is not a gate."""
+    env = os.environ if environ is None else environ
+    module = load_doctor_receipt_module(search_roots)
+    if module is None:
+        raw = (explicit or env.get("ANDREA_DOCTOR_RECEIPT") or "").strip()
+        discovered = False
+        for root in [local_repo, Path.cwd()]:
+            if root is None:
+                continue
+            candidate = Path(root) / "data" / "andrea-doctor-receipt.json"
+            if candidate.is_file():
+                discovered = True
+                break
+        if raw or discovered:
+            return {
+                "consulted": True,
+                "receipt_source": "explicit" if raw else "discovered",
+                "receipt_state": "invalid",
+                "receipt_verified": False,
+                "fresh": False,
+                "overall_status": "blocked",
+                "blocked_reason": "invalid_receipt",
+                "failed_stages": [],
+                "grade": "C",
+                "who_acts_first": "owner",
+                "safe_for_autonomous_ops": False,
+                "may_continue_offline_code": False,
+                "must_wait_for_owner": True,
+                "next_action": (
+                    "Restore a valid readiness receipt before autonomous operation, "
+                    "then rerun bash scripts/andrea_doctor.sh --offline."
+                ),
+                "reason": "validator_unavailable",
+            }
+        return {
+            "consulted": False,
+            "receipt_source": "absent",
+            "receipt_state": "absent",
+            "receipt_verified": False,
+            "fresh": False,
+            "overall_status": "",
+            "blocked_reason": "",
+            "failed_stages": [],
+            "grade": "",
+            "who_acts_first": "",
+            "safe_for_autonomous_ops": False,
+            "may_continue_offline_code": True,
+            "must_wait_for_owner": False,
+            "next_action": "",
+            "reason": "receipt_not_consulted",
+        }
+    path, source = module.resolve_handoff_receipt_path(
+        explicit, local_repo=local_repo, environ=env
+    )
+    return module.consult_receipt_for_handoff(path, source=source, now=now)
+
+
+def live_handoff_block_reason(consult: Dict[str, Any], backend: str) -> Optional[str]:
+    if consult.get("consulted") is not True:
+        return None
+    action = str(consult.get("next_action") or "Restore a valid readiness receipt.")
+    if backend == "api" and consult.get("safe_for_autonomous_ops") is not True:
+        return (
+            "Live Cursor API handoff is blocked because the doctor receipt is "
+            "not current authority for autonomous work. " + action
+        )
+    if backend == "cli" and consult.get("may_continue_offline_code") is not True:
+        return (
+            "Local Cursor CLI handoff is blocked because the doctor receipt "
+            "does not allow continued offline code. " + action
+        )
+    return None
+
+
+def _emit_doctor_receipt_lines(payload: Dict[str, Any]) -> None:
+    consult = payload.get("doctor_receipt")
+    if not isinstance(consult, dict):
+        return
+    print(f"  doctor_receipt: {consult.get('receipt_state') or consult.get('receipt_source')}")
+    if consult.get("consulted"):
+        if consult.get("who_acts_first"):
+            print(f"  doctor_who_acts_first: {consult.get('who_acts_first')}")
+        if consult.get("next_action"):
+            print(f"  doctor_next_action: {consult.get('next_action')}")
+    would_block = payload.get("receipt_would_block")
+    if would_block:
+        print(f"  receipt_would_block: {would_block}")
+
+
 def emit_json(payload: Dict[str, Any]) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
 
@@ -340,6 +465,7 @@ def emit_text(payload: Dict[str, Any]) -> None:
             print(f"  openai_api_key_present: {checks.get('openai_api_key_present')}")
         if "openai_api_enabled" in checks:
             print(f"  openai_api_enabled: {checks.get('openai_api_enabled')}")
+        _emit_doctor_receipt_lines(payload)
         print("  (Use --json for full diagnostics.)")
         return
 
@@ -352,6 +478,7 @@ def emit_text(payload: Dict[str, Any]) -> None:
         print(f"  read_only: {payload.get('read_only')}")
         print(f"  branch: {payload.get('branch')}")
         print(f"  repo_input: {payload.get('repo_input')}")
+        _emit_doctor_receipt_lines(payload)
         print("  (Use --json for full dry-run payload.)")
         return
 
@@ -371,6 +498,7 @@ def emit_text(payload: Dict[str, Any]) -> None:
     else:
         print("Handoff failed.")
         print(payload.get("error", "Unknown error"))
+        _emit_doctor_receipt_lines(payload)
 
 
 def build_ssl_diagnostics() -> Dict[str, Any]:
@@ -496,6 +624,16 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.5,
         help="API only. Base retry backoff in seconds (exponential).",
+    )
+    parser.add_argument(
+        "--receipt",
+        default="",
+        help=(
+            "Optional offline doctor receipt to consult before a live handoff. "
+            "If omitted, ANDREA_DOCTOR_RECEIPT or a local "
+            "data/andrea-doctor-receipt.json is used when present. "
+            "/tmp is never auto-read."
+        ),
     )
     parser.add_argument(
         "--diagnose",
@@ -709,7 +847,18 @@ def main() -> int:
                 hint = build_ssl_hint(error_text)
                 if hint:
                     checks["hint"] = hint
-        payload = {"ok": True, "diagnose": True, "checks": checks}
+        receipt_consult = consult_doctor_receipt(
+            explicit=getattr(args, "receipt", "") or "",
+            local_repo=local_repo,
+            search_roots=[Path.cwd(), local_repo, skill_root.parent.parent],
+        )
+        checks["doctor_receipt"] = receipt_consult
+        payload = {
+            "ok": True,
+            "diagnose": True,
+            "checks": checks,
+            "doctor_receipt": receipt_consult,
+        }
         emit_json(payload) if args.json else emit_text(payload)
         return EXIT_OK
 
@@ -743,6 +892,15 @@ def main() -> int:
             "prompt_preview": final_prompt[:500] if op == "submit" else prompt_text[:500],
             "model": api_model,
         }
+        receipt_consult = consult_doctor_receipt(
+            explicit=getattr(args, "receipt", "") or "",
+            local_repo=local_repo,
+            search_roots=[Path.cwd(), local_repo, skill_root.parent.parent],
+        )
+        payload["doctor_receipt"] = receipt_consult
+        payload["receipt_would_block"] = live_handoff_block_reason(
+            receipt_consult, backend if backend else "api"
+        )
         emit_json(payload) if args.json else emit_text(payload)
         return EXIT_OK
 
@@ -754,6 +912,22 @@ def main() -> int:
     )
     if not backend:
         payload = {"ok": False, "error": backend_error}
+        emit_json(payload) if args.json else emit_text(payload)
+        return EXIT_PREREQ
+
+    receipt_consult = consult_doctor_receipt(
+        explicit=getattr(args, "receipt", "") or "",
+        local_repo=local_repo,
+        search_roots=[Path.cwd(), local_repo, skill_root.parent.parent],
+    )
+    receipt_block = live_handoff_block_reason(receipt_consult, backend)
+    if receipt_block:
+        payload = {
+            "ok": False,
+            "backend": backend,
+            "error": receipt_block,
+            "doctor_receipt": receipt_consult,
+        }
         emit_json(payload) if args.json else emit_text(payload)
         return EXIT_PREREQ
 

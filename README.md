@@ -325,7 +325,12 @@ python3 scripts/andrea_doctor_receipt.py --consume /tmp/andrea-doctor-receipt.js
 
 `--audience` accepts `andrea`, `coding_agent` (`bob` / `codex` / `grok` /
 `claude`), `owner`, or `dashboard`. Invalid or tampered receipts fail closed to
-an owner-blocked packet.
+an owner-blocked packet. A correctly signed receipt whose local file is older
+than 24 hours is also not current authority: `--verify`, `--consume`, and
+`--summary` report `receipt_state=stale`, keep the last verified owner hold or
+failed stage as history, and refuse `safe_for_autonomous_ops`. That freshness
+check uses local mtime only; it is not cryptographic provenance. The dashboard
+uses this same consume contract.
 
 To put that same verified decision at the top of the existing local dashboard,
 use its private ignored path and then open `http://127.0.0.1:8765/dashboard`:
@@ -342,7 +347,18 @@ receipt older than 24 hours is also blocked until the same offline command is
 rerun. Expiration does not erase previous owner holds or failed stages: those
 remain clearly labeled **historical**, never current authority or proof that a
 blocker cleared. A verified receipt can still correctly show `blocked` when
-its grade or security/reliability stages require it.
+its grade or security/reliability stages require it. Coding-agent consume
+packets now use the same stale/current authority rules, so an old green
+receipt cannot authorize live Cursor work just because the dashboard was not
+open.
+
+`cursor_handoff` consults that same packet before a live submit. It reads an
+explicit `--receipt`, `ANDREA_DOCTOR_RECEIPT`, or a discovered local
+`data/andrea-doctor-receipt.json`. It never auto-reads `/tmp`. Missing
+evidence is not a new gate. A consulted receipt that is stale, invalid, or
+not `safe_for_autonomous_ops` blocks Cursor API submit; a consulted receipt
+that does not allow offline code also blocks local CLI submit. Diagnose and
+dry-run report the consult and do not launch work.
 
 The panel shows one selectable, code-owned refresh command targeting the same
 `data/andrea-doctor-receipt.json` file it reads, including when a failed-stage

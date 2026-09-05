@@ -34,6 +34,7 @@ usage() {
   echo "             handoff receipt for Codex, Grok, Claude, dashboards, and scripts."
   echo "             After write, print a verify summary. Consumers then run"
   echo "             python3 scripts/andrea_doctor_receipt.py --consume PATH --audience bob"
+  echo "             Consume/verify/summary fail closed if the file is older than 24h."
 }
 
 reprint_operator_recap() {

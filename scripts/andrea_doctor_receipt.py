@@ -9,7 +9,9 @@ Consumers (Bob, Codex, Grok, Claude, Andrea, dashboards, and scripts) must
 load the artifact through this module. Verify recomputes the fingerprint,
 rejects unknown keys, and fail-closes to an owner-blocked packet when a
 stage is not passed — even if leftover Grade A next-step text is still
-present on an older receipt.
+present on an older receipt. Consume/verify/summary also withdraw current
+authority from a correctly signed receipt whose local file is older than
+24 hours. That freshness check uses mtime only; it is not cryptographic.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -85,8 +88,19 @@ FALLBACK_ACTION = (
     "Restore a valid readiness receipt before autonomous operation, then rerun "
     "bash scripts/andrea_doctor.sh --offline."
 )
+RECEIPT_MAX_AGE_SECONDS = 24 * 60 * 60
+CANONICAL_RELATIVE_RECEIPT = Path("data") / "andrea-doctor-receipt.json"
 RERUN_COMMAND = (
     "bash scripts/andrea_doctor.sh --offline --receipt /tmp/andrea-doctor-receipt.json"
+)
+STALE_OWNER_HOLD_ACTION = (
+    "The last verified check recorded an owner blocker; its clearance "
+    "has not been verified. Keep the owner hold. After owner review, "
+    "refresh the offline evidence: " + RERUN_COMMAND
+)
+STALE_REFRESH_ACTION = (
+    "The last verified receipt is older than 24 hours and is not current "
+    "authority. Refresh it with: " + RERUN_COMMAND
 )
 CONSUME_COMMAND = (
     "python3 scripts/andrea_doctor_receipt.py --consume "
@@ -405,6 +419,13 @@ def _fallback_packet(
         },
         "receipt_fingerprint": "",
         "reason": _safe_string(reason, "invalid_receipt", limit=200),
+        "receipt_state": "invalid",
+        "receipt_verified": False,
+        "fresh": False,
+        "age_seconds": None,
+        "max_age_seconds": RECEIPT_MAX_AGE_SECONDS,
+        "last_verified": None,
+        "refresh_required": True,
     }
 
 
@@ -621,29 +642,274 @@ def audience_packet(
     return packet
 
 
-def consume_receipt(path: Path, audience: str) -> tuple[int, dict[str, Any]]:
-    ok, reason, receipt = load_receipt(path)
+def receipt_age_seconds(path: Path, now: float | None = None) -> tuple[float | None, str]:
+    """Return (age_seconds, reason) from local file mtime. Not cryptographic."""
+    try:
+        modified_at = path.expanduser().stat().st_mtime
+    except OSError:
+        return None, "receipt_stat_failed"
+    current = float(now if now is not None else time.time())
+    return max(0.0, current - modified_at), "ok"
+
+
+def _with_authority_meta(
+    packet: dict[str, Any],
+    *,
+    receipt_state: str,
+    receipt_verified: bool,
+    fresh: bool,
+    age_seconds: float | None,
+) -> dict[str, Any]:
+    packet["receipt_state"] = receipt_state
+    packet["receipt_verified"] = receipt_verified
+    packet["fresh"] = fresh
+    packet["age_seconds"] = age_seconds
+    packet["max_age_seconds"] = RECEIPT_MAX_AGE_SECONDS
+    packet.setdefault("last_verified", None)
+    if receipt_state == "current":
+        packet["refresh_required"] = packet.get("overall_status") == "blocked"
+    else:
+        packet["refresh_required"] = True
+    return packet
+
+
+def apply_stale_authority(packet: dict[str, Any]) -> dict[str, Any]:
+    """Withdraw current authority from a verified but expired receipt."""
+    last_verified = {
+        "overall_status": packet.get("overall_status"),
+        "grade": packet.get("grade"),
+        "who_acts_first": packet.get("who_acts_first"),
+        "blocked_reason": packet.get("blocked_reason"),
+        "failed_stages": list(packet.get("failed_stages") or []),
+    }
+    owner_hold = packet.get("must_wait_for_owner") is True
+    may_continue = packet.get("may_continue_offline_code") is True
+    packet["trusted_receipt"] = False
+    packet["receipt_verified"] = True
+    packet["receipt_state"] = "stale"
+    packet["fresh"] = False
+    packet["overall_status"] = "blocked"
+    packet["blocked_reason"] = "stale_receipt"
+    packet["safe_for_autonomous_ops"] = False
+    packet["may_continue_offline_code"] = may_continue
+    packet["must_wait_for_owner"] = owner_hold
+    packet["who_acts_first"] = "owner" if owner_hold else last_verified["who_acts_first"]
+    packet["failed_stages"] = list(last_verified["failed_stages"])
+    packet["last_verified"] = last_verified
+    packet["refresh_required"] = True
+    packet["reason"] = "receipt_too_old"
+    packet["next_action"] = (
+        STALE_OWNER_HOLD_ACTION if owner_hold else STALE_REFRESH_ACTION
+    )
+    return packet
+
+
+def consume_receipt(
+    path: Path, audience: str, *, now: float | None = None
+) -> tuple[int, dict[str, Any]]:
+    expanded = path.expanduser()
+    path_existed = expanded.is_file()
+    ok, reason, receipt = load_receipt(expanded)
     if not ok:
-        return 1, audience_packet({}, audience, trusted=False, reason=reason)
-    return 0, audience_packet(receipt, audience, trusted=True, reason="ok")
+        state = "missing" if (not path_existed and reason == "missing_file") else "invalid"
+        packet = audience_packet({}, audience, trusted=False, reason=reason)
+        _with_authority_meta(
+            packet,
+            receipt_state=state,
+            receipt_verified=False,
+            fresh=False,
+            age_seconds=None,
+        )
+        return 1, packet
+    age, age_reason = receipt_age_seconds(expanded, now=now)
+    if age is None:
+        packet = audience_packet({}, audience, trusted=False, reason=age_reason)
+        _with_authority_meta(
+            packet,
+            receipt_state="invalid",
+            receipt_verified=False,
+            fresh=False,
+            age_seconds=None,
+        )
+        return 1, packet
+    packet = audience_packet(receipt, audience, trusted=True, reason="ok")
+    _with_authority_meta(
+        packet,
+        receipt_state="current",
+        receipt_verified=True,
+        fresh=True,
+        age_seconds=age,
+    )
+    if age > RECEIPT_MAX_AGE_SECONDS:
+        apply_stale_authority(packet)
+        return 1, packet
+    return 0, packet
 
 
-def format_summary(receipt: dict[str, Any]) -> str:
+def resolve_handoff_receipt_path(
+    explicit: str = "",
+    *,
+    local_repo: Path | None = None,
+    cwd: Path | None = None,
+    environ: dict[str, str] | None = None,
+) -> tuple[Path | None, str]:
+    """Resolve an explicit, env, or canonical data/ receipt. Never invent /tmp."""
+    env = os.environ if environ is None else environ
+    raw = (explicit or env.get("ANDREA_DOCTOR_RECEIPT") or "").strip()
+    if raw:
+        return Path(raw).expanduser(), "explicit"
+    roots: list[Path] = []
+    if local_repo is not None:
+        roots.append(Path(local_repo))
+    roots.append(Path.cwd() if cwd is None else Path(cwd))
+    seen: set[Path] = set()
+    for root in roots:
+        try:
+            resolved = root.expanduser().resolve()
+        except OSError:
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        candidate = resolved / CANONICAL_RELATIVE_RECEIPT
+        if candidate.is_file():
+            return candidate, "discovered"
+    return None, "absent"
+
+
+def public_handoff_consult(
+    packet: dict[str, Any],
+    *,
+    source: str,
+    consulted: bool,
+) -> dict[str, Any]:
+    """Allowlisted handoff view. Never includes path, fingerprint, or raw extras."""
+    failed = packet.get("failed_stages")
+    if not isinstance(failed, list):
+        failed = []
+    return {
+        "consulted": consulted,
+        "receipt_source": _safe_string(source, "absent", limit=40),
+        "receipt_state": _safe_string(packet.get("receipt_state"), "invalid", limit=40),
+        "receipt_verified": packet.get("receipt_verified") is True,
+        "fresh": packet.get("fresh") is True,
+        "overall_status": _safe_string(packet.get("overall_status"), "blocked", limit=40),
+        "blocked_reason": _safe_string(packet.get("blocked_reason"), "", limit=200),
+        "failed_stages": [str(stage) for stage in failed[:4]],
+        "grade": _safe_string(packet.get("grade"), "C", limit=1),
+        "who_acts_first": _safe_string(packet.get("who_acts_first"), "owner", limit=40),
+        "safe_for_autonomous_ops": packet.get("safe_for_autonomous_ops") is True,
+        "may_continue_offline_code": packet.get("may_continue_offline_code") is True,
+        "must_wait_for_owner": packet.get("must_wait_for_owner") is True,
+        "next_action": _safe_string(packet.get("next_action"), FALLBACK_ACTION),
+        "reason": _safe_string(packet.get("reason"), "ok", limit=200),
+    }
+
+
+def absent_handoff_consult() -> dict[str, Any]:
+    return {
+        "consulted": False,
+        "receipt_source": "absent",
+        "receipt_state": "absent",
+        "receipt_verified": False,
+        "fresh": False,
+        "overall_status": "",
+        "blocked_reason": "",
+        "failed_stages": [],
+        "grade": "",
+        "who_acts_first": "",
+        "safe_for_autonomous_ops": False,
+        "may_continue_offline_code": True,
+        "must_wait_for_owner": False,
+        "next_action": "",
+        "reason": "receipt_not_consulted",
+    }
+
+
+def validator_unavailable_consult(*, source: str) -> dict[str, Any]:
+    return {
+        "consulted": True,
+        "receipt_source": _safe_string(source, "explicit", limit=40),
+        "receipt_state": "invalid",
+        "receipt_verified": False,
+        "fresh": False,
+        "overall_status": "blocked",
+        "blocked_reason": "invalid_receipt",
+        "failed_stages": [],
+        "grade": "C",
+        "who_acts_first": "owner",
+        "safe_for_autonomous_ops": False,
+        "may_continue_offline_code": False,
+        "must_wait_for_owner": True,
+        "next_action": FALLBACK_ACTION,
+        "reason": "validator_unavailable",
+    }
+
+
+def consult_receipt_for_handoff(
+    path: Path | None,
+    *,
+    source: str,
+    audience: str = "coding_agent",
+    now: float | None = None,
+) -> dict[str, Any]:
+    if path is None:
+        return absent_handoff_consult()
+    _rc, packet = consume_receipt(path, audience, now=now)
+    return public_handoff_consult(packet, source=source, consulted=True)
+
+
+def live_handoff_block_reason(consult: dict[str, Any], backend: str) -> str | None:
+    """Return a block reason for live submit, or None when the handoff may proceed."""
+    if consult.get("consulted") is not True:
+        return None
+    lane = _safe_string(backend, "", limit=16)
+    action = _safe_string(consult.get("next_action"), FALLBACK_ACTION)
+    if lane == "api" and consult.get("safe_for_autonomous_ops") is not True:
+        return (
+            "Live Cursor API handoff is blocked because the doctor receipt is "
+            "not current authority for autonomous work. " + action
+        )
+    if lane == "cli" and consult.get("may_continue_offline_code") is not True:
+        return (
+            "Local Cursor CLI handoff is blocked because the doctor receipt "
+            "does not allow continued offline code. " + action
+        )
+    return None
+
+
+def format_summary(
+    receipt: dict[str, Any],
+    *,
+    receipt_state: str = "current",
+    fresh: bool = True,
+) -> str:
     handoff = _handoff_map(receipt.get("handoff"))
     failed = receipt.get("failed_stages")
     if not isinstance(failed, list):
         failed = handoff.get("failed_stages") if isinstance(handoff.get("failed_stages"), list) else []
     failed_text = ",".join(_safe_string(item, limit=40) for item in failed if item) or "-"
+    overall = receipt.get("overall_status")
+    blocked = receipt.get("blocked_reason") or handoff.get("blocked_reason") or "-"
+    if receipt_state == "stale":
+        overall = "blocked"
+        blocked = "stale_receipt"
     return "\n".join(
         [
             f"Receipt schema: {receipt.get('schema_version')}",
             "Receipt verify: valid",
-            f"overall_status={receipt.get('overall_status')}",
-            f"blocked_reason={receipt.get('blocked_reason') or handoff.get('blocked_reason') or '-'}",
+            f"receipt_state={receipt_state}",
+            f"fresh={'true' if fresh else 'false'}",
+            f"overall_status={overall}",
+            f"blocked_reason={blocked}",
             f"who_acts_first={handoff.get('who_acts_first')}",
             f"failed_stages={failed_text}",
             "safe_for_autonomous_ops="
-            + ("true" if handoff.get("safe_for_autonomous_ops") else "false"),
+            + (
+                "false"
+                if receipt_state == "stale"
+                else ("true" if handoff.get("safe_for_autonomous_ops") else "false")
+            ),
             f"Verify: {VERIFY_COMMAND}",
             f"Consume: {CONSUME_COMMAND}",
         ]
@@ -689,39 +955,73 @@ def main() -> int:
     if args.verify:
         ok, reason, receipt = load_receipt(args.verify)
         if not ok:
+            state = "missing" if reason == "missing_file" else "invalid"
             _print_json(
                 {
                     "ok": False,
                     "overall_status": "blocked",
                     "blocked_reason": "invalid_receipt",
+                    "receipt_state": state,
+                    "receipt_verified": False,
+                    "fresh": False,
                     "reason": reason,
                 }
             )
             return 1
-        _print_json(
-            {
-                "ok": True,
-                "overall_status": receipt["overall_status"],
-                "blocked_reason": receipt.get("blocked_reason")
-                or receipt.get("handoff", {}).get("blocked_reason")
-                or blocked_reason_for(
-                    failed_stages=failed_gate_stages(
-                        str(receipt["stages"]["security"]["status"]),
-                        str(receipt["stages"]["reliability"]["status"]),
-                    ),
-                    grade=str(receipt["stages"]["readiness"]["grade"]),
-                    exit_code=int(receipt["exit_code"]),
-                ),
-                "failed_stages": receipt.get("failed_stages")
-                or failed_gate_stages(
+        age, age_reason = receipt_age_seconds(args.verify)
+        if age is None:
+            _print_json(
+                {
+                    "ok": False,
+                    "overall_status": "blocked",
+                    "blocked_reason": "invalid_receipt",
+                    "receipt_state": "invalid",
+                    "receipt_verified": False,
+                    "fresh": False,
+                    "reason": age_reason,
+                }
+            )
+            return 1
+        payload = {
+            "ok": True,
+            "overall_status": receipt["overall_status"],
+            "blocked_reason": receipt.get("blocked_reason")
+            or receipt.get("handoff", {}).get("blocked_reason")
+            or blocked_reason_for(
+                failed_stages=failed_gate_stages(
                     str(receipt["stages"]["security"]["status"]),
                     str(receipt["stages"]["reliability"]["status"]),
                 ),
-                "who_acts_first": receipt.get("handoff", {}).get("who_acts_first"),
-                "receipt_fingerprint": receipt["receipt_fingerprint"],
-                "reason": "ok",
-            }
-        )
+                grade=str(receipt["stages"]["readiness"]["grade"]),
+                exit_code=int(receipt["exit_code"]),
+            ),
+            "failed_stages": receipt.get("failed_stages")
+            or failed_gate_stages(
+                str(receipt["stages"]["security"]["status"]),
+                str(receipt["stages"]["reliability"]["status"]),
+            ),
+            "who_acts_first": receipt.get("handoff", {}).get("who_acts_first"),
+            "receipt_fingerprint": receipt["receipt_fingerprint"],
+            "receipt_state": "current",
+            "receipt_verified": True,
+            "fresh": True,
+            "age_seconds": age,
+            "reason": "ok",
+        }
+        if age > RECEIPT_MAX_AGE_SECONDS:
+            payload.update(
+                {
+                    "ok": False,
+                    "overall_status": "blocked",
+                    "blocked_reason": "stale_receipt",
+                    "receipt_state": "stale",
+                    "fresh": False,
+                    "reason": "receipt_too_old",
+                }
+            )
+            _print_json(payload)
+            return 1
+        _print_json(payload)
         return 0
     if args.consume:
         rc, packet = consume_receipt(args.consume, args.audience)
@@ -733,11 +1033,28 @@ def main() -> int:
             print(f"Receipt verify: invalid ({reason})", file=os.sys.stderr)
             print("overall_status=blocked")
             print("blocked_reason=invalid_receipt")
+            print("receipt_state=invalid")
             print("who_acts_first=owner")
             print("safe_for_autonomous_ops=false")
             return 1
-        print(format_summary(receipt))
-        return 0
+        age, age_reason = receipt_age_seconds(args.summary)
+        if age is None:
+            print(f"Receipt verify: invalid ({age_reason})", file=os.sys.stderr)
+            print("overall_status=blocked")
+            print("blocked_reason=invalid_receipt")
+            print("receipt_state=invalid")
+            print("who_acts_first=owner")
+            print("safe_for_autonomous_ops=false")
+            return 1
+        stale = age > RECEIPT_MAX_AGE_SECONDS
+        print(
+            format_summary(
+                receipt,
+                receipt_state="stale" if stale else "current",
+                fresh=not stale,
+            )
+        )
+        return 1 if stale else 0
 
     required = (
         args.security_status,

@@ -1,17 +1,38 @@
 # Cursor session handoff snapshot
 
-Last updated: 2026-09-04 operator-readiness dashboard product pass.
+Last updated: 2026-09-04 resilient operator-monitor product pass.
 
 ## Current draft handoff
 
-- **Base:** exact `main` `8c6e4710d605751a68e2ffea36db1c0a78b7b25f`
-  (merged leftover-squash #19).
-- **Branch:** `codex/openclaw-dashboard-readiness-20260904`.
-- **Product change:** the existing local dashboard now consumes the existing
-  verified offline-doctor receipt and leads with **Operator readiness**: current
-  trust/status, who acts first, and one next action. Missing, unreadable,
-  tampered, and older-than-24-hour receipts fail closed. The API exposes no
-  receipt path, raw JSON, probe output, or fingerprint.
+- **Base:** exact `main` `8540a9d90cc062046400c65316252d5b3f731771`
+  (operator-readiness #20 already merged; do not redo it).
+- **Branch:** `codex/openclaw-operator-product-20260904`.
+- **Product change:** the existing dashboard now has honest overview connection
+  status, bounded single-flight polling, and task selection that cannot show a
+  late response for the wrong task. HTTP and JSON reads time out after 10 seconds,
+  including across suspended timers; the next overview poll starts 5 seconds
+  after completion. Failed/malformed reads and 15-second stale overviews hide
+  previous status and revoke the displayed readiness actor/action. Retry restores
+  current data without any new live action or endpoint.
+- **Task UX:** native keyboard buttons preserve focus across polling. Same-task
+  background reads keep explicitly labeled last-received details; unchanged
+  payloads avoid rebuilding them. Selection changes, empty task lists, failed
+  detail reads, and overview loss clear old details. Request cancellation and
+  generation/identity checks prevent stale success or failure from replacing a
+  newer selection. Detail failures remain separate from overview connectivity.
+- **Evidence:** executable Node fixture tests run the actual rendered JavaScript
+  via Python, with fake timers and transport (including ignored aborts and hung
+  JSON). Existing dashboard/HTTP tests and the full offline integration gate are
+  required. Node.js 18+ is a test-only prerequisite, not a new deployed service.
+- **Browser check:** synthetic, fully intercepted Chromium requests only;
+  desktop and 390px mobile checked for layout, overflow, keyboard selection,
+  retained focus, unavailable state, and retry. No live runtime was opened.
+- **Local verification:** all 11 integration stages passed: 787 Python tests
+  (84 subtests), 9 vendored skill tests, syntax/security/reliability/dry-run and
+  exhaustive offline checks. The dashboard runtime test contains 21 executable
+  JavaScript scenarios. Existing focused dashboard/HTTP coverage: 48 passed.
+  Node syntax and `git diff --check` passed. Hosted CI is recorded on the draft
+  and coordination issue; these local results do not claim a deployment.
 - **Fence:** `OUTBOUND_CONFIRM_RE` is unchanged
   (`send it` / `send it now` / `send now`). `services/andrea_sync/server.py`
   blob `8c5efa82` is identical to base. Private API stays off.
@@ -22,6 +43,18 @@ Last updated: 2026-09-04 operator-readiness dashboard product pass.
   CLI and does not make a live probe.
 - **Holds:** no live send, Private API off, no BlueBubbles live send, no
   credential writes, no merge/tag/deploy/gateway restart unless the owner asks.
+
+## Separate follow-ups, not solved by this UI slice
+
+- The backend's stale-receipt refresh packet drops prior failed-stage evidence
+  and changes the suggested actor. Review that recovery policy separately; a
+  refreshed dashboard is not proof that an underlying readiness blocker cleared.
+- Failed-stage doctor recovery text can target `/tmp/andrea-doctor-receipt.json`
+  while the dashboard consumes `data/andrea-doctor-receipt.json`.
+- `andrea_doctor.sh --offline` still honors optional `OPENCLAW_ENFORCE=1` and
+  `ANDREA_SYNC_DOCTOR=1` flags. Do not enable those for offline verification;
+  this session explicitly disabled them and all live probes. This dashboard
+  change neither executes the command nor changes doctor/runtime behavior.
 
 ## Earlier shipped snapshot
 

@@ -992,10 +992,9 @@ def render_dashboard_html() -> str:
     .value { font-size: 28px; font-weight: 700; margin-top: 6px; }
     .value.sm { font-size: 18px; }
     .twoCol { grid-template-columns: minmax(0, 1.15fr) minmax(360px, 0.85fr); }
-    .panel { padding: 16px; min-height: 180px; }
+    .panel { padding: 16px; min-height: 180px; min-width: 0; overflow-wrap: anywhere; }
     table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 14px; }
     th, td { padding: 10px 8px; border-bottom: 1px solid #24314d; text-align: left; vertical-align: top; }
-    tr.taskRow { cursor: pointer; }
     tr.taskRow:hover { background: #17213b; }
     tr.selected { background: #1e2d4f; }
     .pill { display: inline-block; border-radius: 999px; padding: 3px 9px; font-size: 12px; font-weight: 600; }
@@ -1016,8 +1015,14 @@ def render_dashboard_html() -> str:
     .readinessMeta { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin-top: 12px; }
     button { background: #315efb; color: white; border: 0; border-radius: 10px; padding: 10px 14px; cursor: pointer; font-weight: 600; }
     button:hover { background: #426cff; }
+    button:disabled { opacity: 0.65; cursor: wait; }
+    button:focus-visible { outline: 3px solid #9dc7ff; outline-offset: 3px; }
+    .taskSelect { background: transparent; color: #adc6ff; padding: 3px 0; text-align: left; overflow-wrap: anywhere; }
+    .connectionBar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 12px 16px; margin-bottom: 16px; border: 1px solid #304267; border-radius: 12px; background: #11182c; }
+    [hidden] { display: none !important; }
     a { color: #93b2ff; }
     @media (max-width: 1100px) { .twoCol, .readinessGrid { grid-template-columns: 1fr; } }
+    @media (max-width: 600px) { .wrap { padding: 12px; } .topbar { align-items: flex-start; flex-direction: column; } #tasks { overflow-x: auto; } }
   </style>
 </head>
 <body>
@@ -1033,6 +1038,11 @@ def render_dashboard_html() -> str:
       </div>
     </div>
 
+    <div class="connectionBar" role="status" aria-live="polite" aria-atomic="true">
+      <span class="pill muted" id="connectionState">Connecting</span>
+      <span class="subtle" id="connectionNote">Checking the local monitor. No live actions are available here.</span>
+    </div>
+
     <section class="panel readinessHero">
       <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap;">
         <div>
@@ -1045,6 +1055,7 @@ def render_dashboard_html() -> str:
       <div id="operatorReadiness"></div>
     </section>
 
+    <div id="snapshotContent" hidden>
     <div class="grid cards" id="cards"></div>
 
     <div class="grid twoCol" style="margin-bottom:16px;">
@@ -1114,6 +1125,7 @@ def render_dashboard_html() -> str:
       <section class="panel">
         <h2>Task Detail</h2>
         <p class="subtle" id="detailSummary">Select a task to inspect projected metadata and links.</p>
+        <button id="detailRetryBtn" type="button" hidden>Retry task details</button>
         <div class="list" id="taskMeta"></div>
       </section>
 
@@ -1123,11 +1135,24 @@ def render_dashboard_html() -> str:
         <div class="timeline" id="timeline"></div>
       </section>
     </div>
+    </div>
   </div>
 
   <script>
     let selectedTaskId = "";
     let latestSummary = null;
+    const POLL_INTERVAL_MS = 5000;
+    const REQUEST_TIMEOUT_MS = 10000;
+    const SNAPSHOT_MAX_AGE_MS = 15000;
+    let summaryRequest = null;
+    let pollTimer = null;
+    let freshnessTimer = null;
+    let lastSuccessAt = null;
+    let snapshotCurrent = false;
+    let taskRequest = null;
+    let taskGeneration = 0;
+    let displayedTaskId = "";
+    let displayedTaskPayload = "";
 
     function escapeHtml(value) {
       return String(value ?? "").replace(/[&<>"]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[ch]));
@@ -1146,10 +1171,44 @@ def render_dashboard_html() -> str:
       return "warn";
     }
 
-    async function fetchJson(url) {
-      const resp = await fetch(url, { cache: "no-store" });
-      if (!resp.ok) throw new Error(`${url} -> ${resp.status}`);
-      return await resp.json();
+    function fetchJson(url, signal) {
+      const controller = new AbortController();
+      const startedAt = Date.now();
+      // Bound both the HTTP response and its JSON body, even if a transport
+      // ignores abort. A late response must never revive a timed-out request.
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        let timeout;
+        const finish = (error, value) => {
+          if (settled) return;
+          // Timers can be suspended while the browser sleeps. Elapsed-time
+          // validation also rejects a late completion that beats its timer.
+          if (!error && Date.now() - startedAt >= REQUEST_TIMEOUT_MS) error = new Error("Request timed out");
+          settled = true;
+          clearTimeout(timeout);
+          if (signal) signal.removeEventListener("abort", cancel);
+          if (error) reject(error);
+          else resolve(value);
+        };
+        const cancel = () => {
+          finish(new Error("Request cancelled"));
+          controller.abort();
+        };
+        if (signal && signal.aborted) { cancel(); return; }
+        if (signal) signal.addEventListener("abort", cancel, { once: true });
+        timeout = setTimeout(() => {
+          finish(new Error("Request timed out"));
+          controller.abort();
+        }, REQUEST_TIMEOUT_MS);
+        Promise.resolve().then(() => {
+          if (settled || Date.now() - startedAt >= REQUEST_TIMEOUT_MS) throw new Error("Request expired");
+          return fetch(url, { cache: "no-store", signal: controller.signal });
+        })
+          .then((resp) => {
+            if (!resp.ok) throw new Error("Monitor request failed");
+            return resp.json();
+          }).then((data) => finish(null, data), (error) => finish(error));
+      });
     }
 
     function renderCards(data) {
@@ -1193,9 +1252,9 @@ def render_dashboard_html() -> str:
       const actor = readiness.who_acts_first || "owner";
       const action = readiness.next_action || "Run the offline doctor before continuing.";
       const state = readiness.receipt_state || "missing";
-      const ageSeconds = Number(readiness.age_seconds);
+      const ageSeconds = readiness.age_seconds == null || readiness.age_seconds === "" ? NaN : Number(readiness.age_seconds);
       const age = Number.isFinite(ageSeconds) ? `${Math.max(0, Math.round(ageSeconds / 60))}m old` : "no current receipt";
-      const trust = readiness.trusted_receipt ? "verified + current" : (readiness.receipt_verified ? "verified but stale" : "not trusted");
+      const trust = readiness.trusted_receipt ? "verified + current" : (readiness.receipt_verified ? "verified, not current" : "not trusted");
       const failed = (readiness.failed_stages || []).length ? `Failed: ${(readiness.failed_stages || []).join(", ")}` : "No failed gate stage recorded";
       const pill = document.getElementById("operatorReadinessPill");
       pill.className = `pill ${pillClass(status)}`;
@@ -1633,6 +1692,7 @@ def render_dashboard_html() -> str:
     }
 
     function renderTasks(data) {
+      const focusedTaskId = document.activeElement?.getAttribute("data-task-id");
       const rows = data.tasks.items || [];
       const header = `
         <table>
@@ -1653,8 +1713,8 @@ def render_dashboard_html() -> str:
               const summary = task.summary || task.last_error || "";
               const cls = task.task_id === selectedTaskId ? "taskRow selected" : "taskRow";
               return `
-                <tr class="${cls}" data-task-id="${escapeHtml(task.task_id)}">
-                  <td><strong>${escapeHtml(task.task_id)}</strong><br><span class="subtle">${escapeHtml(summary.slice(0, 100) || "No summary yet")}</span></td>
+                <tr class="${cls}">
+                  <td><button type="button" class="taskSelect" data-task-id="${escapeHtml(task.task_id)}" aria-pressed="${task.task_id === selectedTaskId}">${escapeHtml(task.task_id)}</button><br><span class="subtle">${escapeHtml(summary.slice(0, 100) || "No summary yet")}</span></td>
                   <td><span class="pill ${pillClass(task.status)}">${escapeHtml(task.status)}</span></td>
                   <td>${escapeHtml(task.channel)}</td>
                   <td>${escapeHtml(lane)}</td>
@@ -1665,15 +1725,9 @@ def render_dashboard_html() -> str:
           </tbody>
         </table>`;
       document.getElementById("tasks").innerHTML = rows.length ? header : `<div class="item"><strong>No tasks yet</strong><p class="subtle" style="margin-top:8px;">Once Telegram, Alexa, or CLI tasks land, they will appear here.</p></div>`;
-      document.querySelectorAll("tr.taskRow").forEach((row) => {
-        row.addEventListener("click", () => {
-          const taskId = row.getAttribute("data-task-id") || "";
-          if (taskId) {
-            selectedTaskId = taskId;
-            renderTasks(latestSummary);
-            loadTask(taskId).catch(showError);
-          }
-        });
+      document.querySelectorAll("button.taskSelect").forEach((button) => {
+        button.addEventListener("click", () => selectTask(button.getAttribute("data-task-id") || ""));
+        if (focusedTaskId && button.getAttribute("data-task-id") === focusedTaskId) button.focus({ preventScroll: true });
       });
     }
 
@@ -1712,49 +1766,157 @@ def render_dashboard_html() -> str:
       `).join("") || `<div class="item"><strong>No events</strong><p class="subtle" style="margin-top:8px;">This task has no stored events yet.</p></div>`;
     }
 
-    async function loadTask(taskId) {
-      const data = await fetchJson(`/v1/tasks/${encodeURIComponent(taskId)}`);
-      renderTaskMeta(data.task || {});
-      renderTimeline(data.events || []);
+    function clearTaskDetail(message) {
+      taskGeneration += 1;
+      if (taskRequest) taskRequest.controller.abort();
+      taskRequest = null;
+      displayedTaskId = "";
+      displayedTaskPayload = "";
+      document.getElementById("taskMeta").innerHTML = "";
+      document.getElementById("timeline").innerHTML = "";
+      document.getElementById("detailSummary").textContent = message;
+      document.getElementById("detailRetryBtn").hidden = true;
     }
 
-    async function loadSummary() {
-      latestSummary = await fetchJson("/v1/dashboard/summary?limit=30");
-      renderOperatorReadiness(latestSummary);
-      renderCards(latestSummary);
-      renderAttention(latestSummary);
-      renderOptimization(latestSummary);
-      renderExperience(latestSummary);
-      renderCollaborationPromotion(latestSummary);
-      renderDailyAssistantPack(latestSummary);
+    function selectTask(taskId) {
+      if (!snapshotCurrent) return Promise.resolve();
+      if (taskId !== selectedTaskId || !taskId) {
+        clearTaskDetail(taskId ? `Loading task ${taskId}…` : "No tasks to inspect.");
+        selectedTaskId = taskId;
+      }
       renderTasks(latestSummary);
-      document.getElementById("lastUpdated").textContent = `Last updated ${new Date().toLocaleTimeString()} (auto-refresh every 5s)`;
-      const tasks = latestSummary.tasks.items || [];
-      if (!tasks.length) {
-        selectedTaskId = "";
+      return taskId ? loadTask(taskId) : Promise.resolve();
+    }
+
+    function loadTask(taskId) {
+      if (!snapshotCurrent || !taskId || taskId !== selectedTaskId) return Promise.resolve();
+      if (taskRequest && taskRequest.taskId === taskId) return taskRequest.promise;
+      if (displayedTaskId === taskId) {
+        document.getElementById("detailSummary").textContent = `Refreshing task ${taskId}; showing its last received details.`;
+        document.getElementById("detailRetryBtn").hidden = true;
+      } else {
+        clearTaskDetail(`Loading task ${taskId}…`);
       }
-      if (!selectedTaskId && tasks.length) {
-        selectedTaskId = tasks[0].task_id;
-      }
-      if (selectedTaskId) {
-        const stillVisible = tasks.some((task) => task.task_id === selectedTaskId);
-        if (!stillVisible && tasks.length) {
-          selectedTaskId = tasks[0].task_id;
+      const generation = taskGeneration;
+      const request = { taskId, controller: new AbortController(), promise: null };
+      taskRequest = request;
+      request.promise = (async () => {
+        try {
+          const data = await fetchJson(`/v1/tasks/${encodeURIComponent(taskId)}`, request.controller.signal);
+          if (generation !== taskGeneration || taskId !== selectedTaskId || !snapshotCurrent) return;
+          if (!data || data.ok !== true || !data.task || data.task.task_id !== taskId || !Array.isArray(data.events)) {
+            throw new Error("Task response does not match selection");
+          }
+          const payload = JSON.stringify({ task: data.task, events: data.events });
+          if (displayedTaskPayload !== payload) {
+            renderTaskMeta(data.task);
+            renderTimeline(data.events);
+          }
+          displayedTaskId = taskId;
+          displayedTaskPayload = payload;
+          document.getElementById("detailSummary").textContent = `Task ${taskId} projected state and collaboration metadata. Last received ${new Date().toLocaleTimeString()}.`;
+        } catch (_error) {
+          if (generation !== taskGeneration || taskId !== selectedTaskId || !snapshotCurrent) return;
+          document.getElementById("taskMeta").innerHTML = "";
+          document.getElementById("timeline").innerHTML = "";
+          displayedTaskId = "";
+          displayedTaskPayload = "";
+          document.getElementById("detailSummary").textContent = `Task ${taskId} details unavailable. Retry or choose another task. The overview has its own connection status.`;
+          document.getElementById("detailRetryBtn").hidden = false;
+        } finally {
+          if (taskRequest === request) taskRequest = null;
         }
-        if (selectedTaskId) {
-          renderTasks(latestSummary);
-          await loadTask(selectedTaskId);
-        }
+      })();
+      return request.promise;
+    }
+
+    function setConnectionState(label, note, status) {
+      const pill = document.getElementById("connectionState");
+      pill.textContent = label;
+      pill.className = `pill ${status}`;
+      document.getElementById("connectionNote").textContent = note;
+      document.getElementById("lastUpdated").textContent = lastSuccessAt === null
+        ? "No successful update yet."
+        : `Last successful update ${new Date(lastSuccessAt).toLocaleTimeString()}`;
+    }
+
+    function invalidateSnapshot(expired = false) {
+      snapshotCurrent = false;
+      clearTimeout(freshnessTimer);
+      document.getElementById("snapshotContent").hidden = true;
+      const pill = document.getElementById("operatorReadinessPill");
+      pill.className = "pill warn";
+      pill.textContent = "unavailable";
+      document.getElementById("operatorReadiness").innerHTML = `<div class="item"><strong>Current readiness is unavailable.</strong><p class="subtle" style="margin-top:8px;">Refresh the dashboard to check who acts next. Previous evidence is hidden; it cannot authorize any action.</p></div>`;
+      clearTaskDetail("Reconnect the overview before inspecting tasks.");
+      setConnectionState(expired ? "Not current" : "Unavailable", expired
+        ? "No fresh overview in 15 seconds. Previous status is hidden while we reconnect."
+        : "Cannot refresh the local monitor. Previous status is hidden. Retry now or wait for automatic retry in 5 seconds.", "warn");
+    }
+
+    function validateSummary(data) {
+      if (!data || data.ok !== true || !data.service || !data.service.kill_switch
+          || typeof data.service.kill_switch.engaged !== "boolean"
+          || !data.webhook || typeof data.webhook.status !== "string"
+          || !data.capabilities || !data.tasks || !Array.isArray(data.tasks.items)
+          || data.tasks.items.some((task) => !task || typeof task.task_id !== "string" || !task.task_id)) {
+        throw new Error("Invalid monitor summary");
       }
     }
 
-    function showError(err) {
-      document.getElementById("lastUpdated").textContent = `Dashboard error: ${err}`;
+    function loadSummary() {
+      if (summaryRequest) return summaryRequest;
+      clearTimeout(pollTimer);
+      document.getElementById("refreshBtn").disabled = true;
+      document.getElementById("refreshBtn").textContent = "Refreshing…";
+      summaryRequest = (async () => {
+        try {
+          const data = await fetchJson("/v1/dashboard/summary?limit=30");
+          validateSummary(data);
+          renderOperatorReadiness(data);
+          renderCards(data);
+          renderAttention(data);
+          renderOptimization(data);
+          renderExperience(data);
+          renderCollaborationPromotion(data);
+          renderDailyAssistantPack(data);
+          renderTasks(data);
+          latestSummary = data;
+          lastSuccessAt = Date.now();
+          snapshotCurrent = true;
+          document.getElementById("snapshotContent").hidden = false;
+          setConnectionState("Current", "Overview connected · refreshes every 5 seconds. Offline readiness never authorizes a live send.", "ready");
+          clearTimeout(freshnessTimer);
+          freshnessTimer = setTimeout(() => invalidateSnapshot(true), SNAPSHOT_MAX_AGE_MS);
+          const tasks = data.tasks.items;
+          const nextId = tasks.some((task) => task.task_id === selectedTaskId) ? selectedTaskId : (tasks[0]?.task_id || "");
+          // A slow or failed detail request must not stall or relabel the overview.
+          selectTask(nextId);
+        } catch (_error) {
+          invalidateSnapshot();
+        } finally {
+          summaryRequest = null;
+          document.getElementById("refreshBtn").disabled = false;
+          document.getElementById("refreshBtn").textContent = snapshotCurrent ? "Refresh now" : "Retry now";
+          pollTimer = setTimeout(loadSummary, POLL_INTERVAL_MS);
+        }
+      })();
+      return summaryRequest;
     }
 
-    document.getElementById("refreshBtn").addEventListener("click", () => loadSummary().catch(showError));
-    loadSummary().catch(showError);
-    setInterval(() => loadSummary().catch(showError), 5000);
+    function resumeMonitor() {
+      if (document.hidden) return;
+      // Background tabs may suspend timers. Revoke an old snapshot before
+      // requesting a new one when the tab or network becomes available again.
+      if (lastSuccessAt !== null && Date.now() - lastSuccessAt >= SNAPSHOT_MAX_AGE_MS) invalidateSnapshot(true);
+      loadSummary();
+    }
+
+    document.getElementById("refreshBtn").addEventListener("click", loadSummary);
+    document.getElementById("detailRetryBtn").addEventListener("click", () => loadTask(selectedTaskId));
+    document.addEventListener("visibilitychange", resumeMonitor);
+    window.addEventListener("online", resumeMonitor);
+    loadSummary();
   </script>
 </body>
 </html>

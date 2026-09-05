@@ -333,6 +333,21 @@ receipt older than 24 hours is also blocked until the same offline command is
 rerun. A verified receipt can still correctly show `blocked` when its grade or
 security/reliability stages require it.
 
+The monitor now distinguishes **Current** overview data from **Unavailable**
+or **Not current** status. Each read has a 10-second deadline, including JSON
+decoding; overview polling is single-flight and retries 5 seconds after each
+completion. A failed read, invalid response, or 15 seconds without fresh data
+hides the old panels and replaces the readiness action with reconnect guidance.
+The last successful update remains visible. **Retry now** and returning to a
+suspended tab recheck the existing local endpoints; they do not run the doctor,
+change settings, or send anything.
+
+Task selection works by keyboard as well as pointer. Late results from a
+different task cannot replace the selected task. A same-task background refresh
+keeps the last received details visible and labels them as refreshing; a failed
+detail read clears them and offers **Retry task details**, without incorrectly
+marking a fresh overview disconnected. An empty task list clears old details.
+
 Optional capability table only: `python3 scripts/andrea_capabilities.py`.
 
 **Live doctor** (optional OpenClaw model probe on an owner-approved host). OpenClaw **`--probe-timeout` is in milliseconds** (e.g. 30s → `30000`).
@@ -453,6 +468,12 @@ conflict. Increase `--max-pages` and retry rather than accepting a false “all
 stopped” result.
 
 ## Testing
+
+Use Python 3.12 with `requirements-test.txt` and Node.js 18+ on `PATH`.
+Node is a test-only prerequisite: the dashboard has no new runtime package or
+service. The Python suite executes the actual rendered dashboard JavaScript
+against fake timers and synthetic HTTP/JSON responses, without a browser,
+network, credentials, or live runtime. Missing Node fails the gate explicitly.
 
 **Integration CLI + skill (recommended):**
 

@@ -6,6 +6,7 @@ andrea_capabilities JSON.
 A — No blocked capabilities; optional gaps are modest.
 B — No blocked rows, but many ready_with_limits (degraded / optional missing).
 C — Any blocked row (especially critical ones called out in reasons).
+    Critical capabilities explicitly not run offline also remain unverified/no-go.
 
 Human and JSON output use code-owned actions rather than copying free-form
 probe notes, keeping the result safe for shared agent and dashboard handoffs.
@@ -18,6 +19,7 @@ obvious before reasons or summary JSON.
 Usage:
   python3 scripts/andrea_readiness_grade.py
   python3 scripts/andrea_readiness_grade.py --json
+  python3 scripts/andrea_readiness_grade.py --offline --json
 """
 from __future__ import annotations
 
@@ -89,6 +91,13 @@ def _action_for_row(row: dict) -> str:
     """Return code-owned guidance without echoing probe notes or secret values."""
     capability_id = _safe_capability_id(row)
     name = capability_id.split(":", 1)[-1]
+    if row.get("status") == "not_run":
+        return (
+            f"Capability {capability_id} was not verified in offline mode; this is not "
+            "a missing-install or failed-auth diagnosis. Continue unrelated local code "
+            "and tests only. The owner must approve a separate live readiness check "
+            "before relying on this capability."
+        )
     if capability_id == "skill:cursor_handoff":
         return (
             "Review docs/OPENCLAW_SKILL.md and install the checked-in cursor_handoff "
@@ -219,7 +228,11 @@ def build_readiness_plan(data: dict, grade: str) -> dict:
             "C",
         )
 
-    blocked = [row for row in rows if isinstance(row, dict) and row.get("status") == "blocked"]
+    blocked = [
+        row for row in rows if isinstance(row, dict)
+        and (row.get("status") == "blocked"
+             or (row.get("critical") and row.get("status") == "not_run"))
+    ]
     blocked.sort(
         key=lambda row: (
             not bool(row.get("critical")),
@@ -246,7 +259,7 @@ def build_readiness_plan(data: dict, grade: str) -> dict:
             "id": _safe_capability_id(row),
             "status": (
                 str(row.get("status"))
-                if row.get("status") in {"ready", "ready_with_limits", "blocked"}
+                if row.get("status") in {"ready", "ready_with_limits", "blocked", "not_run"}
                 else "blocked"
             ),
             "critical": bool(row.get("critical")),
@@ -268,9 +281,9 @@ def build_readiness_plan(data: dict, grade: str) -> dict:
     )
 
 
-def run_capabilities() -> dict:
+def run_capabilities(*, offline: bool = False) -> dict:
     proc = subprocess.run(
-        [sys.executable, str(CAP), "--json"],
+        [sys.executable, str(CAP), "--json", *(["--offline"] if offline else [])],
         cwd=str(REPO),
         capture_output=True,
         text=True,
@@ -314,6 +327,10 @@ def grade_from_payload(data: dict) -> tuple[str, list[str]]:
         if len(any_blocked) > 8:
             reasons.append(f"blocked:…+{len(any_blocked) - 8}_more")
         return "C", reasons
+
+    unverified = [r for r in rows if r.get("critical") and r.get("status") == "not_run"]
+    if unverified:
+        return "C", [f"critical_not_verified:{r.get('id')}" for r in unverified]
 
     if limits >= SOFT_LIMITS_THRESHOLD:
         reasons.append(f"ready_with_limits_count={limits}>={SOFT_LIMITS_THRESHOLD}")
@@ -402,13 +419,17 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Andrea readiness grade from capability matrix")
     ap.add_argument("--json", action="store_true", help="Print machine-readable grade payload")
     ap.add_argument(
+        "--offline", action="store_true",
+        help="Skip external capability probes; unverified critical lanes remain no-go",
+    )
+    ap.add_argument(
         "--json-out",
         type=Path,
         help="Also write the same safe machine-readable payload to this file",
     )
     args = ap.parse_args()
 
-    data = run_capabilities()
+    data = run_capabilities(offline=args.offline)
     grade, reasons = grade_from_payload(data)
     readiness_plan = build_readiness_plan(data, grade)
 

@@ -6,6 +6,7 @@ and boolean-only secret presence (never prints secret values).
 Usage:
   python3 scripts/andrea_capabilities.py
   python3 scripts/andrea_capabilities.py --json
+  python3 scripts/andrea_capabilities.py --offline --json
   python3 scripts/andrea_capabilities.py --markdown-table
   python3 scripts/andrea_capabilities.py --strict   # exit 1 if critical capability blocked
 
@@ -15,6 +16,10 @@ Environment:
 OpenClaw skills:
   Core / optional / hybrid keys are defined in this module. Hybrid install matrix:
   docs/ANDREA_OPENCLAW_HYBRID_SKILLS.md
+
+Offline mode skips external GitHub authentication and OpenClaw enumeration.
+It still checks local binaries and boolean secret presence and runs redacted
+local CLI diagnosis; it is not a claim that live integrations were verified.
 """
 from __future__ import annotations
 
@@ -579,7 +584,7 @@ def _cursor_diagnose_summary() -> Tuple[str, str]:
     return "ready", "diagnose ok; CURSOR_API_KEY not set in this probe (see secret:CURSOR_API_KEY)"
 
 
-def build_matrix() -> List[Row]:
+def build_matrix(*, offline: bool = False) -> List[Row]:
     rows: List[Row] = []
     dotenv_main = _read_dotenv_keys(REPO_ROOT / ".env")
     dotenv_skill = _read_dotenv_keys(
@@ -635,7 +640,11 @@ def build_matrix() -> List[Row]:
             )
         )
 
-    oc_status, oc_out, oc_err = _openclaw_skills()
+    oc_status, oc_out, oc_err = (
+        ("not_run", "", "Not verified: OpenClaw skill enumeration was not run in offline mode")
+        if offline
+        else _openclaw_skills()
+    )
     rows.append(
         Row(
             id="openclaw:skills_list",
@@ -643,7 +652,7 @@ def build_matrix() -> List[Row]:
             detail="openclaw skills list",
             status=oc_status,
             notes=oc_err or "skills enumeration",
-            critical=oc_status == "blocked",
+            critical=oc_status in {"blocked", "not_run"},
         )
     )
     # Avoid false "blocked" core skills when `skills list` failed but returned empty/partial output.
@@ -652,7 +661,12 @@ def build_matrix() -> List[Row]:
     ):
         rows.extend(_skill_rows(oc_out))
         rows.extend(_runtime_skill_rows(oc_out))
-    rows.extend(_acp_support_rows(oc_out, skills_probe_ok=oc_status == "ready"))
+    acp_rows = _acp_support_rows(oc_out, skills_probe_ok=oc_status == "ready")
+    if offline:
+        for row in acp_rows:
+            row.status = "not_run"
+            row.notes = "Not verified: ACP runtime depends on OpenClaw enumeration, skipped in offline mode"
+    rows.extend(acp_rows)
     for name in HYBRID_OPTIONAL_BINARIES:
         present = _which(name)
         rows.append(
@@ -668,7 +682,11 @@ def build_matrix() -> List[Row]:
             )
         )
 
-    gh_st, gh_note = _gh_auth_state(dotenv_main, dotenv_skill)
+    gh_st, gh_note = (
+        ("not_run", "Not verified: GitHub authentication was not checked in offline mode")
+        if offline
+        else _gh_auth_state(dotenv_main, dotenv_skill)
+    )
     rows.append(
         Row(
             id="github:auth",
@@ -676,7 +694,7 @@ def build_matrix() -> List[Row]:
             detail="GitHub CLI / token",
             status=gh_st,
             notes=gh_note,
-            critical=gh_st == "blocked",
+            critical=gh_st in {"blocked", "not_run"},
         )
     )
 
@@ -778,12 +796,16 @@ def main() -> int:
     ap.add_argument("--json", action="store_true", help="Emit JSON")
     ap.add_argument("--markdown-table", action="store_true", help="Emit markdown table")
     ap.add_argument(
+        "--offline", action="store_true",
+        help="Skip external OpenClaw/GitHub probes; report those capabilities as not verified",
+    )
+    ap.add_argument(
         "--strict",
         action="store_true",
-        help="Exit 1 if any row with critical=True is blocked",
+        help="Exit 1 if any critical row is blocked or not verified",
     )
     args = ap.parse_args()
-    rows = build_matrix()
+    rows = build_matrix(offline=args.offline)
     payload = {
         "ok": True,
         "repo_root": str(REPO_ROOT),
@@ -792,6 +814,7 @@ def main() -> int:
             "ready": sum(1 for r in rows if r.status == "ready"),
             "ready_with_limits": sum(1 for r in rows if r.status == "ready_with_limits"),
             "blocked": sum(1 for r in rows if r.status == "blocked"),
+            **({"not_run": sum(1 for r in rows if r.status == "not_run")} if args.offline else {}),
             "runtime_skill_rows": sum(
                 1
                 for r in rows
@@ -818,10 +841,11 @@ def main() -> int:
         _print_table(rows)
 
     if args.strict:
-        bad = [r for r in rows if r.critical and r.status == "blocked"]
+        bad = [r for r in rows if r.critical and r.status in {"blocked", "not_run"}]
         if bad:
             sys.stderr.write(
-                "strict: blocked critical capabilities:\n"
+                ("strict: blocked or unverified critical capabilities:\n" if args.offline
+                 else "strict: blocked critical capabilities:\n")
                 + "\n".join(f"  - {r.id}: {r.notes}" for r in bad)
                 + "\n"
             )

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Runtime / auth drift probes with deterministic env isolation for CLI checks.
 # Usage: bash scripts/andrea_reliability_probes.sh
+#        bash scripts/andrea_reliability_probes.sh --offline
 #        RUN_LIVE_PROBES=1 bash scripts/andrea_reliability_probes.sh
 set -euo pipefail
 
@@ -8,6 +9,23 @@ BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CLI="${BASE_DIR}/scripts/cursor_openclaw.py"
 CAP="${BASE_DIR}/scripts/andrea_capabilities.py"
 RUN_LIVE_PROBES="${RUN_LIVE_PROBES:-0}"
+CAPABILITY_ARGS=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --offline)
+      RUN_LIVE_PROBES=0
+      CAPABILITY_ARGS=(--offline)
+      ;;
+    -h|--help)
+      echo "Usage: bash scripts/andrea_reliability_probes.sh [--offline]"
+      echo "  --offline  Skip external capability probes and inherited RUN_LIVE_PROBES."
+      exit 0
+      ;;
+    *) echo "Unknown option: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "OK  $*"; }
@@ -49,7 +67,7 @@ pass "diagnose deterministic (no key in env)"
 
 echo "-------- Andrea capability snapshot (non-strict) --------"
 # Script may still read repo .env on disk; this probe ensures the runner does not crash.
-python3 "$CAP" --json | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("ok") is True; assert "rows" in d; assert "summary" in d' \
+python3 "$CAP" --json ${CAPABILITY_ARGS[@]+"${CAPABILITY_ARGS[@]}"} | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("ok") is True; assert "rows" in d; assert "summary" in d' \
   || fail "andrea_capabilities json shape"
 pass "andrea_capabilities.py --json"
 

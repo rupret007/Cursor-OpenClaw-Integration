@@ -287,7 +287,15 @@ Full steps and flow: [docs/OPENCLAW_SKILL.md](docs/OPENCLAW_SKILL.md).
 bash scripts/andrea_doctor.sh --offline
 ```
 
-Read the `--- Operator next steps ---` block. It names **Who acts first**, then **Next for Andrea**, **Next for the coding agent (Bob)**, and **Next for the owner**. Grade C still finishes the offline pass and reprints that recap; exit `1` means the owner must clear a blocker. Do not send a message, enable Private API, or restart a gateway unless the owner asks.
+Read the `--- Operator next steps ---` block. It names **Who acts first**, then **Next for Andrea**, **Next for the coding agent (Bob)**, and **Next for the owner**. Grade C still finishes the offline pass and reprints that recap; exit `1` means readiness is blocked or not verified. Do not send a message, enable Private API, or restart a gateway unless the owner asks.
+
+Explicit `--offline` overrides inherited live-enforcer, model-guard, health,
+and live-probe options. OpenClaw skill enumeration and GitHub authentication
+are `not_run`, not successful or missing: unchecked critical capabilities keep
+Grade C until the owner separately approves the relevant readiness check.
+This is still a local diagnostic, not a fixture-only command; it checks local
+binary and environment-key presence without printing secret values. It does
+not install skills, restart services, or change settings.
 
 For a handoff that Bob, Codex, Grok, Claude, or a dashboard can consume
 without scraping terminal prose, add a receipt path:
@@ -303,8 +311,9 @@ offline-probe stage outcomes; the code-owned actor/action/hold contract; named
 excludes raw probe output, environment values, capability notes, and the local
 repository path. A failed stage or Grade C always makes `overall_status`
 `blocked`. A failed security/reliability stage also overrides leftover Grade A
-next-step text to owner-first fail-closed actions. Receipt generation is
-intentionally offline-only and never runs an OpenClaw model probe.
+next-step text to owner-first fail-closed actions. Receipt generation requires
+explicit `--offline`; the legacy `SKIP_OPENCLAW_PROBE=1` environment setting
+alone cannot produce a receipt.
 
 Bob, Codex, Grok, Claude, and dashboards should consume the artifact through
 the code-owned verifier instead of scraping JSON by hand:
@@ -330,8 +339,19 @@ The **Operator readiness** panel shows the responsible actor and one next
 action. It never returns the receipt path, raw JSON, probe output, or
 fingerprint. Missing, invalid, or tampered receipts are blocked; a valid
 receipt older than 24 hours is also blocked until the same offline command is
-rerun. A verified receipt can still correctly show `blocked` when its grade or
-security/reliability stages require it.
+rerun. Expiration does not erase previous owner holds or failed stages: those
+remain clearly labeled **historical**, never current authority or proof that a
+blocker cleared. A verified receipt can still correctly show `blocked` when
+its grade or security/reliability stages require it.
+
+The panel shows one selectable, code-owned refresh command targeting the same
+`data/andrea-doctor-receipt.json` file it reads, including when a failed-stage
+receipt's generic CLI guidance used `/tmp/`. The command field retains focus
+and text selection while the monitor polls. It has no execute or clipboard
+handler. Follow the named actor/hold, run the command in this checkout's
+terminal if permitted, then choose **Refresh now**. Refreshing the page alone
+does not run a check or clear a blocker. See
+[the operator recovery handoff](docs/OPERATOR_RECOVERY.md).
 
 The monitor now distinguishes **Current** overview data from **Unavailable**
 or **Not current** status. Each read has a 10-second deadline, including JSON
@@ -348,7 +368,7 @@ keeps the last received details visible and labels them as refreshing; a failed
 detail read clears them and offers **Retry task details**, without incorrectly
 marking a fresh overview disconnected. An empty task list clears old details.
 
-Optional capability table only: `python3 scripts/andrea_capabilities.py`.
+Optional offline capability table: `python3 scripts/andrea_capabilities.py --offline`.
 
 **Live doctor** (optional OpenClaw model probe on an owner-approved host). OpenClaw **`--probe-timeout` is in milliseconds** (e.g. 30s → `30000`).
 

@@ -41,7 +41,13 @@ cd /path/to/Cursor-OpenClaw-Integration
 bash scripts/andrea_doctor.sh --offline
 ```
 
-Read `--- Operator next steps ---`: **Who acts first**, then **Next for Andrea**, **Next for the coding agent (Bob)**, and **Next for the owner**. Grade C still finishes the offline pass and reprints that recap; exit `1` means the owner must clear a blocker.
+Read `--- Operator next steps ---`: **Who acts first**, then **Next for Andrea**, **Next for the coding agent (Bob)**, and **Next for the owner**. Grade C still finishes the offline pass and reprints that recap; exit `1` means readiness is blocked or unverified, not necessarily a failed installation.
+
+Explicit `--offline` skips external capability checks and overrides inherited
+live-enforcer, health, model-guard, and live-probe options. Unexecuted OpenClaw
+and GitHub checks are `not_run`; the owner must approve a separate real check
+before relying on them. Local binary/key-presence and redacted diagnostics
+still run. The legacy model-probe-skip variable alone cannot create a receipt.
 
 For a stable cross-agent/dashboard handoff from that same run:
 
@@ -82,7 +88,12 @@ the lower telemetry. The panel exposes only the allowlisted dashboard packet:
 receipt state, grade/status, responsible actor, failed gate stages, and one
 next action. It blocks missing/invalid receipts and treats verified receipts
 older than 24 hours as stale. Stale status is dashboard freshness policy; it
-does not rewrite or weaken the receipt fingerprint.
+does not rewrite or weaken the receipt fingerprint. Stale verified failures
+retain their previous owner hold under a historical label, not a fake cleared
+state. The stable selectable command points to this same `data/` receipt;
+polling never runs it or copies it automatically. Refresh after the named actor
+has generated new evidence. A newly verified blocked result remains blocked.
+See [OPERATOR_RECOVERY.md](OPERATOR_RECOVERY.md) for the complete recovery path.
 
 Live doctor (optional model probe on an owner-approved host):
 
@@ -96,11 +107,11 @@ bash scripts/andrea_doctor.sh
 # OPENCLAW_ENFORCE=1 bash scripts/andrea_doctor.sh
 ```
 
-Manual steps (same ingredients):
+Manual offline steps (same ingredients):
 
 ```bash
-python3 scripts/andrea_capabilities.py
-python3 scripts/andrea_readiness_grade.py   # A/B/C; exits 1 on C
+python3 scripts/andrea_capabilities.py --offline
+python3 scripts/andrea_readiness_grade.py --offline   # A/B/C; exits 1 on C/unverified
 bash scripts/andrea_security_sanity.sh
 ```
 

@@ -344,14 +344,16 @@ def consult_doctor_receipt(
     search_roots: list[Optional[Path]],
     now: Optional[float] = None,
     environ: Optional[Dict[str, str]] = None,
+    cwd: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Consult an existing offline doctor receipt. Missing evidence is not a gate."""
     env = os.environ if environ is None else environ
     module = load_doctor_receipt_module(search_roots)
+    discovery_cwd = Path.cwd() if cwd is None else Path(cwd)
     if module is None:
         raw = (explicit or env.get("ANDREA_DOCTOR_RECEIPT") or "").strip()
         discovered = False
-        for root in [local_repo, Path.cwd()]:
+        for root in [local_repo, discovery_cwd]:
             if root is None:
                 continue
             candidate = Path(root) / "data" / "andrea-doctor-receipt.json"
@@ -397,7 +399,7 @@ def consult_doctor_receipt(
             "reason": "receipt_not_consulted",
         }
     path, source = module.resolve_handoff_receipt_path(
-        explicit, local_repo=local_repo, environ=env
+        explicit, local_repo=local_repo, cwd=discovery_cwd, environ=env
     )
     return module.consult_receipt_for_handoff(path, source=source, now=now)
 

@@ -7,7 +7,7 @@ import urllib.parse
 from pathlib import Path
 from typing import Any, Dict, List
 
-from scripts.andrea_doctor_receipt import consume_receipt
+from scripts.andrea_doctor_receipt import RERUN_COMMAND, consume_receipt
 
 from .adapters import telegram as tg_adapt
 from .assistant_domain_rollout import (
@@ -62,8 +62,33 @@ def _refresh_readiness_snapshot(
     reason: str,
     receipt_verified: bool = False,
     age_seconds: float | None = None,
+    prior_packet: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     security_review = receipt_state == "invalid"
+    # Expiration withdraws current authority, not the last verified blocker.
+    # Never manufacture history from an invalid or unreadable artifact.
+    history = None
+    if receipt_state == "stale" and receipt_verified and prior_packet is not None:
+        history = {
+            "overall_status": prior_packet["overall_status"],
+            "grade": prior_packet["grade"],
+            "who_acts_first": prior_packet["who_acts_first"],
+            "blocked_reason": prior_packet["blocked_reason"],
+            "failed_stages": list(prior_packet["failed_stages"]),
+        }
+    owner_hold = security_review or (
+        history is not None and prior_packet.get("must_wait_for_owner") is True
+    )
+    if history is not None and owner_hold:
+        next_action = (
+            "The last verified check recorded an owner blocker; its clearance "
+            "has not been verified. Keep the owner hold. After owner review, "
+            "refresh the offline evidence: "
+        )
+    elif security_review:
+        next_action = "Owner review required. Replace the invalid receipt with a fresh offline doctor result: "
+    else:
+        next_action = "Run the offline doctor and refresh this dashboard: "
     return {
         "receipt_state": receipt_state,
         "trusted_receipt": False,
@@ -74,17 +99,20 @@ def _refresh_readiness_snapshot(
         "overall_status": "blocked",
         "blocked_reason": f"{receipt_state}_receipt",
         "grade": "C",
-        "who_acts_first": "owner" if security_review else "coding_agent",
+        "who_acts_first": "owner" if owner_hold else "coding_agent",
         "safe_for_autonomous_ops": False,
-        "may_continue_offline_code": not security_review,
-        "must_wait_for_owner": security_review,
-        "next_action": (
-            "Replace the invalid receipt with a fresh offline doctor result: "
-            if security_review
-            else "Run the offline doctor and refresh this dashboard: "
+        "may_continue_offline_code": (
+            prior_packet.get("may_continue_offline_code") is True
+            if history is not None
+            else not security_review
         )
-        + OPERATOR_RECEIPT_REFRESH_COMMAND,
-        "failed_stages": [],
+        and not security_review,
+        "must_wait_for_owner": owner_hold,
+        "next_action": next_action + OPERATOR_RECEIPT_REFRESH_COMMAND,
+        "failed_stages": list(history["failed_stages"]) if history else [],
+        "last_verified": history,
+        "refresh_required": True,
+        "refresh_command": OPERATOR_RECEIPT_REFRESH_COMMAND,
         "reason": reason,
     }
 
@@ -121,6 +149,7 @@ def build_operator_readiness_snapshot(
             reason="receipt_too_old",
             receipt_verified=True,
             age_seconds=age_seconds,
+            prior_packet=packet,
         )
 
     failed_stages = packet.get("failed_stages")
@@ -140,8 +169,16 @@ def build_operator_readiness_snapshot(
         "safe_for_autonomous_ops": packet.get("safe_for_autonomous_ops") is True,
         "may_continue_offline_code": packet.get("may_continue_offline_code") is True,
         "must_wait_for_owner": packet.get("must_wait_for_owner") is True,
-        "next_action": str(packet.get("next_action") or OPERATOR_RECEIPT_REFRESH_COMMAND),
+        # Keep the verifier's actor/action contract, but route this surface's
+        # recovery to the same receipt it actually consumes. Receipt bytes and
+        # fingerprints remain unchanged; arbitrary receipt commands are unused.
+        "next_action": str(packet.get("next_action") or OPERATOR_RECEIPT_REFRESH_COMMAND).replace(
+            RERUN_COMMAND, OPERATOR_RECEIPT_REFRESH_COMMAND
+        ),
         "failed_stages": [str(stage) for stage in failed_stages[:4]],
+        "last_verified": None,
+        "refresh_required": packet.get("overall_status") == "blocked",
+        "refresh_command": OPERATOR_RECEIPT_REFRESH_COMMAND,
         "reason": str(packet.get("reason") or "ok"),
     }
 
@@ -1013,6 +1050,16 @@ def render_dashboard_html() -> str:
     .readinessActor strong { display: block; font-size: 22px; margin-top: 8px; }
     .readinessAction p { color: #e3ebff; font-size: 15px; line-height: 1.45; margin-top: 8px; overflow-wrap: anywhere; }
     .readinessMeta { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin-top: 12px; }
+    .readinessStatus { margin-top: 12px; line-height: 1.5; }
+    .readinessHistory { margin-top: 14px; padding: 14px; border: 1px solid #665332; border-radius: 12px; background: #211e19; }
+    .readinessHistory h3 { font-size: 15px; }
+    .readinessHistory p, .readinessHistory li { margin-top: 8px; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+    .readinessHistory ul { margin: 8px 0 0; padding-left: 20px; }
+    .readinessRecovery { margin-top: 14px; padding: 14px; border: 1px solid #304267; border-radius: 12px; min-width: 0; }
+    .readinessRecovery label { display: block; font-weight: 600; font-size: 14px; }
+    .readinessRecovery textarea { display: block; box-sizing: border-box; width: 100%; min-width: 0; margin: 10px 0; padding: 12px; border: 1px solid #536b98; border-radius: 8px; background: #0b1020; color: #eef2ff; font: 16px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; resize: vertical; }
+    .readinessRecovery textarea:focus-visible { outline: 3px solid #9dc7ff; outline-offset: 3px; }
+    .readinessRecovery p { line-height: 1.5; }
     button { background: #315efb; color: white; border: 0; border-radius: 10px; padding: 10px 14px; cursor: pointer; font-weight: 600; }
     button:hover { background: #426cff; }
     button:disabled { opacity: 0.65; cursor: wait; }
@@ -1052,7 +1099,13 @@ def render_dashboard_html() -> str:
         </div>
         <span class="pill warn" id="operatorReadinessPill">checking</span>
       </div>
+      <p class="subtle readinessStatus" id="operatorReadinessStatus" role="status" aria-live="polite" aria-atomic="true">Waiting for offline evidence.</p>
       <div id="operatorReadiness"></div>
+      <div class="readinessRecovery" id="operatorReadinessRecovery" hidden>
+        <label for="operatorReadinessCommand">Offline evidence refresh command</label>
+        <textarea id="operatorReadinessCommand" readonly rows="4" wrap="soft" spellcheck="false" aria-describedby="operatorReadinessCommandHelp">bash scripts/andrea_doctor.sh --offline --receipt data/andrea-doctor-receipt.json</textarea>
+        <p class="subtle" id="operatorReadinessCommandHelp">From this repository's terminal, select and run this command only when the named actor can proceed. It writes the offline evidence this dashboard reads. Then choose Refresh now above. This page does not run commands, copy to your clipboard, or clear blockers.</p>
+      </div>
     </section>
 
     <div id="snapshotContent" hidden>
@@ -1248,36 +1301,74 @@ def render_dashboard_html() -> str:
 
     function renderOperatorReadiness(data) {
       const readiness = data.operator_readiness || {};
-      const status = readiness.overall_status || "blocked";
-      const actor = readiness.who_acts_first || "owner";
-      const action = readiness.next_action || "Run the offline doctor before continuing.";
       const state = readiness.receipt_state || "missing";
+      const current = state === "current" && readiness.trusted_receipt === true && readiness.receipt_verified === true;
+      const historical = state === "stale" && readiness.receipt_verified === true;
+      const status = current && ["ready", "ready_with_limits", "blocked"].includes(readiness.overall_status)
+        ? readiness.overall_status : "blocked";
+      const actorNames = { owner: "Owner", coding_agent: "Coding agent", andrea: "Andrea" };
+      const actor = actorNames[readiness.who_acts_first] || "Owner";
+      const command = "bash scripts/andrea_doctor.sh --offline --receipt data/andrea-doctor-receipt.json";
+      const showCommand = readiness.refresh_required === true && readiness.refresh_command === command;
+      const action = String(readiness.next_action || "Current next steps are unavailable. Refresh the offline evidence before continuing.")
+        .replaceAll(command, showCommand ? "the offline evidence refresh command below" : "a fresh offline evidence check before continuing");
       const ageSeconds = readiness.age_seconds == null || readiness.age_seconds === "" ? NaN : Number(readiness.age_seconds);
       const age = Number.isFinite(ageSeconds) ? `${Math.max(0, Math.round(ageSeconds / 60))}m old` : "no current receipt";
-      const trust = readiness.trusted_receipt ? "verified + current" : (readiness.receipt_verified ? "verified, not current" : "not trusted");
-      const failed = (readiness.failed_stages || []).length ? `Failed: ${(readiness.failed_stages || []).join(", ")}` : "No failed gate stage recorded";
+      const failedStages = Array.isArray(readiness.failed_stages) ? readiness.failed_stages.slice(0, 4) : [];
+      const trust = current ? "Verified current offline result" : (historical ? "Verified historical result — not current" : "No trusted current result");
+      let note = "Offline evidence is missing. Refresh it before treating this host as ready.";
+      if (state === "invalid") note = "Evidence could not be verified. Owner review is required; readiness remains blocked.";
+      else if (historical) note = "Evidence is out of date. The last verified result is historical and cannot establish current readiness.";
+      else if (current) note = status === "ready"
+        ? "Current offline evidence is ready. This does not authorize a live send."
+        : (status === "ready_with_limits"
+          ? "Current offline evidence is ready with limits. Follow the named actor's next step within those limits; this does not authorize a live send."
+          : "Current offline evidence records a blocker. Follow the named actor's next step; refreshing alone does not clear it.");
+      const statusLine = document.getElementById("operatorReadinessStatus");
+      if (statusLine.textContent !== note) statusLine.textContent = note;
       const pill = document.getElementById("operatorReadinessPill");
       pill.className = `pill ${pillClass(status)}`;
-      pill.textContent = status;
+      pill.textContent = current ? (status === "ready_with_limits" ? "ready with limits" : status) : (state === "invalid" ? "owner review" : "refresh needed");
+      const previous = historical && readiness.last_verified && typeof readiness.last_verified === "object"
+        ? readiness.last_verified : null;
+      let history = "";
+      if (previous) {
+        const priorFailed = Array.isArray(previous.failed_stages) ? previous.failed_stages.slice(0, 4) : [];
+        history = `<div class="readinessHistory">
+          <h3>${previous.overall_status === "blocked" ? "Last verified blockers — historical" : "Last verified result — historical"}</h3>
+          <p>${previous.overall_status === "blocked" ? "This older result is not current. No blocker is assumed cleared and it cannot authorize work." : "This older result is not current and cannot authorize work. Refresh the offline evidence before treating its result as current."}</p>
+          <ul>
+            <li>Recorded result: ${escapeHtml(previous.overall_status || "unknown")} · Grade ${escapeHtml(previous.grade || "unknown")}</li>
+            <li>Recorded actor: ${escapeHtml(actorNames[previous.who_acts_first] || "Unknown")}</li>
+            <li>${escapeHtml(priorFailed.length ? `Recorded failed stages: ${priorFailed.join(", ")}` : "No failed gate stage was recorded in that historical result.")}</li>
+            ${previous.blocked_reason ? `<li>Recorded reason: ${escapeHtml(previous.blocked_reason)}</li>` : ""}
+          </ul>
+        </div>`;
+      } else if (!current) {
+        history = `<p class="subtle readinessStatus">No trusted blocker history is available in this snapshot. That does not mean the gates passed.</p>`;
+      }
       document.getElementById("operatorReadiness").innerHTML = `
         <div class="readinessGrid">
           <div class="readinessActor">
-            <div class="label">Who acts first</div>
+            <div class="label">${current ? "Who acts first" : "Who reviews or refreshes next"}</div>
             <strong>${escapeHtml(actor)}</strong>
             <div class="readinessMeta">
-              <span class="pill ${readiness.trusted_receipt ? "ready" : "bad"}">${escapeHtml(trust)}</span>
+              <span class="pill ${current && status === "ready" ? "ready" : "warn"}">${escapeHtml(trust)}</span>
               <span class="subtle">${escapeHtml(state)} · ${escapeHtml(age)}</span>
             </div>
           </div>
           <div class="readinessAction">
             <div class="label">One next action</div>
             <p>${escapeHtml(action)}</p>
-            <div class="readinessMeta">
+            ${current ? `<div class="readinessMeta">
               <span class="subtle">Grade ${escapeHtml(readiness.grade || "C")}</span>
-              <span class="subtle">${escapeHtml(failed)}</span>
-            </div>
+              <span class="subtle">${escapeHtml(failedStages.length ? `Failed: ${failedStages.join(", ")}` : "No failed gate stage recorded in this current result")}</span>
+            </div>` : ""}
           </div>
-        </div>`;
+        </div>${history}`;
+      // The readonly command is a stable node: polling must not discard the
+      // operator's keyboard focus or partial text selection.
+      document.getElementById("operatorReadinessRecovery").hidden = !showCommand;
     }
 
     function renderAttention(data) {
@@ -1847,6 +1938,8 @@ def render_dashboard_html() -> str:
       const pill = document.getElementById("operatorReadinessPill");
       pill.className = "pill warn";
       pill.textContent = "unavailable";
+      document.getElementById("operatorReadinessRecovery").hidden = true;
+      document.getElementById("operatorReadinessStatus").textContent = "Current offline evidence is unavailable. Reconnect the overview before continuing.";
       document.getElementById("operatorReadiness").innerHTML = `<div class="item"><strong>Current readiness is unavailable.</strong><p class="subtle" style="margin-top:8px;">Refresh the dashboard to check who acts next. Previous evidence is hidden; it cannot authorize any action.</p></div>`;
       clearTaskDetail("Reconnect the overview before inspecting tasks.");
       setConnectionState(expired ? "Not current" : "Unavailable", expired

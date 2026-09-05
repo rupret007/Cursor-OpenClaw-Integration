@@ -28,6 +28,9 @@ class Element {
     this.className = attributes.class || "";
     this.hidden = Object.hasOwn(attributes, "hidden");
     this.disabled = false;
+    this.value = "";
+    this.selectionStart = 0;
+    this.selectionEnd = 0;
     this.style = {};
     this.dataset = {};
     this.classList = {
@@ -50,6 +53,7 @@ class Element {
     this.innerHTMLWrites += 1;
   }
   focus() { if (this.onFocus) this.onFocus(this); }
+  setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; }
   addEventListener(name, listener) {
     const listeners = this.listeners.get(name) || [];
     listeners.push(listener);
@@ -97,6 +101,7 @@ function browser() {
   let nextTimer = 1;
   const timers = new Map();
   const elements = new Map();
+  const sideEffects = [];
   for (const tag of html.matchAll(/<[^>]+\bid="([^"]+)"[^>]*>/g)) {
     const attributes = {};
     for (const attribute of tag[0].matchAll(/([\w-]+)="([^"]*)"/g)) {
@@ -104,6 +109,9 @@ function browser() {
     }
     if (/\shidden(?:[\s=>])/.test(tag[0])) attributes.hidden = "";
     elements.set(tag[1], new Element(tag[1], attributes));
+  }
+  for (const textarea of html.matchAll(/<textarea\b[^>]*id="([^"]+)"[^>]*>([\s\S]*?)<\/textarea>/g)) {
+    elements.get(textarea[1]).value = textarea[2];
   }
   const element = (id) => {
     assert.ok(elements.has(id), `actual HTML must define #${id}`);
@@ -136,6 +144,12 @@ function browser() {
       return this.taskButtons;
     },
   };
+  for (const element of elements.values()) element.onFocus = () => { document.activeElement = element; };
+  const refuseAction = (name) => () => {
+    sideEffects.push(name);
+    throw new Error(`Readonly dashboard attempted ${name}`);
+  };
+  document.execCommand = refuseAction("execCommand");
   const timer = (fn, delay, repeat) => {
     const id = nextTimer++;
     timers.set(id, { fn, at: now + Number(delay || 0), repeat });
@@ -147,6 +161,8 @@ function browser() {
   }
   const context = vm.createContext({
     document, Date: FixtureDate, AbortController, DOMException, console,
+    navigator: { clipboard: { writeText: refuseAction("clipboard write") }, share: refuseAction("native share") },
+    open: refuseAction("window.open"),
     URL, URLSearchParams,
     setTimeout: (fn, delay) => timer(fn, delay, 0),
     clearTimeout: (id) => timers.delete(id),
@@ -169,7 +185,7 @@ function browser() {
   context.addEventListener = () => {};
   vm.runInContext(inline, context, { filename: "rendered-dashboard.js" });
   return {
-    context, requests, element, timers, document,
+    context, requests, element, timers, document, sideEffects,
     call: (source) => vm.runInContext(source, context),
     elapseWithoutTimers(milliseconds) { now += milliseconds; },
     async advance(milliseconds) {
@@ -209,9 +225,156 @@ function assertUnavailable(b) {
   assert.equal(b.element("snapshotContent").hidden, true);
   assert.equal(b.element("operatorReadinessPill").textContent.toLowerCase(), "unavailable");
   assert.doesNotMatch(b.element("operatorReadiness").innerHTML, /FRESH_ACTION_ONLY|coding_agent/);
+  assert.equal(b.element("operatorReadinessRecovery").hidden, true);
+}
+
+const OFFLINE_COMMAND = "bash scripts/andrea_doctor.sh --offline --receipt data/andrea-doctor-receipt.json";
+
+function recovery(state = "missing", previous = null) {
+  return {
+    receipt_state: state, trusted_receipt: false, receipt_verified: state === "stale",
+    overall_status: "blocked", grade: null, who_acts_first: "owner",
+    next_action: `Review evidence and run ${OFFLINE_COMMAND}`,
+    age_seconds: state === "stale" ? 90000 : null,
+    failed_stages: [], refresh_required: true, refresh_command: OFFLINE_COMMAND,
+    last_verified: previous,
+  };
+}
+
+async function renderReadiness(readiness) {
+  const b = browser();
+  await settle();
+  b.requests[0].resolve({ ...summary(), operator_readiness: readiness });
+  await settle();
+  assert.equal(b.element("connectionState").textContent, "Current");
+  return b;
 }
 
 const scenarios = {
+  async "offline recovery command is display-only and retains selection across unchanged polls"() {
+    const data = recovery();
+    const b = await renderReadiness(data);
+    const command = b.element("operatorReadinessCommand");
+    const panel = b.element("operatorReadinessRecovery");
+    assert.equal(panel.hidden, false);
+    assert.equal(command.value, OFFLINE_COMMAND);
+    assert.match(html, /<textarea\b[^>]*id="operatorReadinessCommand"[^>]*\breadonly\b/);
+    assert.match(html, /<label for="operatorReadinessCommand">Offline evidence refresh command<\/label>/);
+    command.focus();
+    command.setSelectionRange(5, 28);
+    command.click();
+    assert.equal(b.requests.length, 1);
+    assert.deepEqual(b.sideEffects, []);
+    assert.equal(b.requests[0].url, "/v1/dashboard/summary?limit=30");
+    const ancestorWrites = panel.innerHTMLWrites;
+    for (let repeat = 0; repeat < 3; repeat += 1) {
+      b.call("loadSummary()");
+      await settle();
+      b.requests.at(-1).resolve({ ...summary(), operator_readiness: data });
+      await settle();
+      assert.equal(b.element("operatorReadinessCommand"), command);
+      assert.equal(b.document.activeElement, command);
+      assert.equal(command.value, OFFLINE_COMMAND);
+      assert.equal(command.selectionStart, 5);
+      assert.equal(command.selectionEnd, 28);
+      assert.equal(panel.innerHTMLWrites, ancestorWrites);
+      assert.deepEqual(b.sideEffects, []);
+    }
+    assert.equal(b.requests.length, 4, "only explicit summary refreshes are performed");
+  },
+  async "stale failed evidence preserves the recorded owner and blockers only as history"() {
+    const b = await renderReadiness(recovery("stale", {
+      overall_status: "blocked", grade: "C", who_acts_first: "owner",
+      failed_stages: ["security", "reliability"], blocked_reason: "security_gate_failed",
+    }));
+    const content = b.element("operatorReadiness").innerHTML;
+    assert.match(content, /Last verified blockers — historical/);
+    assert.match(content, /Recorded actor: Owner/);
+    assert.match(content, /Recorded failed stages: security, reliability/);
+    assert.match(content, /security_gate_failed/);
+    assert.match(content, /No blocker is assumed cleared/);
+    assert.match(content, /Verified historical result — not current/);
+    assert.notEqual(b.element("operatorReadinessPill").textContent, "ready");
+    assert.equal(b.element("operatorReadinessRecovery").hidden, false);
+  },
+  async "missing and invalid evidence never invent historical grades or successful gates"() {
+    for (const state of ["missing", "invalid"]) {
+      const b = await renderReadiness(recovery(state));
+      const content = b.element("operatorReadiness").innerHTML;
+      assert.match(content, /No trusted blocker history is available/);
+      assert.match(content, /does not mean the gates passed/);
+      assert.doesNotMatch(content, /Grade [ABC]|No failed gate stage|Last verified blockers/);
+      assert.equal(b.element("operatorReadinessRecovery").hidden, false);
+      if (state === "invalid") assert.match(b.element("operatorReadinessStatus").textContent, /Owner review is required/);
+    }
+  },
+  async "unverified stale history cannot be shown as previously trusted evidence"() {
+    const data = recovery("stale", { overall_status: "ready", grade: "A", who_acts_first: "coding_agent" });
+    data.receipt_verified = false;
+    const b = await renderReadiness(data);
+    assert.doesNotMatch(b.element("operatorReadiness").innerHTML, /Recorded result|Grade A|Last verified result/);
+    assert.match(b.element("operatorReadiness").innerHTML, /No trusted blocker history/);
+  },
+  async "historical narrative is escaped and cannot become executable markup"() {
+    const b = await renderReadiness(recovery("stale", {
+      overall_status: "blocked", grade: '<img src=x onerror="bad()">', who_acts_first: '<script>bad()</script>',
+      failed_stages: ['<svg onload="bad()">'], blocked_reason: '<script>bad()</script>',
+    }));
+    const content = b.element("operatorReadiness").innerHTML;
+    assert.doesNotMatch(content, /<script|<img|<svg/);
+    assert.match(content, /&lt;script&gt;/);
+    assert.match(content, /&lt;svg/);
+    assert.match(content, /Recorded actor: Unknown/);
+    assert.deepEqual(b.sideEffects, []);
+  },
+  async "unknown or non-exact recovery commands remain hidden"() {
+    for (const command of ["", `${OFFLINE_COMMAND}; unexpected`, `${OFFLINE_COMMAND}\n`, "sudo reboot"]) {
+      const b = await renderReadiness({ ...recovery(), refresh_command: command });
+      assert.equal(b.element("operatorReadinessRecovery").hidden, true);
+      assert.equal(b.element("operatorReadinessCommand").value, OFFLINE_COMMAND);
+      assert.deepEqual(b.sideEffects, []);
+      assert.equal(b.requests.length, 1);
+    }
+  },
+  async "failed or malformed overview hides previously rendered recovery and blocker history"() {
+    for (const failure of ["network", "malformed"]) {
+      const b = await renderReadiness(recovery("stale", {
+        overall_status: "blocked", grade: "C", who_acts_first: "owner", failed_stages: ["HISTORY_SENTINEL"],
+      }));
+      b.call("loadSummary()");
+      await settle();
+      if (failure === "network") b.requests.at(-1).reject();
+      else b.requests.at(-1).resolve({ ok: true });
+      await settle();
+      assertUnavailable(b);
+      assert.doesNotMatch(b.element("operatorReadiness").innerHTML, /HISTORY_SENTINEL|Last verified/);
+      assert.equal(b.element("operatorReadinessRecovery").hidden, true);
+    }
+  },
+  async "current Grade B remains ready with limits and keeps its actual next actor"() {
+    const b = await renderReadiness({
+      ...summary().operator_readiness,
+      overall_status: "ready_with_limits", grade: "B", who_acts_first: "andrea",
+      next_action: "LIMITED_OFFLINE_ACTION", refresh_required: false,
+    });
+    const content = b.element("operatorReadiness").innerHTML;
+    assert.equal(b.element("operatorReadinessPill").textContent, "ready with limits");
+    assert.match(content, /<strong>Andrea<\/strong>/);
+    assert.match(content, /Grade B/);
+    assert.match(content, /LIMITED_OFFLINE_ACTION/);
+    assert.doesNotMatch(b.element("operatorReadinessStatus").textContent, /records a blocker/);
+    assert.equal(b.element("operatorReadinessRecovery").hidden, true);
+  },
+  async "stale prior Grade A or B is a historical result and not invented blockers"() {
+    for (const [overall_status, grade] of [["ready", "A"], ["ready_with_limits", "B"]]) {
+      const b = await renderReadiness(recovery("stale", { overall_status, grade, who_acts_first: "andrea", failed_stages: [] }));
+      const content = b.element("operatorReadiness").innerHTML;
+      assert.match(content, /Last verified result — historical/);
+      assert.doesNotMatch(content, /Last verified blockers/);
+      assert.match(content, /not current and cannot authorize work/);
+      assert.notEqual(b.element("operatorReadinessPill").textContent, "ready");
+    }
+  },
   async "concurrent refreshes coalesce and the next poll waits for completion"() {
     const b = browser();
     b.call("loadSummary()");

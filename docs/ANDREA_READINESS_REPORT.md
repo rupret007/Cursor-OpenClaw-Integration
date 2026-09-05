@@ -6,6 +6,12 @@
 
 This file records the **latest verified state** of the Andrea max-autonomy stack. Refresh after material changes (new machine, token rotation, OpenClaw upgrade).
 
+Workflow note (September 5, 2026; **not** a new host sign-off): explicit offline
+doctor checks now skip external probes and inherited live/remediation options.
+Unexecuted critical capabilities are `not_run` and keep Grade C/no-go without
+claiming missing software or failed authentication. Record the evidence mode
+alongside any grade. See [OPERATOR_RECOVERY.md](OPERATOR_RECOVERY.md).
+
 ## 0. Max-autonomy rollout (implementation)
 
 The following artifacts landed on **2026-03-20** (extended with masterclass hardening):
@@ -103,12 +109,16 @@ doctor, then read the top-level **Operator readiness** panel. The API summary
 returns only allowlisted decision fields and no source path/fingerprint/raw
 JSON. Missing or invalid receipts fail closed; verified receipts older than 24
 hours are marked stale and cannot authorize current operation until rerun.
+Previously verified owner holds/failed stages remain historical until new
+verified evidence replaces them; expiration or page refresh does not clear a
+blocker. Use the panel's stable `data/` refresh command for this dashboard, not
+the generic CLI `/tmp/` destination. The panel never executes or copies it.
 
 | Grade | Meaning |
 |-------|---------|
 | **A** | No blocked capabilities; limited degradation |
 | **B** | No blockers; many `ready_with_limits` or GitHub auth degraded |
-| **C** | One or more blocked rows (or capabilities script failed) — **no-go** for autonomous ops until fixed |
+| **C** | Blocked rows, an unverified critical check (`not_run`), or a failed capabilities script — **no-go** for autonomous ops until resolved/verified |
 
 ---
 

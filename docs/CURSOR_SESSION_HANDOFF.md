@@ -1,8 +1,38 @@
 # Cursor session handoff snapshot
 
-Last updated: 2026-09-04 resilient operator-monitor product pass.
+Last updated: 2026-09-05 operator readiness recovery product pass.
 
 ## Current draft handoff
+
+- **Base:** exact main `10863501a421fb3d17e52e8b02f0423ccc2318ff`;
+  resilient monitor #21 already landed, not redone.
+- **Branch:** `codex/openclaw-product-recovery-20260905`.
+- **Product delta:** readiness recovery preserves verified old owner holds and
+  failed-stage evidence as historical, shows one stable selectable command for
+  the receipt this dashboard consumes, and distinguishes unknown/blocked/ready
+  with limits. A new verified result replaces history; page refresh alone does
+  not resolve a blocker. No new endpoint or automatic execution/copy.
+- **Offline boundary:** explicit doctor `--offline` now prevents inherited
+  enforcer/model-guard/live-health/live-probe options and external capability
+  probes. Unexecuted critical checks are `not_run` and remain no-go; they are
+  not reported as installed/missing/authenticated/failed. Legacy probe-skip is
+  not equivalent to explicit offline mode and cannot create a receipt.
+- **Reuse:** existing receipt consumer, schema 2/fingerprint, show-next actor
+  contract, and monitor polling/task behavior. Receipt bytes are not rewritten
+  merely to change the dashboard's recovery destination.
+- **Verification:** focused state-transition and isolated exact-script tests,
+  actual rendered-JavaScript scenarios, existing HTTP tests and full offline
+  integration are required. Exact local/hosted results and draft tip are
+  recorded on the PR and Bob-the-Bot coord #20, not implied by this note.
+- **Holds:** `services/andrea_sync/server.py` remains exact base blob
+  `8c5efa82c51534d93503b9cb655ba3eeefe2d39c`; exact send fence and Private API
+  OFF unchanged. No live runtime/probe/message, skills installation, service
+  restart, credentials/settings mutation, merge/tag/release/sign/deploy.
+- **Next:** Karen reviews the exact draft; Jeff retains any real host/live
+  readiness decision. See [OPERATOR_RECOVERY.md](OPERATOR_RECOVERY.md) for
+  scenarios, commands, test isolation, and remaining limitations.
+
+## Previous monitor slice — shipped in #21
 
 - **Base:** exact `main` `8540a9d90cc062046400c65316252d5b3f731771`
   (operator-readiness #20 already merged; do not redo it).
@@ -44,17 +74,15 @@ Last updated: 2026-09-04 resilient operator-monitor product pass.
 - **Holds:** no live send, Private API off, no BlueBubbles live send, no
   credential writes, no merge/tag/deploy/gateway restart unless the owner asks.
 
-## Separate follow-ups, not solved by this UI slice
+## Follow-ups identified by #21 — addressed by this recovery slice
 
-- The backend's stale-receipt refresh packet drops prior failed-stage evidence
-  and changes the suggested actor. Review that recovery policy separately; a
-  refreshed dashboard is not proof that an underlying readiness blocker cleared.
-- Failed-stage doctor recovery text can target `/tmp/andrea-doctor-receipt.json`
-  while the dashboard consumes `data/andrea-doctor-receipt.json`.
-- `andrea_doctor.sh --offline` still honors optional `OPENCLAW_ENFORCE=1` and
-  `ANDREA_SYNC_DOCTOR=1` flags. Do not enable those for offline verification;
-  this session explicitly disabled them and all live probes. This dashboard
-  change neither executes the command nor changes doctor/runtime behavior.
+- Stale verified failures now retain the prior owner hold and historical
+  stages; a refreshed dashboard still cannot prove a blocker cleared.
+- Dashboard recovery now consistently targets its canonical `data/` receipt;
+  the generic receipt CLI's `/tmp/` contract remains intact for other consumers.
+- Explicit offline mode now overrides live options and skips external
+  capability probes. This changes offline doctor behavior, not the default
+  owner-invoked live path. The monitor never executes either path itself.
 
 ## Earlier shipped snapshot
 

@@ -145,6 +145,129 @@ class TestDashboardOperatorReadiness(unittest.TestCase):
         self.assertEqual(snapshot["reason"], "unexpected_keys")
         self.assertNotIn("SECRET", json.dumps(snapshot))
 
+    def test_expired_failed_stages_preserve_owner_hold_as_history(self) -> None:
+        for security, reliability, stages in (
+            ("failed", "passed", ["security"]),
+            ("passed", "failed", ["reliability"]),
+            ("failed", "not_run", ["security", "reliability"]),
+        ):
+            with self.subTest(stages=stages):
+                modified_at = self._write(
+                    security=security, reliability=reliability, exit_code=1
+                )
+                snapshot = build_operator_readiness_snapshot(
+                    self.server, now=modified_at + OPERATOR_RECEIPT_MAX_AGE_SECONDS + 1
+                )
+                self.assertEqual(snapshot["receipt_state"], "stale")
+                self.assertEqual(snapshot["overall_status"], "blocked")
+                self.assertFalse(snapshot["trusted_receipt"])
+                self.assertFalse(snapshot["safe_for_autonomous_ops"])
+                self.assertFalse(snapshot["may_continue_offline_code"])
+                self.assertTrue(snapshot["must_wait_for_owner"])
+                self.assertEqual(snapshot["who_acts_first"], "owner")
+                self.assertEqual(snapshot["failed_stages"], stages)
+                self.assertEqual(snapshot["last_verified"]["failed_stages"], stages)
+                self.assertEqual(snapshot["last_verified"]["overall_status"], "blocked")
+                self.assertEqual(snapshot["last_verified"]["who_acts_first"], "owner")
+                self.assertIn("clearance has not been verified", snapshot["next_action"])
+
+    def test_expired_grade_c_keeps_owner_but_not_a_fake_failed_stage(self) -> None:
+        modified_at = self._write(grade="C", exit_code=1)
+        snapshot = build_operator_readiness_snapshot(
+            self.server, now=modified_at + OPERATOR_RECEIPT_MAX_AGE_SECONDS + 1
+        )
+        self.assertTrue(snapshot["must_wait_for_owner"])
+        self.assertTrue(snapshot["may_continue_offline_code"])
+        self.assertFalse(snapshot["safe_for_autonomous_ops"])
+        self.assertEqual(snapshot["who_acts_first"], "owner")
+        self.assertEqual(snapshot["failed_stages"], [])
+        self.assertEqual(snapshot["last_verified"]["grade"], "C")
+        self.assertEqual(snapshot["last_verified"]["blocked_reason"], "grade_c")
+
+    def test_expired_nonzero_result_cannot_become_permission_to_continue(self) -> None:
+        modified_at = self._write(exit_code=1)
+        snapshot = build_operator_readiness_snapshot(
+            self.server, now=modified_at + OPERATOR_RECEIPT_MAX_AGE_SECONDS + 1
+        )
+        self.assertEqual(snapshot["last_verified"]["blocked_reason"], "nonzero_exit")
+        self.assertTrue(snapshot["must_wait_for_owner"])
+        self.assertFalse(snapshot["may_continue_offline_code"])
+
+    def test_expired_ready_result_is_history_not_current_authority(self) -> None:
+        for grade in ("A", "B"):
+            with self.subTest(grade=grade):
+                modified_at = self._write(grade=grade)
+                snapshot = build_operator_readiness_snapshot(
+                    self.server, now=modified_at + OPERATOR_RECEIPT_MAX_AGE_SECONDS + 1
+                )
+                self.assertEqual(snapshot["last_verified"]["grade"], grade)
+                self.assertEqual(snapshot["overall_status"], "blocked")
+                self.assertFalse(snapshot["trusted_receipt"])
+                self.assertFalse(snapshot["safe_for_autonomous_ops"])
+                expected_actor = "coding_agent" if grade == "A" else "owner"
+                self.assertEqual(snapshot["who_acts_first"], expected_actor)
+                self.assertEqual(snapshot["last_verified"]["who_acts_first"], expected_actor)
+                self.assertEqual(snapshot["must_wait_for_owner"], grade == "B")
+                self.assertTrue(snapshot["refresh_required"])
+
+    def test_recovery_replaces_history_only_after_a_new_verified_result(self) -> None:
+        modified_at = self._write(security="failed", exit_code=1)
+        stale = build_operator_readiness_snapshot(
+            self.server, now=modified_at + OPERATOR_RECEIPT_MAX_AGE_SECONDS + 1
+        )
+        self.assertEqual(stale["last_verified"]["failed_stages"], ["security"])
+        refreshed_at = self._write()
+        current = build_operator_readiness_snapshot(self.server, now=refreshed_at + 1)
+        self.assertTrue(current["trusted_receipt"])
+        self.assertEqual(current["overall_status"], "ready")
+        self.assertEqual(current["failed_stages"], [])
+        self.assertIsNone(current["last_verified"])
+        self.assertFalse(current["refresh_required"])
+        self.assertFalse(current["must_wait_for_owner"])
+
+    def test_a_new_still_blocked_result_does_not_clear_the_owner_hold(self) -> None:
+        self._write(security="failed", exit_code=1)
+        modified_at = self._write(reliability="failed", exit_code=1)
+        current = build_operator_readiness_snapshot(self.server, now=modified_at + 1)
+        self.assertTrue(current["fresh"])
+        self.assertTrue(current["trusted_receipt"])
+        self.assertEqual(current["overall_status"], "blocked")
+        self.assertTrue(current["must_wait_for_owner"])
+        self.assertEqual(current["failed_stages"], ["reliability"])
+        self.assertIsNone(current["last_verified"])
+
+    def test_all_refresh_paths_target_the_dashboard_receipt_without_rewriting_it(self) -> None:
+        missing = build_operator_readiness_snapshot(self.server)
+        self.assertIsNone(missing["last_verified"])
+        modified_at = self._write(security="failed", exit_code=1)
+        original = self.receipt_path.read_bytes()
+        current = build_operator_readiness_snapshot(self.server, now=modified_at + 1)
+        stale = build_operator_readiness_snapshot(
+            self.server, now=modified_at + OPERATOR_RECEIPT_MAX_AGE_SECONDS + 1
+        )
+        self.assertEqual(self.receipt_path.read_bytes(), original)
+        for snapshot in (missing, current, stale):
+            self.assertTrue(snapshot["refresh_required"])
+            self.assertEqual(snapshot["refresh_command"], OPERATOR_RECEIPT_REFRESH_COMMAND)
+            self.assertIn(OPERATOR_RECEIPT_REFRESH_COMMAND, snapshot["next_action"])
+            self.assertNotIn("/tmp/", snapshot["next_action"])
+            self.assertNotIn(str(self.repo_root), json.dumps(snapshot))
+            self.assertNotIn("receipt_fingerprint", json.dumps(snapshot))
+
+    def test_invalid_replacement_never_reuses_prior_history(self) -> None:
+        modified_at = self._write(security="failed", exit_code=1)
+        stale = build_operator_readiness_snapshot(
+            self.server, now=modified_at + OPERATOR_RECEIPT_MAX_AGE_SECONDS + 1
+        )
+        self.assertIsNotNone(stale["last_verified"])
+        self.receipt_path.write_text('{"raw": "private-fixture"}', encoding="utf-8")
+        invalid = build_operator_readiness_snapshot(self.server)
+        self.assertEqual(invalid["receipt_state"], "invalid")
+        self.assertTrue(invalid["must_wait_for_owner"])
+        self.assertIsNone(invalid["last_verified"])
+        self.assertNotIn("private-fixture", json.dumps(invalid))
+        self.assertEqual(invalid["refresh_command"], OPERATOR_RECEIPT_REFRESH_COMMAND)
+
 
 if __name__ == "__main__":
     unittest.main()

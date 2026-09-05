@@ -12,6 +12,8 @@ set -euo pipefail
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export STRICT="${STRICT_SECURITY:-0}"
 SKIP_OPENCLAW="${SKIP_OPENCLAW_PROBE:-0}"
+EXPLICIT_OFFLINE=0
+OFFLINE_ARGS=()
 MODEL_GUARD_ON_FAIL="${MODEL_GUARD_ON_FAIL:-0}"
 OPENCLAW_ENFORCE="${OPENCLAW_ENFORCE:-0}"
 RECEIPT_PATH=""
@@ -24,7 +26,8 @@ OPENCLAW_STATUS="not_run"
 usage() {
   echo "Usage: bash scripts/andrea_doctor.sh [--offline] [--receipt PATH]"
   echo "  --offline  Run security, the readiness next-step contract (Andrea / Bob / owner),"
-  echo "             and deterministic probes without the live OpenClaw model probe."
+  echo "             and deterministic probes without external capability/model probes,"
+  echo "             live health checks, or inherited live/remediation options."
   echo "             Prints and reprints the operator recap even on Grade C; exit 1 still"
   echo "             means Grade C (owner must act). This is the operator-testable path."
   echo "  --receipt  With --offline, atomically write a mode-600, redaction-safe JSON"
@@ -44,7 +47,9 @@ reprint_operator_recap() {
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --offline)
+      EXPLICIT_OFFLINE=1
       SKIP_OPENCLAW=1
+      OFFLINE_ARGS=(--offline)
       ;;
     --receipt)
       if [[ $# -lt 2 || -z "${2:-}" ]]; then
@@ -68,14 +73,21 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-if [[ -n "${RECEIPT_PATH}" && "${SKIP_OPENCLAW}" != "1" ]]; then
+if [[ -n "${RECEIPT_PATH}" && "${EXPLICIT_OFFLINE}" != "1" ]]; then
   echo "--receipt is offline-only; add --offline so no live probe can run" >&2
   usage >&2
   exit 2
 fi
 
+if [[ "${EXPLICIT_OFFLINE}" == "1" ]]; then
+  # Explicit offline recovery wins over a previous live-operator shell session.
+  OPENCLAW_ENFORCE=0
+  MODEL_GUARD_ON_FAIL=0
+  export RUN_LIVE_PROBES=0
+fi
+
 if [[ -n "${RECEIPT_PATH}" ]]; then
-  RECEIPT_READINESS_JSON="$(mktemp -t andrea-doctor-readiness.XXXXXX)"
+  RECEIPT_READINESS_JSON="$(mktemp "${TMPDIR:-/tmp}/andrea-doctor-readiness.XXXXXXXX")"
 fi
 
 emit_receipt() {
@@ -126,12 +138,16 @@ fi
 echo ""
 
 echo ">>> [2/4] Readiness grade + Andrea/Bob next-step contract"
-echo "Full capability table (optional): python3 scripts/andrea_capabilities.py"
+if [[ "${EXPLICIT_OFFLINE}" == "1" ]]; then
+  echo "Full capability table (optional): python3 scripts/andrea_capabilities.py --offline"
+else
+  echo "Full capability table (optional): python3 scripts/andrea_capabilities.py"
+fi
 GRADE_RC=0
 if [[ -n "${RECEIPT_READINESS_JSON}" ]]; then
-  GRADE_OUT="$(python3 "${BASE_DIR}/scripts/andrea_readiness_grade.py" --json-out "${RECEIPT_READINESS_JSON}")" || GRADE_RC=$?
+  GRADE_OUT="$(python3 "${BASE_DIR}/scripts/andrea_readiness_grade.py" ${OFFLINE_ARGS[@]+"${OFFLINE_ARGS[@]}"} --json-out "${RECEIPT_READINESS_JSON}")" || GRADE_RC=$?
 else
-  GRADE_OUT="$(python3 "${BASE_DIR}/scripts/andrea_readiness_grade.py")" || GRADE_RC=$?
+  GRADE_OUT="$(python3 "${BASE_DIR}/scripts/andrea_readiness_grade.py" ${OFFLINE_ARGS[@]+"${OFFLINE_ARGS[@]}"})" || GRADE_RC=$?
 fi
 printf '%s\n' "${GRADE_OUT}"
 if [[ "${GRADE_RC}" -ne 0 ]]; then
@@ -145,7 +161,7 @@ fi
 echo ""
 
 echo ">>> [3/4] Reliability probes (deterministic)"
-if bash "${BASE_DIR}/scripts/andrea_reliability_probes.sh"; then
+if bash "${BASE_DIR}/scripts/andrea_reliability_probes.sh" ${OFFLINE_ARGS[@]+"${OFFLINE_ARGS[@]}"}; then
   RELIABILITY_STATUS="passed"
 else
   RELIABILITY_RC=$?
@@ -161,7 +177,7 @@ if [[ "${OPENCLAW_ENFORCE}" == "1" ]]; then
   echo ""
 fi
 
-if [[ "${ANDREA_SYNC_DOCTOR:-0}" == "1" ]]; then
+if [[ "${EXPLICIT_OFFLINE}" != "1" && "${ANDREA_SYNC_DOCTOR:-0}" == "1" ]]; then
   echo ">>> [3.6/4] Andrea lockstep health (ANDREA_SYNC_DOCTOR=1)"
   python3 "${BASE_DIR}/scripts/andrea_sync_health.py" || {
     echo "Lockstep health failed — start python3 scripts/andrea_sync_server.py or unset ANDREA_SYNC_REQUIRED" >&2

@@ -121,6 +121,132 @@ class CursorHandoffTests(unittest.TestCase):
         finally:
             sys.argv = original_argv
 
+    def test_doctor_receipt_consult_and_live_gate(self):
+        repo_root = pathlib.Path(__file__).resolve().parents[3]
+        module = MODULE.load_doctor_receipt_module([repo_root])
+        self.assertIsNotNone(module)
+        ready = module.build_receipt(
+            {
+                "grade": "A",
+                "readiness_plan": {
+                    "safe_for_autonomous_ops": True,
+                    "blocker_count": 0,
+                    "who_acts_first": "coding_agent",
+                    "next_action": "Continue the assigned offline test.",
+                    "andrea_next_action": "Keep the draft pending.",
+                    "coding_agent_next_action": "Run offline verification.",
+                    "owner_next_action": "No owner setup is required.",
+                    "holds": ["Do not send any live message."],
+                    "routing": {
+                        "andrea": "offline only",
+                        "coding_agent": "offline code and tests only",
+                        "owner": "owner-gated actions only",
+                    },
+                    "actions": [],
+                },
+            },
+            security_status="passed",
+            reliability_status="passed",
+            openclaw_status="skipped_offline",
+            exit_code=0,
+        )
+        failed = module.build_receipt(
+            {
+                "grade": "A",
+                "readiness_plan": {
+                    "safe_for_autonomous_ops": False,
+                    "blocker_count": 1,
+                    "who_acts_first": "owner",
+                    "next_action": "Stop.",
+                    "andrea_next_action": "Keep the draft pending.",
+                    "coding_agent_next_action": "Wait.",
+                    "owner_next_action": "Restore security.",
+                    "holds": ["Do not send any live message."],
+                    "routing": {
+                        "andrea": "offline only",
+                        "coding_agent": "offline code and tests only",
+                        "owner": "owner-gated actions only",
+                    },
+                    "actions": [],
+                },
+            },
+            security_status="failed",
+            reliability_status="passed",
+            openclaw_status="skipped_offline",
+            exit_code=1,
+        )
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            ready_path = root / "ready.json"
+            failed_path = root / "failed.json"
+            module.write_receipt(ready_path, ready)
+            module.write_receipt(failed_path, failed)
+            absent = MODULE.consult_doctor_receipt(
+                explicit="",
+                local_repo=root,
+                search_roots=[repo_root],
+                environ={},
+            )
+            self.assertFalse(absent["consulted"])
+            self.assertIsNone(MODULE.live_handoff_block_reason(absent, "api"))
+            current = MODULE.consult_doctor_receipt(
+                explicit=str(ready_path),
+                local_repo=root,
+                search_roots=[repo_root],
+                now=ready_path.stat().st_mtime + 4,
+                environ={},
+            )
+            self.assertTrue(current["safe_for_autonomous_ops"])
+            self.assertIsNone(MODULE.live_handoff_block_reason(current, "api"))
+            stale = MODULE.consult_doctor_receipt(
+                explicit=str(ready_path),
+                local_repo=root,
+                search_roots=[repo_root],
+                now=ready_path.stat().st_mtime + module.RECEIPT_MAX_AGE_SECONDS + 1,
+                environ={},
+            )
+            self.assertEqual(stale["receipt_state"], "stale")
+            self.assertIn("current authority", MODULE.live_handoff_block_reason(stale, "api") or "")
+            owner_hold = MODULE.consult_doctor_receipt(
+                explicit=str(failed_path),
+                local_repo=root,
+                search_roots=[repo_root],
+                now=failed_path.stat().st_mtime + 4,
+                environ={},
+            )
+            self.assertIsNotNone(MODULE.live_handoff_block_reason(owner_hold, "cli"))
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                MODULE.emit_text(
+                    {
+                        "ok": False,
+                        "error": "blocked by receipt",
+                        "doctor_receipt": stale,
+                    }
+                )
+            rendered = buf.getvalue()
+            self.assertIn("doctor_receipt: stale", rendered)
+            self.assertNotIn("receipt_fingerprint", rendered)
+            self.assertNotIn(str(ready_path), rendered)
+
+    def test_parse_args_accepts_receipt(self):
+        original_argv = sys.argv[:]
+        try:
+            sys.argv = [
+                "cursor_handoff.py",
+                "--receipt",
+                "data/andrea-doctor-receipt.json",
+                "--diagnose",
+                "--json",
+            ]
+            parsed = MODULE.parse_args()
+            self.assertEqual(parsed.receipt, "data/andrea-doctor-receipt.json")
+            self.assertTrue(parsed.diagnose)
+        finally:
+            sys.argv = original_argv
+
 
 if __name__ == "__main__":
     unittest.main()

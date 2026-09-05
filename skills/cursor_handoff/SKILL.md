@@ -101,6 +101,7 @@ With a **local** repo path, add **`--triage`** to prepend a short non-secret sna
    - status + URL (if available)
    - one next step
 6. If the handoff is blocked, explain it as a product limitation or fallback choice. Do not surface raw tool/config/runtime jargon to the user.
+7. Before a live submit, consult the offline doctor receipt when one is present (`--receipt`, `ANDREA_DOCTOR_RECEIPT`, or local `data/andrea-doctor-receipt.json`). Do not auto-read `/tmp`. A stale, invalid, or not-autonomous receipt blocks Cursor API handoff; a receipt that disallows offline code also blocks local CLI handoff. Missing evidence is not a new gate. Diagnose and dry-run only report the consult.
 
 ## Safety Guidance
 

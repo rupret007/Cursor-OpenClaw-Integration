@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 import stat
 import subprocess
 import sys
@@ -533,6 +534,226 @@ class TestAndreaDoctorReceipt(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 2)
         self.assertIn("--receipt is offline-only", proc.stderr)
+
+    def test_consume_withdraws_current_authority_from_stale_ready_receipt(self) -> None:
+        receipt = self._mod.build_receipt(
+            _readiness("A"),
+            security_status="passed",
+            reliability_status="passed",
+            openclaw_status="skipped_offline",
+            exit_code=0,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "receipt.json"
+            self._mod.write_receipt(path, receipt)
+            original_bytes = path.read_bytes()
+            current_rc, current = self._mod.consume_receipt(
+                path, "grok", now=path.stat().st_mtime + 90.0
+            )
+            self.assertEqual(current_rc, 0)
+            self.assertEqual(current["receipt_state"], "current")
+            self.assertTrue(current["trusted_receipt"])
+            self.assertTrue(current["safe_for_autonomous_ops"])
+            self.assertTrue(current["fresh"])
+            stale_rc, stale = self._mod.consume_receipt(
+                path,
+                "grok",
+                now=path.stat().st_mtime + self._mod.RECEIPT_MAX_AGE_SECONDS + 1,
+            )
+            self.assertEqual(stale_rc, 1)
+            self.assertEqual(stale["receipt_state"], "stale")
+            self.assertTrue(stale["receipt_verified"])
+            self.assertFalse(stale["trusted_receipt"])
+            self.assertFalse(stale["safe_for_autonomous_ops"])
+            self.assertTrue(stale["may_continue_offline_code"])
+            self.assertFalse(stale["must_wait_for_owner"])
+            self.assertEqual(stale["who_acts_first"], "coding_agent")
+            self.assertEqual(stale["blocked_reason"], "stale_receipt")
+            self.assertEqual(stale["last_verified"]["grade"], "A")
+            self.assertEqual(stale["last_verified"]["overall_status"], "ready")
+            self.assertIn("older than 24 hours", stale["next_action"])
+            self.assertEqual(path.read_bytes(), original_bytes)
+            self.assertNotIn("receipt_path", stale)
+            self.assertNotIn(str(path), json.dumps(stale))
+
+    def test_stale_failed_stage_keeps_owner_hold_for_every_consumer(self) -> None:
+        receipt = self._mod.build_receipt(
+            _readiness("A"),
+            security_status="failed",
+            reliability_status="passed",
+            openclaw_status="skipped_offline",
+            exit_code=1,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "receipt.json"
+            self._mod.write_receipt(path, receipt)
+            now = path.stat().st_mtime + self._mod.RECEIPT_MAX_AGE_SECONDS + 5
+            for audience in ("bob", "codex", "grok", "claude", "andrea", "owner", "dashboard"):
+                rc, packet = self._mod.consume_receipt(path, audience, now=now)
+                with self.subTest(audience=audience):
+                    self.assertEqual(rc, 1)
+                    self.assertEqual(packet["receipt_state"], "stale")
+                    self.assertTrue(packet["must_wait_for_owner"])
+                    self.assertFalse(packet["may_continue_offline_code"])
+                    self.assertEqual(packet["last_verified"]["failed_stages"], ["security"])
+                    self.assertIn("clearance has not been verified", packet["next_action"])
+
+    def test_cli_verify_and_summary_fail_closed_on_stale_mtime(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            readiness_path = root / "readiness.json"
+            receipt_path = root / "receipt.json"
+            readiness_path.write_text(json.dumps(_readiness("A")), encoding="utf-8")
+            write = subprocess.run(
+                [
+                    sys.executable,
+                    str(RECEIPT_SCRIPT),
+                    "--readiness-json",
+                    str(readiness_path),
+                    "--security-status",
+                    "passed",
+                    "--reliability-status",
+                    "passed",
+                    "--openclaw-status",
+                    "skipped_offline",
+                    "--exit-code",
+                    "0",
+                    "--output",
+                    str(receipt_path),
+                ],
+                cwd=str(REPO_ROOT),
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+            self.assertEqual(write.returncode, 0, write.stderr)
+            old = receipt_path.stat().st_mtime - (self._mod.RECEIPT_MAX_AGE_SECONDS + 10)
+            os.utime(receipt_path, (old, old))
+            verify = subprocess.run(
+                [sys.executable, str(RECEIPT_SCRIPT), "--verify", str(receipt_path)],
+                cwd=str(REPO_ROOT),
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+            self.assertEqual(verify.returncode, 1, verify.stderr)
+            verify_payload = json.loads(verify.stdout)
+            self.assertFalse(verify_payload["ok"])
+            self.assertEqual(verify_payload["reason"], "receipt_too_old")
+            self.assertTrue(verify_payload["receipt_verified"])
+            self.assertEqual(verify_payload["overall_status"], "blocked")
+            consume = subprocess.run(
+                [
+                    sys.executable,
+                    str(RECEIPT_SCRIPT),
+                    "--consume",
+                    str(receipt_path),
+                    "--audience",
+                    "bob",
+                ],
+                cwd=str(REPO_ROOT),
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+            self.assertEqual(consume.returncode, 1, consume.stderr)
+            packet = json.loads(consume.stdout)
+            self.assertEqual(packet["receipt_state"], "stale")
+            self.assertFalse(packet["safe_for_autonomous_ops"])
+            summary = subprocess.run(
+                [sys.executable, str(RECEIPT_SCRIPT), "--summary", str(receipt_path)],
+                cwd=str(REPO_ROOT),
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+            self.assertEqual(summary.returncode, 1, summary.stderr)
+            self.assertIn("receipt_state=stale", summary.stdout)
+            self.assertIn("overall_status=blocked", summary.stdout)
+            self.assertIn("blocked_reason=stale_receipt", summary.stdout)
+
+    def test_handoff_consult_gates_live_api_but_not_absent_evidence(self) -> None:
+        ready = self._mod.build_receipt(
+            _readiness("A"),
+            security_status="passed",
+            reliability_status="passed",
+            openclaw_status="skipped_offline",
+            exit_code=0,
+        )
+        grade_c = self._mod.build_receipt(
+            _readiness("C"),
+            security_status="passed",
+            reliability_status="passed",
+            openclaw_status="skipped_offline",
+            exit_code=1,
+        )
+        failed = self._mod.build_receipt(
+            _readiness("A"),
+            security_status="failed",
+            reliability_status="passed",
+            openclaw_status="skipped_offline",
+            exit_code=1,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ready_path = root / "ready.json"
+            grade_c_path = root / "grade-c.json"
+            failed_path = root / "failed.json"
+            data_root = root / "checkout"
+            canonical = data_root / "data" / "andrea-doctor-receipt.json"
+            self._mod.write_receipt(ready_path, ready)
+            self._mod.write_receipt(grade_c_path, grade_c)
+            self._mod.write_receipt(failed_path, failed)
+            self._mod.write_receipt(canonical, ready)
+            absent = self._mod.consult_receipt_for_handoff(None, source="absent")
+            self.assertFalse(absent["consulted"])
+            self.assertIsNone(self._mod.live_handoff_block_reason(absent, "api"))
+            current = self._mod.consult_receipt_for_handoff(
+                ready_path, source="explicit", now=ready_path.stat().st_mtime + 3
+            )
+            self.assertTrue(current["consulted"])
+            self.assertTrue(current["safe_for_autonomous_ops"])
+            self.assertIsNone(self._mod.live_handoff_block_reason(current, "api"))
+            stale = self._mod.consult_receipt_for_handoff(
+                ready_path,
+                source="explicit",
+                now=ready_path.stat().st_mtime + self._mod.RECEIPT_MAX_AGE_SECONDS + 1,
+            )
+            self.assertEqual(stale["receipt_state"], "stale")
+            self.assertIn("current authority", self._mod.live_handoff_block_reason(stale, "api") or "")
+            self.assertIsNone(self._mod.live_handoff_block_reason(stale, "cli"))
+            limited = self._mod.consult_receipt_for_handoff(
+                grade_c_path, source="explicit", now=grade_c_path.stat().st_mtime + 3
+            )
+            self.assertTrue(limited["may_continue_offline_code"])
+            self.assertIsNotNone(self._mod.live_handoff_block_reason(limited, "api"))
+            self.assertIsNone(self._mod.live_handoff_block_reason(limited, "cli"))
+            owner_hold = self._mod.consult_receipt_for_handoff(
+                failed_path, source="explicit", now=failed_path.stat().st_mtime + 3
+            )
+            self.assertIsNotNone(self._mod.live_handoff_block_reason(owner_hold, "api"))
+            self.assertIsNotNone(self._mod.live_handoff_block_reason(owner_hold, "cli"))
+            path, source = self._mod.resolve_handoff_receipt_path(
+                "", local_repo=data_root, cwd=root, environ={}
+            )
+            self.assertEqual(source, "discovered")
+            self.assertEqual(path, canonical)
+            ignored_tmp, tmp_source = self._mod.resolve_handoff_receipt_path(
+                "", local_repo=root, cwd=root, environ={}
+            )
+            self.assertEqual(tmp_source, "absent")
+            self.assertIsNone(ignored_tmp)
+            explicit_tmp = root / "tmp-not-canonical.json"
+            self._mod.write_receipt(explicit_tmp, ready)
+            forced, forced_source = self._mod.resolve_handoff_receipt_path(
+                str(explicit_tmp), local_repo=root, cwd=root, environ={}
+            )
+            self.assertEqual(forced_source, "explicit")
+            self.assertEqual(forced, explicit_tmp)
 
     def test_receipt_help_names_consume_path(self) -> None:
         proc = subprocess.run(

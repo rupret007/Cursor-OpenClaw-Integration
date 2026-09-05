@@ -7,7 +7,11 @@ import urllib.parse
 from pathlib import Path
 from typing import Any, Dict, List
 
-from scripts.andrea_doctor_receipt import RERUN_COMMAND, consume_receipt
+from scripts.andrea_doctor_receipt import (
+    RECEIPT_MAX_AGE_SECONDS,
+    RERUN_COMMAND,
+    consume_receipt,
+)
 
 from .adapters import telegram as tg_adapt
 from .assistant_domain_rollout import (
@@ -42,7 +46,7 @@ from .store import (
 )
 
 OPERATOR_RECEIPT_RELATIVE_PATH = Path("data") / "andrea-doctor-receipt.json"
-OPERATOR_RECEIPT_MAX_AGE_SECONDS = 24 * 60 * 60
+OPERATOR_RECEIPT_MAX_AGE_SECONDS = RECEIPT_MAX_AGE_SECONDS
 OPERATOR_RECEIPT_REFRESH_COMMAND = (
     "bash scripts/andrea_doctor.sh --offline --receipt "
     "data/andrea-doctor-receipt.json"
@@ -130,27 +134,44 @@ def build_operator_readiness_snapshot(
     """
     path = receipt_path or _operator_receipt_path(server)
     path_existed = path.is_file()
-    rc, packet = consume_receipt(path, "dashboard")
+    rc, packet = consume_receipt(path, "dashboard", now=now)
+    state = str(packet.get("receipt_state") or "")
+    if state == "stale":
+        history = packet.get("last_verified")
+        prior = None
+        if isinstance(history, dict):
+            prior = {
+                "overall_status": history.get("overall_status"),
+                "grade": history.get("grade"),
+                "who_acts_first": history.get("who_acts_first"),
+                "blocked_reason": history.get("blocked_reason"),
+                "failed_stages": list(history.get("failed_stages") or []),
+                "must_wait_for_owner": packet.get("must_wait_for_owner") is True,
+                "may_continue_offline_code": packet.get("may_continue_offline_code")
+                is True,
+            }
+        age = packet.get("age_seconds")
+        return _refresh_readiness_snapshot(
+            receipt_state="stale",
+            reason=str(packet.get("reason") or "receipt_too_old"),
+            receipt_verified=True,
+            age_seconds=float(age) if isinstance(age, (int, float)) else None,
+            prior_packet=prior,
+        )
     if rc != 0:
         reason = str(packet.get("reason") or "invalid_receipt")
         state = "missing" if not path_existed and reason == "missing_file" else "invalid"
         return _refresh_readiness_snapshot(receipt_state=state, reason=reason)
 
-    try:
-        modified_at = path.stat().st_mtime
-    except OSError:
-        return _refresh_readiness_snapshot(
-            receipt_state="invalid", reason="receipt_stat_failed"
-        )
-    age_seconds = max(0.0, float(now if now is not None else time.time()) - modified_at)
-    if age_seconds > OPERATOR_RECEIPT_MAX_AGE_SECONDS:
-        return _refresh_readiness_snapshot(
-            receipt_state="stale",
-            reason="receipt_too_old",
-            receipt_verified=True,
-            age_seconds=age_seconds,
-            prior_packet=packet,
-        )
+    age_seconds = packet.get("age_seconds")
+    if not isinstance(age_seconds, (int, float)):
+        try:
+            modified_at = path.stat().st_mtime
+        except OSError:
+            return _refresh_readiness_snapshot(
+                receipt_state="invalid", reason="receipt_stat_failed"
+            )
+        age_seconds = max(0.0, float(now if now is not None else time.time()) - modified_at)
 
     failed_stages = packet.get("failed_stages")
     if not isinstance(failed_stages, list):
@@ -160,7 +181,7 @@ def build_operator_readiness_snapshot(
         "trusted_receipt": packet.get("trusted_receipt") is True,
         "receipt_verified": True,
         "fresh": True,
-        "age_seconds": age_seconds,
+        "age_seconds": float(age_seconds),
         "max_age_seconds": OPERATOR_RECEIPT_MAX_AGE_SECONDS,
         "overall_status": str(packet.get("overall_status") or "blocked"),
         "blocked_reason": str(packet.get("blocked_reason") or ""),

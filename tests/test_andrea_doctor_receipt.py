@@ -369,6 +369,77 @@ class TestAndreaDoctorReceipt(unittest.TestCase):
         self.assertEqual(packet["reason"], "invalid_audience")
         self.assertFalse(packet["may_continue_offline_code"])
 
+    def test_consume_missing_receipt_is_not_an_owner_hold(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            missing_path = Path(temp_dir) / "missing.json"
+            for audience in (
+                "bob",
+                "codex",
+                "grok",
+                "claude",
+                "andrea",
+                "owner",
+                "dashboard",
+            ):
+                rc, packet = self._mod.consume_receipt(missing_path, audience)
+                with self.subTest(audience=audience):
+                    self.assertEqual(rc, 1)
+                    self.assertEqual(packet["receipt_state"], "missing")
+                    self.assertEqual(packet["blocked_reason"], "missing_receipt")
+                    self.assertEqual(packet["reason"], "missing_file")
+                    self.assertEqual(packet["overall_status"], "blocked")
+                    self.assertFalse(packet["trusted_receipt"])
+                    self.assertFalse(packet["safe_for_autonomous_ops"])
+                    self.assertTrue(packet["may_continue_offline_code"])
+                    self.assertFalse(packet["must_wait_for_owner"])
+                    self.assertEqual(packet["who_acts_first"], "coding_agent")
+                    self.assertEqual(packet["failed_stages"], [])
+                    self.assertIsNone(packet["last_verified"])
+                    self.assertIn(self._mod.RERUN_COMMAND, packet["next_action"])
+                    self.assertNotIn("/tmp/", packet["next_action"])
+                    self.assertNotIn("failed doctor stage", packet["next_action"])
+                    self.assertNotIn(str(missing_path), json.dumps(packet))
+            dashboard = self._mod.consume_receipt(missing_path, "dashboard")[1]
+            self.assertEqual(dashboard["next_action"], self._mod.MISSING_DASHBOARD_ACTION)
+            coding = self._mod.consume_receipt(missing_path, "bob")[1]
+            self.assertEqual(coding["audience"], "coding_agent")
+            self.assertEqual(coding["next_action"], self._mod.MISSING_CODING_AGENT_ACTION)
+            unknown = self._mod.missing_audience_packet("unknown-lane")
+            self.assertEqual(unknown["audience"], "owner")
+            self.assertEqual(unknown["reason"], "invalid_audience")
+            self.assertFalse(unknown["may_continue_offline_code"])
+
+    def test_cli_verify_and_summary_name_missing_not_owner_hold(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            missing_path = Path(temp_dir) / "missing.json"
+            verify = subprocess.run(
+                [sys.executable, str(RECEIPT_SCRIPT), "--verify", str(missing_path)],
+                cwd=str(REPO_ROOT),
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+            self.assertEqual(verify.returncode, 1, verify.stderr)
+            payload = json.loads(verify.stdout)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["receipt_state"], "missing")
+            self.assertEqual(payload["blocked_reason"], "missing_receipt")
+            self.assertEqual(payload["reason"], "missing_file")
+            summary = subprocess.run(
+                [sys.executable, str(RECEIPT_SCRIPT), "--summary", str(missing_path)],
+                cwd=str(REPO_ROOT),
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+            self.assertEqual(summary.returncode, 1, summary.stderr)
+            self.assertIn("Receipt verify: missing (missing_file)", summary.stderr)
+            self.assertIn("receipt_state=missing", summary.stdout)
+            self.assertIn("blocked_reason=missing_receipt", summary.stdout)
+            self.assertIn("who_acts_first=coding_agent", summary.stdout)
+
     def test_cli_verify_and_consume_and_summary(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -466,6 +537,13 @@ class TestAndreaDoctorReceipt(unittest.TestCase):
             missing_packet = json.loads(missing.stdout)
             self.assertFalse(missing_packet["trusted_receipt"])
             self.assertEqual(missing_packet["reason"], "missing_file")
+            self.assertEqual(missing_packet["receipt_state"], "missing")
+            self.assertEqual(missing_packet["blocked_reason"], "missing_receipt")
+            self.assertEqual(missing_packet["who_acts_first"], "coding_agent")
+            self.assertTrue(missing_packet["may_continue_offline_code"])
+            self.assertFalse(missing_packet["must_wait_for_owner"])
+            self.assertIn("data/andrea-doctor-receipt.json", missing_packet["next_action"])
+            self.assertNotIn("/tmp/", missing_packet["next_action"])
 
     def test_exact_offline_doctor_writes_complete_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -720,6 +798,17 @@ class TestAndreaDoctorReceipt(unittest.TestCase):
             absent = self._mod.consult_receipt_for_handoff(None, source="absent")
             self.assertFalse(absent["consulted"])
             self.assertIsNone(self._mod.live_handoff_block_reason(absent, "api"))
+            missing = self._mod.consult_receipt_for_handoff(
+                root / "missing.json", source="explicit"
+            )
+            self.assertTrue(missing["consulted"])
+            self.assertEqual(missing["receipt_state"], "missing")
+            self.assertEqual(missing["who_acts_first"], "coding_agent")
+            self.assertTrue(missing["may_continue_offline_code"])
+            self.assertFalse(missing["must_wait_for_owner"])
+            self.assertIn("data/andrea-doctor-receipt.json", missing["next_action"])
+            self.assertIsNotNone(self._mod.live_handoff_block_reason(missing, "api"))
+            self.assertIsNone(self._mod.live_handoff_block_reason(missing, "cli"))
             current = self._mod.consult_receipt_for_handoff(
                 ready_path, source="explicit", now=ready_path.stat().st_mtime + 3
             )

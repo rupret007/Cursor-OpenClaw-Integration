@@ -1,14 +1,17 @@
 # Operator readiness recovery
 
-This product slice starts from main `d9246d61ee8253b82dbba3ed4605baf1d89f9cb4`
-after #23. It makes the offline doctor write the same canonical
-`data/andrea-doctor-receipt.json` that the dashboard and `cursor_handoff`
-already consume; it does not deploy or start a runtime.
+This product slice starts from main `e532b713442c66f100b7affeef87e394cfd027c1`
+after #24. It makes missing-receipt consume agree with the dashboard and
+handoff: missing evidence is not an owner hold. It does not deploy or start a
+runtime.
 
 ## The useful path
 
 1. Read **Who acts first** (or **Who reviews or refreshes next**) and the one
-   next action. A failed current check and a missing check are different.
+   next action. A failed current check, an invalid/tampered artifact, and a
+   missing check are different. Missing evidence names the coding agent and
+   the same offline refresh command; it is not an owner hold. Invalid evidence
+   still requires owner review.
 2. For expired evidence, inspect **Last verified result/blockers — historical**.
    Age cannot erase a previously verified owner hold or failed stage. Historical
    facts never count as current authority; unknown history does not mean passed.
@@ -51,11 +54,13 @@ passing local code tests never supplies that approval.
 ## Logic and compatibility
 
 - Reuses `consume_receipt` and its code-owned actor/hold contract. No new store,
-  validator, schema bump, or receipt/fingerprint rewrite. `--offline` now writes
-  the canonical ignored `data/` receipt by default so consume/verify/summary,
-  the dashboard, and `cursor_handoff` discovery share one destination. Following
-  a stale or failed-stage next action refreshes the file those surfaces read.
-  `cursor_handoff` still never auto-reads `/tmp`. Explicit `--receipt PATH`
+  validator, schema bump, or receipt/fingerprint rewrite. A missing file now
+  produces the same coding-agent / offline-continue packet that the dashboard
+  already showed; invalid and tampered artifacts stay owner-blocked. Following
+  that next action still refreshes the canonical ignored `data/` receipt.
+  `cursor_handoff` still never auto-reads `/tmp`. Missing evidence is still not
+  a new unconsulted handoff gate. An explicit consult of a missing path blocks
+  live API submit and allows local CLI submit. Explicit `--receipt PATH`
   remains an override.
 - Failed-stage expiration preserves the owner hold and disallows continued
   offline code under the existing failed-stage policy. Grade C remains distinct:

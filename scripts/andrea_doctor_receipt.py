@@ -9,9 +9,12 @@ Consumers (Bob, Codex, Grok, Claude, Andrea, dashboards, and scripts) must
 load the artifact through this module. Verify recomputes the fingerprint,
 rejects unknown keys, and fail-closes to an owner-blocked packet when a
 stage is not passed — even if leftover Grade A next-step text is still
-present on an older receipt. Consume/verify/summary also withdraw current
-authority from a correctly signed receipt whose local file is older than
-24 hours. That freshness check uses mtime only; it is not cryptographic.
+present on an older receipt. A missing file is not an owner hold: consume
+names the coding agent, allows offline code, and points at the canonical
+refresh command. Invalid or tampered artifacts stay owner-blocked.
+Consume/verify/summary also withdraw current authority from a correctly
+signed receipt whose local file is older than 24 hours. That freshness
+check uses mtime only; it is not cryptographic.
 """
 
 from __future__ import annotations
@@ -97,6 +100,22 @@ RERUN_COMMAND = (
 LEGACY_TMP_RERUN_COMMAND = (
     "bash scripts/andrea_doctor.sh --offline --receipt "
     "/tmp/andrea-doctor-receipt.json"
+)
+MISSING_DASHBOARD_ACTION = (
+    "Run the offline doctor and refresh this dashboard: " + RERUN_COMMAND
+)
+MISSING_CODING_AGENT_ACTION = (
+    "Stay offline. Missing evidence is not an owner hold. You may continue "
+    "offline code and tests. Refresh the receipt with: " + RERUN_COMMAND
+)
+MISSING_ANDREA_ACTION = (
+    "Do not run autonomous or live communication work. Keep outbound drafts "
+    "pending. Offline evidence is missing; it is not a failed doctor stage. "
+    "Refresh it with: " + RERUN_COMMAND
+)
+MISSING_OWNER_ACTION = (
+    "Offline evidence is missing. This is not an owner hold. Allow the coding "
+    "agent to refresh it with: " + RERUN_COMMAND
 )
 STALE_OWNER_HOLD_ACTION = (
     "The last verified check recorded an owner blocker; its clearance "
@@ -432,6 +451,58 @@ def _fallback_packet(
     }
 
 
+def missing_audience_packet(audience: str, *, reason: str = "missing_file") -> dict[str, Any]:
+    """Blocked for autonomy, not an owner hold. Same actor as the dashboard."""
+    requested = _safe_string(audience, "owner", limit=40)
+    canonical = _canonical_audience(requested)
+    if canonical is None:
+        return _fallback_packet(
+            audience="owner", requested=requested, reason="invalid_audience"
+        )
+    next_by_audience = {
+        "andrea": MISSING_ANDREA_ACTION,
+        "coding_agent": MISSING_CODING_AGENT_ACTION,
+        "owner": MISSING_OWNER_ACTION,
+        "dashboard": MISSING_DASHBOARD_ACTION,
+    }
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "kind": PACKET_KIND,
+        "audience": canonical,
+        "audience_requested": requested,
+        "trusted_receipt": False,
+        "overall_status": "blocked",
+        "blocked_reason": "missing_receipt",
+        "failed_stages": [],
+        "grade": "C",
+        "who_acts_first": "coding_agent",
+        "safe_for_autonomous_ops": False,
+        "may_continue_offline_code": True,
+        "must_wait_for_owner": False,
+        "next_action": next_by_audience[canonical],
+        "andrea_next_action": MISSING_ANDREA_ACTION,
+        "coding_agent_next_action": MISSING_CODING_AGENT_ACTION,
+        "owner_next_action": MISSING_OWNER_ACTION,
+        "holds": list(DEFAULT_HOLDS),
+        "routing": dict(DEFAULT_ROUTING),
+        "actions": [],
+        "commands": {
+            "rerun": RERUN_COMMAND,
+            "verify": VERIFY_COMMAND,
+            "consume": CONSUME_COMMAND,
+        },
+        "receipt_fingerprint": "",
+        "reason": _safe_string(reason, "missing_file", limit=200),
+        "receipt_state": "missing",
+        "receipt_verified": False,
+        "fresh": False,
+        "age_seconds": None,
+        "max_age_seconds": RECEIPT_MAX_AGE_SECONDS,
+        "last_verified": None,
+        "refresh_required": True,
+    }
+
+
 def verify_receipt(receipt: Any) -> tuple[bool, str, dict[str, Any]]:
     """Return (ok, reason, receipt). On failure the receipt is empty."""
     if not isinstance(receipt, dict):
@@ -714,11 +785,13 @@ def consume_receipt(
     path_existed = expanded.is_file()
     ok, reason, receipt = load_receipt(expanded)
     if not ok:
-        state = "missing" if (not path_existed and reason == "missing_file") else "invalid"
+        if not path_existed and reason == "missing_file":
+            packet = missing_audience_packet(audience, reason=reason)
+            return 1, packet
         packet = audience_packet({}, audience, trusted=False, reason=reason)
         _with_authority_meta(
             packet,
-            receipt_state=state,
+            receipt_state="invalid",
             receipt_verified=False,
             fresh=False,
             age_seconds=None,
@@ -963,7 +1036,9 @@ def main() -> int:
                 {
                     "ok": False,
                     "overall_status": "blocked",
-                    "blocked_reason": "invalid_receipt",
+                    "blocked_reason": (
+                        "missing_receipt" if state == "missing" else "invalid_receipt"
+                    ),
                     "receipt_state": state,
                     "receipt_verified": False,
                     "fresh": False,
@@ -1033,11 +1108,19 @@ def main() -> int:
     if args.summary:
         ok, reason, receipt = load_receipt(args.summary)
         if not ok:
-            print(f"Receipt verify: invalid ({reason})", file=os.sys.stderr)
+            state = "missing" if reason == "missing_file" else "invalid"
+            label = "missing" if state == "missing" else "invalid"
+            print(f"Receipt verify: {label} ({reason})", file=os.sys.stderr)
             print("overall_status=blocked")
-            print("blocked_reason=invalid_receipt")
-            print("receipt_state=invalid")
-            print("who_acts_first=owner")
+            print(
+                "blocked_reason="
+                + ("missing_receipt" if state == "missing" else "invalid_receipt")
+            )
+            print(f"receipt_state={state}")
+            print(
+                "who_acts_first="
+                + ("coding_agent" if state == "missing" else "owner")
+            )
             print("safe_for_autonomous_ops=false")
             return 1
         age, age_reason = receipt_age_seconds(args.summary)

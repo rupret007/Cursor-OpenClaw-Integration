@@ -192,6 +192,19 @@ class CursorHandoffTests(unittest.TestCase):
             )
             self.assertFalse(absent["consulted"])
             self.assertIsNone(MODULE.live_handoff_block_reason(absent, "api"))
+            missing = MODULE.consult_doctor_receipt(
+                explicit=str(root / "missing.json"),
+                local_repo=root,
+                search_roots=[repo_root],
+                cwd=root,
+                environ={},
+            )
+            self.assertTrue(missing["consulted"])
+            self.assertEqual(missing["receipt_state"], "missing")
+            self.assertEqual(missing["who_acts_first"], "coding_agent")
+            self.assertTrue(missing["may_continue_offline_code"])
+            self.assertIsNotNone(MODULE.live_handoff_block_reason(missing, "api"))
+            self.assertIsNone(MODULE.live_handoff_block_reason(missing, "cli"))
             current = MODULE.consult_doctor_receipt(
                 explicit=str(ready_path),
                 local_repo=root,

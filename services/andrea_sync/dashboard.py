@@ -156,6 +156,35 @@ def build_operator_readiness_snapshot(
             age_seconds=float(age) if isinstance(age, (int, float)) else None,
             prior_packet=prior,
         )
+    if str(packet.get("receipt_state") or "") == "missing":
+        failed_stages = packet.get("failed_stages")
+        if not isinstance(failed_stages, list):
+            failed_stages = []
+        return {
+            "receipt_state": "missing",
+            "trusted_receipt": False,
+            "receipt_verified": False,
+            "fresh": False,
+            "age_seconds": None,
+            "max_age_seconds": OPERATOR_RECEIPT_MAX_AGE_SECONDS,
+            "overall_status": "blocked",
+            "blocked_reason": str(packet.get("blocked_reason") or "missing_receipt"),
+            "grade": str(packet.get("grade") or "C"),
+            "who_acts_first": str(packet.get("who_acts_first") or "coding_agent"),
+            "safe_for_autonomous_ops": False,
+            "may_continue_offline_code": packet.get("may_continue_offline_code") is True,
+            "must_wait_for_owner": packet.get("must_wait_for_owner") is True,
+            "next_action": str(
+                packet.get("next_action") or OPERATOR_RECEIPT_REFRESH_COMMAND
+            )
+            .replace(LEGACY_TMP_RERUN_COMMAND, OPERATOR_RECEIPT_REFRESH_COMMAND)
+            .replace(RERUN_COMMAND, OPERATOR_RECEIPT_REFRESH_COMMAND),
+            "failed_stages": [str(stage) for stage in failed_stages[:4]],
+            "last_verified": None,
+            "refresh_required": True,
+            "refresh_command": OPERATOR_RECEIPT_REFRESH_COMMAND,
+            "reason": str(packet.get("reason") or "missing_file"),
+        }
     if rc != 0:
         reason = str(packet.get("reason") or "invalid_receipt")
         state = "missing" if not path_existed and reason == "missing_file" else "invalid"

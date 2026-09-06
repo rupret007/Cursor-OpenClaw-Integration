@@ -481,6 +481,8 @@ def emit_text(payload: Dict[str, Any]) -> None:
         print(f"  branch: {payload.get('branch')}")
         print(f"  repo_input: {payload.get('repo_input')}")
         _emit_doctor_receipt_lines(payload)
+        if payload.get("agent_state"):
+            print(f"  agent_state: {payload.get('agent_state')}")
         print("  (Use --json for full dry-run payload.)")
         return
 
@@ -500,6 +502,8 @@ def emit_text(payload: Dict[str, Any]) -> None:
     else:
         print("Handoff failed.")
         print(payload.get("error", "Unknown error"))
+        if payload.get("agent_state"):
+            print(f"  agent_state: {payload.get('agent_state')}")
         _emit_doctor_receipt_lines(payload)
 
 
@@ -903,6 +907,9 @@ def main() -> int:
         payload["receipt_would_block"] = live_handoff_block_reason(
             receipt_consult, backend if backend else "api"
         )
+        if op == "followup":
+            payload["agent_state"] = "not_checked"
+            payload["followup_would_block"] = payload["receipt_would_block"]
         emit_json(payload) if args.json else emit_text(payload)
         return EXIT_OK
 
@@ -1018,6 +1025,8 @@ def main() -> int:
 
     # Two-way operations against an existing agent.
     if op != "submit":
+        agent_state = None
+        snapshot = None
         try:
             if op == "status":
                 status_code, data, raw, auth_mode = api_client.request("GET", f"/v0/agents/{agent_id}")
@@ -1028,6 +1037,28 @@ def main() -> int:
             elif op == "artifacts":
                 status_code, data, raw, auth_mode = api_client.request("GET", f"/v0/agents/{agent_id}/artifacts")
             elif op == "followup":
+                status_code, data, raw, auth_mode = api_client.request(
+                    "GET", f"/v0/agents/{agent_id}"
+                )
+                agent_state, agent_block, snapshot = cursor_api_common.classify_followup_agent(
+                    status_code,
+                    data if data else raw,
+                    expected_id=agent_id,
+                )
+                if agent_block:
+                    payload = {
+                        "ok": False,
+                        "backend": "api",
+                        "op": op,
+                        "agent_id": agent_id,
+                        "agent_state": agent_state,
+                        "agent": snapshot,
+                        "auth_mode": auth_mode,
+                        "error": agent_block,
+                        "doctor_receipt": receipt_consult,
+                    }
+                    emit_json(payload) if args.json else emit_text(payload)
+                    return EXIT_PREREQ
                 status_code, data, raw, auth_mode = api_client.request(
                     "POST",
                     f"/v0/agents/{agent_id}/followup",
@@ -1068,6 +1099,9 @@ def main() -> int:
             "status": status_code,
             "response": data if data else raw,
         }
+        if op == "followup" and agent_state:
+            payload["agent_state"] = agent_state
+            payload["agent"] = snapshot
         emit_json(payload) if args.json else emit_text(payload)
         return EXIT_OK
 

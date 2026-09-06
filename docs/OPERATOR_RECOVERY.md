@@ -1,8 +1,10 @@
 # Operator readiness recovery
 
-This product slice starts from main `0bdecde20b46936a2a08ed284226bc5ab311abfb`
-after #25. It makes live `cursor_openclaw.py create-agent` consult the same
-canonical doctor receipt the dashboard and `cursor_handoff` already consume.
+This product slice starts from main `55c6d8eff5a2af5fb3c8257e35ce576be1d0afbb`
+after #26. It makes live `cursor_openclaw.py followup` consult the same
+canonical doctor receipt `create-agent` already uses, then refuse a missing
+or finished Cloud agent before POSTing. `cursor_handoff --op followup`
+already consulted the receipt; it now uses the same agent-state check.
 It does not deploy or start a runtime.
 
 ## The useful path
@@ -62,8 +64,10 @@ passing local code tests never supplies that approval.
   `/tmp`. Missing evidence is still not a new unconsulted handoff gate. An
   explicit consult of a missing path blocks live API submit (`create-agent` is
   API-only) and allows local `cursor_handoff` CLI submit. Explicit
-  `--receipt PATH` remains an override. `followup` is not a new create and
-  does not re-consult.
+  `--receipt PATH` remains an override. Live `followup` now reuses that same
+  consult and then reads agent status. A missing or terminal agent is reported
+  honestly and does not receive a followup POST. Absent (unconsulted) evidence
+  is still not a new gate. `followup --dry-run` does not GET or POST.
 - Failed-stage expiration preserves the owner hold and disallows continued
   offline code under the existing failed-stage policy. Grade C remains distinct:
   unrelated offline code can still be allowed while its owner readiness gate
@@ -95,7 +99,7 @@ The focused tests cover failed → stale → fresh transitions, Grade C versus
 failed gates, no history from invalid receipts, unchanged receipt bytes,
 canonical command destination, hostile inherited live flags, legacy/default
 behavior, unverified capability guidance, and the `cursor_openclaw.py`
-create-agent / diagnose receipt consult. The doctor test copies the actual
+create-agent / diagnose / followup receipt and agent-state consult. The doctor test copies the actual
 tracked scripts into a synthetic tree with trap providers and a fake local
 diagnostic child; it never contacts real providers. The JavaScript tests execute
 the actual rendered monitor against fake transport/timers and retain the #21

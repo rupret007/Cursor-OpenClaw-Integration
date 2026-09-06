@@ -881,6 +881,209 @@ class CursorOpenClawTests(unittest.TestCase):
             self.assertNotIn("receipt_fingerprint", rendered)
             self.assertNotIn(str(receipt_path), rendered)
 
+    def test_parse_args_accepts_receipt_and_dry_run_on_followup(self):
+        original_argv = sys.argv[:]
+        try:
+            sys.argv = [
+                "cursor_openclaw.py",
+                "--json",
+                "followup",
+                "--id",
+                "bc-abc123",
+                "--prompt",
+                "continue",
+                "--receipt",
+                "data/andrea-doctor-receipt.json",
+                "--dry-run",
+            ]
+            parsed = MODULE.parse_args()
+            self.assertEqual(parsed.command, "followup")
+            self.assertEqual(parsed.receipt, "data/andrea-doctor-receipt.json")
+            self.assertTrue(parsed.dry_run)
+        finally:
+            sys.argv = original_argv
+
+    def test_followup_dry_run_reports_receipt_without_http(self):
+        calls = []
+
+        class FakeClient:
+            def __init__(self, _cfg):
+                pass
+
+            def request(self, method, path, query=None, body=None):
+                calls.append((method, path, body))
+                raise AssertionError("followup dry-run must not call the API")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            receipt_path = pathlib.Path(temp_dir) / "failed.json"
+            RECEIPT.write_receipt(receipt_path, _build_receipt(safe=False, security="failed"))
+            args = types.SimpleNamespace(
+                command="followup",
+                id="bc-abc123",
+                prompt="please continue",
+                dry_run=True,
+                receipt=str(receipt_path),
+            )
+            old_client = MODULE.CursorApiClient
+            MODULE.CursorApiClient = FakeClient
+            try:
+                status, payload = MODULE.handle(_cfg(), args)
+            finally:
+                MODULE.CursorApiClient = old_client
+        self.assertEqual(status, 0)
+        self.assertTrue(payload["dry_run"])
+        self.assertEqual(payload["agent_state"], "not_checked")
+        self.assertTrue(payload["doctor_receipt"]["consulted"])
+        self.assertIsNotNone(payload["receipt_would_block"])
+        self.assertEqual(payload["followup_would_block"], payload["receipt_would_block"])
+        self.assertNotIn(str(receipt_path), json.dumps(payload))
+        self.assertEqual(calls, [])
+
+    def test_followup_live_blocks_consulted_receipt_without_http(self):
+        calls = []
+
+        class FakeClient:
+            def __init__(self, _cfg):
+                pass
+
+            def request(self, method, path, query=None, body=None):
+                calls.append((method, path, body))
+                raise AssertionError("blocked followup must not call the API")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            receipt_path = pathlib.Path(temp_dir) / "failed.json"
+            RECEIPT.write_receipt(receipt_path, _build_receipt(safe=False, security="failed"))
+            args = types.SimpleNamespace(
+                command="followup",
+                id="bc-abc123",
+                prompt="please continue",
+                dry_run=False,
+                receipt=str(receipt_path),
+            )
+            old_client = MODULE.CursorApiClient
+            MODULE.CursorApiClient = FakeClient
+            try:
+                with self.assertRaises(MODULE.DoctorReceiptBlocked) as ctx:
+                    MODULE.handle(_cfg(), args)
+            finally:
+                MODULE.CursorApiClient = old_client
+        self.assertIn("current authority", str(ctx.exception))
+        self.assertEqual(ctx.exception.payload["agent_state"], "not_checked")
+        self.assertNotIn(str(receipt_path), json.dumps(ctx.exception.payload))
+        self.assertEqual(calls, [])
+
+    def test_followup_live_blocks_missing_and_stale_agent_without_post(self):
+        for status_code, agent_body, expected_state in (
+            (404, {"error": "not found"}, "missing"),
+            (200, {"id": "bc-abc123", "status": "FINISHED"}, "stale"),
+        ):
+            calls = []
+
+            class FakeClient:
+                def __init__(self, _cfg):
+                    pass
+
+                def request(self, method, path, query=None, body=None):
+                    calls.append((method, path, body))
+                    if method == "GET" and path == "/v0/agents/bc-abc123":
+                        return status_code, agent_body, "{}", "bearer"
+                    raise AssertionError("blocked followup must not POST")
+
+            args = types.SimpleNamespace(
+                command="followup",
+                id="bc-abc123",
+                prompt="please continue",
+                dry_run=False,
+                receipt="",
+            )
+            old_client = MODULE.CursorApiClient
+            old_consult = MODULE.consult_doctor_receipt
+            MODULE.CursorApiClient = FakeClient
+            MODULE.consult_doctor_receipt = lambda **_kwargs: RECEIPT.absent_handoff_consult()
+            try:
+                with self.assertRaises(MODULE.AgentStateBlocked) as ctx:
+                    MODULE.handle(_cfg(), args)
+            finally:
+                MODULE.CursorApiClient = old_client
+                MODULE.consult_doctor_receipt = old_consult
+            self.assertEqual(ctx.exception.payload["agent_state"], expected_state)
+            self.assertEqual(ctx.exception.payload["agent"]["id"], "bc-abc123")
+            self.assertEqual(calls, [("GET", "/v0/agents/bc-abc123", None)])
+
+    def test_followup_live_absent_receipt_posts_only_when_agent_is_running(self):
+        calls = []
+
+        class FakeClient:
+            def __init__(self, _cfg):
+                pass
+
+            def request(self, method, path, query=None, body=None):
+                calls.append((method, path, body))
+                if method == "GET":
+                    return 200, {"id": "bc-abc123", "status": "RUNNING"}, "{}", "bearer"
+                return 200, {"ok": True}, "{}", "bearer"
+
+        args = types.SimpleNamespace(
+            command="followup",
+            id="bc-abc123",
+            prompt="please continue",
+            dry_run=False,
+            receipt="",
+        )
+        old_client = MODULE.CursorApiClient
+        old_consult = MODULE.consult_doctor_receipt
+        MODULE.CursorApiClient = FakeClient
+        MODULE.consult_doctor_receipt = lambda **_kwargs: RECEIPT.absent_handoff_consult()
+        try:
+            status, payload = MODULE.handle(_cfg(), args)
+        finally:
+            MODULE.CursorApiClient = old_client
+            MODULE.consult_doctor_receipt = old_consult
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["agent_state"], "running")
+        self.assertEqual(payload["agent"]["status"], "RUNNING")
+        self.assertEqual(calls[0], ("GET", "/v0/agents/bc-abc123", None))
+        self.assertEqual(calls[1][0], "POST")
+        self.assertEqual(calls[1][1], "/v0/agents/bc-abc123/followup")
+        self.assertEqual(calls[1][2], {"prompt": {"text": "please continue"}})
+
+    def test_main_followup_receipt_block_exits_validation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            receipt_path = pathlib.Path(temp_dir) / "failed.json"
+            RECEIPT.write_receipt(receipt_path, _build_receipt(safe=False, security="failed"))
+            original_argv = sys.argv[:]
+            env_key = os.environ.get("CURSOR_API_KEY")
+            os.environ["CURSOR_API_KEY"] = "dummy_test_key"
+            sys.argv = [
+                "cursor_openclaw.py",
+                "--json",
+                "followup",
+                "--id",
+                "bc-abc123",
+                "--prompt",
+                "please continue",
+                "--receipt",
+                str(receipt_path),
+            ]
+            buf = io.StringIO()
+            try:
+                with redirect_stdout(buf):
+                    code = MODULE.main()
+            finally:
+                sys.argv = original_argv
+                if env_key is None:
+                    os.environ.pop("CURSOR_API_KEY", None)
+                else:
+                    os.environ["CURSOR_API_KEY"] = env_key
+            rendered = buf.getvalue()
+            payload = json.loads(rendered)
+            self.assertEqual(code, 2)
+            self.assertFalse(payload["ok"])
+            self.assertIn("current authority", payload["error"])
+            self.assertEqual(payload["agent_state"], "not_checked")
+            self.assertNotIn("receipt_fingerprint", rendered)
+            self.assertNotIn(str(receipt_path), rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

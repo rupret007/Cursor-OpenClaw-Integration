@@ -52,9 +52,11 @@ python3 scripts/cursor_openclaw.py --json create-agent \
 ```
 
 A consulted stale, invalid, or not-autonomous offline doctor receipt blocks
-this live `create-agent` the same way `cursor_handoff` blocks API submit.
-`--json diagnose` and `create-agent --dry-run` report that consult without
-POSTing. Missing evidence is not a new gate.
+this live `create-agent` and `followup` the same way `cursor_handoff` blocks
+API submit. `--json diagnose`, `create-agent --dry-run`, and
+`followup --dry-run` report that consult without POSTing. Live followup then
+reads agent status and refuses a missing or finished agent. Missing evidence
+is not a new gate.
 
 **Fallbacks**
 

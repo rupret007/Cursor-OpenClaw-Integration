@@ -1,5 +1,7 @@
 import importlib.util
 import io
+import json
+import os
 import pathlib
 import sys
 import unittest
@@ -260,6 +262,168 @@ class CursorHandoffTests(unittest.TestCase):
             self.assertTrue(parsed.diagnose)
         finally:
             sys.argv = original_argv
+
+    def test_followup_dry_run_marks_agent_not_checked(self):
+        original_argv = sys.argv[:]
+        sys.argv = [
+            "cursor_handoff.py",
+            "--mode",
+            "api",
+            "--op",
+            "followup",
+            "--agent-id",
+            "bc-abc123",
+            "--prompt",
+            "continue",
+            "--dry-run",
+            "--json",
+        ]
+        buf = io.StringIO()
+        try:
+            with redirect_stdout(buf):
+                code = MODULE.main()
+        finally:
+            sys.argv = original_argv
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(code, MODULE.EXIT_OK)
+        self.assertTrue(payload["dry_run"])
+        self.assertEqual(payload["agent_state"], "not_checked")
+        self.assertIn("followup_would_block", payload)
+
+    def test_followup_live_blocks_stale_agent_without_post(self):
+        calls = []
+
+        class FakeClient:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def request(self, method, path, body=None, query=None):
+                calls.append((method, path, body))
+                if method == "GET" and path == "/v0/agents/bc-abc123":
+                    return 200, {"id": "bc-abc123", "status": "FINISHED"}, "{}", "bearer"
+                raise AssertionError("blocked followup must not POST")
+
+        original_argv = sys.argv[:]
+        env_key = os.environ.get("CURSOR_API_KEY")
+        os.environ["CURSOR_API_KEY"] = "dummy_test_key"
+        sys.argv = [
+            "cursor_handoff.py",
+            "--mode",
+            "api",
+            "--op",
+            "followup",
+            "--agent-id",
+            "bc-abc123",
+            "--prompt",
+            "continue",
+            "--json",
+        ]
+        old_client = MODULE.CursorApiClient
+        old_consult = MODULE.consult_doctor_receipt
+        MODULE.CursorApiClient = FakeClient
+        MODULE.consult_doctor_receipt = lambda **_kwargs: {
+            "consulted": False,
+            "receipt_source": "absent",
+            "receipt_state": "absent",
+            "receipt_verified": False,
+            "fresh": False,
+            "overall_status": "",
+            "blocked_reason": "",
+            "failed_stages": [],
+            "grade": "",
+            "who_acts_first": "",
+            "safe_for_autonomous_ops": False,
+            "may_continue_offline_code": True,
+            "must_wait_for_owner": False,
+            "next_action": "",
+            "reason": "receipt_not_consulted",
+        }
+        buf = io.StringIO()
+        try:
+            with redirect_stdout(buf):
+                code = MODULE.main()
+        finally:
+            sys.argv = original_argv
+            MODULE.CursorApiClient = old_client
+            MODULE.consult_doctor_receipt = old_consult
+            if env_key is None:
+                os.environ.pop("CURSOR_API_KEY", None)
+            else:
+                os.environ["CURSOR_API_KEY"] = env_key
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(code, MODULE.EXIT_PREREQ)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["agent_state"], "stale")
+        self.assertIn("FINISHED", payload["error"])
+        self.assertEqual(calls, [("GET", "/v0/agents/bc-abc123", None)])
+
+    def test_followup_live_posts_when_agent_is_running(self):
+        calls = []
+
+        class FakeClient:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def request(self, method, path, body=None, query=None):
+                calls.append((method, path, body))
+                if method == "GET":
+                    return 200, {"id": "bc-abc123", "status": "RUNNING"}, "{}", "bearer"
+                return 200, {"ok": True}, "{}", "bearer"
+
+        original_argv = sys.argv[:]
+        env_key = os.environ.get("CURSOR_API_KEY")
+        os.environ["CURSOR_API_KEY"] = "dummy_test_key"
+        sys.argv = [
+            "cursor_handoff.py",
+            "--mode",
+            "api",
+            "--op",
+            "followup",
+            "--agent-id",
+            "bc-abc123",
+            "--prompt",
+            "continue",
+            "--json",
+        ]
+        old_client = MODULE.CursorApiClient
+        old_consult = MODULE.consult_doctor_receipt
+        MODULE.CursorApiClient = FakeClient
+        MODULE.consult_doctor_receipt = lambda **_kwargs: {
+            "consulted": False,
+            "receipt_source": "absent",
+            "receipt_state": "absent",
+            "receipt_verified": False,
+            "fresh": False,
+            "overall_status": "",
+            "blocked_reason": "",
+            "failed_stages": [],
+            "grade": "",
+            "who_acts_first": "",
+            "safe_for_autonomous_ops": False,
+            "may_continue_offline_code": True,
+            "must_wait_for_owner": False,
+            "next_action": "",
+            "reason": "receipt_not_consulted",
+        }
+        buf = io.StringIO()
+        try:
+            with redirect_stdout(buf):
+                code = MODULE.main()
+        finally:
+            sys.argv = original_argv
+            MODULE.CursorApiClient = old_client
+            MODULE.consult_doctor_receipt = old_consult
+            if env_key is None:
+                os.environ.pop("CURSOR_API_KEY", None)
+            else:
+                os.environ["CURSOR_API_KEY"] = env_key
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(code, MODULE.EXIT_OK)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["agent_state"], "running")
+        self.assertEqual(calls[0], ("GET", "/v0/agents/bc-abc123", None))
+        self.assertEqual(calls[1][0], "POST")
+        self.assertEqual(calls[1][1], "/v0/agents/bc-abc123/followup")
 
 
 if __name__ == "__main__":

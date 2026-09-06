@@ -37,6 +37,89 @@ def validate_agent_id(agent_id: str, flag_name: str = "--id") -> None:
         )
 
 
+TERMINAL_AGENT_STATUSES = frozenset({"FINISHED", "FAILED", "CANCELLED", "STOPPED", "EXPIRED"})
+
+
+def allowlisted_agent_snapshot(agent: Any, *, expected_id: str = "") -> Dict[str, str]:
+    """Return id + status only. Never conversation, URLs, or raw bodies."""
+    aid = str(expected_id or "").strip()
+    status = ""
+    if isinstance(agent, dict):
+        raw_id = str(agent.get("id") or "").strip()
+        if raw_id:
+            aid = raw_id
+        status = str(agent.get("status") or "").strip()
+    return {"id": aid, "status": status}
+
+
+def classify_followup_agent(
+    status_code: int,
+    agent: Any,
+    *,
+    expected_id: str,
+) -> tuple[str, str | None, Dict[str, str]]:
+    """Classify whether a live followup POST may proceed.
+
+    agent_state is one of: running, missing, stale, unknown.
+    A non-None block reason means the followup must not be sent.
+    """
+    expected = str(expected_id or "").strip()
+    snapshot = allowlisted_agent_snapshot(agent, expected_id=expected)
+    if int(status_code) == 404:
+        return (
+            "missing",
+            (
+                "Followup is blocked because that Cloud agent was not found. "
+                "The followup was not sent."
+            ),
+            snapshot,
+        )
+    if int(status_code) >= 400:
+        return (
+            "unknown",
+            (
+                "Followup is blocked because the Cloud agent status check failed "
+                f"(HTTP {int(status_code)}). The followup was not sent."
+            ),
+            snapshot,
+        )
+    if not isinstance(agent, dict) or agent.get("_non_json_response"):
+        return (
+            "missing",
+            "Followup is blocked because the Cloud agent status was empty. "
+            "The followup was not sent.",
+            snapshot,
+        )
+    raw_id = str(agent.get("id") or "").strip()
+    if raw_id and expected and raw_id != expected:
+        return (
+            "unknown",
+            (
+                "Followup is blocked because the status response did not match "
+                "the requested agent. The followup was not sent."
+            ),
+            snapshot,
+        )
+    raw_status = str(agent.get("status") or "").strip()
+    if not raw_status:
+        return (
+            "missing",
+            "Followup is blocked because the Cloud agent has no status. "
+            "The followup was not sent.",
+            snapshot,
+        )
+    if raw_status.upper() in TERMINAL_AGENT_STATUSES:
+        return (
+            "stale",
+            (
+                f"Followup is blocked because Cloud agent {expected or raw_id} "
+                f"is {raw_status} (not a running agent). The followup was not sent."
+            ),
+            snapshot,
+        )
+    return "running", None, snapshot
+
+
 def encode_request_json(body: Dict[str, Any]) -> bytes:
     """Serialize a dict to UTF-8 JSON for HTTP bodies (Unicode-safe)."""
     try:

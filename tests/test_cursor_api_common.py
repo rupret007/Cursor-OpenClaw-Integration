@@ -63,6 +63,55 @@ class CursorApiCommonTests(unittest.TestCase):
         self.assertTrue(MOD.parse_openai_enabled("TRUE"))
         self.assertTrue(MOD.parse_openai_enabled("Yes"))
 
+    def test_classify_followup_agent_running(self):
+        state, reason, snapshot = MOD.classify_followup_agent(
+            200,
+            {"id": "bc-abc123", "status": "RUNNING", "conversation": ["secret"]},
+            expected_id="bc-abc123",
+        )
+        self.assertEqual(state, "running")
+        self.assertIsNone(reason)
+        self.assertEqual(snapshot, {"id": "bc-abc123", "status": "RUNNING"})
+        self.assertNotIn("conversation", snapshot)
+
+    def test_classify_followup_agent_missing_and_stale(self):
+        missing_state, missing_reason, missing_snap = MOD.classify_followup_agent(
+            404, {}, expected_id="bc-gone"
+        )
+        self.assertEqual(missing_state, "missing")
+        self.assertIn("not found", missing_reason or "")
+        self.assertEqual(missing_snap["id"], "bc-gone")
+
+        stale_state, stale_reason, stale_snap = MOD.classify_followup_agent(
+            200,
+            {"id": "bc-done", "status": "FINISHED"},
+            expected_id="bc-done",
+        )
+        self.assertEqual(stale_state, "stale")
+        self.assertIn("FINISHED", stale_reason or "")
+        self.assertEqual(stale_snap["status"], "FINISHED")
+
+        empty_state, empty_reason, _ = MOD.classify_followup_agent(
+            200, {"id": "bc-empty"}, expected_id="bc-empty"
+        )
+        self.assertEqual(empty_state, "missing")
+        self.assertIn("no status", empty_reason or "")
+
+    def test_classify_followup_agent_unknown_failures(self):
+        unknown_state, unknown_reason, _ = MOD.classify_followup_agent(
+            500, {"error": "boom"}, expected_id="bc-1"
+        )
+        self.assertEqual(unknown_state, "unknown")
+        self.assertIn("HTTP 500", unknown_reason or "")
+
+        mismatch_state, mismatch_reason, _ = MOD.classify_followup_agent(
+            200,
+            {"id": "bc-other", "status": "RUNNING"},
+            expected_id="bc-wanted",
+        )
+        self.assertEqual(mismatch_state, "unknown")
+        self.assertIn("did not match", mismatch_reason or "")
+
 
 if __name__ == "__main__":
     unittest.main()

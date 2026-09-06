@@ -76,6 +76,12 @@ CURSOR_API_KEY="dummy_test_key" python3 "$CLI" \
   --branch-name "cursor/intent-only" \
   --dry-run >/dev/null
 
+CURSOR_API_KEY="dummy_test_key" python3 "$CLI" \
+  --json followup \
+  --id "bc-abc123" \
+  --prompt "Continue the offline check." \
+  --dry-run >/dev/null
+
 echo "[6/11] Diagnostic command..."
 CURSOR_API_KEY="dummy_test_key" python3 "$CLI" --json diagnose >/dev/null
 

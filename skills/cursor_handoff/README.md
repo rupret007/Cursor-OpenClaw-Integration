@@ -140,9 +140,10 @@ python3 ~/.openclaw/workspace/skills/cursor_handoff/scripts/cursor_handoff.py \
 
 Live submit consults an offline doctor receipt when one is present
 (`--receipt`, `ANDREA_DOCTOR_RECEIPT`, or `data/andrea-doctor-receipt.json`
-in the local repo or cwd). `/tmp` is never auto-read. A stale or
-not-autonomous receipt blocks Cursor API handoff. Diagnose and dry-run
-report that consult without launching work.
+in the local repo or cwd). `bash scripts/andrea_doctor.sh --offline` writes
+that canonical file unless `--receipt PATH` overrides. `/tmp` is never
+auto-read. A stale or not-autonomous receipt blocks Cursor API handoff.
+Diagnose and dry-run report that consult without launching work.
 
 ### Real API submission
 

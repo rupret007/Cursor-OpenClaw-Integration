@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from scripts.andrea_doctor_receipt import (
+    LEGACY_TMP_RERUN_COMMAND,
     RECEIPT_MAX_AGE_SECONDS,
     RERUN_COMMAND,
     consume_receipt,
@@ -47,10 +48,7 @@ from .store import (
 
 OPERATOR_RECEIPT_RELATIVE_PATH = Path("data") / "andrea-doctor-receipt.json"
 OPERATOR_RECEIPT_MAX_AGE_SECONDS = RECEIPT_MAX_AGE_SECONDS
-OPERATOR_RECEIPT_REFRESH_COMMAND = (
-    "bash scripts/andrea_doctor.sh --offline --receipt "
-    "data/andrea-doctor-receipt.json"
-)
+OPERATOR_RECEIPT_REFRESH_COMMAND = RERUN_COMMAND
 
 
 def _operator_receipt_path(server: Any) -> Path:
@@ -193,9 +191,9 @@ def build_operator_readiness_snapshot(
         # Keep the verifier's actor/action contract, but route this surface's
         # recovery to the same receipt it actually consumes. Receipt bytes and
         # fingerprints remain unchanged; arbitrary receipt commands are unused.
-        "next_action": str(packet.get("next_action") or OPERATOR_RECEIPT_REFRESH_COMMAND).replace(
-            RERUN_COMMAND, OPERATOR_RECEIPT_REFRESH_COMMAND
-        ),
+        "next_action": str(packet.get("next_action") or OPERATOR_RECEIPT_REFRESH_COMMAND)
+        .replace(LEGACY_TMP_RERUN_COMMAND, OPERATOR_RECEIPT_REFRESH_COMMAND)
+        .replace(RERUN_COMMAND, OPERATOR_RECEIPT_REFRESH_COMMAND),
         "failed_stages": [str(stage) for stage in failed_stages[:4]],
         "last_verified": None,
         "refresh_required": packet.get("overall_status") == "blocked",

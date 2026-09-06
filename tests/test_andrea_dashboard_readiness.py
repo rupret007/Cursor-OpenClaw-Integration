@@ -8,7 +8,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.andrea_doctor_receipt import build_receipt, write_receipt
+from scripts.andrea_doctor_receipt import (
+    LEGACY_TMP_RERUN_COMMAND,
+    RERUN_COMMAND,
+    build_receipt,
+    write_receipt,
+)
 from services.andrea_sync.dashboard import (
     OPERATOR_RECEIPT_MAX_AGE_SECONDS,
     OPERATOR_RECEIPT_REFRESH_COMMAND,
@@ -235,6 +240,46 @@ class TestDashboardOperatorReadiness(unittest.TestCase):
         self.assertTrue(current["must_wait_for_owner"])
         self.assertEqual(current["failed_stages"], ["reliability"])
         self.assertIsNone(current["last_verified"])
+
+    def test_leftover_tmp_guidance_is_remapped_to_canonical_data_path(self) -> None:
+        receipt = build_receipt(
+            {
+                "grade": "C",
+                "readiness_plan": {
+                    "safe_for_autonomous_ops": False,
+                    "blocker_count": 1,
+                    "who_acts_first": "owner",
+                    "next_action": LEGACY_TMP_RERUN_COMMAND,
+                    "andrea_next_action": "Keep the draft pending.",
+                    "coding_agent_next_action": "Stay offline.",
+                    "owner_next_action": LEGACY_TMP_RERUN_COMMAND,
+                    "holds": ["Do not send any live message."],
+                    "routing": {
+                        "andrea": "offline only",
+                        "coding_agent": "offline code and tests only",
+                        "owner": "owner-gated actions only",
+                    },
+                    "actions": [],
+                },
+            },
+            security_status="passed",
+            reliability_status="passed",
+            openclaw_status="skipped_offline",
+            exit_code=1,
+        )
+        write_receipt(self.receipt_path, receipt)
+        snapshot = build_operator_readiness_snapshot(
+            self.server, now=self.receipt_path.stat().st_mtime + 1
+        )
+        self.assertEqual(snapshot["receipt_state"], "current")
+        self.assertEqual(snapshot["refresh_command"], OPERATOR_RECEIPT_REFRESH_COMMAND)
+        self.assertEqual(snapshot["next_action"], OPERATOR_RECEIPT_REFRESH_COMMAND)
+        self.assertNotIn("/tmp/", snapshot["next_action"])
+
+    def test_dashboard_refresh_command_is_the_shared_rerun_constant(self) -> None:
+        self.assertEqual(OPERATOR_RECEIPT_REFRESH_COMMAND, RERUN_COMMAND)
+        self.assertIn("data/andrea-doctor-receipt.json", OPERATOR_RECEIPT_REFRESH_COMMAND)
+        self.assertNotIn("/tmp/", OPERATOR_RECEIPT_REFRESH_COMMAND)
 
     def test_all_refresh_paths_target_the_dashboard_receipt_without_rewriting_it(self) -> None:
         missing = build_operator_readiness_snapshot(self.server)

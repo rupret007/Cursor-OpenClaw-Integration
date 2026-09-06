@@ -219,10 +219,22 @@ class TestAndreaSyncHTTP(unittest.TestCase):
         )
         with urllib.request.urlopen(create_req, timeout=5) as resp:
             created = json.loads(resp.read().decode("utf-8"))
-        req = urllib.request.Request(self._url("/v1/dashboard/summary?limit=5"), method="GET")
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            self.assertEqual(resp.status, 200)
-            data = json.loads(resp.read().decode("utf-8"))
+        receipt = REPO_ROOT / "data" / "andrea-doctor-receipt.json"
+        parked = receipt.with_name(receipt.name + ".http-test-park")
+        if receipt.is_file():
+            receipt.replace(parked)
+        else:
+            parked = None
+        data = None
+        try:
+            req = urllib.request.Request(self._url("/v1/dashboard/summary?limit=5"), method="GET")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                self.assertEqual(resp.status, 200)
+                data = json.loads(resp.read().decode("utf-8"))
+        finally:
+            if parked is not None and parked.is_file():
+                parked.replace(receipt)
+        self.assertIsNotNone(data)
         self.assertTrue(data.get("ok"))
         self.assertIn("webhook", data)
         self.assertIn("capabilities", data)

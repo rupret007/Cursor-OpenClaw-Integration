@@ -291,6 +291,7 @@ class TestAndreaReadinessGrade(unittest.TestCase):
         self.assertIn("operator-testable", proc.stdout)
         self.assertIn("Grade C", proc.stdout)
         self.assertIn("--receipt", proc.stdout)
+        self.assertIn("data/andrea-doctor-receipt.json", proc.stdout)
         self.assertIn("Grok", proc.stdout)
         self.assertIn("--consume", proc.stdout)
         self.assertIn("audience", proc.stdout)
@@ -308,34 +309,45 @@ class TestAndreaReadinessGrade(unittest.TestCase):
 
     def test_offline_doctor_completes_and_reprints_andrea_bob_owner_recap(self) -> None:
         """Run the exact operator command and assert the recap is testable."""
-        proc = subprocess.run(
-            ["bash", str(DOCTOR_SCRIPT), "--offline"],
-            cwd=str(REPO_ROOT),
-            capture_output=True,
-            text=True,
-            timeout=180,
-        )
-        combined = f"{proc.stdout}\n{proc.stderr}"
-        self.assertIn(proc.returncode, {0, 1}, combined)
-        self.assertIn(self._mod.OPERATOR_RECAP_START, proc.stdout)
-        self.assertIn(self._mod.OPERATOR_RECAP_END, proc.stdout)
-        recap = self._mod.extract_operator_recap(proc.stdout)
-        self.assertIn("Who acts first:", recap)
-        self.assertIn("Next for Andrea:", recap)
-        self.assertIn("Next for the coding agent (Bob):", recap)
-        self.assertIn("Next for the owner:", recap)
-        self.assertIn("Do not send any live message.", recap)
-        self.assertIn("Keep Private API off.", recap)
-        self.assertGreaterEqual(proc.stdout.count(self._mod.OPERATOR_RECAP_START), 2)
-        self.assertIn(">>> [3/4] Reliability probes (deterministic)", proc.stdout)
-        self.assertIn("(Skip: offline mode / SKIP_OPENCLAW_PROBE=1)", proc.stdout)
-        self.assertIn("Offline doctor complete.", proc.stdout)
-        self.assertIn("Private API stays off", proc.stdout)
-        self.assertNotIn("fix blocked rows above", combined)
-        self.assertNotIn("openclaw models status --probe", proc.stdout)
-        if proc.returncode == 1:
-            self.assertIn("Next for the owner", proc.stderr)
-            self.assertIn("Continuing the offline doctor", proc.stderr)
+        receipt = REPO_ROOT / "data" / "andrea-doctor-receipt.json"
+        prior = receipt.read_bytes() if receipt.is_file() else None
+        try:
+            proc = subprocess.run(
+                ["bash", str(DOCTOR_SCRIPT), "--offline"],
+                cwd=str(REPO_ROOT),
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+            combined = f"{proc.stdout}\n{proc.stderr}"
+            self.assertIn(proc.returncode, {0, 1}, combined)
+            self.assertIn(self._mod.OPERATOR_RECAP_START, proc.stdout)
+            self.assertIn(self._mod.OPERATOR_RECAP_END, proc.stdout)
+            recap = self._mod.extract_operator_recap(proc.stdout)
+            self.assertIn("Who acts first:", recap)
+            self.assertIn("Next for Andrea:", recap)
+            self.assertIn("Next for the coding agent (Bob):", recap)
+            self.assertIn("Next for the owner:", recap)
+            self.assertIn("Do not send any live message.", recap)
+            self.assertIn("Keep Private API off.", recap)
+            self.assertGreaterEqual(proc.stdout.count(self._mod.OPERATOR_RECAP_START), 2)
+            self.assertIn(">>> [3/4] Reliability probes (deterministic)", proc.stdout)
+            self.assertIn("(Skip: offline mode / SKIP_OPENCLAW_PROBE=1)", proc.stdout)
+            self.assertIn("Offline doctor complete.", proc.stdout)
+            self.assertIn("Private API stays off", proc.stdout)
+            self.assertTrue(receipt.is_file(), combined)
+            self.assertEqual(receipt.stat().st_mode & 0o777, 0o600)
+            self.assertIn("Machine handoff receipt: data/andrea-doctor-receipt.json", proc.stdout)
+            self.assertNotIn("fix blocked rows above", combined)
+            self.assertNotIn("openclaw models status --probe", proc.stdout)
+            if proc.returncode == 1:
+                self.assertIn("Next for the owner", proc.stderr)
+                self.assertIn("Continuing the offline doctor", proc.stderr)
+        finally:
+            if prior is None:
+                receipt.unlink(missing_ok=True)
+            else:
+                receipt.write_bytes(prior)
 
     def test_operator_docs_lead_with_offline_doctor_command(self) -> None:
         for rel in (

@@ -187,6 +187,7 @@ class CursorHandoffTests(unittest.TestCase):
                 explicit="",
                 local_repo=root,
                 search_roots=[repo_root],
+                cwd=root,
                 environ={},
             )
             self.assertFalse(absent["consulted"])

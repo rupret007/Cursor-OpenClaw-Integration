@@ -90,8 +90,13 @@ FALLBACK_ACTION = (
 )
 RECEIPT_MAX_AGE_SECONDS = 24 * 60 * 60
 CANONICAL_RELATIVE_RECEIPT = Path("data") / "andrea-doctor-receipt.json"
+CANONICAL_RECEIPT_ARG = CANONICAL_RELATIVE_RECEIPT.as_posix()
 RERUN_COMMAND = (
-    "bash scripts/andrea_doctor.sh --offline --receipt /tmp/andrea-doctor-receipt.json"
+    "bash scripts/andrea_doctor.sh --offline --receipt " + CANONICAL_RECEIPT_ARG
+)
+LEGACY_TMP_RERUN_COMMAND = (
+    "bash scripts/andrea_doctor.sh --offline --receipt "
+    "/tmp/andrea-doctor-receipt.json"
 )
 STALE_OWNER_HOLD_ACTION = (
     "The last verified check recorded an owner blocker; its clearance "
@@ -104,9 +109,11 @@ STALE_REFRESH_ACTION = (
 )
 CONSUME_COMMAND = (
     "python3 scripts/andrea_doctor_receipt.py --consume "
-    "/tmp/andrea-doctor-receipt.json --audience coding_agent"
+    f"{CANONICAL_RECEIPT_ARG} --audience coding_agent"
 )
-VERIFY_COMMAND = "python3 scripts/andrea_doctor_receipt.py --verify /tmp/andrea-doctor-receipt.json"
+VERIFY_COMMAND = (
+    "python3 scripts/andrea_doctor_receipt.py --verify " + CANONICAL_RECEIPT_ARG
+)
 DEFAULT_ROUTING = {
     "andrea": "offline only",
     "coding_agent": "offline code and tests only",
@@ -199,18 +206,14 @@ def stage_failed_next_action(failed_stages: list[str]) -> str:
     names = ", ".join(stage for stage in failed_stages if stage in GATE_STAGES) or "doctor"
     return (
         f"Doctor stage failed ({names}). Stop autonomous operation. The owner "
-        "must restore the failed stage, then rerun "
-        "bash scripts/andrea_doctor.sh --offline --receipt "
-        "/tmp/andrea-doctor-receipt.json."
+        f"must restore the failed stage, then rerun {RERUN_COMMAND}."
     )
 
 
 def stage_failed_owner_action(failed_stages: list[str]) -> str:
     names = ", ".join(stage for stage in failed_stages if stage in GATE_STAGES) or "doctor"
     return (
-        f"Restore the failed doctor stage ({names}), then rerun "
-        "bash scripts/andrea_doctor.sh --offline --receipt "
-        "/tmp/andrea-doctor-receipt.json."
+        f"Restore the failed doctor stage ({names}), then rerun {RERUN_COMMAND}."
     )
 
 

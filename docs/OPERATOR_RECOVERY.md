@@ -1,9 +1,9 @@
 # Operator readiness recovery
 
-This product slice starts from main `e532b713442c66f100b7affeef87e394cfd027c1`
-after #24. It makes missing-receipt consume agree with the dashboard and
-handoff: missing evidence is not an owner hold. It does not deploy or start a
-runtime.
+This product slice starts from main `0bdecde20b46936a2a08ed284226bc5ab311abfb`
+after #25. It makes live `cursor_openclaw.py create-agent` consult the same
+canonical doctor receipt the dashboard and `cursor_handoff` already consume.
+It does not deploy or start a runtime.
 
 ## The useful path
 
@@ -58,10 +58,12 @@ passing local code tests never supplies that approval.
   produces the same coding-agent / offline-continue packet that the dashboard
   already showed; invalid and tampered artifacts stay owner-blocked. Following
   that next action still refreshes the canonical ignored `data/` receipt.
-  `cursor_handoff` still never auto-reads `/tmp`. Missing evidence is still not
-  a new unconsulted handoff gate. An explicit consult of a missing path blocks
-  live API submit and allows local CLI submit. Explicit `--receipt PATH`
-  remains an override.
+  `cursor_handoff` and `cursor_openclaw.py create-agent` still never auto-read
+  `/tmp`. Missing evidence is still not a new unconsulted handoff gate. An
+  explicit consult of a missing path blocks live API submit (`create-agent` is
+  API-only) and allows local `cursor_handoff` CLI submit. Explicit
+  `--receipt PATH` remains an override. `followup` is not a new create and
+  does not re-consult.
 - Failed-stage expiration preserves the owner hold and disallows continued
   offline code under the existing failed-stage policy. Grade C remains distinct:
   unrelated offline code can still be allowed while its owner readiness gate
@@ -85,14 +87,15 @@ Use the pinned Python test dependency and Node runtime from the README. In a
 credential-free, isolated checkout, run:
 
 ```sh
-python3 -m pytest -q tests/test_andrea_dashboard_readiness.py tests/test_andrea_doctor_receipt.py tests/test_andrea_doctor_offline_recovery.py tests/test_andrea_dashboard_runtime.py skills/cursor_handoff/tests/test_cursor_handoff.py
+python3 -m pytest -q tests/test_andrea_dashboard_readiness.py tests/test_andrea_doctor_receipt.py tests/test_andrea_doctor_offline_recovery.py tests/test_andrea_dashboard_runtime.py tests/test_cursor_openclaw.py skills/cursor_handoff/tests/test_cursor_handoff.py
 bash scripts/test_integration.sh
 ```
 
 The focused tests cover failed → stale → fresh transitions, Grade C versus
 failed gates, no history from invalid receipts, unchanged receipt bytes,
 canonical command destination, hostile inherited live flags, legacy/default
-behavior, and unverified capability guidance. The doctor test copies the actual
+behavior, unverified capability guidance, and the `cursor_openclaw.py`
+create-agent / diagnose receipt consult. The doctor test copies the actual
 tracked scripts into a synthetic tree with trap providers and a fake local
 diagnostic child; it never contacts real providers. The JavaScript tests execute
 the actual rendered monitor against fake transport/timers and retain the #21

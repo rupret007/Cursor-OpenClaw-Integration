@@ -101,7 +101,7 @@ With a **local** repo path, add **`--triage`** to prepend a short non-secret sna
    - status + URL (if available)
    - one next step
 6. If the handoff is blocked, explain it as a product limitation or fallback choice. Do not surface raw tool/config/runtime jargon to the user.
-7. Before a live submit, consult the offline doctor receipt when one is present (`--receipt`, `ANDREA_DOCTOR_RECEIPT`, or local `data/andrea-doctor-receipt.json`). `bash scripts/andrea_doctor.sh --offline` writes that canonical file unless `--receipt PATH` overrides. Do not auto-read `/tmp`. A stale, invalid, or not-autonomous receipt blocks Cursor API handoff; a receipt that disallows offline code also blocks local CLI handoff. Missing evidence is not a new gate. Diagnose and dry-run only report the consult.
+7. Before a live submit, consult the offline doctor receipt when one is present (`--receipt`, `ANDREA_DOCTOR_RECEIPT`, or local `data/andrea-doctor-receipt.json`). `bash scripts/andrea_doctor.sh --offline` writes that canonical file unless `--receipt PATH` overrides. Do not auto-read `/tmp`. A stale, invalid, or not-autonomous receipt blocks Cursor API handoff; a receipt that disallows offline code also blocks local CLI handoff. Missing evidence is not a new gate. Diagnose and dry-run only report the consult. The same consult now also gates `scripts/cursor_openclaw.py create-agent`; do not treat that CLI as a bypass.
 
 ## Safety Guidance
 

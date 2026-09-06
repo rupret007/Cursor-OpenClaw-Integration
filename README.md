@@ -352,13 +352,14 @@ packets now use the same stale/current authority rules, so an old green
 receipt cannot authorize live Cursor work just because the dashboard was not
 open.
 
-`cursor_handoff` consults that same packet before a live submit. It reads an
-explicit `--receipt`, `ANDREA_DOCTOR_RECEIPT`, or a discovered local
-`data/andrea-doctor-receipt.json`. It never auto-reads `/tmp`. Missing
-evidence is not a new gate. A consulted receipt that is stale, invalid, or
-not `safe_for_autonomous_ops` blocks Cursor API submit; a consulted receipt
-that does not allow offline code also blocks local CLI submit. Diagnose and
-dry-run report the consult and do not launch work.
+`cursor_handoff` and `cursor_openclaw.py create-agent` consult that same
+packet before a live Cloud Agents submit. Both read an explicit `--receipt`,
+`ANDREA_DOCTOR_RECEIPT`, or a discovered local `data/andrea-doctor-receipt.json`.
+They never auto-read `/tmp`. Missing evidence is not a new gate. A consulted
+receipt that is stale, invalid, or not `safe_for_autonomous_ops` blocks the
+API POST; a consulted receipt that does not allow offline code also blocks
+local `cursor_handoff` CLI submit. Diagnose and dry-run report the consult
+and do not launch work. `followup` on an already-created agent is unchanged.
 
 The panel shows one selectable, code-owned refresh command targeting the same
 `data/andrea-doctor-receipt.json` file it reads. Leftover `/tmp/` guidance in
@@ -619,7 +620,10 @@ See [.env.example](.env.example) and [skills/cursor_handoff/.env.example](skills
 - `--retries` + exponential backoff reduce transient failures (including transport-layer errors).
 - `diagnose` redacts secrets.
 - Readiness output leads with a marked operator recap (`Who acts first` plus Next for Andrea / Bob / owner) and fail-closed holds. `bash scripts/andrea_doctor.sh --offline` is the operator command: it prints that recap, runs deterministic probes, reprints the recap, skips the live model probe, and writes `data/andrea-doctor-receipt.json` for Bob/Codex/Grok/Claude/dashboard/handoff. Grade C still completes the offline pass; exit `1` means the owner must act. A failed stage is always `blocked` and overrides next-step text. Consume with `python3 scripts/andrea_doctor_receipt.py --consume data/andrea-doctor-receipt.json --audience bob`.
-- `create-agent --dry-run` validates payload without network calls.
+- `create-agent --dry-run` validates payload without network calls and reports
+  the same doctor-receipt consult used by live create.
+- Live `create-agent` reuses the `cursor_handoff` API receipt gate so a stale,
+  invalid, or not-autonomous receipt cannot be bypassed by choosing the CLI.
 - `cursor_handoff` supports `--dry-run` and read-only defaults for safer delegation.
 
 ## License

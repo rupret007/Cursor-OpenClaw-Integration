@@ -1,23 +1,24 @@
 # Cursor session handoff snapshot
 
-Last updated: 2026-09-06 missing-receipt actor product pass.
+Last updated: 2026-09-06 openclaw CLI receipt-consult product pass.
 
 ## Current draft handoff
 
-- **Base:** exact main `e532b713442c66f100b7affeef87e394cfd027c1`;
-  canonical `data/` doctor receipt #24 already landed, not redone.
-- **Branch:** `cursor/missing-receipt-actor-1e30`.
-- **Product delta:** `--consume` / `--verify` / `--summary` no longer treat a
-  missing receipt as an owner hold. Missing evidence is still blocked for
-  autonomy, but the coding agent may continue offline code and refresh the
-  canonical `data/` receipt. Invalid or tampered artifacts stay owner-blocked.
-  Dashboard missing snapshots now read that same consume packet. An explicit
-  missing consult still blocks live Cursor API submit and no longer blocks
-  local CLI submit. Absent (unconsulted) evidence is still not a new gate.
-- **Reuse:** existing schema 2/fingerprint, `consume_receipt`, dashboard
-  snapshot, and handoff backends. No receipt-byte rewrite.
-- **Verification:** focused receipt/dashboard/offline-doctor/handoff tests plus
-  the existing offline integration gate. Exact local/hosted results and draft
+- **Base:** exact main `0bdecde20b46936a2a08ed284226bc5ab311abfb`;
+  missing-receipt actor #25 already landed, not redone. Canonical `data/`
+  destination #24 is also already landed, not redone.
+- **Branch:** `cursor/openclaw-cli-receipt-consult-2b04`.
+- **Product delta:** live `cursor_openclaw.py create-agent` now consults the
+  same offline doctor receipt `cursor_handoff` already uses (`--receipt`,
+  `ANDREA_DOCTOR_RECEIPT`, or discovered `data/andrea-doctor-receipt.json`).
+  A consulted stale, invalid, missing-path, or not-autonomous receipt blocks
+  the Cloud Agents POST. Diagnose and `--dry-run` report the consult and do
+  not launch work. Absent (unconsulted) evidence is still not a new gate.
+  `/tmp` is still never auto-read. `followup` is unchanged.
+- **Reuse:** existing schema 2/fingerprint, `consult_receipt_for_handoff`,
+  and `live_handoff_block_reason(..., "api")`. No receipt-byte rewrite.
+- **Verification:** focused `cursor_openclaw` receipt-consult tests plus the
+  existing offline integration gate. Exact local/hosted results and draft
   tip are recorded on the PR and Bob-the-Bot coord #20, not implied by this
   note.
 - **Holds:** `services/andrea_sync/server.py` remains exact base blob
@@ -26,6 +27,11 @@ Last updated: 2026-09-06 missing-receipt actor product pass.
   restart, credentials/settings mutation, merge/tag/release/sign/deploy.
 - **Next:** Karen reviews the exact draft; Jeff retains any real host/live
   readiness decision. See [OPERATOR_RECOVERY.md](OPERATOR_RECOVERY.md).
+
+## Previous missing-receipt slice — shipped in #25
+
+- `--consume` / `--verify` / `--summary` no longer treat a missing receipt as
+  an owner hold. Invalid or tampered artifacts stay owner-blocked.
 
 ## Previous destination slice — shipped in #24
 

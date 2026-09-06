@@ -51,6 +51,11 @@ python3 scripts/cursor_openclaw.py --json create-agent \
   --poll-attempts 5
 ```
 
+A consulted stale, invalid, or not-autonomous offline doctor receipt blocks
+this live `create-agent` the same way `cursor_handoff` blocks API submit.
+`--json diagnose` and `create-agent --dry-run` report that consult without
+POSTing. Missing evidence is not a new gate.
+
 **Fallbacks**
 
 - **401 / auth**: rotate `CURSOR_API_KEY`; confirm `CURSOR_AUTH_MODE` / `CURSOR_BASE_URL`.

@@ -31,8 +31,17 @@ if str(_SCRIPTS_DIR) not in sys.path:
 import env_loader  # noqa: E402
 import cursor_api_common  # noqa: E402
 import handoff_context  # noqa: E402
+import andrea_doctor_receipt  # noqa: E402
 
 VERSION = "1.2.0"
+
+
+class DoctorReceiptBlocked(RuntimeError):
+    """Local receipt gate failed before any Cloud Agents POST."""
+
+    def __init__(self, message: str, payload: Dict[str, Any]) -> None:
+        super().__init__(message)
+        self.payload = payload
 
 TERMINAL_STATUSES = {"FINISHED", "FAILED", "CANCELLED", "STOPPED", "EXPIRED"}
 
@@ -231,6 +240,45 @@ def print_out(payload: Dict[str, Any], as_json: bool) -> None:
             print(f"{key}: {value}")
 
 
+def _receipt_flag(args: argparse.Namespace) -> str:
+    return str(getattr(args, "receipt", "") or "")
+
+
+def consult_doctor_receipt(
+    *,
+    explicit: str = "",
+    local_repo: Optional[Path] = None,
+    cwd: Optional[Path] = None,
+    environ: Optional[Dict[str, str]] = None,
+    now: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Consult an existing offline doctor receipt. Missing evidence is not a gate."""
+    path, source = andrea_doctor_receipt.resolve_handoff_receipt_path(
+        explicit,
+        local_repo=local_repo,
+        cwd=Path.cwd() if cwd is None else cwd,
+        environ=os.environ if environ is None else environ,
+    )
+    return andrea_doctor_receipt.consult_receipt_for_handoff(path, source=source, now=now)
+
+
+def live_create_agent_block_reason(consult: Dict[str, Any]) -> Optional[str]:
+    """create-agent is Cloud Agents API only; reuse the shared API handoff gate."""
+    return andrea_doctor_receipt.live_handoff_block_reason(consult, "api")
+
+
+def _add_receipt_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--receipt",
+        default="",
+        help=(
+            "Optional offline doctor receipt to consult. If omitted, "
+            "ANDREA_DOCTOR_RECEIPT or a local data/andrea-doctor-receipt.json "
+            "is used when present. /tmp is never auto-read."
+        ),
+    )
+
+
 def require_one_of(repo: str, pr_url: str) -> None:
     has_r = bool((repo or "").strip())
     has_p = bool((pr_url or "").strip())
@@ -363,6 +411,7 @@ def parse_args() -> argparse.Namespace:
     p_create.add_argument("--poll-attempts", type=int, default=0)
     p_create.add_argument("--poll-interval-seconds", type=float, default=3.0)
     p_create.add_argument("--dry-run", action="store_true")
+    _add_receipt_arg(p_create)
 
     p_follow = sub.add_parser("followup")
     p_follow.add_argument("--id", required=True)
@@ -409,6 +458,7 @@ def parse_args() -> argparse.Namespace:
 
     p_diag = sub.add_parser("diagnose")
     p_diag.add_argument("--show-key", action="store_true")
+    _add_receipt_arg(p_diag)
     return parser.parse_args()
 
 
@@ -517,6 +567,10 @@ def handle(cfg: Config, args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
             "openai_api_enabled": openai_on,
             "openai_api_key_redacted": cursor_api_common.redact_secret(openai_key) if args.show_key else "***",
             "dotenv_files_loaded": [str(p) for p in _DOTENV_FILES_LOADED],
+            "doctor_receipt": consult_doctor_receipt(
+                explicit=_receipt_flag(args),
+                local_repo=_SCRIPTS_DIR.parent,
+            ),
         }
         return 0, payload
 
@@ -630,8 +684,27 @@ def handle(cfg: Config, args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
         else:
             prompt_body = (args.prompt or "").strip()
         payload = build_create_payload(args, prompt_body)
+        receipt_consult = consult_doctor_receipt(
+            explicit=_receipt_flag(args),
+            local_repo=_SCRIPTS_DIR.parent,
+        )
+        receipt_block = live_create_agent_block_reason(receipt_consult)
         if args.dry_run:
-            return 0, {"status": 0, "dry_run": True, "payload": payload}
+            return 0, {
+                "status": 0,
+                "dry_run": True,
+                "payload": payload,
+                "doctor_receipt": receipt_consult,
+                "receipt_would_block": receipt_block,
+            }
+        if receipt_block:
+            raise DoctorReceiptBlocked(
+                receipt_block,
+                {
+                    "error": receipt_block,
+                    "doctor_receipt": receipt_consult,
+                },
+            )
         status, data, raw, auth_mode = client.request("POST", "/v0/agents", body=payload)
         response = {"status": status, "auth_mode": auth_mode, "response": data or raw}
         if status < 400 and args.poll_attempts > 0 and isinstance(data, dict) and data.get("id") is not None:
@@ -804,6 +877,12 @@ def main() -> int:
         payload["ok"] = status < 400
         print_out(payload, as_json=cfg.output_json)
         return 0 if status < 400 else 4
+    except DoctorReceiptBlocked as err:
+        payload = dict(err.payload)
+        payload["ok"] = False
+        payload.setdefault("error", str(err))
+        print_out(payload, as_json=cursor_api_common.argv_has_json_flag())
+        return 2
     except Exception as err:  # noqa: BLE001
         payload = {"ok": False, "error": str(err)}
         print_out(payload, as_json=cursor_api_common.argv_has_json_flag())

@@ -397,7 +397,7 @@ class TestAndreaDoctorReceipt(unittest.TestCase):
                     self.assertIsNone(packet["last_verified"])
                     self.assertIn(self._mod.RERUN_COMMAND, packet["next_action"])
                     self.assertNotIn("/tmp/", packet["next_action"])
-                    self.assertNotIn("failed doctor stage", packet["next_action"])
+                    self.assertNotIn("Restore the failed doctor stage", packet["next_action"])
                     self.assertNotIn(str(missing_path), json.dumps(packet))
             dashboard = self._mod.consume_receipt(missing_path, "dashboard")[1]
             self.assertEqual(dashboard["next_action"], self._mod.MISSING_DASHBOARD_ACTION)

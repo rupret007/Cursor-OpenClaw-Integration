@@ -143,7 +143,9 @@ Live submit consults an offline doctor receipt when one is present
 in the local repo or cwd). `bash scripts/andrea_doctor.sh --offline` writes
 that canonical file unless `--receipt PATH` overrides. `/tmp` is never
 auto-read. A stale or not-autonomous receipt blocks Cursor API handoff.
-Diagnose and dry-run report that consult without launching work.
+Diagnose and dry-run report that consult without launching work. The repo
+CLI `scripts/cursor_openclaw.py create-agent` uses that same consult before
+a live Cloud Agents POST, so choosing the CLI is not a bypass.
 
 ### Real API submission
 

@@ -50,8 +50,9 @@ before relying on them. Local binary/key-presence and redacted diagnostics
 still run. The legacy model-probe-skip variable alone cannot create a receipt.
 
 The same `--offline` run writes the canonical ignored receipt
-`data/andrea-doctor-receipt.json` that the dashboard and `cursor_handoff`
-already consume. Pass `--receipt PATH` only to override that destination.
+`data/andrea-doctor-receipt.json` that the dashboard, `cursor_handoff`, and
+`cursor_openclaw.py create-agent` already consume. Pass `--receipt PATH` only
+to override that destination.
 
 The receipt is private-by-default (mode `600`) and contains only allowlisted
 stage status plus the readiness actor/action/hold contract. It does not copy

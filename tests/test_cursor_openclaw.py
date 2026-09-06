@@ -1,16 +1,67 @@
 import importlib.util
+import io
+import json
+import os
 import pathlib
 import sys
+import tempfile
 import types
 import unittest
+from contextlib import redirect_stdout
 
 
 SCRIPT_PATH = pathlib.Path(__file__).resolve().parent.parent / "scripts" / "cursor_openclaw.py"
+RECEIPT_SCRIPT = SCRIPT_PATH.parent / "andrea_doctor_receipt.py"
 SPEC = importlib.util.spec_from_file_location("cursor_openclaw", SCRIPT_PATH)
 MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC and SPEC.loader
 sys.modules["cursor_openclaw"] = MODULE
 SPEC.loader.exec_module(MODULE)  # type: ignore[attr-defined]
+RECEIPT_SPEC = importlib.util.spec_from_file_location("andrea_doctor_receipt", RECEIPT_SCRIPT)
+RECEIPT = importlib.util.module_from_spec(RECEIPT_SPEC)
+assert RECEIPT_SPEC and RECEIPT_SPEC.loader
+sys.modules.setdefault("andrea_doctor_receipt", RECEIPT)
+RECEIPT_SPEC.loader.exec_module(RECEIPT)  # type: ignore[attr-defined]
+
+
+def _cfg() -> MODULE.Config:
+    return MODULE.Config(
+        base_url="https://api.cursor.com",
+        api_key="k",
+        auth_mode="auto",
+        timeout_seconds=30,
+        retries=0,
+        retry_backoff_seconds=0.0,
+        output_json=True,
+    )
+
+
+def _build_receipt(*, safe: bool, security: str = "passed") -> dict:
+    return RECEIPT.build_receipt(
+        {
+            "grade": "A",
+            "readiness_plan": {
+                "safe_for_autonomous_ops": safe,
+                "blocker_count": 0 if safe else 1,
+                "who_acts_first": "coding_agent" if safe else "owner",
+                "next_action": "Continue the assigned offline test." if safe else "Stop.",
+                "andrea_next_action": "Keep the draft pending.",
+                "coding_agent_next_action": "Run offline verification." if safe else "Wait.",
+                "owner_next_action": "No owner setup is required." if safe else "Restore security.",
+                "holds": ["Do not send any live message."],
+                "routing": {
+                    "andrea": "offline only",
+                    "coding_agent": "offline code and tests only",
+                    "owner": "owner-gated actions only",
+                },
+                "actions": [],
+            },
+        },
+        security_status=security,
+        reliability_status="passed",
+        openclaw_status="skipped_offline",
+        exit_code=0 if safe and security == "passed" else 1,
+    )
 
 
 class CursorOpenClawTests(unittest.TestCase):
@@ -525,6 +576,310 @@ class CursorOpenClawTests(unittest.TestCase):
         self.assertEqual(payload["stopped"], 0)
         self.assertIn("no stops were attempted", payload["note"])
         self.assertEqual(calls, [("GET", "/v0/agents")])
+
+    def test_parse_args_accepts_receipt_on_diagnose_and_create_agent(self):
+        original_argv = sys.argv[:]
+        try:
+            sys.argv = [
+                "cursor_openclaw.py",
+                "--json",
+                "diagnose",
+                "--receipt",
+                "data/andrea-doctor-receipt.json",
+            ]
+            parsed = MODULE.parse_args()
+            self.assertEqual(parsed.command, "diagnose")
+            self.assertEqual(parsed.receipt, "data/andrea-doctor-receipt.json")
+            sys.argv = [
+                "cursor_openclaw.py",
+                "create-agent",
+                "--prompt",
+                "p",
+                "--repository",
+                "https://github.com/foo/bar",
+                "--branch-name",
+                "cursor/test",
+                "--receipt",
+                "data/andrea-doctor-receipt.json",
+                "--dry-run",
+            ]
+            parsed = MODULE.parse_args()
+            self.assertEqual(parsed.command, "create-agent")
+            self.assertEqual(parsed.receipt, "data/andrea-doctor-receipt.json")
+            self.assertTrue(parsed.dry_run)
+        finally:
+            sys.argv = original_argv
+
+    def test_consult_absent_is_not_a_create_agent_gate(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            consult = MODULE.consult_doctor_receipt(
+                explicit="",
+                local_repo=root,
+                cwd=root,
+                environ={},
+            )
+            self.assertFalse(consult["consulted"])
+            self.assertEqual(consult["receipt_state"], "absent")
+            self.assertIsNone(MODULE.live_create_agent_block_reason(consult))
+
+    def test_consult_does_not_autodiscover_tmp(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            tmp_receipt = pathlib.Path("/tmp") / f"andrea-doctor-receipt-{root.name}.json"
+            try:
+                RECEIPT.write_receipt(tmp_receipt, _build_receipt(safe=False, security="failed"))
+                consult = MODULE.consult_doctor_receipt(
+                    explicit="",
+                    local_repo=root,
+                    cwd=root,
+                    environ={},
+                )
+                self.assertFalse(consult["consulted"])
+                self.assertEqual(consult["receipt_source"], "absent")
+            finally:
+                if tmp_receipt.exists():
+                    tmp_receipt.unlink()
+
+    def test_consult_missing_explicit_blocks_live_create_agent(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            missing = root / "missing.json"
+            consult = MODULE.consult_doctor_receipt(
+                explicit=str(missing),
+                local_repo=root,
+                cwd=root,
+                environ={},
+            )
+            self.assertTrue(consult["consulted"])
+            self.assertEqual(consult["receipt_state"], "missing")
+            self.assertEqual(consult["who_acts_first"], "coding_agent")
+            self.assertTrue(consult["may_continue_offline_code"])
+            self.assertIsNotNone(MODULE.live_create_agent_block_reason(consult))
+
+    def test_consult_stale_and_owner_hold_block_live_api(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            ready_path = root / "ready.json"
+            failed_path = root / "failed.json"
+            RECEIPT.write_receipt(ready_path, _build_receipt(safe=True))
+            RECEIPT.write_receipt(failed_path, _build_receipt(safe=False, security="failed"))
+            current = MODULE.consult_doctor_receipt(
+                explicit=str(ready_path),
+                local_repo=root,
+                cwd=root,
+                now=ready_path.stat().st_mtime + 4,
+                environ={},
+            )
+            self.assertTrue(current["safe_for_autonomous_ops"])
+            self.assertIsNone(MODULE.live_create_agent_block_reason(current))
+            stale = MODULE.consult_doctor_receipt(
+                explicit=str(ready_path),
+                local_repo=root,
+                cwd=root,
+                now=ready_path.stat().st_mtime + RECEIPT.RECEIPT_MAX_AGE_SECONDS + 1,
+                environ={},
+            )
+            self.assertEqual(stale["receipt_state"], "stale")
+            self.assertIn("current authority", MODULE.live_create_agent_block_reason(stale) or "")
+            owner_hold = MODULE.consult_doctor_receipt(
+                explicit=str(failed_path),
+                local_repo=root,
+                cwd=root,
+                now=failed_path.stat().st_mtime + 4,
+                environ={},
+            )
+            self.assertIsNotNone(MODULE.live_create_agent_block_reason(owner_hold))
+
+    def test_diagnose_includes_doctor_receipt_packet(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            receipt_path = pathlib.Path(temp_dir) / "receipt.json"
+            RECEIPT.write_receipt(receipt_path, _build_receipt(safe=True))
+            args = types.SimpleNamespace(
+                command="diagnose",
+                show_key=False,
+                receipt=str(receipt_path),
+            )
+            status, payload = MODULE.handle(_cfg(), args)
+            self.assertEqual(status, 0)
+            consult = payload["doctor_receipt"]
+            self.assertTrue(consult["consulted"])
+            self.assertEqual(consult["receipt_state"], "current")
+            self.assertNotIn("receipt_fingerprint", consult)
+            self.assertNotIn(str(receipt_path), json.dumps(consult))
+
+    def test_create_agent_dry_run_reports_receipt_without_posting(self):
+        calls = []
+
+        class FakeClient:
+            def __init__(self, _cfg):
+                pass
+
+            def request(self, method, path, query=None, body=None):
+                calls.append((method, path, body))
+                raise AssertionError("dry-run must not call the API")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            receipt_path = pathlib.Path(temp_dir) / "failed.json"
+            RECEIPT.write_receipt(receipt_path, _build_receipt(safe=False, security="failed"))
+            args = types.SimpleNamespace(
+                command="create-agent",
+                prompt="hello",
+                intent=None,
+                triage_repo="",
+                repository="https://github.com/foo/bar",
+                ref="main",
+                pr_url="",
+                model="default",
+                branch_name="cursor/test",
+                auto_create_pr=False,
+                open_as_cursor_github_app=False,
+                skip_reviewer_request=False,
+                poll_attempts=0,
+                poll_interval_seconds=0.0,
+                dry_run=True,
+                receipt=str(receipt_path),
+            )
+            old_client = MODULE.CursorApiClient
+            MODULE.CursorApiClient = FakeClient
+            try:
+                status, payload = MODULE.handle(_cfg(), args)
+            finally:
+                MODULE.CursorApiClient = old_client
+        self.assertEqual(status, 0)
+        self.assertTrue(payload["dry_run"])
+        self.assertEqual(payload["payload"]["source"]["repository"], "https://github.com/foo/bar")
+        self.assertTrue(payload["doctor_receipt"]["consulted"])
+        self.assertIsNotNone(payload["receipt_would_block"])
+        self.assertEqual(calls, [])
+
+    def test_create_agent_live_blocks_consulted_receipt_without_http(self):
+        calls = []
+
+        class FakeClient:
+            def __init__(self, _cfg):
+                pass
+
+            def request(self, method, path, query=None, body=None):
+                calls.append((method, path, body))
+                raise AssertionError("blocked create-agent must not POST")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            receipt_path = pathlib.Path(temp_dir) / "failed.json"
+            RECEIPT.write_receipt(receipt_path, _build_receipt(safe=False, security="failed"))
+            args = types.SimpleNamespace(
+                command="create-agent",
+                prompt="hello",
+                intent=None,
+                triage_repo="",
+                repository="https://github.com/foo/bar",
+                ref="main",
+                pr_url="",
+                model="default",
+                branch_name="cursor/test",
+                auto_create_pr=False,
+                open_as_cursor_github_app=False,
+                skip_reviewer_request=False,
+                poll_attempts=0,
+                poll_interval_seconds=0.0,
+                dry_run=False,
+                receipt=str(receipt_path),
+            )
+            old_client = MODULE.CursorApiClient
+            MODULE.CursorApiClient = FakeClient
+            try:
+                with self.assertRaises(MODULE.DoctorReceiptBlocked) as ctx:
+                    MODULE.handle(_cfg(), args)
+            finally:
+                MODULE.CursorApiClient = old_client
+        self.assertIn("current authority", str(ctx.exception))
+        self.assertEqual(ctx.exception.payload["doctor_receipt"]["who_acts_first"], "owner")
+        self.assertNotIn(str(receipt_path), json.dumps(ctx.exception.payload))
+        self.assertEqual(calls, [])
+
+    def test_create_agent_live_absent_receipt_still_posts(self):
+        calls = []
+
+        class FakeClient:
+            def __init__(self, _cfg):
+                pass
+
+            def request(self, method, path, query=None, body=None):
+                calls.append((method, path, body))
+                return 200, {"id": "bc-1", "status": "CREATING"}, "{}", "bearer"
+
+        args = types.SimpleNamespace(
+            command="create-agent",
+            prompt="hello",
+            intent=None,
+            triage_repo="",
+            repository="https://github.com/foo/bar",
+            ref="main",
+            pr_url="",
+            model="default",
+            branch_name="cursor/test",
+            auto_create_pr=False,
+            open_as_cursor_github_app=False,
+            skip_reviewer_request=False,
+            poll_attempts=0,
+            poll_interval_seconds=0.0,
+            dry_run=False,
+            receipt="",
+        )
+        old_client = MODULE.CursorApiClient
+        old_consult = MODULE.consult_doctor_receipt
+        MODULE.CursorApiClient = FakeClient
+        MODULE.consult_doctor_receipt = lambda **_kwargs: RECEIPT.absent_handoff_consult()
+        try:
+            status, payload = MODULE.handle(_cfg(), args)
+        finally:
+            MODULE.CursorApiClient = old_client
+            MODULE.consult_doctor_receipt = old_consult
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["response"]["id"], "bc-1")
+        self.assertEqual(calls[0][0], "POST")
+        self.assertEqual(calls[0][1], "/v0/agents")
+
+    def test_main_create_agent_receipt_block_exits_validation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            receipt_path = pathlib.Path(temp_dir) / "failed.json"
+            RECEIPT.write_receipt(receipt_path, _build_receipt(safe=False, security="failed"))
+            original_argv = sys.argv[:]
+            env_key = os.environ.get("CURSOR_API_KEY")
+            os.environ["CURSOR_API_KEY"] = "dummy_test_key"
+            sys.argv = [
+                "cursor_openclaw.py",
+                "--json",
+                "create-agent",
+                "--prompt",
+                "hello",
+                "--repository",
+                "https://github.com/foo/bar",
+                "--ref",
+                "main",
+                "--branch-name",
+                "cursor/test",
+                "--receipt",
+                str(receipt_path),
+            ]
+            buf = io.StringIO()
+            try:
+                with redirect_stdout(buf):
+                    code = MODULE.main()
+            finally:
+                sys.argv = original_argv
+                if env_key is None:
+                    os.environ.pop("CURSOR_API_KEY", None)
+                else:
+                    os.environ["CURSOR_API_KEY"] = env_key
+            rendered = buf.getvalue()
+            payload = json.loads(rendered)
+            self.assertEqual(code, 2)
+            self.assertFalse(payload["ok"])
+            self.assertIn("current authority", payload["error"])
+            self.assertEqual(payload["doctor_receipt"]["receipt_state"], "current")
+            self.assertNotIn("receipt_fingerprint", rendered)
+            self.assertNotIn(str(receipt_path), rendered)
 
 
 if __name__ == "__main__":

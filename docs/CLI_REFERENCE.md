@@ -20,7 +20,7 @@ Subcommands:
 
 | Command | Notes |
 |---------|--------|
-| `diagnose` | Env summary; optional `--show-key` for redacted Cursor + OpenAI key previews; includes `cli_version`, `dotenv_files_loaded`, `openai_api_key_present`, `openai_api_enabled`, `openai_api_key_redacted` |
+| `diagnose` | Env summary; optional `--show-key` for redacted Cursor + OpenAI key previews; includes `cli_version`, `dotenv_files_loaded`, `openai_api_key_present`, `openai_api_enabled`, `openai_api_key_redacted`, and the same allowlisted `doctor_receipt` consult `cursor_handoff` uses |
 | `whoami` | `GET /v0/me` |
 | `models` | `GET /v0/models` |
 | `list-agents` | `--limit` 1–100, optional `--cursor`, `--pr-url` |
@@ -29,7 +29,7 @@ Subcommands:
 | `artifacts` | `--id` |
 | `artifact-download-url` | `--id`, `--path` |
 | `artifact-index` | `--id`; writes a mode-`0600` Markdown index (`--index-file` optional). Signed download links are sensitive and opt-in via `--include-download-urls true` (default `false`). |
-| `create-agent` | `--branch-name`, repo **or** `--pr-url`; **`--prompt` / `--intent` / `--triage-repo`** (see above); **`--model`** (explicit model id from `models` subcommand, or `default`); optional **`--ref`** (git ref when using `--repository`); `--dry-run`, polling flags |
+| `create-agent` | `--branch-name`, repo **or** `--pr-url`; **`--prompt` / `--intent` / `--triage-repo`** (see above); **`--model`** (explicit model id from `models` subcommand, or `default`); optional **`--ref`** (git ref when using `--repository`); optional **`--receipt`**; `--dry-run`, polling flags. Live create consults the same offline doctor receipt as `cursor_handoff` and blocks Cloud Agents POST when that consult is not current authority for autonomous work. Missing evidence is not a new gate. `--dry-run` reports `doctor_receipt` / `receipt_would_block` and does not POST. |
 | `followup` | `--id`, `--prompt` |
 | `stop-agent` | `--id` |
 | `stop-all-jobs` | Preview matching active agents for one repo (defaults to `--repo .`). It never stops without explicit `--yes`, skips terminal agents by default, and exits nonzero if any requested stop fails. Pagination follows the v0 API's `nextCursor` response field (with a non-conflicting `cursor` alias for compatibility). If `--max-pages` ends before that cursor, the scan is incomplete and **no** stop is attempted. |

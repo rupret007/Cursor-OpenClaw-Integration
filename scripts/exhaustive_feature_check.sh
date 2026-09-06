@@ -54,7 +54,7 @@ done
 pass "all subcommand --help"
 
 # Diagnose: empty Cursor + OpenAI in env so .env merge does not inject local secrets
-"${ENV_NO_SECRETS[@]}" python3 "$CLI" --json diagnose | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("ok") is True; assert d.get("api_key_present") is False; assert "dotenv_files_loaded" in d; assert d.get("openai_api_key_present") is False; assert d.get("openai_api_enabled") is False; assert d.get("openai_api_key_redacted") == "***"' || fail "diagnose empty key"
+"${ENV_NO_SECRETS[@]}" python3 "$CLI" --json diagnose | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("ok") is True; assert d.get("api_key_present") is False; assert "dotenv_files_loaded" in d; assert d.get("openai_api_key_present") is False; assert d.get("openai_api_enabled") is False; assert d.get("openai_api_key_redacted") == "***"; assert isinstance(d.get("doctor_receipt"), dict); assert "receipt_fingerprint" not in json.dumps(d["doctor_receipt"])' || fail "diagnose empty key"
 pass "diagnose with CURSOR_API_KEY empty"
 
 "${ENV_NO_SECRETS[@]}" python3 "$CLI" diagnose --show-key | grep -q "api_key_redacted" || fail "diagnose --show-key text"
@@ -155,7 +155,7 @@ env CURSOR_API_KEY=dummy_test_key python3 "$CLI" --json create-agent \
   --repository "https://github.com/foo/bar" \
   --ref main \
   --branch-name "cursor/test" \
-  --dry-run | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("dry_run") is True' || fail "create dry-run"
+  --dry-run | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("dry_run") is True; assert "doctor_receipt" in d; assert "receipt_would_block" in d' || fail "create dry-run"
 pass "create-agent --dry-run payload"
 
 env CURSOR_API_KEY=dummy_test_key python3 "$CLI" --json create-agent \

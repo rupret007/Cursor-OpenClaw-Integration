@@ -60,7 +60,7 @@ openclaw gateway restart
 1. **Preflight:** `python3 .../cursor_handoff.py --diagnose --json` (JSON includes `tool_version`, `dotenv_files_loaded`, OpenAI env summary fields, and optional `/v0/me` checks)
 2. **Handoff (read-only audit):** `--read-only true --dry-run` first, then real run without `--dry-run`.
 3. **Handoff (implementation):** `--read-only false` only when the user explicitly wants code changes.
-4. **Deep operations:** use `cursor_openclaw.py` for `list-agents`, `conversation`, `followup`, `artifacts`, etc. Live `create-agent` consults the same offline doctor receipt as `cursor_handoff` before POSTing.
+4. **Deep operations:** use `cursor_openclaw.py` for `list-agents`, `conversation`, `followup`, `artifacts`, etc. Live `create-agent` and `followup` consult the same offline doctor receipt as `cursor_handoff` before POSTing. Followup also refuses a missing or finished agent.
 
 ### Two-way communication with a running Cursor agent
 

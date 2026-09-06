@@ -36,14 +36,23 @@ import andrea_doctor_receipt  # noqa: E402
 VERSION = "1.2.0"
 
 
-class DoctorReceiptBlocked(RuntimeError):
-    """Local receipt gate failed before any Cloud Agents POST."""
+class LocalWriteBlocked(RuntimeError):
+    """Local receipt or agent-state gate failed before a Cloud Agents write."""
 
     def __init__(self, message: str, payload: Dict[str, Any]) -> None:
         super().__init__(message)
         self.payload = payload
 
-TERMINAL_STATUSES = {"FINISHED", "FAILED", "CANCELLED", "STOPPED", "EXPIRED"}
+
+class DoctorReceiptBlocked(LocalWriteBlocked):
+    """Local receipt gate failed before any Cloud Agents POST."""
+
+
+class AgentStateBlocked(LocalWriteBlocked):
+    """Local agent-state gate failed before a followup POST."""
+
+
+TERMINAL_STATUSES = set(cursor_api_common.TERMINAL_AGENT_STATUSES)
 
 _DOTENV_FILES_LOADED: list[Path] = []
 
@@ -416,6 +425,12 @@ def parse_args() -> argparse.Namespace:
     p_follow = sub.add_parser("followup")
     p_follow.add_argument("--id", required=True)
     p_follow.add_argument("--prompt", required=True)
+    p_follow.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Consult the doctor receipt and report whether followup would block; do not GET or POST.",
+    )
+    _add_receipt_arg(p_follow)
 
     p_stop = sub.add_parser("stop-agent")
     p_stop.add_argument("--id", required=True)
@@ -730,8 +745,66 @@ def handle(cfg: Config, args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
     if args.command == "followup":
         cursor_api_common.validate_agent_id(args.id)
         body = {"prompt": {"text": args.prompt}}
-        status, data, raw, auth_mode = client.request("POST", f"/v0/agents/{args.id}/followup", body=body)
-        return status, {"status": status, "auth_mode": auth_mode, "response": data or raw}
+        receipt_consult = consult_doctor_receipt(
+            explicit=_receipt_flag(args),
+            local_repo=_SCRIPTS_DIR.parent,
+        )
+        receipt_block = live_create_agent_block_reason(receipt_consult)
+        if args.dry_run:
+            return 0, {
+                "status": 0,
+                "dry_run": True,
+                "command": "followup",
+                "agent_id": args.id,
+                "agent_state": "not_checked",
+                "payload": body,
+                "doctor_receipt": receipt_consult,
+                "receipt_would_block": receipt_block,
+                "followup_would_block": receipt_block,
+            }
+        if receipt_block:
+            raise DoctorReceiptBlocked(
+                receipt_block,
+                {
+                    "error": receipt_block,
+                    "command": "followup",
+                    "agent_id": args.id,
+                    "agent_state": "not_checked",
+                    "doctor_receipt": receipt_consult,
+                },
+            )
+        status_code, data, raw, auth_mode = client.request("GET", f"/v0/agents/{args.id}")
+        agent_state, agent_block, snapshot = cursor_api_common.classify_followup_agent(
+            status_code,
+            data if data else raw,
+            expected_id=args.id,
+        )
+        if agent_block:
+            raise AgentStateBlocked(
+                agent_block,
+                {
+                    "error": agent_block,
+                    "command": "followup",
+                    "agent_id": args.id,
+                    "agent_state": agent_state,
+                    "agent": snapshot,
+                    "doctor_receipt": receipt_consult,
+                    "status": status_code,
+                    "auth_mode": auth_mode,
+                },
+            )
+        status, data, raw, auth_mode = client.request(
+            "POST", f"/v0/agents/{args.id}/followup", body=body
+        )
+        return status, {
+            "status": status,
+            "auth_mode": auth_mode,
+            "command": "followup",
+            "agent_id": args.id,
+            "agent_state": agent_state,
+            "agent": snapshot,
+            "response": data or raw,
+        }
 
     if args.command == "stop-agent":
         cursor_api_common.validate_agent_id(args.id)
@@ -877,7 +950,7 @@ def main() -> int:
         payload["ok"] = status < 400
         print_out(payload, as_json=cfg.output_json)
         return 0 if status < 400 else 4
-    except DoctorReceiptBlocked as err:
+    except LocalWriteBlocked as err:
         payload = dict(err.payload)
         payload["ok"] = False
         payload.setdefault("error", str(err))

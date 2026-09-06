@@ -69,10 +69,11 @@ python3 scripts/andrea_doctor_receipt.py --consume data/andrea-doctor-receipt.js
 `--audience` accepts `andrea`, `coding_agent` (`bob` / `codex` / `grok` /
 `claude`), `owner`, or `dashboard`. Verify recomputes the fingerprint, rejects
 unknown keys, and fail-closes to an owner-blocked packet when the artifact is
-missing, tampered, internally inconsistent, or older than 24 hours. A stale
-but correctly signed receipt keeps the last verified owner hold as history and
-is not current authority. `blocked` means stop at the audience `next_action`
-and route to `who_acts_first`.
+tampered, internally inconsistent, or older than 24 hours. A missing file is
+not an owner hold: consume names the coding agent, allows offline code, and
+asks for the canonical refresh. A stale but correctly signed receipt keeps the
+last verified owner hold as history and is not current authority. `blocked`
+means stop at the audience `next_action` and route to `who_acts_first`.
 
 For the local dashboard's action-first view, run the same offline doctor
 (it already writes the ignored repository-local path) and open the dashboard:

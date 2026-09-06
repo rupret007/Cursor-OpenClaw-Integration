@@ -77,14 +77,28 @@ class TestDashboardOperatorReadiness(unittest.TestCase):
         return self.receipt_path.stat().st_mtime
 
     def test_missing_receipt_blocks_but_names_safe_offline_refresh(self) -> None:
-        snapshot = build_operator_readiness_snapshot(self.server, now=100.0)
+        from scripts.andrea_doctor_receipt import consume_receipt
 
+        snapshot = build_operator_readiness_snapshot(self.server, now=100.0)
+        rc, consumed = consume_receipt(
+            self.repo_root / "data" / "andrea-doctor-receipt.json",
+            "dashboard",
+            now=100.0,
+        )
+
+        self.assertEqual(rc, 1)
         self.assertEqual(snapshot["receipt_state"], "missing")
+        self.assertEqual(consumed["receipt_state"], "missing")
         self.assertEqual(snapshot["overall_status"], "blocked")
+        self.assertEqual(snapshot["blocked_reason"], consumed["blocked_reason"])
         self.assertFalse(snapshot["trusted_receipt"])
         self.assertFalse(snapshot["safe_for_autonomous_ops"])
         self.assertTrue(snapshot["may_continue_offline_code"])
+        self.assertTrue(consumed["may_continue_offline_code"])
         self.assertEqual(snapshot["who_acts_first"], "coding_agent")
+        self.assertEqual(consumed["who_acts_first"], "coding_agent")
+        self.assertFalse(snapshot["must_wait_for_owner"])
+        self.assertEqual(snapshot["next_action"], consumed["next_action"])
         self.assertIn(OPERATOR_RECEIPT_REFRESH_COMMAND, snapshot["next_action"])
         self.assertNotIn(str(self.repo_root), json.dumps(snapshot))
 

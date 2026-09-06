@@ -323,12 +323,14 @@ python3 scripts/andrea_doctor_receipt.py --consume data/andrea-doctor-receipt.js
 
 `--audience` accepts `andrea`, `coding_agent` (`bob` / `codex` / `grok` /
 `claude`), `owner`, or `dashboard`. Invalid or tampered receipts fail closed to
-an owner-blocked packet. A correctly signed receipt whose local file is older
-than 24 hours is also not current authority: `--verify`, `--consume`, and
-`--summary` report `receipt_state=stale`, keep the last verified owner hold or
-failed stage as history, and refuse `safe_for_autonomous_ops`. That freshness
-check uses local mtime only; it is not cryptographic provenance. The dashboard
-uses this same consume contract.
+an owner-blocked packet. A missing file is different: consume still blocks
+autonomy, but it names the coding agent, allows offline code, and points at
+the same canonical refresh command the dashboard already showed. A correctly
+signed receipt whose local file is older than 24 hours is also not current
+authority: `--verify`, `--consume`, and `--summary` report `receipt_state=stale`,
+keep the last verified owner hold or failed stage as history, and refuse
+`safe_for_autonomous_ops`. That freshness check uses local mtime only; it is
+not cryptographic provenance. The dashboard uses this same consume contract.
 
 To put that same verified decision at the top of the existing local dashboard,
 open `http://127.0.0.1:8765/dashboard` after the offline doctor. The ignored

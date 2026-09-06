@@ -233,8 +233,11 @@ const OFFLINE_COMMAND = "bash scripts/andrea_doctor.sh --offline --receipt data/
 function recovery(state = "missing", previous = null) {
   return {
     receipt_state: state, trusted_receipt: false, receipt_verified: state === "stale",
-    overall_status: "blocked", grade: null, who_acts_first: "owner",
-    next_action: `Review evidence and run ${OFFLINE_COMMAND}`,
+    overall_status: "blocked", grade: null,
+    who_acts_first: state === "missing" ? "coding_agent" : "owner",
+    next_action: state === "missing"
+      ? `Run the offline doctor and refresh this dashboard: ${OFFLINE_COMMAND}`
+      : `Review evidence and run ${OFFLINE_COMMAND}`,
     age_seconds: state === "stale" ? 90000 : null,
     failed_stages: [], refresh_required: true, refresh_command: OFFLINE_COMMAND,
     last_verified: previous,
@@ -307,6 +310,13 @@ const scenarios = {
       assert.equal(b.element("operatorReadinessRecovery").hidden, false);
       if (state === "invalid") assert.match(b.element("operatorReadinessStatus").textContent, /Owner review is required/);
     }
+  },
+  async "missing evidence names the coding agent to refresh, not an owner hold"() {
+    const b = await renderReadiness(recovery("missing"));
+    assert.match(b.element("operatorReadiness").innerHTML, /Coding agent/);
+    assert.match(b.element("operatorReadinessStatus").textContent, /Offline evidence is missing/);
+    assert.equal(b.element("operatorReadinessPill").textContent, "refresh needed");
+    assert.doesNotMatch(b.element("operatorReadiness").innerHTML, />Owner</);
   },
   async "unverified stale history cannot be shown as previously trusted evidence"() {
     const data = recovery("stale", { overall_status: "ready", grade: "A", who_acts_first: "coding_agent" });

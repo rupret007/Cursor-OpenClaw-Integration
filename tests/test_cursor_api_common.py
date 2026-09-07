@@ -112,6 +112,24 @@ class CursorApiCommonTests(unittest.TestCase):
         self.assertEqual(mismatch_state, "unknown")
         self.assertIn("did not match", mismatch_reason or "")
 
+    def test_followup_dry_run_fields_never_claim_ready(self):
+        receipt_block = "Live Cursor API handoff is blocked."
+        blocked = MOD.followup_dry_run_fields(receipt_block)
+        self.assertEqual(blocked["agent_state"], "not_checked")
+        self.assertEqual(blocked["receipt_would_block"], receipt_block)
+        self.assertEqual(blocked["followup_would_block"], receipt_block)
+        self.assertFalse(blocked["followup_ready"])
+
+        clear_receipt = MOD.followup_dry_run_fields(None)
+        self.assertEqual(clear_receipt["agent_state"], "not_checked")
+        self.assertIsNone(clear_receipt["receipt_would_block"])
+        self.assertEqual(
+            clear_receipt["followup_would_block"],
+            MOD.FOLLOWUP_AGENT_NOT_CHECKED,
+        )
+        self.assertFalse(clear_receipt["followup_ready"])
+        self.assertIn("did not check", clear_receipt["followup_would_block"])
+
 
 if __name__ == "__main__":
     unittest.main()

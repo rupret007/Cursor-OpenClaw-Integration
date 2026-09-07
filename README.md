@@ -361,7 +361,11 @@ API POST; a consulted receipt that does not allow offline code also blocks
 local `cursor_handoff` CLI submit. Diagnose and dry-run report the consult
 and do not launch work. Live `followup` uses that same receipt consult and
 then reads agent status: a missing, unknown, or terminal agent is reported
-honestly and the followup POST is not sent. `--dry-run` does not GET or POST.
+honestly and the followup POST is not sent. A successful followup receipt
+includes that allowlisted consult and `followup_ready=true`. `--dry-run`
+does not GET or POST: `followup_ready` stays false, and `followup_would_block`
+is the receipt reason or the code-owned agent-not-checked reason. A clear
+receipt is not a clear followup.
 
 The panel shows one selectable, code-owned refresh command targeting the same
 `data/andrea-doctor-receipt.json` file it reads. Leftover `/tmp/` guidance in
@@ -624,9 +628,12 @@ See [.env.example](.env.example) and [skills/cursor_handoff/.env.example](skills
 - Readiness output leads with a marked operator recap (`Who acts first` plus Next for Andrea / Bob / owner) and fail-closed holds. `bash scripts/andrea_doctor.sh --offline` is the operator command: it prints that recap, runs deterministic probes, reprints the recap, skips the live model probe, and writes `data/andrea-doctor-receipt.json` for Bob/Codex/Grok/Claude/dashboard/handoff. Grade C still completes the offline pass; exit `1` means the owner must act. A failed stage is always `blocked` and overrides next-step text. Consume with `python3 scripts/andrea_doctor_receipt.py --consume data/andrea-doctor-receipt.json --audience bob`.
 - `create-agent --dry-run` and `followup --dry-run` validate locally without
   network calls and report the same doctor-receipt consult used by live writes.
+  Followup dry-run never claims `followup_ready`; a clear receipt is not a
+  clear followup because agent status was not checked.
 - Live `create-agent` and `followup` reuse the `cursor_handoff` API receipt
   gate so a stale, invalid, or not-autonomous receipt cannot be bypassed by
-  choosing the CLI. Followup also refuses a missing or finished agent.
+  choosing the CLI. Followup also refuses a missing or finished agent. A
+  successful followup CLI receipt includes the allowlisted consult.
 - `cursor_handoff` supports `--dry-run` and read-only defaults for safer delegation.
 
 ## License

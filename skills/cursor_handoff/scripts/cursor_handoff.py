@@ -423,17 +423,22 @@ def live_handoff_block_reason(consult: Dict[str, Any], backend: str) -> Optional
 
 def _emit_doctor_receipt_lines(payload: Dict[str, Any]) -> None:
     consult = payload.get("doctor_receipt")
-    if not isinstance(consult, dict):
-        return
-    print(f"  doctor_receipt: {consult.get('receipt_state') or consult.get('receipt_source')}")
-    if consult.get("consulted"):
-        if consult.get("who_acts_first"):
-            print(f"  doctor_who_acts_first: {consult.get('who_acts_first')}")
-        if consult.get("next_action"):
-            print(f"  doctor_next_action: {consult.get('next_action')}")
-    would_block = payload.get("receipt_would_block")
-    if would_block:
-        print(f"  receipt_would_block: {would_block}")
+    if isinstance(consult, dict):
+        print(f"  doctor_receipt: {consult.get('receipt_state') or consult.get('receipt_source')}")
+        if consult.get("consulted"):
+            if consult.get("who_acts_first"):
+                print(f"  doctor_who_acts_first: {consult.get('who_acts_first')}")
+            if consult.get("next_action"):
+                print(f"  doctor_next_action: {consult.get('next_action')}")
+        would_block = payload.get("receipt_would_block")
+        if would_block:
+            print(f"  receipt_would_block: {would_block}")
+    if "followup_would_block" in payload:
+        followup_block = payload.get("followup_would_block")
+        if followup_block:
+            print(f"  followup_would_block: {followup_block}")
+    if "followup_ready" in payload:
+        print(f"  followup_ready: {payload.get('followup_ready')}")
 
 
 def emit_json(payload: Dict[str, Any]) -> None:
@@ -495,6 +500,10 @@ def emit_text(payload: Dict[str, Any]) -> None:
         print(f"Branch: {payload.get('branch')}")
         if payload.get("agent_id"):
             print(f"Agent ID: {payload.get('agent_id')}")
+        if payload.get("agent_state"):
+            print(f"Agent state: {payload.get('agent_state')}")
+        if "followup_ready" in payload:
+            print(f"Followup ready: {payload.get('followup_ready')}")
         if payload.get("agent_url"):
             print(f"Agent URL: {payload.get('agent_url')}")
         if payload.get("status"):
@@ -908,8 +917,9 @@ def main() -> int:
             receipt_consult, backend if backend else "api"
         )
         if op == "followup":
-            payload["agent_state"] = "not_checked"
-            payload["followup_would_block"] = payload["receipt_would_block"]
+            payload.update(
+                cursor_api_common.followup_dry_run_fields(payload["receipt_would_block"])
+            )
         emit_json(payload) if args.json else emit_text(payload)
         return EXIT_OK
 
@@ -937,6 +947,12 @@ def main() -> int:
             "error": receipt_block,
             "doctor_receipt": receipt_consult,
         }
+        if op == "followup":
+            payload["op"] = op
+            payload["agent_id"] = agent_id or None
+            payload["agent_state"] = "not_checked"
+            payload["followup_ready"] = False
+            payload["followup_would_block"] = receipt_block
         emit_json(payload) if args.json else emit_text(payload)
         return EXIT_PREREQ
 
@@ -1056,6 +1072,8 @@ def main() -> int:
                         "auth_mode": auth_mode,
                         "error": agent_block,
                         "doctor_receipt": receipt_consult,
+                        "followup_ready": False,
+                        "followup_would_block": agent_block,
                     }
                     emit_json(payload) if args.json else emit_text(payload)
                     return EXIT_PREREQ
@@ -1102,6 +1120,9 @@ def main() -> int:
         if op == "followup" and agent_state:
             payload["agent_state"] = agent_state
             payload["agent"] = snapshot
+            payload["doctor_receipt"] = receipt_consult
+            payload["followup_ready"] = True
+            payload["followup_would_block"] = None
         emit_json(payload) if args.json else emit_text(payload)
         return EXIT_OK
 

@@ -246,6 +246,27 @@ class CursorHandoffTests(unittest.TestCase):
             self.assertIn("doctor_receipt: stale", rendered)
             self.assertNotIn("receipt_fingerprint", rendered)
             self.assertNotIn(str(ready_path), rendered)
+            dry_text = io.StringIO()
+            with redirect_stdout(dry_text):
+                MODULE.emit_text(
+                    {
+                        "dry_run": True,
+                        "backend": "api",
+                        "mode_requested": "api",
+                        "read_only": True,
+                        "branch": "cursor/test",
+                        "repo_input": str(root),
+                        "doctor_receipt": current,
+                        "receipt_would_block": None,
+                        **MODULE.cursor_api_common.followup_dry_run_fields(None),
+                    }
+                )
+            dry_rendered = dry_text.getvalue()
+            self.assertIn("followup_ready: False", dry_rendered)
+            self.assertIn("followup_would_block:", dry_rendered)
+            self.assertIn("did not check", dry_rendered)
+            self.assertIn("agent_state: not_checked", dry_rendered)
+            self.assertNotIn("receipt_fingerprint", dry_rendered)
 
     def test_parse_args_accepts_receipt(self):
         original_argv = sys.argv[:]
@@ -288,7 +309,12 @@ class CursorHandoffTests(unittest.TestCase):
         self.assertEqual(code, MODULE.EXIT_OK)
         self.assertTrue(payload["dry_run"])
         self.assertEqual(payload["agent_state"], "not_checked")
-        self.assertIn("followup_would_block", payload)
+        self.assertFalse(payload["followup_ready"])
+        self.assertEqual(
+            payload["followup_would_block"],
+            MODULE.cursor_api_common.FOLLOWUP_AGENT_NOT_CHECKED,
+        )
+        self.assertNotEqual(payload["followup_would_block"], payload["receipt_would_block"])
 
     def test_followup_live_blocks_stale_agent_without_post(self):
         calls = []
@@ -354,6 +380,8 @@ class CursorHandoffTests(unittest.TestCase):
         self.assertEqual(code, MODULE.EXIT_PREREQ)
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["agent_state"], "stale")
+        self.assertFalse(payload["followup_ready"])
+        self.assertEqual(payload["followup_would_block"], payload["error"])
         self.assertIn("FINISHED", payload["error"])
         self.assertEqual(calls, [("GET", "/v0/agents/bc-abc123", None)])
 
@@ -421,6 +449,9 @@ class CursorHandoffTests(unittest.TestCase):
         self.assertEqual(code, MODULE.EXIT_OK)
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["agent_state"], "running")
+        self.assertTrue(payload["followup_ready"])
+        self.assertIsNone(payload["followup_would_block"])
+        self.assertEqual(payload["doctor_receipt"]["receipt_source"], "absent")
         self.assertEqual(calls[0], ("GET", "/v0/agents/bc-abc123", None))
         self.assertEqual(calls[1][0], "POST")
         self.assertEqual(calls[1][1], "/v0/agents/bc-abc123/followup")

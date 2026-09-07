@@ -1,29 +1,27 @@
 # Cursor session handoff snapshot
 
-Last updated: 2026-09-06 honest followup leftover after #26.
+Last updated: 2026-09-07 followup dry-run / CLI receipt honesty after #27.
 
 ## Current draft handoff
 
-- **Base:** exact main `55c6d8eff5a2af5fb3c8257e35ce576be1d0afbb`;
-  create-agent receipt consult #26 already landed, not redone. Canonical
-  `data/` destination #24 and missing-receipt actor #25 are also already
-  landed, not redone.
-- **Branch:** `cursor/followup-receipt-agent-honesty-2b71`.
-- **Product delta:** live `cursor_openclaw.py followup` now consults the
-  same offline doctor receipt `create-agent` already uses (`--receipt`,
-  `ANDREA_DOCTOR_RECEIPT`, or discovered `data/andrea-doctor-receipt.json`).
-  A consulted stale, invalid, missing-path, or not-autonomous receipt blocks
-  the followup POST. After that consult, followup `GET`s agent status and
-  refuses a missing, unknown, or terminal agent instead of POSTing more
-  work. Diagnose is unchanged. `--dry-run` reports the consult plus
-  `agent_state=not_checked` and does not GET or POST. Absent (unconsulted)
-  evidence is still not a new gate. `/tmp` is still never auto-read.
-  `cursor_handoff --op followup` already consulted the receipt; it now uses
-  the same allowlisted agent-state check. `stop` / `delete` / `status` are
-  unchanged.
+- **Base:** exact main `ea95e62f1912ac9e2841b0453f963ddea06f5ca0`;
+  followup receipt/agent honesty #27 already landed, not redone. Canonical
+  `data/` destination #24, missing-receipt actor #25, and create-agent
+  consult #26 are also already landed, not redone.
+- **Branch:** `cursor/followup-dry-run-honesty-31c6`.
+- **Product delta:** followup CLI receipts no longer treat a clear doctor
+  receipt as a clear followup. `--dry-run` still does not GET or POST.
+  `receipt_would_block` stays the receipt gate. `followup_would_block` is
+  that receipt reason when the receipt blocks, otherwise the code-owned
+  `agent_not_checked` reason. `followup_ready` is always false on dry-run.
+  Live success now includes the same allowlisted `doctor_receipt` consult
+  (no path or fingerprint) plus `followup_ready=true`. `cursor_handoff --op
+  followup` uses the same contract. `stop` / `delete` / `status` /
+  `create-agent` write paths are unchanged.
 - **Reuse:** existing schema 2/fingerprint, `consult_receipt_for_handoff`,
   `live_handoff_block_reason(..., "api")`, and shared
-  `classify_followup_agent`. No receipt-byte rewrite.
+  `classify_followup_agent`. New shared `followup_dry_run_fields` in
+  `cursor_api_common` (mirrored under the skill). No receipt-byte rewrite.
 - **Verification:** focused `cursor_openclaw` / `cursor_api_common` /
   `cursor_handoff` followup tests plus the existing offline integration
   gate. Exact local/hosted results and draft tip are recorded on the PR
@@ -34,6 +32,12 @@ Last updated: 2026-09-06 honest followup leftover after #26.
   restart, credentials/settings mutation, merge/tag/release/sign/deploy.
 - **Next:** Karen reviews the exact draft; Jeff retains any real host/live
   readiness decision. See [OPERATOR_RECOVERY.md](OPERATOR_RECOVERY.md).
+
+## Previous followup leftover — shipped in #27
+
+- Live `cursor_openclaw.py followup` consults the same offline doctor
+  receipt `create-agent` already uses, then refuses a missing or terminal
+  agent before POSTing.
 
 ## Previous create-agent consult slice — shipped in #26
 

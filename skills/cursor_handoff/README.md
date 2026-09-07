@@ -64,6 +64,7 @@ Defined in `.env.example`:
 
 - Uses Cursor Cloud Agents endpoint: `POST /v0/agents`
 - Supports status polling via `GET /v0/agents/{id}`
+- If polling observes a terminal non-`FINISHED` state (`FAILED`, `CANCELLED`, `STOPPED`, `EXPIRED`), the submit reports failure (`ok: false`, non-zero exit) instead of "submitted successfully"
 - Requires `CURSOR_API_KEY`
 - Requires GitHub repository URL (local repo path is resolved via `git remote get-url origin`)
 - Supports optional PR-oriented submission via `--pr-url`

@@ -100,6 +100,7 @@ With a **local** repo path, add **`--triage`** to prepend a short non-secret sna
    - agent/job ID (if available)
    - status + URL (if available)
    - one next step
+   - If polling shows the agent ended in a terminal non-`FINISHED` state (`FAILED`, `CANCELLED`, `STOPPED`, `EXPIRED`), the handoff is reported as failed (non-zero exit, `ok: false`) even though the agent was submitted; surface that as "the Cursor agent stopped before finishing" and point the user at the agent URL.
 6. If the handoff is blocked, explain it as a product limitation or fallback choice. Do not surface raw tool/config/runtime jargon to the user.
 7. Before a live submit or followup, consult the offline doctor receipt when one is present (`--receipt`, `ANDREA_DOCTOR_RECEIPT`, or local `data/andrea-doctor-receipt.json`). `bash scripts/andrea_doctor.sh --offline` writes that canonical file unless `--receipt PATH` overrides. Do not auto-read `/tmp`. A stale, invalid, or not-autonomous receipt blocks Cursor API handoff; a receipt that disallows offline code also blocks local CLI handoff. Missing evidence is not a new gate. Diagnose and dry-run only report the consult. Followup `--dry-run` never sets `followup_ready`; a clear receipt is not a clear followup. The same consult now also gates `scripts/cursor_openclaw.py create-agent` and `followup`; do not treat that CLI as a bypass. Live followup then reads agent status and refuses a missing or finished agent. A successful followup receipt includes the allowlisted consult.
 

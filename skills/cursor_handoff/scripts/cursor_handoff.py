@@ -55,6 +55,8 @@ EXIT_CLI = 5
 EXIT_DIAG = 6
 
 TERMINAL_STATUSES = {"FINISHED", "FAILED", "CANCELLED", "STOPPED", "EXPIRED"}
+# Terminal states that mean the Cloud agent stopped without completing the handoff.
+TERMINAL_FAILURE_STATUSES = TERMINAL_STATUSES - {"FINISHED"}
 GITHUB_SLUG_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 TRANSIENT_HTTP_STATUSES = {429, 500, 502, 503, 504, cursor_api_common.TRANSIENT_TRANSPORT_STATUS}
 
@@ -511,6 +513,12 @@ def emit_text(payload: Dict[str, Any]) -> None:
     else:
         print("Handoff failed.")
         print(payload.get("error", "Unknown error"))
+        if payload.get("agent_id"):
+            print(f"  agent_id: {payload.get('agent_id')}")
+        if payload.get("status"):
+            print(f"  status: {payload.get('status')}")
+        if payload.get("agent_url"):
+            print(f"  agent_url: {payload.get('agent_url')}")
         if payload.get("agent_state"):
             print(f"  agent_state: {payload.get('agent_state')}")
         _emit_doctor_receipt_lines(payload)
@@ -1232,6 +1240,16 @@ def main() -> int:
     }
     if poll_skipped:
         payload["poll_skipped"] = poll_skipped
+
+    if str(status_text or "").strip().upper() in TERMINAL_FAILURE_STATUSES:
+        payload["ok"] = False
+        payload["error"] = (
+            f"Cursor Cloud agent {agent_id} ended in {status_text} without "
+            "completing the handoff. Check the agent URL for details before retrying."
+        )
+        emit_json(payload) if args.json else emit_text(payload)
+        return EXIT_API
+
     emit_json(payload) if args.json else emit_text(payload)
     return EXIT_OK
 

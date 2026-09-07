@@ -455,6 +455,105 @@ class CursorHandoffTests(unittest.TestCase):
         self.assertEqual(calls[0], ("GET", "/v0/agents/bc-abc123", None))
         self.assertEqual(calls[1][0], "POST")
         self.assertEqual(calls[1][1], "/v0/agents/bc-abc123/followup")
+    def _run_submit_api(self, poll_status):
+        calls = []
+
+        class FakeClient:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def create_agent(self, payload):
+                calls.append(("create", payload))
+                return (
+                    200,
+                    {"id": "bc-run1", "status": "RUNNING", "target": {"url": "https://cursor.com/agents/bc-run1"}},
+                    "{}",
+                    "bearer",
+                )
+
+            def get_agent(self, aid):
+                calls.append(("poll", aid))
+                return 200, {"id": aid, "status": poll_status, "target": {"url": "https://cursor.com/agents/bc-run1"}}, "{}", "bearer"
+
+        original_argv = sys.argv[:]
+        env_key = os.environ.get("CURSOR_API_KEY")
+        os.environ["CURSOR_API_KEY"] = "dummy_test_key"
+        sys.argv = [
+            "cursor_handoff.py",
+            "--repo",
+            "owner/repo",
+            "--prompt",
+            "Review the module",
+            "--mode",
+            "api",
+            "--read-only",
+            "true",
+            "--poll-max-attempts",
+            "1",
+            "--poll-interval-seconds",
+            "0",
+            "--json",
+        ]
+        old_client = MODULE.CursorApiClient
+        old_consult = MODULE.consult_doctor_receipt
+        MODULE.CursorApiClient = FakeClient
+        MODULE.consult_doctor_receipt = lambda **_kwargs: {
+            "consulted": False,
+            "may_continue_offline_code": True,
+            "safe_for_autonomous_ops": False,
+            "receipt_source": "absent",
+            "receipt_state": "absent",
+        }
+        buf = io.StringIO()
+        try:
+            with redirect_stdout(buf):
+                code = MODULE.main()
+        finally:
+            sys.argv = original_argv
+            MODULE.CursorApiClient = old_client
+            MODULE.consult_doctor_receipt = old_consult
+            if env_key is None:
+                os.environ.pop("CURSOR_API_KEY", None)
+            else:
+                os.environ["CURSOR_API_KEY"] = env_key
+        return code, json.loads(buf.getvalue()), calls
+
+    def test_submit_api_reports_terminal_failure(self):
+        code, payload, calls = self._run_submit_api("FAILED")
+        self.assertEqual(code, MODULE.EXIT_API)
+        self.assertFalse(payload["ok"])
+        self.assertTrue(payload["submitted"])
+        self.assertEqual(payload["agent_id"], "bc-run1")
+        self.assertEqual(payload["status"], "FAILED")
+        self.assertIn("FAILED", payload["error"])
+        self.assertEqual(calls[0][0], "create")
+        self.assertEqual(calls[1][0], "poll")
+
+    def test_submit_api_ok_when_finished(self):
+        code, payload, _calls = self._run_submit_api("FINISHED")
+        self.assertEqual(code, MODULE.EXIT_OK)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["status"], "FINISHED")
+        self.assertNotIn("error", payload)
+
+    def test_emit_text_failure_shows_agent_url(self):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            MODULE.emit_text(
+                {
+                    "ok": False,
+                    "submitted": True,
+                    "error": "Cursor Cloud agent bc-x ended in FAILED without completing the handoff.",
+                    "agent_id": "bc-x",
+                    "status": "FAILED",
+                    "agent_url": "https://cursor.com/agents/bc-x",
+                }
+            )
+        out = buf.getvalue()
+        self.assertIn("Handoff failed.", out)
+        self.assertIn("agent_url: https://cursor.com/agents/bc-x", out)
+        self.assertIn("status: FAILED", out)
+        self.assertNotIn("Handoff submitted successfully", out)
 
 
 if __name__ == "__main__":

@@ -936,7 +936,47 @@ class CursorOpenClawTests(unittest.TestCase):
         self.assertTrue(payload["doctor_receipt"]["consulted"])
         self.assertIsNotNone(payload["receipt_would_block"])
         self.assertEqual(payload["followup_would_block"], payload["receipt_would_block"])
+        self.assertFalse(payload["followup_ready"])
         self.assertNotIn(str(receipt_path), json.dumps(payload))
+        self.assertEqual(calls, [])
+
+    def test_followup_dry_run_clear_receipt_still_not_ready(self):
+        calls = []
+
+        class FakeClient:
+            def __init__(self, _cfg):
+                pass
+
+            def request(self, method, path, query=None, body=None):
+                calls.append((method, path, body))
+                raise AssertionError("followup dry-run must not call the API")
+
+        args = types.SimpleNamespace(
+            command="followup",
+            id="bc-abc123",
+            prompt="please continue",
+            dry_run=True,
+            receipt="",
+        )
+        old_client = MODULE.CursorApiClient
+        old_consult = MODULE.consult_doctor_receipt
+        MODULE.CursorApiClient = FakeClient
+        MODULE.consult_doctor_receipt = lambda **_kwargs: RECEIPT.absent_handoff_consult()
+        try:
+            status, payload = MODULE.handle(_cfg(), args)
+        finally:
+            MODULE.CursorApiClient = old_client
+            MODULE.consult_doctor_receipt = old_consult
+        self.assertEqual(status, 0)
+        self.assertTrue(payload["dry_run"])
+        self.assertEqual(payload["agent_state"], "not_checked")
+        self.assertIsNone(payload["receipt_would_block"])
+        self.assertEqual(
+            payload["followup_would_block"],
+            MODULE.cursor_api_common.FOLLOWUP_AGENT_NOT_CHECKED,
+        )
+        self.assertFalse(payload["followup_ready"])
+        self.assertNotEqual(payload["followup_would_block"], payload["receipt_would_block"])
         self.assertEqual(calls, [])
 
     def test_followup_live_blocks_consulted_receipt_without_http(self):
@@ -969,6 +1009,11 @@ class CursorOpenClawTests(unittest.TestCase):
                 MODULE.CursorApiClient = old_client
         self.assertIn("current authority", str(ctx.exception))
         self.assertEqual(ctx.exception.payload["agent_state"], "not_checked")
+        self.assertFalse(ctx.exception.payload["followup_ready"])
+        self.assertEqual(
+            ctx.exception.payload["followup_would_block"],
+            ctx.exception.payload["error"],
+        )
         self.assertNotIn(str(receipt_path), json.dumps(ctx.exception.payload))
         self.assertEqual(calls, [])
 
@@ -1008,6 +1053,11 @@ class CursorOpenClawTests(unittest.TestCase):
                 MODULE.consult_doctor_receipt = old_consult
             self.assertEqual(ctx.exception.payload["agent_state"], expected_state)
             self.assertEqual(ctx.exception.payload["agent"]["id"], "bc-abc123")
+            self.assertFalse(ctx.exception.payload["followup_ready"])
+            self.assertEqual(
+                ctx.exception.payload["followup_would_block"],
+                ctx.exception.payload["error"],
+            )
             self.assertEqual(calls, [("GET", "/v0/agents/bc-abc123", None)])
 
     def test_followup_live_absent_receipt_posts_only_when_agent_is_running(self):
@@ -1042,6 +1092,10 @@ class CursorOpenClawTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(payload["agent_state"], "running")
         self.assertEqual(payload["agent"]["status"], "RUNNING")
+        self.assertTrue(payload["followup_ready"])
+        self.assertIsNone(payload["followup_would_block"])
+        self.assertEqual(payload["doctor_receipt"]["receipt_source"], "absent")
+        self.assertNotIn("receipt_fingerprint", json.dumps(payload))
         self.assertEqual(calls[0], ("GET", "/v0/agents/bc-abc123", None))
         self.assertEqual(calls[1][0], "POST")
         self.assertEqual(calls[1][1], "/v0/agents/bc-abc123/followup")

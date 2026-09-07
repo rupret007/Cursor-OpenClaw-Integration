@@ -120,6 +120,27 @@ def classify_followup_agent(
     return "running", None, snapshot
 
 
+FOLLOWUP_AGENT_NOT_CHECKED = (
+    "Followup dry-run did not check Cloud agent status. The followup was not sent."
+)
+
+
+def followup_dry_run_block_reason(receipt_block: str | None) -> str:
+    """Dry-run never proves a followup is clear: agent status is not GET."""
+    text = str(receipt_block or "").strip()
+    return text or FOLLOWUP_AGENT_NOT_CHECKED
+
+
+def followup_dry_run_fields(receipt_block: str | None) -> Dict[str, Any]:
+    """Allowlisted dry-run followup receipt. Never implies the POST is clear."""
+    return {
+        "agent_state": "not_checked",
+        "receipt_would_block": receipt_block,
+        "followup_would_block": followup_dry_run_block_reason(receipt_block),
+        "followup_ready": False,
+    }
+
+
 def encode_request_json(body: Dict[str, Any]) -> bytes:
     """Serialize a dict to UTF-8 JSON for HTTP bodies (Unicode-safe)."""
     try:

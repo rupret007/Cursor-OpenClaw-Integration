@@ -428,7 +428,10 @@ def parse_args() -> argparse.Namespace:
     p_follow.add_argument(
         "--dry-run",
         action="store_true",
-        help="Consult the doctor receipt and report whether followup would block; do not GET or POST.",
+        help=(
+            "Consult the doctor receipt and report followup_ready=false. "
+            "Does not GET agent status or POST. A clear receipt is not a clear followup."
+        ),
     )
     _add_receipt_arg(p_follow)
 
@@ -756,11 +759,9 @@ def handle(cfg: Config, args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
                 "dry_run": True,
                 "command": "followup",
                 "agent_id": args.id,
-                "agent_state": "not_checked",
                 "payload": body,
                 "doctor_receipt": receipt_consult,
-                "receipt_would_block": receipt_block,
-                "followup_would_block": receipt_block,
+                **cursor_api_common.followup_dry_run_fields(receipt_block),
             }
         if receipt_block:
             raise DoctorReceiptBlocked(
@@ -771,6 +772,8 @@ def handle(cfg: Config, args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
                     "agent_id": args.id,
                     "agent_state": "not_checked",
                     "doctor_receipt": receipt_consult,
+                    "followup_ready": False,
+                    "followup_would_block": receipt_block,
                 },
             )
         status_code, data, raw, auth_mode = client.request("GET", f"/v0/agents/{args.id}")
@@ -789,6 +792,8 @@ def handle(cfg: Config, args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
                     "agent_state": agent_state,
                     "agent": snapshot,
                     "doctor_receipt": receipt_consult,
+                    "followup_ready": False,
+                    "followup_would_block": agent_block,
                     "status": status_code,
                     "auth_mode": auth_mode,
                 },
@@ -803,6 +808,9 @@ def handle(cfg: Config, args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
             "agent_id": args.id,
             "agent_state": agent_state,
             "agent": snapshot,
+            "doctor_receipt": receipt_consult,
+            "followup_ready": True,
+            "followup_would_block": None,
             "response": data or raw,
         }
 

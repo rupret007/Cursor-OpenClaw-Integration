@@ -161,7 +161,7 @@ pass "create-agent --dry-run payload"
 env CURSOR_API_KEY=dummy_test_key python3 "$CLI" --json followup \
   --id "bc-abc123" \
   --prompt "Continue the offline check." \
-  --dry-run | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("dry_run") is True; assert d.get("agent_state")=="not_checked"; assert "doctor_receipt" in d; assert "followup_would_block" in d; assert "receipt_fingerprint" not in json.dumps(d)' || fail "followup dry-run"
+  --dry-run | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("dry_run") is True; assert d.get("agent_state")=="not_checked"; assert d.get("followup_ready") is False; assert d.get("followup_would_block"); assert d.get("followup_would_block") != d.get("receipt_would_block"); assert "did not check" in d.get("followup_would_block"); assert "doctor_receipt" in d; assert "receipt_fingerprint" not in json.dumps(d)' || fail "followup dry-run"
 pass "followup --dry-run payload"
 
 env CURSOR_API_KEY=dummy_test_key python3 "$CLI" --json create-agent \

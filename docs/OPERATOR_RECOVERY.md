@@ -1,10 +1,12 @@
 # Operator readiness recovery
 
-This product slice starts from main `55c6d8eff5a2af5fb3c8257e35ce576be1d0afbb`
-after #26. It makes live `cursor_openclaw.py followup` consult the same
-canonical doctor receipt `create-agent` already uses, then refuse a missing
-or finished Cloud agent before POSTing. `cursor_handoff --op followup`
-already consulted the receipt; it now uses the same agent-state check.
+This product slice starts from main `ea95e62f1912ac9e2841b0453f963ddea06f5ca0`
+after #27. Followup `--dry-run` no longer copies `receipt_would_block` onto
+`followup_would_block`. A clear or absent receipt still reports
+`followup_ready=false` and a code-owned agent-not-checked reason because
+dry-run does not GET agent status. A successful live followup receipt now
+includes the same allowlisted doctor consult. Live followup still consults
+the receipt and refuses a missing or finished Cloud agent before POSTing.
 It does not deploy or start a runtime.
 
 ## The useful path

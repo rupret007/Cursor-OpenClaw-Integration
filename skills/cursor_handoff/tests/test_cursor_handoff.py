@@ -6,6 +6,7 @@ import pathlib
 import sys
 import unittest
 from contextlib import redirect_stdout
+from unittest import mock
 
 
 SCRIPT_PATH = (
@@ -19,6 +20,81 @@ SPEC.loader.exec_module(MODULE)  # type: ignore[attr-defined]
 
 
 class CursorHandoffTests(unittest.TestCase):
+    def _run_status(self, response, *, as_json=True, http_status=200, error=None):
+        client = mock.Mock(spec=["request"])
+        client.request.return_value = (http_status, response, "raw response", "bearer")
+        client.request.side_effect = error
+        argv = ["cursor_handoff.py", "--mode", "api", "--op", "status", "--agent-id", "bc-run1"]
+        if as_json:
+            argv.append("--json")
+        output = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.dict(os.environ, {"CURSOR_API_KEY": "dummy_test_key"}, clear=True),
+            mock.patch.object(MODULE.env_loader, "merge_dotenv_paths", return_value=[]),
+            mock.patch.object(MODULE, "detect_cli_binary", return_value=None),
+            mock.patch.object(MODULE, "consult_doctor_receipt", return_value={"consulted": False}),
+            mock.patch.object(MODULE, "CursorApiClient", return_value=client),
+            redirect_stdout(output),
+        ):
+            code = MODULE.main()
+        client.request.assert_called_once_with("GET", "/v0/agents/bc-run1")
+        text = output.getvalue()
+        return code, json.loads(text) if as_json else text
+
+    def test_status_json_separates_agent_state_from_http_success(self):
+        for state in ["CREATING", "PENDING", "RUNNING", "FINISHED", "FAILED", "CANCELLED", "STOPPED", "EXPIRED"]:
+            with self.subTest(state=state):
+                response = {"id": "bc-run1", "status": state}
+                code, payload = self._run_status(response)
+                self.assertEqual(code, MODULE.EXIT_OK)
+                self.assertTrue(payload["ok"])
+                self.assertEqual(payload["status"], 200)
+                self.assertEqual(payload["response"], response)
+                self.assertEqual(payload["agent_status"], state)
+                self.assertTrue(payload["status_verified"])
+                self.assertTrue(payload["next_action"])
+                self.assertNotIn("submitted", payload)
+
+    def test_status_text_reports_failed_agent_and_read_only_next_step(self):
+        code, text = self._run_status({"id": "bc-run1", "status": "FAILED"}, as_json=False)
+        self.assertEqual(code, MODULE.EXIT_OK)
+        self.assertIn("Agent status: FAILED", text)
+        self.assertIn("HTTP status: 200", text)
+        self.assertIn("Agent ID: bc-run1", text)
+        self.assertIn("conversation and artifacts", text)
+        self.assertIn("before deciding whether to retry", text)
+        self.assertNotIn("submitted", text)
+        self.assertNotIn("None", text)
+
+    def test_status_does_not_trust_missing_mismatched_or_unrecognized_evidence(self):
+        for response in [
+            {}, {"status": "FINISHED"}, {"id": "bc-other", "status": "FINISHED"},
+            {"id": "bc-run1"}, {"id": "bc-run1", "status": "NEW_PROVIDER_STATE"},
+            {"id": "bc-run1", "status": ["FINISHED"]},
+            {"id": "bc-run1", "status": "FINISHED", "_non_json_response": True},
+        ]:
+            with self.subTest(response=response):
+                _, payload = self._run_status(response)
+                self.assertEqual(payload["agent_status"], "UNKNOWN")
+                self.assertFalse(payload["status_verified"])
+                self.assertIn("unverified", payload["next_action"])
+
+    def test_status_normalizes_known_state_and_does_not_claim_verified_work(self):
+        _, payload = self._run_status({"id": "bc-run1", "status": " finished "})
+        self.assertEqual(payload["agent_status"], "FINISHED")
+        self.assertIn("Review", payload["next_action"])
+        self.assertIn("not verified", payload["next_action"])
+
+    def test_status_http_or_transport_failure_never_claims_a_handoff(self):
+        for options in [{"http_status": 404}, {"http_status": 503}, {"error": OSError("offline")}]:
+            with self.subTest(options=options):
+                code, text = self._run_status({}, as_json=False, **options)
+                self.assertEqual(code, MODULE.EXIT_API)
+                self.assertIn("Agent status check failed", text)
+                self.assertIn("bc-run1", text)
+                self.assertNotIn("Handoff", text)
+
     def test_parse_bool_text(self):
         self.assertTrue(MODULE.parse_bool_text("true"))
         self.assertTrue(MODULE.parse_bool_text("YES"))

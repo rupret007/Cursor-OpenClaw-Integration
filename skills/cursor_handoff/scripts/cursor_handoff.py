@@ -447,6 +447,39 @@ def emit_json(payload: Dict[str, Any]) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
 
 
+def agent_status_readout(response: Any, expected_id: str) -> Dict[str, Any]:
+    """Separate observed agent state from a successful HTTP status request."""
+    state = "UNKNOWN"
+    if isinstance(response, dict) and not response.get("_non_json_response"):
+        raw_state = response.get("status")
+        if response.get("id") == expected_id and isinstance(raw_state, str):
+            candidate = raw_state.strip().upper()
+            if candidate in TERMINAL_STATUSES | {"CREATING", "PENDING", "RUNNING"}:
+                state = candidate
+
+    if state == "CREATING":
+        next_action = "Agent is being created. Check this agent again; do not submit a duplicate."
+    elif state == "PENDING":
+        next_action = "Agent is queued. Check this agent again; do not submit a duplicate."
+    elif state == "RUNNING":
+        next_action = "Work is still running. Check this agent again; no completion is confirmed."
+    elif state == "FINISHED":
+        next_action = (
+            "Agent reports finished. Review its conversation and artifacts; "
+            "changes are not verified by this status check."
+        )
+    elif state in TERMINAL_FAILURE_STATUSES:
+        next_action = (
+            "Agent stopped without completing the handoff. Inspect its conversation and artifacts "
+            "before deciding whether to retry."
+        )
+    else:
+        next_action = (
+            "Status is unverified. Check this agent ID and inspect the existing agent before any retry."
+        )
+    return {"agent_status": state, "status_verified": state != "UNKNOWN", "next_action": next_action}
+
+
 def emit_text(payload: Dict[str, Any]) -> None:
     if payload.get("diagnose"):
         print("Diagnostics complete.")
@@ -491,6 +524,19 @@ def emit_text(payload: Dict[str, Any]) -> None:
         if payload.get("agent_state"):
             print(f"  agent_state: {payload.get('agent_state')}")
         print("  (Use --json for full dry-run payload.)")
+        return
+
+    if payload.get("op") == "status":
+        if payload.get("ok"):
+            print("Agent status received." if payload.get("status_verified") else "Agent status not verified.")
+            print(f"Agent ID: {payload.get('agent_id')}")
+            print(f"Agent status: {payload.get('agent_status', 'UNKNOWN')}")
+            print(f"HTTP status: {payload.get('status')}")
+            print(f"Next: {payload.get('next_action')}")
+        else:
+            print("Agent status check failed.")
+            print(f"Agent ID: {payload.get('agent_id')}")
+            print(payload.get("error", "Status could not be retrieved."))
         return
 
     if payload.get("ok"):
@@ -1125,6 +1171,8 @@ def main() -> int:
             "status": status_code,
             "response": data if data else raw,
         }
+        if op == "status":
+            payload.update(agent_status_readout(data, agent_id))
         if op == "followup" and agent_state:
             payload["agent_state"] = agent_state
             payload["agent"] = snapshot

@@ -81,6 +81,30 @@ Defined in `.env.example`:
 - Uses safe quoting and no GUI automation
 - Requires local repo path
 
+### Read an Existing Agent's Status
+
+```bash
+python3 scripts/cursor_handoff.py --mode api --op status --agent-id bc-example
+```
+
+This reads the existing agent; it does not submit another handoff. The text
+readout labels the agent state separately from the HTTP result and gives a next
+step: wait/check again, review reported completion, or inspect a stopped agent's
+conversation and artifacts before deciding whether to retry. `FINISHED` reports
+the provider's state; it does not verify the work or authorize a merge/send.
+The existing backend uses Cursor's [v0 agent-status endpoint](https://cursor.com/docs/cloud-agent/api/v0#agent-status);
+its `CREATING` state is also reported as work still awaiting completion.
+
+With `--json`, existing `ok`, numeric `status` (HTTP), and `response` fields retain
+their meanings. Added `agent_status`, `status_verified`, and `next_action` fields
+describe the observed state. HTTP success alone does not mean the agent finished
+successfully. A missing/mismatched agent ID, absent status, or unfamiliar status
+produces `agent_status: "UNKNOWN"` and `status_verified: false`; the raw response
+remains available in JSON. Existing readiness/doctor gates still apply.
+
+Use `--op conversation` or `--op artifacts` with the same agent ID to inspect
+the work. This status readout does not send a follow-up, retry, or create a job.
+
 ### Auto Mode
 
 - Uses API when credentials exist

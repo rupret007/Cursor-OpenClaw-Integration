@@ -23,8 +23,8 @@ Subcommands:
 | `diagnose` | Env summary; optional `--show-key` for redacted Cursor + OpenAI key previews; includes `cli_version`, `dotenv_files_loaded`, `openai_api_key_present`, `openai_api_enabled`, `openai_api_key_redacted`, and the same allowlisted `doctor_receipt` consult `cursor_handoff` uses |
 | `whoami` | `GET /v0/me` |
 | `models` | `GET /v0/models` |
-| `list-agents` | `--limit` 1–100, optional `--cursor`, `--pr-url` |
-| `agent-status` | `--id` |
+| `list-agents` | `--limit` 1–100, optional `--cursor`, `--pr-url`. On success adds `agents_summary`: one `{id, agent_status, status_verified, next_action}` entry per returned agent, normalizing each raw `status` string the same way `agent-status` does, so a page of agents is never skimmed as all-healthy just because the list call returned HTTP 200. |
+| `agent-status` | `--id`. HTTP success (`status < 400`) adds `agent_status`, `status_verified`, and `next_action` — the observed Cloud agent state, separate from the HTTP result. A missing/mismatched agent ID, absent status, or unrecognized status value produces `agent_status: "UNKNOWN"` and `status_verified: false`; `FAILED`/`CANCELLED`/`STOPPED`/`EXPIRED` and still-`CREATING`/`PENDING`/`RUNNING` agents are reported as such rather than folded into a generic "ok". The raw response remains available under `response`. |
 | `conversation` | `--id` |
 | `artifacts` | `--id` |
 | `artifact-download-url` | `--id`, `--path` |

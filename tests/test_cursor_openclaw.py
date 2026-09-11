@@ -1138,6 +1138,130 @@ class CursorOpenClawTests(unittest.TestCase):
             self.assertNotIn("receipt_fingerprint", rendered)
             self.assertNotIn(str(receipt_path), rendered)
 
+    def test_agent_status_separates_observed_state_from_http_success(self):
+        for state in ["CREATING", "PENDING", "RUNNING", "FINISHED", "FAILED", "CANCELLED", "STOPPED", "EXPIRED"]:
+            with self.subTest(state=state):
+                class FakeClient:
+                    def __init__(self, _cfg):
+                        pass
+
+                    def request(self, method, path, query=None, body=None):
+                        return 200, {"id": "bc-abc123", "status": state}, "{}", "bearer"
+
+                args = types.SimpleNamespace(command="agent-status", id="bc-abc123")
+                old_client = MODULE.CursorApiClient
+                MODULE.CursorApiClient = FakeClient
+                try:
+                    status, payload = MODULE.handle(_cfg(), args)
+                finally:
+                    MODULE.CursorApiClient = old_client
+                self.assertEqual(status, 200)
+                self.assertEqual(payload["response"], {"id": "bc-abc123", "status": state})
+                self.assertEqual(payload["agent_status"], state)
+                self.assertTrue(payload["status_verified"])
+                self.assertTrue(payload["next_action"])
+
+    def test_agent_status_does_not_trust_missing_or_mismatched_evidence(self):
+        for response in [
+            {},
+            {"status": "FINISHED"},
+            {"id": "bc-other", "status": "FINISHED"},
+            {"id": "bc-abc123"},
+            {"id": "bc-abc123", "status": "NEW_PROVIDER_STATE"},
+        ]:
+            with self.subTest(response=response):
+                class FakeClient:
+                    def __init__(self, _cfg):
+                        pass
+
+                    def request(self, method, path, query=None, body=None):
+                        return 200, response, "{}", "bearer"
+
+                args = types.SimpleNamespace(command="agent-status", id="bc-abc123")
+                old_client = MODULE.CursorApiClient
+                MODULE.CursorApiClient = FakeClient
+                try:
+                    status, payload = MODULE.handle(_cfg(), args)
+                finally:
+                    MODULE.CursorApiClient = old_client
+                self.assertEqual(payload["agent_status"], "UNKNOWN")
+                self.assertFalse(payload["status_verified"])
+                self.assertIn("unverified", payload["next_action"])
+
+    def test_agent_status_http_failure_never_synthesizes_a_readout(self):
+        class FakeClient:
+            def __init__(self, _cfg):
+                pass
+
+            def request(self, method, path, query=None, body=None):
+                return 404, {}, "{}", "bearer"
+
+        args = types.SimpleNamespace(command="agent-status", id="bc-abc123")
+        old_client = MODULE.CursorApiClient
+        MODULE.CursorApiClient = FakeClient
+        try:
+            status, payload = MODULE.handle(_cfg(), args)
+        finally:
+            MODULE.CursorApiClient = old_client
+        self.assertEqual(status, 404)
+        self.assertNotIn("agent_status", payload)
+        self.assertNotIn("status_verified", payload)
+        self.assertNotIn("next_action", payload)
+
+    def test_list_agents_summary_normalizes_each_agent_and_flags_unknowns(self):
+        agents = [
+            {"id": "bc-1", "status": "RUNNING"},
+            {"id": "bc-2", "status": "FAILED"},
+            {"id": "bc-3", "status": "NEW_PROVIDER_STATE"},
+            {"status": "FINISHED"},
+        ]
+
+        class FakeClient:
+            def __init__(self, _cfg):
+                pass
+
+            def request(self, method, path, query=None, body=None):
+                return 200, {"agents": agents}, "{}", "bearer"
+
+        args = types.SimpleNamespace(command="list-agents", limit="20", cursor="", pr_url="")
+        old_client = MODULE.CursorApiClient
+        MODULE.CursorApiClient = FakeClient
+        try:
+            status, payload = MODULE.handle(_cfg(), args)
+        finally:
+            MODULE.CursorApiClient = old_client
+        self.assertEqual(status, 200)
+        summary = payload["agents_summary"]
+        self.assertEqual(len(summary), 4)
+        self.assertEqual(summary[0]["id"], "bc-1")
+        self.assertEqual(summary[0]["agent_status"], "RUNNING")
+        self.assertTrue(summary[0]["status_verified"])
+        self.assertTrue(summary[0]["next_action"])
+        self.assertEqual(summary[1]["agent_status"], "FAILED")
+        self.assertTrue(summary[1]["status_verified"])
+        self.assertEqual(summary[2]["agent_status"], "UNKNOWN")
+        self.assertFalse(summary[2]["status_verified"])
+        self.assertEqual(summary[3]["id"], "")
+        self.assertEqual(summary[3]["agent_status"], "UNKNOWN")
+
+    def test_list_agents_skips_summary_on_http_failure(self):
+        class FakeClient:
+            def __init__(self, _cfg):
+                pass
+
+            def request(self, method, path, query=None, body=None):
+                return 500, {}, "{}", "bearer"
+
+        args = types.SimpleNamespace(command="list-agents", limit="20", cursor="", pr_url="")
+        old_client = MODULE.CursorApiClient
+        MODULE.CursorApiClient = FakeClient
+        try:
+            status, payload = MODULE.handle(_cfg(), args)
+        finally:
+            MODULE.CursorApiClient = old_client
+        self.assertEqual(status, 500)
+        self.assertNotIn("agents_summary", payload)
+
 
 if __name__ == "__main__":
     unittest.main()

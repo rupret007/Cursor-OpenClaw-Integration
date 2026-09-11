@@ -130,6 +130,42 @@ class CursorApiCommonTests(unittest.TestCase):
         self.assertFalse(clear_receipt["followup_ready"])
         self.assertIn("did not check", clear_receipt["followup_would_block"])
 
+    def test_agent_status_readout_recognizes_every_known_state(self):
+        for state in ["CREATING", "PENDING", "RUNNING", "FINISHED", "FAILED", "CANCELLED", "STOPPED", "EXPIRED"]:
+            with self.subTest(state=state):
+                readout = MOD.agent_status_readout({"id": "bc-1", "status": state}, "bc-1")
+                self.assertEqual(readout["agent_status"], state)
+                self.assertTrue(readout["status_verified"])
+                self.assertTrue(readout["next_action"])
+
+    def test_agent_status_readout_normalizes_case_and_whitespace(self):
+        readout = MOD.agent_status_readout({"id": "bc-1", "status": " failed "}, "bc-1")
+        self.assertEqual(readout["agent_status"], "FAILED")
+        self.assertIn("before deciding whether to retry", readout["next_action"])
+
+    def test_agent_status_readout_never_trusts_missing_or_mismatched_evidence(self):
+        for response in [
+            {},
+            {"status": "FINISHED"},
+            {"id": "bc-other", "status": "FINISHED"},
+            {"id": "bc-1"},
+            {"id": "bc-1", "status": "SOME_NEW_STATE"},
+            {"id": "bc-1", "status": ["FINISHED"]},
+            {"id": "bc-1", "status": "FINISHED", "_non_json_response": True},
+            "not a dict",
+            None,
+        ]:
+            with self.subTest(response=response):
+                readout = MOD.agent_status_readout(response, "bc-1")
+                self.assertEqual(readout["agent_status"], "UNKNOWN")
+                self.assertFalse(readout["status_verified"])
+                self.assertIn("unverified", readout["next_action"])
+
+    def test_agent_status_readout_finished_does_not_claim_verified_work(self):
+        readout = MOD.agent_status_readout({"id": "bc-1", "status": "FINISHED"}, "bc-1")
+        self.assertEqual(readout["agent_status"], "FINISHED")
+        self.assertIn("not verified", readout["next_action"])
+
 
 if __name__ == "__main__":
     unittest.main()

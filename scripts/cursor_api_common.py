@@ -38,6 +38,48 @@ def validate_agent_id(agent_id: str, flag_name: str = "--id") -> None:
 
 
 TERMINAL_AGENT_STATUSES = frozenset({"FINISHED", "FAILED", "CANCELLED", "STOPPED", "EXPIRED"})
+TERMINAL_FAILURE_AGENT_STATUSES = TERMINAL_AGENT_STATUSES - {"FINISHED"}
+NON_TERMINAL_AGENT_STATUSES = frozenset({"CREATING", "PENDING", "RUNNING"})
+
+
+def agent_status_readout(response: Any, expected_id: str) -> Dict[str, Any]:
+    """Separate the observed Cloud agent state from a successful HTTP status request.
+
+    A 200 from the status endpoint only proves the endpoint answered; it says
+    nothing about whether the agent itself is healthy. Callers must surface
+    `agent_status` / `status_verified` / `next_action` alongside `ok` so a
+    FAILED, still-CREATING, or unrecognized agent is never read as done just
+    because the HTTP call succeeded.
+    """
+    state = "UNKNOWN"
+    if isinstance(response, dict) and not response.get("_non_json_response"):
+        raw_state = response.get("status")
+        if response.get("id") == expected_id and isinstance(raw_state, str):
+            candidate = raw_state.strip().upper()
+            if candidate in TERMINAL_AGENT_STATUSES | NON_TERMINAL_AGENT_STATUSES:
+                state = candidate
+
+    if state == "CREATING":
+        next_action = "Agent is being created. Check this agent again; do not submit a duplicate."
+    elif state == "PENDING":
+        next_action = "Agent is queued. Check this agent again; do not submit a duplicate."
+    elif state == "RUNNING":
+        next_action = "Work is still running. Check this agent again; no completion is confirmed."
+    elif state == "FINISHED":
+        next_action = (
+            "Agent reports finished. Review its conversation and artifacts; "
+            "changes are not verified by this status check."
+        )
+    elif state in TERMINAL_FAILURE_AGENT_STATUSES:
+        next_action = (
+            "Agent stopped without completing the handoff. Inspect its conversation and artifacts "
+            "before deciding whether to retry."
+        )
+    else:
+        next_action = (
+            "Status is unverified. Check this agent ID and inspect the existing agent before any retry."
+        )
+    return {"agent_status": state, "status_verified": state != "UNKNOWN", "next_action": next_action}
 
 
 def allowlisted_agent_snapshot(agent: Any, *, expected_id: str = "") -> Dict[str, str]:

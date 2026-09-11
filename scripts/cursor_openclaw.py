@@ -614,12 +614,26 @@ def handle(cfg: Config, args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
         if args.pr_url:
             query["prUrl"] = args.pr_url
         status, data, raw, auth_mode = client.request("GET", "/v0/agents", query=query)
-        return status, {"status": status, "auth_mode": auth_mode, "response": data or raw}
+        response: Dict[str, Any] = {"status": status, "auth_mode": auth_mode, "response": data or raw}
+        if status < 400 and isinstance(data, dict) and isinstance(data.get("agents"), list):
+            response["agents_summary"] = [
+                {
+                    "id": str(item.get("id") or "") if isinstance(item, dict) else "",
+                    **cursor_api_common.agent_status_readout(
+                        item, str(item.get("id") or "") if isinstance(item, dict) else ""
+                    ),
+                }
+                for item in data["agents"]
+            ]
+        return status, response
 
     if args.command == "agent-status":
         cursor_api_common.validate_agent_id(args.id)
         status, data, raw, auth_mode = client.request("GET", f"/v0/agents/{args.id}")
-        return status, {"status": status, "auth_mode": auth_mode, "response": data or raw}
+        response = {"status": status, "auth_mode": auth_mode, "response": data or raw}
+        if status < 400:
+            response.update(cursor_api_common.agent_status_readout(data, args.id))
+        return status, response
 
     if args.command == "conversation":
         cursor_api_common.validate_agent_id(args.id)

@@ -362,6 +362,16 @@ class TestAndreaReadinessGrade(unittest.TestCase):
                     r"(?m)^bash scripts/andrea_doctor.sh --offline\s*$",
                 )
 
+    def test_readme_legacy_banner_keeps_operator_content(self) -> None:
+        text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("Bob-the-Bot", text)
+        self.assertIn("## Legacy Content below", text)
+        self.assertGreater(len(text.splitlines()), 50)
+        self.assertRegex(
+            text,
+            r"(?m)^bash scripts/andrea_doctor.sh --offline\s*$",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

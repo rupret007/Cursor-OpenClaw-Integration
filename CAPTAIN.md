@@ -44,14 +44,17 @@ nice -n 10 python3 -B first-officer/provision-andrea.py \
    nice -n 10 "$captain_cli" status
    ```
 
-3. Choose one open Integration PR with terminal CI. Authorize the scope and have Grok finish its current dispatch and record its genuine check-in through the normal process. Use the Grok-held epoch printed by `status` for the handoff. The installed watchdog timer was inactive during diagnostics, so request a single service tick after filing the handoff.
+3. Choose one open Integration PR with terminal CI. Authorize the scope and have Grok finish its current dispatch and record a fresh, genuine check-in through the normal process. From the reviewed checkout on Bobserver, use the epoch printed by `status` for the handoff. Takeover was off and the watchdog timer was inactive during diagnostics. The arming command checks the fresh check-in, explicit handoff, drained dispatches and exact epoch under the shared fence. Run one watchdog tick after it succeeds.
 
    ```bash
    read -r -p 'Current Grok-held epoch: ' grok_epoch
    nice -n 10 "$captain_cli" handoff "$grok_epoch" &&
-     systemctl --user start openclaw-conductor-watchdog.service &&
-     nice -n 10 "$captain_cli" status
+     nice -n 10 python3 -I -B first-officer/captain-arm.py arm "$grok_epoch" &&
+     systemctl --user start openclaw-conductor-watchdog.service
+   nice -n 10 "$captain_cli" status
    ```
+
+   Check the lease even if the watchdog service reports a failure. A Telegram delivery failure can occur after the lease changes.
 
 4. Verify the CLI shows `first-officer` held and Telegram `captain status` shows OpenClaw. Send `captain grant integration-ci epoch N` with the **new** epoch, then submit the pilot PR. Send the same task twice. Check that the handoff and local runner receipts show one lane for that full head. Compare the final Telegram outcome with both required checks on GitHub. Check the lane receipt under `~/work/lanes/first-officer-codex/`.
 5. Exercise the failure path using an approved open Integration PR with a known failed check or an operator-supervised failing worker. Keep the full tested head, the outcome and the elapsed time. Verify a reported failure remains in the handoff.
@@ -70,6 +73,13 @@ nice -n 10 "$captain_cli" status
 nice -n 10 "$captain_cli" request-handback &&
   systemctl --user start openclaw-conductor-watchdog.service &&
   nice -n 10 "$captain_cli" status
+```
+
+To restore the original disarmed state after handback, use the **new Grok-held epoch** from the operator CLI in the reviewed Bobserver checkout.
+
+```bash
+read -r -p 'Current Grok-held epoch: ' grok_epoch
+nice -n 10 python3 -I -B first-officer/captain-arm.py disarm "$grok_epoch"
 ```
 
 After handback, use the private installation backup with the [gateway rollback commands](INSTALL.md#roll-back-to-the-exact-prior-config-and-pin). If the Mac reader was refreshed, restore its previous restricted command from the Nuc.

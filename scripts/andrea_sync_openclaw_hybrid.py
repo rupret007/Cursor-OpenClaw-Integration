@@ -468,8 +468,10 @@ def _derive_openclaw_contract(
     model: str = "",
 ) -> dict[str, Any]:
     summary = _sanitize_user_safe_text(lockstep_meta.get("summary") or "", 2000)
-    if not summary:
-        summary = _sanitize_user_safe_text(payload.get("summary") or "", 2000)
+    transport_summary = str(payload.get("summary") or "").strip()
+    # The gateway uses these labels for the run lifecycle, even when no answer was returned.
+    if not summary and transport_summary.lower() not in {"completed", "aborted", "failed"}:
+        summary = _sanitize_user_safe_text(transport_summary, 2000)
     for key in ("message", "response", "answer", "output"):
         if summary:
             break
@@ -630,8 +632,11 @@ def run_openclaw_hybrid(
     if not summary:
         summary = "OpenClaw completed the delegated task."
     user_summary = _first_sentence(summary, 320) or _clip(summary, 500)
-    status = str(lockstep_meta.get("status") or payload.get("status") or "ok").strip().lower()
-    ok = status in {"ok", "completed", "success"}
+    success_statuses = {"ok", "completed", "success"}
+    status = str(payload.get("status") or "").strip().lower()
+    if not status or status in success_statuses:
+        status = str(lockstep_meta.get("status") or status or "ok").strip().lower()
+    ok = status in success_statuses
 
     return {
         "ok": ok,

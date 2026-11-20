@@ -3324,7 +3324,6 @@ class TestAndreaSync(unittest.TestCase):
                 prompt="news",
                 route_reason="structured_live_news",
                 success_reason="news_summary_ready",
-                success_fallback="fallback ok",
                 failure_reason="news_summary_failed",
                 failure_reply="I couldn't pull a grounded live news summary cleanly just now.",
             )
@@ -3357,7 +3356,6 @@ class TestAndreaSync(unittest.TestCase):
                 prompt="private fixture",
                 route_reason="structured_live_news",
                 success_reason="news_summary_ready",
-                success_fallback="fixture success",
                 failure_reason="news_summary_failed",
                 failure_reply="Live lookup did not finish.",
             )
@@ -3394,7 +3392,6 @@ class TestAndreaSync(unittest.TestCase):
                 prompt="msgs",
                 route_reason="structured_recent_text_messages",
                 success_reason="recent_text_messages_ready",
-                success_fallback="fallback ok",
                 failure_reason="recent_text_messages_failed",
                 failure_reply="I couldn't retrieve your recent text messages cleanly just now.",
             )
@@ -3422,7 +3419,6 @@ class TestAndreaSync(unittest.TestCase):
                 prompt="news",
                 route_reason="structured_live_news",
                 success_reason="news_summary_ready",
-                success_fallback="fb",
                 failure_reason="news_summary_failed",
                 failure_reply="fail",
             )
@@ -3448,7 +3444,6 @@ class TestAndreaSync(unittest.TestCase):
                     prompt="x",
                     route_reason="structured_recent_text_messages",
                     success_reason="ok",
-                    success_fallback="fb",
                     failure_reason="failed",
                     failure_reply="fail",
                 )
@@ -3600,7 +3595,7 @@ class TestAndreaSync(unittest.TestCase):
         event_types = [event_type for _seq, _ts, event_type, _payload in load_events_for_task(server.conn, result["task_id"])]
         self.assertNotIn(EventType.JOB_QUEUED.value, event_types)
 
-    def test_server_recent_text_messages_fall_back_when_openclaw_summary_is_generic(self) -> None:
+    def test_server_recent_text_messages_reports_failure_for_generic_openclaw_summary(self) -> None:
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
         os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
         from services.andrea_sync.server import SyncServer  # noqa: E402
@@ -3638,8 +3633,9 @@ class TestAndreaSync(unittest.TestCase):
             server._handle_task_followups(result["task_id"])
         proj = project_task_dict(server.conn, result["task_id"], "telegram")
         reply = proj["meta"]["assistant"]["last_reply"]
-        self.assertEqual(proj["meta"]["assistant"]["reason"], "recent_text_messages_ready")
-        self.assertIn("recent text-message summary", reply.lower())
+        self.assertEqual(proj["meta"]["assistant"]["route"], "direct")
+        self.assertEqual(proj["meta"]["assistant"]["reason"], "recent_text_messages_failed")
+        self.assertIn("couldn't retrieve your recent text messages", reply.lower())
         self.assertNotIn("completed the delegated task", reply.lower())
 
     def test_server_recent_text_messages_stay_truthful_when_lane_unavailable(self) -> None:
@@ -5815,6 +5811,45 @@ class TestAndreaSync(unittest.TestCase):
         self.assertTrue(str(contract.get("primary_finding") or "").strip())
         self.assertIn("secondary_evidence_lines", contract)
         self.assertIn("uncertainty_boundary", contract)
+
+    def test_grounded_research_failure_skips_evidence_realization(self) -> None:
+        from services.andrea_sync.server import SyncServer
+        from services.andrea_sync.turn_intelligence import build_turn_plan
+
+        question = "How should I configure retries for timeout failures?"
+        plan = build_turn_plan(
+            question,
+            scenario_id="researchSummary",
+            projection_has_continuity_state=False,
+        )
+        server = SyncServer()
+        self.addCleanup(server.conn.close)
+        with (
+            mock.patch.dict(os.environ, {"ANDREA_GROUNDED_RESEARCH_ENABLED": "1"}),
+            mock.patch.object(
+                server,
+                "_resolve_runtime_skill",
+                return_value={"truth": {"status": "verified_available"}},
+            ),
+            mock.patch.object(server, "_create_openclaw_job", return_value={"ok": True}),
+            mock.patch("services.andrea_sync.server.maybe_realize_grounded_technical_reply") as realize,
+        ):
+            out = server._maybe_grounded_research_reply(
+                "t-grounded-empty",
+                classify_text=question,
+                turn_plan=plan,
+                scenario_id="researchSummary",
+            )
+
+        self.assertIsNotNone(out)
+        assert out is not None
+        reply, reason, contract = out
+        self.assertEqual(reason, "grounded_research_failed")
+        self.assertIn("couldn't gather a grounded lookup summary", reply)
+        self.assertEqual(contract["answer_mode"], "truthful_fallback_with_next_steps")
+        self.assertEqual(contract["evidence_lines"], [])
+        self.assertEqual(contract["evidence_strength"], 0)
+        realize.assert_not_called()
 
     def test_grounded_research_skipped_for_lightweight_collaborative_day_plan(self) -> None:
         os.environ["ANDREA_GROUNDED_RESEARCH_ENABLED"] = "1"

@@ -34,14 +34,14 @@ nice -n 10 python3 -B first-officer/provision-andrea.py \
   --mac-host "$mac_host" --mac-user "$mac_user" --diagnose-sync
 ```
 
-Jeff can refresh the existing key’s forced command from this checkout. The reviewed reader uses fresh cached previews when available. When the cache is stale, it can read a bounded sample of known one-to-one chats on Andrea's confirmed allowlist through the configured BlueBubbles provider. The helper checks for recent preview evidence on the Mac before changing the key and checks for it again from Bobserver afterward.
+Jeff can refresh the existing key’s forced command from this checkout. The reviewed reader uses fresh cached previews when available. When the cache is stale, it can read a bounded sample of exact one-to-one threads on Andrea's confirmed allowlist through the configured BlueBubbles provider. This includes approved threads missing from the cached index. The helper checks for recent preview evidence on the Mac before changing the key and checks for it again from Bobserver afterward.
 
 ```bash
 nice -n 10 python3 -B first-officer/provision-andrea.py \
   --mac-host "$mac_host" --mac-user "$mac_user" --refresh-reader
 ```
 
-After it reports `Andrea reader verified from bobserver.`, send `summarize my texts` to **Bob the Bot**, the OpenClaw Telegram account. Compare the result privately with a recent thread. Use the error line to diagnose a refused refresh. `no-authorized-chats` means the candidate found no known, non-self, one-to-one chat matching Andrea's allowlist.
+After it reports `Andrea reader verified from bobserver.`, send `summarize my texts` to **Bob the Bot**, the OpenClaw Telegram account. Compare the result privately with a recent thread. Use the error line to diagnose a refused refresh. `no-authorized-chats` means the configured allowlist supplied no eligible non-self one-to-one thread.
 
 ## Activate and run the supervised pilot
 

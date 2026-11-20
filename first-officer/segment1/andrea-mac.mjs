@@ -14,6 +14,19 @@ const chatId = /^bb:[^\s\x00-\x1f\x7f]{1,220}$/u;
 const directGuid = /^(?:iMessage|SMS|RCS);-;[^;\s\x00-\x1f\x7f]{1,190}$/i;
 const messageLimit = 20;
 
+function selfThreads(settings) {
+  return new Set([settings.BLUEBUBBLES_CANONICAL_SELF_THREAD_JID,
+    ...(settings.BLUEBUBBLES_SELF_THREAD_ALIAS_JIDS ?? '').split(',')]
+    .map((id) => id?.trim()).filter(Boolean));
+}
+
+function directHandle(guid) {
+  const handle = guid.split(';')[2].toLowerCase();
+  if (!/^\+?[0-9().-]+$/.test(handle)) return handle;
+  const digits = handle.replace(/\D/g, '');
+  return digits.length === 11 && digits.startsWith('1') ? digits.slice(1) : digits;
+}
+
 class ReaderError extends Error {
   constructor(code) {
     super(code);
@@ -73,7 +86,7 @@ async function getJson(url, transport, options) {
 export function createMacAndreaReader(settings, transport = fetch, counts) {
   const token = settings.BLUEBUBBLES_CONTROL_TOKEN;
   const owner = settings.BLUEBUBBLES_CANONICAL_SELF_THREAD_JID;
-  const excluded = new Set([owner, ...(settings.BLUEBUBBLES_SELF_THREAD_ALIAS_JIDS ?? '').split(',').map((id) => id.trim())]);
+  const excluded = selfThreads(settings);
   const base = new URL(settings.BLUEBUBBLES_CONTROL_BASE_URL ||
     'http://localhost:' + (settings.BLUEBUBBLES_CONTROL_PORT || '4315'));
   if (base.protocol !== 'http:' || !loopback(base) ||
@@ -118,8 +131,13 @@ export function createMacAndreaReader(settings, transport = fetch, counts) {
 }
 
 function providerPlan(settings) {
+  const excluded = selfThreads(settings);
+  const selfHandles = new Set([...excluded]
+    .filter((id) => id.startsWith('bb:') && directGuid.test(id.slice(3)))
+    .map((id) => directHandle(id.slice(3))));
   const allowed = new Set([settings.BLUEBUBBLES_ALLOWED_CHAT_GUIDS, settings.BLUEBUBBLES_ALLOWED_CHAT_GUID]
-    .filter(Boolean).join(',').split(',').map((value) => value.trim()).filter((value) => directGuid.test(value)));
+    .filter(Boolean).join(',').split(',').map((value) => value.trim())
+    .filter((guid) => directGuid.test(guid) && !excluded.has('bb:' + guid) && !selfHandles.has(directHandle(guid))));
   const password = settings.BLUEBUBBLES_PASSWORD;
   const bases = [settings.BLUEBUBBLES_BASE_URL, ...(settings.BLUEBUBBLES_BASE_URL_CANDIDATES ?? '').split(',')]
     .filter((value) => URL.canParse(value ?? '')).map((value) => new URL(value))
@@ -160,8 +178,7 @@ async function inspectMacHistory(settings, transport, now) {
   const cached = await inspectAndrea({ chats: () => list, messages: local.messages }, now);
   if (cached.counts.recentTextPreviews) return { view: cached, source: 'cache' };
   if (!plan) return { view: cached, source: 'provider-unconfigured' };
-  const candidates = (await list).chats.filter((chat) => plan.allowed.has(chat.chatJid.slice(3)));
-  if (!candidates.length) return { view: cached, source: 'no-authorized-chats' };
+  if (!plan.allowed.size) return { view: cached, source: 'no-authorized-chats' };
   const active = await status;
   if (active?.chatScope !== 'allowlist') return { view: cached, source: 'scope-unverified' };
   const declared = active.activeBaseUrl;
@@ -169,8 +186,15 @@ async function inspectMacHistory(settings, transport, now) {
     ? plan.bases.find((url) => url.href === new URL(declared).href)
     : plan.bases[0];
   if (!base) return { view: cached, source: 'provider-unconfigured' };
+  const indexed = new Map((await list).chats.map((chat) => [chat.chatJid, chat]));
+  // Exact direct GUIDs from the existing allowlist are sufficient for a
+  // point read. The bounded cache list can omit a cold or newly synced chat.
+  const candidates = [...plan.allowed].map((guid) => {
+    const chatJid = 'bb:' + guid;
+    return indexed.get(chatJid) ?? { chatJid };
+  });
   const view = await inspectAndrea({
-    chats: async () => ({ chats: candidates, complete: (await list).complete }),
+    chats: async () => ({ chats: candidates, complete: true }),
     async messages(id) {
       const guid = id.slice(3);
       if (!plan.allowed.has(guid)) throw new ReaderError('settings-invalid');

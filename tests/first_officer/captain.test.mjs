@@ -140,7 +140,7 @@ test('Andrea upstream diagnostic returns only allowed status labels and age cate
     webhook: 'unknown', shadowPoll: 'recent', lastInbound: 'older' });
 });
 
-test('the fixed Andrea summary uses a bounded fresh GET for a known allowlisted one-to-one thread', async () => {
+test('the fixed Andrea summary reads an exact allowlisted thread missing from the cache and excludes self', async () => {
   const today = Date.now();
   const allowed = 'iMessage;-;sample-thread';
   const other = 'iMessage;-;other-thread';
@@ -149,14 +149,14 @@ test('the fixed Andrea summary uses a bounded fresh GET for a known allowlisted 
     BLUEBUBBLES_CANONICAL_SELF_THREAD_JID: 'bb:iMessage;-;self-thread',
     BLUEBUBBLES_BASE_URL: 'https://fixture.invalid',
     BLUEBUBBLES_PASSWORD: 'fixture-password',
-    BLUEBUBBLES_ALLOWED_CHAT_GUIDS: allowed,
+    BLUEBUBBLES_ALLOWED_CHAT_GUIDS: allowed + ',SMS;-;SELF-THREAD,iMessage;+;group-thread',
   };
   const examined = [];
   const read = async (url, options, scope) => {
     assert.equal(options.method, 'GET');
     assert.equal(options.redirect, 'error');
     if (url.pathname.endsWith('/status')) return Response.json({ status: { chatScope: scope } });
-    if (url.pathname.endsWith('/chats')) return Response.json({ chats: [other, allowed].map((guid) => ({
+    if (url.pathname.endsWith('/chats')) return Response.json({ chats: [other].map((guid) => ({
       chatJid: 'bb:' + guid, isGroup: false, lastMessageAt: '2020-01-01T00:00:00Z',
     })) });
     if (url.pathname.endsWith('/messages')) return Response.json({ messages: [] });

@@ -8,7 +8,7 @@ The candidate uses a private Telegram dispatcher and a tool registry for fleet, 
 
 The canary against the pinned bundle failed before the change and passed against the staged candidate. OpenClaw 2026.11.5 then received and answered synthetic Telegram updates in an isolated network. Across seven replies, typing and the acknowledgment both arrived within 1.44 seconds and the final replies arrived within 2.43 seconds. The run covered fleet and gate receipts, the GitHub failure path, the memory confirmation and recall, Andrea GETs, and a standalone model answer. The actual GitHub query was accepted under the configured account on the Nuc. Installer tests also covered a failed readiness check and byte-for-byte restoration of the prior config and pin.
 
-The unchanged baseline reported two Andrea doctor test failures in the local WSL run. The full hosted integration job and the Segment 1 job passed on the pull request. On bobserver, Jeff passed the checkout, uploaded archive, gateway and GitHub checks. Jeff verified Andrea’s live read API on the Mac Mini and confirmed bobserver could resolve the Mac. Bobserver’s local Andrea endpoint did not answer. The revised candidate supports a dedicated SSH key that can run only an aggregated summary on the Mac. Andrea’s control credential stays there. The legacy local reader remains available for installations that already have it configured. Activation and [the live Telegram acceptance checks](LIVE-TEST.md) are pending.
+The unchanged baseline reported two Andrea doctor test failures in the local WSL run. The full hosted integration job and the Segment 1 job passed on the pull request. Jeff verified Andrea’s live read API on the Mac Mini, provisioned the restricted SSH key, and verified a live summary from bobserver through that key. The Mac runs only the aggregate summary command and keeps Andrea’s control credential locally. Jeff uploaded the revised bundle and checked out the matching code. Activation and [the live Telegram acceptance checks](LIVE-TEST.md) are pending.
 
 ## Later segments
 
@@ -23,4 +23,4 @@ The unchanged baseline reported two Andrea doctor test failures in the local WSL
 
 The backlog references the bobserver lanes `infra-20261118`, `consolidate-20261119` and `arch-research-20261118`.
 
-BLOCKED: Jeff must provision and verify the restricted Mac Mini reader, then activate and run the live Telegram checks.
+READY_FOR_JEFF_INSTALL

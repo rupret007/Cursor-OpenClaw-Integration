@@ -40,3 +40,27 @@ def test_mac_setup_appends_only_its_restricted_key_and_preserves_existing_keys(p
     with pytest.raises(ValueError, match="needs operator review"):
         module.add_restriction(entry.replace(b"fixture-read-only-command", b"different-command"))
     assert key_file.read_bytes() == previous + entry + b"\n"
+
+
+def test_reader_refresh_and_restore_replace_only_the_dedicated_line(provision):
+    module, home = provision
+    root = home / ".local/libexec/openclaw-firstofficer-andrea"
+    key = module.make_key()["public"]
+
+    def entry(digest):
+        script = root / (digest * 64) / "andrea-mac.mjs"
+        script.parent.mkdir(parents=True)
+        script.write_text("// local synthetic reader")
+        return f'restrict,command="/usr/bin/node {script}" {key} {module.KEY_LABEL}'.encode()
+
+    old, new = entry("a"), entry("b")
+    key_file = home / ".ssh/authorized_keys"
+    unrelated = b"# Unrelated entry is preserved.\n"
+    key_file.write_bytes(unrelated)
+    key_file.chmod(0o600)
+    module.add_restriction(old)
+    module.add_restriction(new, "refresh")
+    module.add_restriction(new, "refresh")
+    assert key_file.read_bytes() == unrelated + new + b"\n"
+    assert module.restore_mac() == {"restored": True}
+    assert key_file.read_bytes() == unrelated + old + b"\n"

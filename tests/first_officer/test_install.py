@@ -170,3 +170,19 @@ def test_schema_validation_uses_the_node_launcher_from_systemd(tmp_path, monkeyp
     assert calls[0][1]["check"] is True
     assert calls[1][0] == [*launcher, "config", "validate", "--json"]
     assert calls[1][1]["env"]["OPENCLAW_CONFIG_PATH"] == str(config)
+
+
+def test_upgrade_from_installed_segment1_restores_its_exact_bytes(controller, tmp_path):
+    installer, release, config, pin, _, _ = controller
+    prior = installer.SEGMENT1
+    config.write_bytes(installer.candidate_config(config.read_bytes(), prior))
+    pin.write_text("[Service]\n" + installer.pin_line(prior) + "\n")
+    old = config.read_bytes(), pin.read_bytes()
+    backup = tmp_path / "captain"
+    installer.prepare(release, backup, config, prior)
+    for member in backup.iterdir():
+        member.chmod(0o600)
+    installer.switch(backup, config, restore=False)
+    assert installer.pin_line(release) in pin.read_text()
+    installer.switch(backup, config, restore=True)
+    assert (config.read_bytes(), pin.read_bytes()) == old

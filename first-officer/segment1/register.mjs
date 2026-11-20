@@ -2,6 +2,7 @@ import { homedir } from 'node:os';
 import { isIP } from 'node:net';
 import { join } from 'node:path';
 import { sshAndreaSummary } from './andrea-ssh.mjs';
+import { createCaptain } from './captain.mjs';
 import { classifyRequest, createDispatch } from './dispatch.mjs';
 import { answerSimple, standaloneSimple } from './model-router.mjs';
 import { fleetStatus, openPullRequests, summarizeAndrea } from './tools.mjs';
@@ -157,6 +158,37 @@ export function registerSegmentOne(api, commands, services) {
     return cfg;
   };
   const registry = toolRegistry(api, commands, liveConfig, services);
+  if (services.getGithub) {
+    const captain = createCaptain({ registry, get: services.getGithub });
+    registry.captain = {
+      run: async (request, turn) => plain(await captain.run(request, turn)),
+      failure: 'Captain state or evidence is unavailable. Check “captain status” before retrying.',
+    };
+    let monitor;
+    let checking = false;
+    api.registerService({
+      id: 'fo-captain-monitor',
+      start() {
+        if (monitor) return;
+        monitor = setInterval(async () => {
+          if (checking) return;
+          checking = true;
+          try {
+            await captain.tick((text, owner) => telegramSend(api, owner, liveConfig, text, AbortSignal.timeout(4000)));
+          } catch {
+            api.logger.warn('Captain monitor could not verify its current state or delivery.');
+          } finally {
+            checking = false;
+          }
+        }, 5000);
+        monitor.unref();
+      },
+      stop() {
+        clearInterval(monitor);
+        monitor = undefined;
+      },
+    });
+  }
   const dispatch = createDispatch({
     authorize(event, ctx) {
       const cfg = currentConfig();

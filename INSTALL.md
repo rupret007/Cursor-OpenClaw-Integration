@@ -1,21 +1,21 @@
-# Install First Officer Segment 1
+# Install First Officer
 
-Jeff runs the activation and rollback commands on bobserver. The candidate starts from the Round 13 release pinned by the gateway. Keep the bundle and config backup in private storage.
+Jeff runs the activation and rollback commands on bobserver. The captain upgrade starts from the verified Segment 1 bundle currently pinned by the gateway. Keep the bundle and config backup in private storage.
 
 ## Stage on the Nuc
 
-From the reviewed PR checkout in a Linux shell, set `ROUND13_BUNDLE` to the private Round 13 bundle directory from the one-time snapshot. It must contain `SHA256SUMS`. Use Node 24.16 or newer and Python 3.12 or newer.
+From the reviewed PR checkout in a Linux shell, set `PRIOR_BUNDLE` to the private, extracted Segment 1 bundle. The staging helper accepts the pinned Segment 1 and Round 13 inventories. Use Node 24.16 or newer and Python 3.12 or newer.
 
 ```bash
 set -euo pipefail
 umask 077
 stage_dir="$(mktemp -d)"
-release="$(nice -n 10 python3 -B first-officer/stage.py "$ROUND13_BUNDLE" "$stage_dir")"
+release="$(nice -n 10 python3 -B first-officer/stage.py "$PRIOR_BUNDLE" "$stage_dir")"
 candidate="$stage_dir/first-officer-$release"
 test_home="$(mktemp -d)"
 env HOME="$test_home" FO_CANARY_HOME="$test_home" FO_RELEASE_ROOT="$candidate" \
   nice -n 10 node tests/first_officer/round13-canary.mjs
-nice -n 10 node --test tests/first_officer/segment1.test.mjs
+nice -n 10 node --test tests/first_officer/segment1.test.mjs tests/first_officer/captain.test.mjs
 nice -n 10 tar -C "$stage_dir" -cf "$stage_dir/first-officer-$release.tar" "first-officer-$release"
 printf 'Release %s\nPrivate bundle %s\n' "$release" "$stage_dir/first-officer-$release.tar"
 ```
@@ -45,7 +45,7 @@ umask 077
 systemctl --user is-active --quiet openclaw-gateway.service
 test "$(gh api user --hostname github.com --jq .login 2>/dev/null)" = rupret007
 test -x /usr/bin/gh
-baseline=daf8df40c3b03440d69db6b61a271362b4b442551c7d3648b0b87c6f8b046ecf
+baseline=ed545847333ee1691824cd8e3b0a528882b2b11c7f2479c1f63af9a0e8def456
 if ! node --input-type=module - "/opt/openclaw-fo/first-officer-$baseline" >/dev/null 2>&1 <<'JS'
 import { pathToFileURL } from 'node:url';
 import { join } from 'node:path';
@@ -66,7 +66,7 @@ If the Andrea check fails, resolve it while the current gateway is running. For 
 
 ## Publish and activate the reviewed candidate
 
-The service pin continues to use the root-owned verifier and its existing fallback slot. The private backup records the exact prior config and pin so the operator can return to Round 13.
+The service pin continues to use the root-owned verifier and its existing fallback slot. The private backup records the exact prior config and pin for rollback.
 
 ```bash
 archive="$HOME/.openclaw/segment1-staged/first-officer-$release.tar"
@@ -84,7 +84,7 @@ sudo mv -nT "$publish_dir" "$published"
 
 backup_parent="$(mktemp -d "$HOME/.openclaw/backups/fo-segment1.XXXXXXXX")"
 backup="$backup_parent/switch"
-nice -n 10 python3 -B first-officer/install.py prepare "$backup" --release "$release"
+nice -n 10 python3 -B first-officer/install.py prepare "$backup" --release "$release" --from-release "$baseline"
 printf 'Keep this private rollback directory: %s\n' "$backup"
 nice -n 10 python3 -B first-officer/install.py activate "$backup"
 systemctl --user is-active --quiet openclaw-gateway.service

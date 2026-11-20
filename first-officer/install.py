@@ -15,7 +15,7 @@ import tempfile
 import time
 from urllib.request import ProxyHandler, build_opener
 
-from stage import BASELINE, ROLLBACK_SLOT, verify_inventory
+from stage import BASELINE, ROLLBACK_SLOT, SEGMENT1, SUPPORTED_BASES, verify_inventory
 
 
 STORE = Path("/opt/openclaw-fo")
@@ -62,8 +62,8 @@ def pin_file(path):
     return path.read_bytes(), [info.st_uid, info.st_gid, mode]
 
 
-def patch_pin(contents, release):
-    expected = shlex.split(pin_line(BASELINE).partition("=")[2])
+def patch_pin(contents, release, previous=BASELINE):
+    expected = shlex.split(pin_line(previous).partition("=")[2])
     expected_config = str(Path.home() / ".openclaw/openclaw.json")
     lines = contents.decode("utf-8").splitlines(keepends=True)
     found = []
@@ -75,12 +75,12 @@ def patch_pin(contents, release):
                     command[1:-4] in (["-I", "-B"], ["-B", "-I"], ["-IB"], ["-BI"]) and
                     command[-4] == expected[3] and
                     command[-3] in (expected[4], expected_config) and command[-2:] == expected[5:] and
-                    line.count(BASELINE) == 1):
+                    line.count(previous) == 1):
                 found.append(index)
     if len(found) != 1:
-        raise ValueError("The Round 13 verifier command did not match exactly once")
+        raise ValueError("The prior verifier command did not match exactly once")
     index = found[0]
-    lines[index] = lines[index].replace(BASELINE, release, 1)
+    lines[index] = lines[index].replace(previous, release, 1)
     return "".join(lines).encode("utf-8")
 
 
@@ -134,27 +134,29 @@ def verify_config(path, release):
         raise ValueError(f"OpenClaw rejected the {label} configuration using the running gateway launcher")
 
 
-def candidate_config(original, release):
+def candidate_config(original, release, previous=BASELINE):
     cfg = json.loads(original)
     paths = cfg["plugins"]["load"]["paths"]
-    base = STORE / f"first-officer-{BASELINE}"
+    base = STORE / f"first-officer-{previous}"
     expected = [str(base / "first-officer-exec-guard.mjs"),
                 str(base / "round6/runtime/first-officer-conductor.mjs")]
     if paths != expected:
-        raise ValueError("The active plugin paths are not the expected Round 13 pair")
+        raise ValueError("The active plugin paths do not match the requested prior release")
     entry = cfg["plugins"]["entries"][PLUGIN]
-    if entry.get("llm") or entry.get("enabled") is not True:
+    policy = {"allowModelOverride": True, "allowedModels": [FAST_MODEL], "allowedCompletionModels": [FAST_MODEL]}
+    prior_policy = entry.get("llm")
+    if entry.get("enabled") is not True or (prior_policy != policy if previous == SEGMENT1 else bool(prior_policy)):
         raise ValueError("The conductor has a custom model policy or is disabled")
     provider = cfg["models"]["providers"]["litellm"]
     if not any(row.get("id") == FAST_MODEL.split("/")[1] for row in provider.get("models", [])):
         raise ValueError("The existing fast model is unavailable in the gateway config")
-    cfg["plugins"]["load"]["paths"] = [path.replace(BASELINE, release, 1) for path in expected]
-    entry["llm"] = {"allowModelOverride": True, "allowedModels": [FAST_MODEL], "allowedCompletionModels": [FAST_MODEL]}
+    cfg["plugins"]["load"]["paths"] = [path.replace(previous, release, 1) for path in expected]
+    entry["llm"] = policy
     return (json.dumps(cfg, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
 
 
-def prepare(release, backup, config):
-    if not DIGEST.fullmatch(release) or release in (BASELINE, ROLLBACK_SLOT):
+def prepare(release, backup, config, previous=BASELINE):
+    if previous not in SUPPORTED_BASES or not DIGEST.fullmatch(release) or release in (*SUPPORTED_BASES, ROLLBACK_SLOT):
         raise ValueError("Expected a distinct, full candidate digest")
     root = STORE / f"first-officer-{release}"
     verify_inventory(root, release)
@@ -166,15 +168,15 @@ def prepare(release, backup, config):
         if stat.S_ISREG(info.st_mode) and info.st_uid in (0, os.getuid()) and info.st_size <= 65_536:
             try:
                 contents, identity = pin_file(path)
-                changed = patch_pin(contents, release)
+                changed = patch_pin(contents, release, previous)
             except (OSError, ValueError):
                 continue
             pins.append((path, contents, changed, identity))
     if len(pins) != 1:
-        raise ValueError("Could not find the existing Round 13 service pin")
+        raise ValueError("Could not find the service pin for the requested prior release")
     path, old_pin, new_pin, identity = pins[0]
     original = owner_file(config, 512 * 1024, private=True)
-    updated = candidate_config(original, release)
+    updated = candidate_config(original, release, previous)
     backup.mkdir(mode=0o700)
     files = {
         "original-openclaw.json": original, "candidate-openclaw.json": updated,
@@ -182,10 +184,11 @@ def prepare(release, backup, config):
     }
     for name, content in files.items():
         (backup / name).write_bytes(content)
-    verify_config(backup / "original-openclaw.json", BASELINE)
+    verify_config(backup / "original-openclaw.json", previous)
     verify_config(backup / "candidate-openclaw.json", release)
     (backup / "plan.json").write_text(
-        json.dumps({"release": release, "pin": str(path), "pin_identity": identity}) + "\n", encoding="utf-8",
+        json.dumps({"release": release, "previous": previous, "pin": str(path), "pin_identity": identity}) + "\n",
+        encoding="utf-8",
     )
 
 
@@ -269,9 +272,10 @@ def switch(backup, config, restore):
         raise ValueError("The installation backup must be a private operator directory")
     plan = json.loads(owner_file(backup / "plan.json", 4096, private=True))
     release = plan["release"]
+    previous = plan.get("previous", BASELINE)
     pin = Path(plan["pin"])
     identity = plan["pin_identity"]
-    if not DIGEST.fullmatch(release) or str(pin) not in shlex.split(
+    if previous not in SUPPORTED_BASES or not DIGEST.fullmatch(release) or str(pin) not in shlex.split(
         systemctl("show", "-p", "DropInPaths", "--value", SERVICE, capture=True)
     ):
         raise ValueError("The current service or release does not match the saved installation plan")
@@ -284,8 +288,8 @@ def switch(backup, config, restore):
         owner_file(backup / "candidate-pin.conf", 65_536, private=True),
     )
     if candidate != (
-        candidate_config(original[0], release),
-        patch_pin(original[1], release),
+        candidate_config(original[0], release, previous),
+        patch_pin(original[1], release, previous),
     ):
         raise ValueError("The saved config and pin pair changed")
     before, after = (candidate, original) if restore else (original, candidate)
@@ -294,7 +298,7 @@ def switch(backup, config, restore):
     if current != before or live_identity != identity:
         raise ValueError("Gateway config or pin changed since preparation. Switch aborted.")
     verify_config(backup / ("original-openclaw.json" if restore else "candidate-openclaw.json"),
-                  BASELINE if restore else release)
+                  previous if restore else release)
     if live_identity[0] != os.getuid():
         authorize_root_pin()
     systemctl("stop", SERVICE)
@@ -328,6 +332,7 @@ def main():
     parser.add_argument("action", choices=("prepare", "activate", "rollback"))
     parser.add_argument("backup", type=Path)
     parser.add_argument("--release")
+    parser.add_argument("--from-release", choices=SUPPORTED_BASES, default=BASELINE)
     args = parser.parse_args()
     os.umask(0o077)
     config = Path.home() / ".openclaw/openclaw.json"
@@ -335,7 +340,7 @@ def main():
         with (config.parent / ".fo-segment1-install.lock").open("ab") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             if args.action == "prepare":
-                prepare(args.release or "", args.backup, config)
+                prepare(args.release or "", args.backup, config, args.from_release)
             else:
                 switch(args.backup, config, restore=args.action == "rollback")
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:

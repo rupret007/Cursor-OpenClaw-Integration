@@ -155,18 +155,39 @@ const themes = new Map([
   ['follow-up', /\b(?:reminder|follow up|follow-up|check in|checking in|update|confirm)\b/i],
 ]);
 
-export async function summarizeAndrea(reader, now = Date.now()) {
+export async function inspectAndrea(reader, now = Date.now()) {
   const list = await reader.chats();
   // The reader can observe a new preview while this turn is already in flight.
   const inWindow = (at) => recent(at, now, recentMs);
-  const candidates = list.chats.filter((chat) => inWindow(Date.parse(chat.lastMessageAt)))
-    .sort((a, b) => Date.parse(b.lastMessageAt) - Date.parse(a.lastMessageAt));
+  const latest = (chat) => Math.max(...[chat.lastMessageAt, chat.lastInboundAt, chat.lastOutboundAt]
+    .map((at) => Date.parse(at)).filter((at) => Number.isFinite(at) && at <= now + 30_000));
+  const candidates = [...list.chats].sort((a, b) => {
+    const first = latest(a);
+    const second = latest(b);
+    return first === second ? 0 : second - first;
+  });
+  // Chat metadata can lag the preview index. Confirm recency from each
+  // message itself, while keeping the same four-read bound.
   const chats = candidates.slice(0, 4);
   const reads = await Promise.allSettled(chats.map((chat) => reader.messages(chat.chatJid)));
   const failures = reads.filter((read) => read.status === 'rejected').length;
-  if (failures && failures === reads.length) throw new Error('Andrea previews unavailable');
-  const groups = reads.filter((read) => read.status === 'fulfilled').map((read) => read.value
-    .filter((row) => inWindow(Date.parse(row.timestamp))).sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp)));
+  const previews = reads.filter((read) => read.status === 'fulfilled').map((read) => read.value);
+  const groups = previews.map((rows) => rows.filter((row) =>
+    inWindow(Date.parse(row.timestamp)) && typeof row.preview === 'string' && row.preview.trim())
+    .sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp)));
+  return {
+    groups, failures, complete: list.complete,
+    counts: {
+      eligibleChats: candidates.length, freshChatMetadata: candidates.filter((chat) => inWindow(latest(chat))).length,
+      selectedChats: chats.length, readFailures: failures, acceptedRows: previews.flat().length,
+      recentTextPreviews: groups.flat().length,
+    },
+  };
+}
+
+export async function summarizeAndrea(reader, now = Date.now()) {
+  const { groups, failures, complete, counts } = await inspectAndrea(reader, now);
+  if (failures && failures === counts.selectedChats) throw new Error('Andrea previews unavailable');
   const messages = groups.flat();
   const incoming = messages.filter((message) => !message.isFromMe).length;
   const tags = [...themes].filter(([, pattern]) => messages.some((message) => pattern.test(message.preview))).map(([label]) => label);
@@ -181,7 +202,7 @@ export async function summarizeAndrea(reader, now = Date.now()) {
     lines.push('Andrea returned no recent previews in the chats checked.');
   }
   if (failures) lines.push('Andrea could not read ' + failures + ' of the selected conversations.');
-  if (candidates.length > chats.length) lines.push('Checked the four most recent conversations.');
-  if (!list.complete) lines.push('Andrea returned a partial chat list.');
+  if (counts.eligibleChats > counts.selectedChats) lines.push('Checked the four most recent conversations.');
+  if (!complete) lines.push('Andrea returned a partial chat list.');
   return lines.join('\n');
 }

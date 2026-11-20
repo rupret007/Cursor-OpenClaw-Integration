@@ -4,6 +4,19 @@ const readQuestion = /^(?:(?:please|first officer)[ ,]+)?(?:what|which|is|are|ho
 
 export const nodeIds = ['bobserver', 'mac-mini', 'nucbox', 'macbook-pro'];
 
+export function captainRequest(raw) {
+  const normalized = raw.trim().toLowerCase().replace(/[?.!]+$/, '').replace(/ +/g, ' ');
+  const daily = { 'brief me': 'brief', 'what needs me': 'decisions', handoff: 'handoff', 'captain status': 'role' };
+  if (Object.hasOwn(daily, normalized)) return { kind: 'captain', action: daily[normalized] };
+  const task = /^captain this:\s*(?:verify|review|check) (?:the )?ci for (?:integration )?pr #?([1-9]\d{0,7})$/.exec(normalized);
+  if (task) return { kind: 'captain', action: 'task', pr: Number(task[1]) };
+  const grant = /^captain grant integration-ci epoch ([1-9]\d{0,12})$/.exec(normalized);
+  if (grant) return { kind: 'captain', action: 'grant', epoch: Number(grant[1]) };
+  const control = /^captain (pause|handback) epoch ([1-9]\d{0,12})$/.exec(normalized);
+  if (control) return { kind: 'captain', action: control[1], epoch: Number(control[2]) };
+  if (/^captain\b/.test(normalized)) return { kind: 'captain', action: 'help' };
+}
+
 function memoryRequest(raw, ask) {
   const remembering = /^remember\b/.test(ask);
   const prefix = /^(?:please\s+)?(?:remember|what did i tell you about|what do you remember about|do you remember about|recall)\s+/i;
@@ -25,6 +38,8 @@ export function classifyRequest(input, { legacyStatus, legacyRequest, isControl,
   const raw = input.trim();
   const text = raw.slice(0, textLimit).toLowerCase().replace(/[’‘]/g, "'").replace(/\s+/g, ' ');
   const ask = text.replace(/[?.!]+$/, '').replace(/^please +/, '');
+  const captain = captainRequest(raw);
+  if (captain) return captain;
   if (/^(?:remember|what did i tell you about|(?:what do you|do you) remember about|recall)\b/.test(ask)) {
     return memoryRequest(raw, ask);
   }

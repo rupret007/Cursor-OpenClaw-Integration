@@ -105,6 +105,8 @@ assert.match(fleet.text, /Bobserver · [\d.]+ \/ [\d.]+ \/ [\d.]+ at /);
 assert.match(fleet.text, /Lane counts at .* · 1 running/);
 assert.match((await dispatch('gate status')).text, /full gate was running on aaaaaaaa/);
 assert.match((await dispatch('quota status')).text, /Quota checked at /);
+assert.match((await dispatch('captain status')).text, /Captain state or evidence is unavailable/);
+assert.match((await dispatch('captain this: deploy')).text, /verify CI for PR #33/);
 
 const remember = await dispatch('remember that my segment marker is orange triangle');
 assert.equal(remember.handled, true);

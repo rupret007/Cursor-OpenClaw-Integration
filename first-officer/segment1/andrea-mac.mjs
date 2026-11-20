@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { andreaCommand } from './andrea-ssh.mjs';
-import { summarizeAndrea } from './tools.mjs';
+import { inspectAndrea, summarizeAndrea } from './tools.mjs';
 
 const execute = promisify(execFile);
 const maxBytes = 196_608;
@@ -32,7 +32,7 @@ async function loadSettings() {
   return settings;
 }
 
-export function createMacAndreaReader(settings, transport = fetch) {
+export function createMacAndreaReader(settings, transport = fetch, counts) {
   const token = settings.BLUEBUBBLES_CONTROL_TOKEN;
   const owner = settings.BLUEBUBBLES_CANONICAL_SELF_THREAD_JID;
   const excluded = new Set([owner, ...(settings.BLUEBUBBLES_SELF_THREAD_ALIAS_JIDS ?? '').split(',').map((id) => id.trim())]);
@@ -72,6 +72,11 @@ export function createMacAndreaReader(settings, transport = fetch) {
     async chats() {
       const { chats } = await get('/v1/bluebubbles/chats?limit=100');
       if (!Array.isArray(chats) || chats.length > 100) throw new Error('Andrea chat list was invalid');
+      if (counts) {
+        counts.listedChats = chats.length;
+        counts.groupChats = chats.filter((row) => row?.isGroup === true).length;
+        counts.excludedChats = chats.filter((row) => excluded.has(row?.chatJid)).length;
+      }
       return { complete: chats.length < 100, chats: chats.filter((row) =>
         row?.isGroup === false && typeof row.chatJid === 'string' &&
         chatId.test(row.chatJid) && !excluded.has(row.chatJid)) };
@@ -80,6 +85,11 @@ export function createMacAndreaReader(settings, transport = fetch) {
       if (typeof id !== 'string' || !chatId.test(id) || excluded.has(id)) throw new Error('Andrea chat was excluded');
       const { messages } = await get('/v1/bluebubbles/chats/' + encodeURIComponent(id) + '/messages?limit=20');
       if (!Array.isArray(messages) || messages.length > 20) throw new Error('Andrea message list was invalid');
+      if (counts) {
+        counts.returnedRows += messages.length;
+        counts.botRows += messages.filter((row) => row?.isBotMessage === true).length;
+        counts.rowsWithValidTimestamp += messages.filter((row) => Number.isFinite(Date.parse(row?.timestamp))).length;
+      }
       return messages.filter((row) => row?.chatJid === id && row.isBotMessage === false &&
         typeof row.isFromMe === 'boolean' && typeof row.preview === 'string');
     },
@@ -91,9 +101,19 @@ export async function runMacAndrea(command, readSettings = loadSettings, transpo
   return { version: 1, summary: await summarizeAndrea(createMacAndreaReader(await readSettings(), transport)) };
 }
 
+export async function diagnoseMacAndrea(readSettings = loadSettings, transport = fetch, now = Date.now()) {
+  const source = { listedChats: 0, groupChats: 0, excludedChats: 0, returnedRows: 0,
+    botRows: 0, rowsWithValidTimestamp: 0 };
+  const { counts } = await inspectAndrea(createMacAndreaReader(await readSettings(), transport, source), now);
+  return { ...source, ...counts };
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
-    console.log(JSON.stringify(await runMacAndrea(process.env.SSH_ORIGINAL_COMMAND)));
+    const localDiagnostic = process.env.SSH_ORIGINAL_COMMAND === undefined &&
+      process.argv.length === 3 && process.argv[2] === '--diagnose';
+    console.log(JSON.stringify(await (localDiagnostic
+      ? diagnoseMacAndrea() : runMacAndrea(process.env.SSH_ORIGINAL_COMMAND))));
   } catch {
     console.error('Andrea read-only summary failed.');
     process.exitCode = 1;

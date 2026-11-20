@@ -10,7 +10,15 @@ The canary against the pinned bundle failed before the change and passed against
 
 The unchanged baseline reported two Andrea doctor test failures in the local WSL run. The full hosted integration job and the Segment 1 job passed on the pull request. Jeff verified Andrea’s live read API on the Mac Mini, provisioned the restricted SSH key, and verified a live summary from bobserver through that key. The Mac runs only the aggregate summary command and keeps Andrea’s control credential locally. Jeff uploaded and published the revised bundle. Initial preparation exposed a root-owned service pin and an SSH shell with no OpenClaw launcher on its PATH. The installer preserves the pin’s owner, mode and verifier arguments and validates with the launcher from systemd.
 
-Jeff activated release `ed545847333ee1691824cd8e3b0a528882b2b11c7f2479c1f63af9a0e8def456` with installer commit `e0da3f1`. The installer reported a successful readiness check and the gateway was active. Jeff has the private rollback directory. The timed [live Telegram acceptance checks](LIVE-TEST.md) are pending.
+Jeff activated release `ed545847333ee1691824cd8e3b0a528882b2b11c7f2479c1f63af9a0e8def456` with installer commit `e0da3f1`. The installer reported a successful readiness check and the gateway was active. Jeff has the private rollback directory. Jeff reported the timed [live Telegram acceptance checks](LIVE-TEST.md) passed except for the Andrea text summary.
+
+During follow-up, the deployed reader connected to Andrea and returned no recent previews. The gateway journal showed no Andrea tool failure. A Mac-local diagnostic now measures counts before and after the eligibility and freshness filters. The candidate can read up to four previews when chat metadata is stale and still enforces the 48-hour message window. The effect on Jeff's live data remains unverified.
+
+## Captain upgrade
+
+The live authority check showed Grok Bot still holds the shared lease. The watchdog timer was inactive. The captain candidate reuses that lease and the existing lane runner. Jeff can grant the named Integration CI scope at the current epoch, pause dispatch and request handback in the private Telegram chat. The runner uses a separate subscription account from the two fleet quota receipts. The candidate reads the runner's own subscription quota before dispatch.
+
+The captain can read current fleet, gate, PR and quota evidence, follow an exact PR head, launch one review lane for it and verify the result against the current GitHub head. The local tests exercise stale grants, duplicate submissions, pause, failed lanes, mismatched heads and the Andrea diagnostic. The [Captain guide](CAPTAIN.md) covers the Mac check, operator activation, supervised pilot and rollback.
 
 ## Later segments
 
@@ -25,4 +33,4 @@ Jeff activated release `ed545847333ee1691824cd8e3b0a528882b2b11c7f2479c1f63af9a0
 
 The backlog references the bobserver lanes `infra-20261118`, `consolidate-20261119` and `arch-research-20261118`.
 
-READY_FOR_JEFF_INSTALL
+BLOCKED: Jeff's Mac-local Andrea check, operator activation, timed Telegram acceptance and supervised authority pilot remain pending.

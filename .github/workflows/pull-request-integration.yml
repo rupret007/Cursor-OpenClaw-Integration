@@ -24,7 +24,7 @@ jobs:
         with:
           node-version: "24"
       - name: Check live-tool dispatch and latency budgets
-        run: nice -n 10 node --test tests/first_officer/segment1.test.mjs
+        run: nice -n 10 node --test tests/first_officer/segment1.test.mjs tests/first_officer/captain.test.mjs
 
   offline-integration:
     runs-on: ubuntu-latest

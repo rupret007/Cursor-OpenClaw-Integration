@@ -16,6 +16,8 @@ During follow-up, the deployed reader connected to Andrea and returned no recent
 
 Jeff ran the Mac-local diagnostic. Andrea returned 100 indexed chats, including 83 eligible one-to-one chats. None of those had metadata in the last 48 hours. All four selected chat reads succeeded and returned 27 valid preview rows, with zero recent previews. The sync diagnostic showed a connected channel, registered webhook, recent shadow poll, an allowlist and an older last inbound event. It could not classify the transport state. Bob the Bot is the deployed OpenClaw Telegram account. The candidate can fetch fresh history on the Mac from Andrea's configured BlueBubbles provider for a known one-to-one chat on the current allowlist. Automated tests exercise that fallback. The operator refresh requires positive recent preview evidence before switching the reader.
 
+The authenticated follow-up found two self-chat entries and two groups on Andrea's allowlist, with no non-self one-to-one entry. The scoped live reader fetched 20 recent previews from the approved groups without read failures. With Jeff's authenticated Mac session, the reader refresh switched the existing restricted key and verified the group aggregate from Bobserver. The existing gateway can still parse the one-to-one reply. It needs the candidate gateway release to display the group aggregate in Telegram.
+
 ## Captain upgrade
 
 The live authority check showed Grok Bot still holds the shared lease. Takeover is off, the watchdog timer is inactive and the latest matching Grok check-in is stale. The pilot arming command requires a fresh Grok check-in and an explicit handoff at the expected epoch. The captain candidate reuses that lease and the existing lane runner. Jeff can grant the named Integration CI scope at the current epoch, pause dispatch and request handback in the private Telegram chat. The runner uses a separate subscription account from the two fleet quota receipts. The candidate reads the runner's own subscription quota before dispatch.
@@ -35,4 +37,4 @@ The captain can read current fleet, gate, PR and quota evidence, follow an exact
 
 The backlog references the bobserver lanes `infra-20261118`, `consolidate-20261119` and `arch-research-20261118`.
 
-BLOCKED: Live verification of the new Andrea reader, operator activation, timed Telegram acceptance and the supervised authority pilot remain pending.
+BLOCKED: Jeff's gateway activation, timed Telegram acceptance and the supervised authority pilot remain pending. The restricted reading path to the Mac is verified.

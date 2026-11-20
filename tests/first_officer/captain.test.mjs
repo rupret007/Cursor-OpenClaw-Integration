@@ -181,3 +181,28 @@ test('the fixed Andrea summary reads an exact allowlisted thread missing from th
   assert.match(parseAndreaSummary(JSON.stringify(result)), /1 incoming, 0 outgoing across 1 recent conversations/);
   assert.doesNotMatch(JSON.stringify(result), /sample-thread|demonstration library|fixture-password/);
 });
+
+test('the Andrea reader returns a separate approved-group aggregate and preserves the legacy one-to-one summary', async () => {
+  const now = Date.now();
+  const group = 'iMessage;+;approved-group';
+  const settings = {
+    BLUEBUBBLES_CONTROL_TOKEN: 'x'.repeat(24),
+    BLUEBUBBLES_CANONICAL_SELF_THREAD_JID: 'bb:iMessage;-;owner',
+    BLUEBUBBLES_BASE_URL: 'https://fixture.invalid',
+    BLUEBUBBLES_PASSWORD: 'fixture-password',
+    BLUEBUBBLES_ALLOWED_CHAT_GUIDS: group + ',SMS;-;OWNER',
+  };
+  const read = async (url, options) => {
+    assert.equal(options.method, 'GET');
+    if (url.pathname.endsWith('/status')) return Response.json({ status: { chatScope: 'allowlist' } });
+    if (url.pathname.endsWith('/chats')) return Response.json({ chats: [] });
+    assert.equal(decodeURIComponent(url.pathname), '/api/v1/chat/' + group + '/message');
+    return Response.json({ data: [{ guid: 'fixture-group-row', text: 'Meet tomorrow at the demonstration library',
+      dateCreated: now, isFromMe: false, chats: [{ guid: group, isGroup: true }] }] });
+  };
+  const result = await runMacAndrea(andreaCommand, () => settings, read, now);
+  assert.match(result.summary, /one-to-one.*\nAndrea returned no recent previews/);
+  assert.match(parseAndreaSummary(JSON.stringify(result)), /approved group chats.*\n1 incoming/);
+  assert.doesNotMatch(JSON.stringify(result), /approved-group|demonstration library|fixture-password/);
+  assert.throws(() => parseAndreaSummary(JSON.stringify({ ...result, groupSummary: result.summary })), /invalid/);
+});

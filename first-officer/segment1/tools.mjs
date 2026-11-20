@@ -189,12 +189,13 @@ export async function summarizeAndrea(reader, now = Date.now()) {
   return formatAndreaSummary(await inspectAndrea(reader, now));
 }
 
-export function formatAndreaSummary({ groups, failures, complete, counts }) {
-  if (failures && failures === counts.selectedChats) throw new Error('Andrea previews unavailable');
+export function formatAndreaSummary({ groups, failures, complete, counts }, { grouped = false, allowEmpty = false } = {}) {
+  if (failures && failures === counts.selectedChats && !allowEmpty) throw new Error('Andrea previews unavailable');
   const messages = groups.flat();
   const incoming = messages.filter((message) => !message.isFromMe).length;
   const tags = [...themes].filter(([, pattern]) => messages.some((message) => pattern.test(message.preview))).map(([label]) => label);
-  const lines = ['Andrea · synced one-to-one text activity from the last 48 hours.'];
+  const lines = [grouped ? 'Andrea · activity in approved group chats from the last 48 hours.' :
+    'Andrea · synced one-to-one text activity from the last 48 hours.'];
   if (messages.length) {
     const latestIncoming = groups.filter((group) => group[0]?.isFromMe === false).length;
     lines.push(incoming + ' incoming, ' + (messages.length - incoming) + ' outgoing across ' +

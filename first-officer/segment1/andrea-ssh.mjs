@@ -7,6 +7,7 @@ import { promisify } from 'node:util';
 export const andreaCommand = 'first-officer-andrea-summary-v1';
 const execute = promisify(execFile);
 const title = 'Andrea · synced one-to-one text activity from the last 48 hours.';
+const groupTitle = 'Andrea · activity in approved group chats from the last 48 hours.';
 const lineFormats = [
   /^\d{1,2} incoming, \d{1,2} outgoing across [1-4] recent conversations\.$/,
   /^The latest message was incoming in [1-4] of those conversations\.$/,
@@ -18,9 +19,11 @@ const lineFormats = [
 ];
 
 export function parseAndreaSummary(payload) {
-  const { version, summary } = JSON.parse(payload) ?? {};
+  const { version, summary: directSummary, groupSummary } = JSON.parse(payload) ?? {};
+  const grouped = groupSummary !== undefined;
+  const summary = grouped ? groupSummary : directSummary;
   const lines = typeof summary === 'string' && summary.length <= 1000 ? summary.split('\n') : [];
-  if (version !== 1 || lines.shift() !== title || lines.length < 1 ||
+  if (version !== 1 || lines.shift() !== (grouped ? groupTitle : title) || lines.length < 1 ||
       lines.length > lineFormats.length || lines.some((line) => !lineFormats.some((format) => format.test(line)))) {
     throw new Error('Andrea summary response was invalid');
   }

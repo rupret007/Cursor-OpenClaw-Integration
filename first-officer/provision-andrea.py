@@ -230,6 +230,21 @@ def validate_sync(status):
     return status
 
 
+def validate_live_history(proof):
+    limits = {"selectedChats": 4, "readFailures": 4, "recentTextPreviews": 80}
+    if (not isinstance(proof, dict) or proof.keys() != {"source", *limits}
+            or not isinstance(proof["source"], str) or proof["source"] not in HISTORY_SOURCES
+            or any(type(proof[key]) is not int or not 0 <= proof[key] <= limit for key, limit in limits.items())):
+        raise DiagnosticError("invalid-counts")
+    return proof
+
+
+def validated_diagnostic(payload, result):
+    if payload.get("live"):
+        return validate_live_history(result)
+    return validate_sync(result) if payload.get("sync") else validate_counts(result)
+
+
 def diagnose_mac(payload):
     try:
         node = mac_node()
@@ -243,7 +258,7 @@ def diagnose_mac(payload):
         for name in MODULES:
             write_once(path / name, files[name].encode())
         env = {name: value for name, value in os.environ.items() if name != "SSH_ORIGINAL_COMMAND"}
-        option = "--diagnose-sync" if payload.get("sync") else "--diagnose"
+        option = "--diagnose-live" if payload.get("live") else "--diagnose-sync" if payload.get("sync") else "--diagnose"
         result = subprocess.run([node, str(path / "andrea-mac.mjs"), option],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=20, text=True)
         try:
@@ -255,7 +270,7 @@ def diagnose_mac(payload):
         if code in ("settings-unavailable", "settings-invalid", "api-unreachable", "api-authentication", "api-response"):
             raise DiagnosticError(code)
         raise DiagnosticError("node-diagnostic")
-    return validate_sync(counts) if payload.get("sync") else validate_counts(counts)
+    return validated_diagnostic(payload, counts)
 
 
 def prepare_mac(payload):
@@ -273,22 +288,20 @@ def prepare_mac(payload):
     refresh = payload.get("refresh") is True
     if refresh:
         env = {name: value for name, value in os.environ.items() if name != "SSH_ORIGINAL_COMMAND"}
-        proof = json.loads(quiet_run([node, main, "--diagnose-live"], env=env))
-        source = proof.get("source")
-        if source not in HISTORY_SOURCES:
-            raise ValueError("The candidate did not return verified live-history evidence")
-        if type(proof.get("recentTextPreviews")) is not int or not 1 <= proof["recentTextPreviews"] <= 80:
-            if type(proof.get("readFailures")) is int and proof["readFailures"] > 0:
+        proof = validate_live_history(json.loads(quiet_run([node, main, "--diagnose-live"], env=env)))
+        if not proof["recentTextPreviews"]:
+            if proof["readFailures"]:
                 raise ValueError("The candidate could not read the selected recent history")
-            raise ValueError("The candidate finds no recent previews. History source " + source + ".")
+            raise ValueError("The candidate finds no recent previews. History source " + proof["source"] + ".")
     result = json.loads(quiet_run([node, main], env={**os.environ, "SSH_ORIGINAL_COMMAND": READER_COMMAND}))
-    if result.get("version") != 1 or not str(result.get("summary", "")).startswith("Andrea · "):
+    summary = result.get("groupSummary", result.get("summary"))
+    if result.get("version") != 1 or not isinstance(summary, str) or not summary.startswith("Andrea · "):
         raise ValueError("Mac reader did not return a verified summary")
     target = shlex.join([node, main]).replace("\\", "\\\\").replace('"', '\\"')
     if "\n" in target or "\r" in target:
         raise ValueError("Mac reader command path is invalid")
     entry = f'restrict,command="{target}" {key} {KEY_LABEL}'.encode()
-    if refresh and not re.search(r"\n\d+ incoming, \d+ outgoing across [1-4] recent conversations\.", result["summary"]):
+    if refresh and not re.search(r"\n\d+ incoming, \d+ outgoing across [1-4] recent conversations\.", summary):
         raise ValueError("The candidate reader still finds no recent text previews")
     add_restriction(entry, "refresh" if refresh else "install")
     return {"pin": pin}
@@ -353,7 +366,7 @@ def run_on_host(host, action, payload, source):
         if call.returncode:
             code = result.get("diagnostic") if isinstance(result, dict) else None
             raise DiagnosticError(code if isinstance(code, str) else "remote-runtime")
-        return validate_sync(result) if payload.get("sync") else validate_counts(result)
+        return validated_diagnostic(payload, result)
     if not call.stdout:
         if call.returncode in (126, 127):
             raise ValueError("The remote shell could not start Python.")
@@ -378,6 +391,7 @@ def main():
     action = parser.add_mutually_exclusive_group()
     action.add_argument("--diagnose", action="store_true", help="Print only counts and freshness from the Mac reader")
     action.add_argument("--diagnose-sync", action="store_true", help="Print only the Mac reader's upstream sync status")
+    action.add_argument("--diagnose-live", action="store_true", help="Print only counts from the scoped live reader")
     action.add_argument("--refresh-reader", action="store_true", help="Switch the existing restricted key to this reviewed reader")
     action.add_argument("--restore-reader", action="store_true", help="Restore the previous restricted Mac reader")
     args = parser.parse_args()
@@ -387,9 +401,10 @@ def main():
     module_dir = Path(__file__).with_name("segment1")
     files = {name: (module_dir / name).read_text(encoding="utf-8") for name in MODULES}
     mac = args.mac_user + "@" + args.mac_host
-    if args.diagnose or args.diagnose_sync:
+    if args.diagnose or args.diagnose_sync or args.diagnose_live:
         try:
-            counts = run_on_host(mac, "remote-diagnose", {"files": files, "sync": args.diagnose_sync}, source)
+            counts = run_on_host(mac, "remote-diagnose", {"files": files, "sync": args.diagnose_sync,
+                                                        "live": args.diagnose_live}, source)
         except DiagnosticError as error:
             print(f"Andrea diagnostic failed [{error.code}]. {error}.", file=sys.stderr)
             return 1

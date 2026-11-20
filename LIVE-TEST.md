@@ -9,7 +9,7 @@ Jeff runs these in the private owner chat after activation. Use a stopwatch from
 | 3. GitHub | `my open PRs and CI` | The current open PR count for the owner, with recent PR identifiers, heads and CI state bound to those heads. Compare with GitHub. An empty list passes only when GitHub reports zero open PRs. | <30 s |
 | 4. Memory | `remember that my segment marker is orange triangle` | A Remember card for the synthetic test fact. Tap **Remember** and verify the card changes to a saved confirmation. | <15 s to card and <15 s from tap to confirmation |
 | 4. Recall | `what did I tell you about segment marker?` | The private saved fact is retrieved from the store and matches the synthetic marker. | <15 s |
-| 5. Andrea | `summarize my texts` | A recent one-to-one activity summary through Andrea with counts and any detected themes. Compare privately with Andrea. The reply should contain no names, addresses, numbers from contacts or raw previews. | <30 s |
+| 5. Andrea | `summarize my texts` | A recent activity summary through Andrea with counts and any detected themes. The reply identifies whether it covers one-to-one chats or the approved groups. Compare privately with a recent thread in that scope. The reply should contain no names, addresses, numbers from contacts or raw previews. | <30 s |
 
 Also send `define a branch` to check a simple model answer in **<15 seconds**, and `quota status` to check current quota receipts in **<30 seconds**. The same acknowledgment target applies.
 

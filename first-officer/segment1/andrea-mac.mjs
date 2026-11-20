@@ -12,6 +12,7 @@ const execute = promisify(execFile);
 const maxBytes = 196_608;
 const chatId = /^bb:[^\s\x00-\x1f\x7f]{1,220}$/u;
 const directGuid = /^(?:iMessage|SMS|RCS);-;[^;\s\x00-\x1f\x7f]{1,190}$/i;
+const groupGuid = /^(?:iMessage|SMS|RCS);\+;[^;\s\x00-\x1f\x7f]{1,190}$/i;
 const messageLimit = 20;
 
 function selfThreads(settings) {
@@ -137,7 +138,8 @@ function providerPlan(settings) {
     .map((id) => directHandle(id.slice(3))));
   const allowed = new Set([settings.BLUEBUBBLES_ALLOWED_CHAT_GUIDS, settings.BLUEBUBBLES_ALLOWED_CHAT_GUID]
     .filter(Boolean).join(',').split(',').map((value) => value.trim())
-    .filter((guid) => directGuid.test(guid) && !excluded.has('bb:' + guid) && !selfHandles.has(directHandle(guid))));
+    .filter((guid) => !excluded.has('bb:' + guid) &&
+      (groupGuid.test(guid) || (directGuid.test(guid) && !selfHandles.has(directHandle(guid))))));
   const password = settings.BLUEBUBBLES_PASSWORD;
   const bases = [settings.BLUEBUBBLES_BASE_URL, ...(settings.BLUEBUBBLES_BASE_URL_CANDIDATES ?? '').split(',')]
     .filter((value) => URL.canParse(value ?? '')).map((value) => new URL(value))
@@ -151,6 +153,7 @@ function providerRows(body, guid) {
   const rows = body?.data ?? body?.messages;
   if (!Array.isArray(rows) || rows.length > messageLimit) throw new ReaderError('api-response');
   const seen = new Set();
+  const grouped = groupGuid.test(guid);
   return rows.flatMap((row) => {
     const preview = [row?.text, row?.body, row?.message].find((value) => typeof value === 'string' && value.trim());
     const id = row?.guid ?? row?.messageGuid ?? row?.id;
@@ -162,7 +165,8 @@ function providerRows(body, guid) {
         typeof row.isFromMe !== 'boolean' || row.isBotMessage === true ||
         row.isSystemMessage === true || row.associatedMessageGuid ||
         (Array.isArray(row.chats) && row.chats.some((chat) =>
-          chat?.isGroup === true || (chat?.guid ?? chat?.chatGuid ?? guid) !== guid))) return [];
+          (typeof chat?.isGroup === 'boolean' && chat.isGroup !== grouped) ||
+          (chat?.guid ?? chat?.chatGuid ?? guid) !== guid))) return [];
     seen.add(id);
     return [{ timestamp: new Date(ms).toISOString(), preview: preview.slice(0, 220), isFromMe: row.isFromMe }];
   });
@@ -189,7 +193,9 @@ async function inspectMacHistory(settings, transport, now) {
   const indexed = new Map((await list).chats.map((chat) => [chat.chatJid, chat]));
   // Exact direct GUIDs from the existing allowlist are sufficient for a
   // point read. The bounded cache list can omit a cold or newly synced chat.
-  const candidates = [...plan.allowed].map((guid) => {
+  const direct = [...plan.allowed].filter((guid) => directGuid.test(guid));
+  const grouped = direct.length === 0;
+  const candidates = (grouped ? [...plan.allowed] : direct).map((guid) => {
     const chatJid = 'bb:' + guid;
     return indexed.get(chatJid) ?? { chatJid };
   });
@@ -206,13 +212,17 @@ async function inspectMacHistory(settings, transport, now) {
       return providerRows(await getJson(url, transport, { signal: AbortSignal.timeout(3000) }), guid);
     },
   }, now);
-  return { view, source: 'live-provider' };
+  return { view, source: 'live-provider', grouped, cached };
 }
 
 export async function runMacAndrea(command, readSettings = loadSettings, transport = fetch, now = Date.now()) {
   if (command !== andreaCommand) throw new Error('Only the Andrea summary operation is allowed');
-  const { view, source } = await inspectMacHistory(await readSettings(), transport, now);
-  return { version: 1, summary: formatAndreaSummary(view), source };
+  const { view, source, grouped, cached } = await inspectMacHistory(await readSettings(), transport, now);
+  // The previous gateway can still read the one-to-one result during a
+  // staged upgrade. The updated client validates the group summary separately.
+  return grouped ? { version: 1, summary: formatAndreaSummary(cached, { allowEmpty: true }), source,
+    groupSummary: formatAndreaSummary(view, { grouped: true }) } :
+    { version: 1, summary: formatAndreaSummary(view), source };
 }
 
 async function diagnosticRead(readSettings, transport, read, counts) {

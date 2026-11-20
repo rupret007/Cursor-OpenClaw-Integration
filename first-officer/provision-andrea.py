@@ -27,6 +27,9 @@ HOST = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]{0,126}")
 ACCOUNT = re.compile(r"[A-Za-z_][A-Za-z0-9_-]{0,59}")
 DIAGNOSTIC_FAILURES = {
     "ssh-session": "SSH authentication or the Mac remote shell failed",
+    "ssh-authentication": "SSH rejected the login",
+    "ssh-host-key": "SSH could not verify the saved host key",
+    "ssh-connection": "SSH could not connect to the host",
     "ssh-timeout": "the SSH session timed out",
     "remote-python": "the Mac Python diagnostic did not return a result",
     "remote-runtime": "the Mac diagnostic failed before reading Andrea",
@@ -312,13 +315,24 @@ def run_on_host(host, action, payload, source):
     prefix = "REMOTE_PAYLOAD = " + repr(payload) + "\n"
     call = subprocess.run(
         ["ssh", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=8",
-         "-o", "NumberOfPasswordPrompts=1", host, "python3 - " + action],
-        input=prefix + source, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-        text=True, timeout=150,
+         "-o", "NumberOfPasswordPrompts=2", host, "python3 - " + action],
+        input=prefix + source, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, timeout=150, env={**os.environ, "LC_ALL": "C"},
     )
+    if call.returncode == 255:
+        stderr = getattr(call, "stderr", "") or ""
+        if re.search(r"permission denied|too many authentication failures|authentication failed", stderr, re.I):
+            code = "ssh-authentication"
+        elif re.search(r"host key verification failed|host identification has changed|strict checking", stderr, re.I):
+            code = "ssh-host-key"
+        elif re.search(r"could not resolve hostname|connect to host|connection (?:closed|reset|timed out)", stderr, re.I):
+            code = "ssh-connection"
+        else:
+            code = "ssh-session"
+        if action == "remote-diagnose":
+            raise DiagnosticError(code)
+        raise ValueError(DIAGNOSTIC_FAILURES[code] + ".")
     if action == "remote-diagnose":
-        if call.returncode == 255:
-            raise DiagnosticError("ssh-session")
         try:
             result = json.loads(call.stdout)
         except ValueError:
@@ -328,8 +342,13 @@ def run_on_host(host, action, payload, source):
             raise DiagnosticError(code if isinstance(code, str) else "remote-runtime")
         return validate_sync(result) if payload.get("sync") else validate_counts(result)
     if not call.stdout:
+        if call.returncode in (126, 127):
+            raise ValueError("The remote shell could not start Python.")
         raise ValueError("The SSH command returned no verification result.")
-    result = json.loads(call.stdout)
+    try:
+        result = json.loads(call.stdout)
+    except ValueError:
+        raise ValueError("The remote helper did not return a valid verification result.") from None
     if call.returncode:
         detail = result.get("problem")
         if isinstance(detail, str) and re.fullmatch(r"[A-Za-z0-9 .-]{1,120}", detail):
@@ -395,6 +414,8 @@ def main():
         print("Andrea setup failed at " + phase + ".", file=sys.stderr)
         if type(error) is ValueError:
             print(str(error), file=sys.stderr)
+        elif isinstance(error, subprocess.TimeoutExpired):
+            print("The SSH or reader request timed out.", file=sys.stderr)
         return 1
     print("Andrea reader verified from bobserver.")
     return 0

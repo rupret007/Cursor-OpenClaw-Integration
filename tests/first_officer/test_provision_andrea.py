@@ -116,3 +116,17 @@ def test_only_allowed_sync_metadata_is_returned(provision):
     assert module.validate_sync(status) == status
     with pytest.raises(module.DiagnosticError):
         module.validate_sync({**status, "channel": "private fixture detail"})
+
+
+@pytest.mark.parametrize(("stderr", "detail"), [
+    ("private fixture identity: Permission denied (publickey,password).", "SSH rejected the login."),
+    ("Host key verification failed. private fixture identity", "SSH could not verify the saved host key."),
+    ("ssh: connect to host private fixture identity: Connection refused", "SSH could not connect to the host."),
+])
+def test_refresh_distinguishes_ssh_failure_without_dumping_stderr(provision, monkeypatch, stderr, detail):
+    module, _ = provision
+    monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs:
+                        SimpleNamespace(returncode=255, stdout="", stderr=stderr))
+    with pytest.raises(ValueError) as caught:
+        module.run_on_host("fixture", "remote-mac", {}, "")
+    assert str(caught.value) == detail

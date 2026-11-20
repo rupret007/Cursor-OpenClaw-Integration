@@ -34,6 +34,8 @@ nice -n 10 python3 -B first-officer/provision-andrea.py \
   --mac-host "$mac_host" --mac-user "$mac_user" --diagnose-sync
 ```
 
+If the channel is connected and its cache is stale, use Andrea's private Telegram owner chat to request a summary of one known, in-scope one-to-one thread with activity in the last 48 hours. Ask for counts and general themes. Andrea's targeted history refresh uses its configured chat scope and stores the fetched history locally. Record only whether the refresh succeeded and the inspected and stored counts. Verify recent previews with the original diagnostic before refreshing the reader.
+
 After the counts show a useful sample, Jeff can refresh the existing key’s forced command. The same public key and the same read-only summary operation are used. The helper rejects a refresh when the candidate finds zero recent previews.
 
 ```bash

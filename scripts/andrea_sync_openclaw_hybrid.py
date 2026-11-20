@@ -690,6 +690,9 @@ def main() -> int:
             timeout_seconds=max(1, args.timeout_seconds),
             thinking=str(args.thinking or "").strip(),
         )
+    except subprocess.TimeoutExpired:
+        print(json.dumps({"ok": False, "error": "openclaw_wait_timeout"}))
+        return 1
     except Exception as exc:  # noqa: BLE001
         print(json.dumps({"ok": False, "error": _clip(exc, 2000)}))
         return 1

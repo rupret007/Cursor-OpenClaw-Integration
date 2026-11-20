@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from typing import Any
 import tempfile
@@ -3095,6 +3096,25 @@ class TestAndreaSync(unittest.TestCase):
         argv = run_mock.call_args.args[0]
         self.assertIn("--session-id", argv)
         self.assertIn("sess-demo-1", argv)
+        self.assertEqual(argv[argv.index("--timeout-seconds") + 1], str(server.openclaw_timeout_seconds))
+        self.assertEqual(run_mock.call_args.kwargs["timeout_seconds"], server.openclaw_timeout_seconds + 10)
+
+    def test_direct_lookup_timeout_defaults_and_respects_job_limit(self) -> None:
+        from services.andrea_sync.server import SyncServer
+
+        for job_limit, lookup_limit, expected in (("900", "", 150), ("900", "80", 80), ("60", "150", 60)):
+            with self.subTest(job_limit=job_limit, lookup_limit=lookup_limit), mock.patch.dict(
+                os.environ,
+                {
+                    "ANDREA_OPENCLAW_TIMEOUT_SECONDS": job_limit,
+                    "ANDREA_OPENCLAW_LOOKUP_TIMEOUT_SECONDS": lookup_limit,
+                },
+            ):
+                server = SyncServer()
+                try:
+                    self.assertEqual(server.openclaw_lookup_timeout_seconds, expected)
+                finally:
+                    server.conn.close()
 
     def test_refresh_openclaw_runtime_falls_back_to_session_rotation(self) -> None:
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
@@ -3311,6 +3331,49 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(reason, "news_summary_failed_contaminated")
         self.assertEqual(reply, "I couldn't pull a grounded live news summary cleanly just now.")
         self.assertNotIn("Masterclass", reply)
+
+    def test_run_direct_openclaw_lookup_deadline_returns_safe_failure(self) -> None:
+        from services.andrea_sync.server import SyncServer
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "ANDREA_OPENCLAW_TIMEOUT_SECONDS": "900",
+                "ANDREA_OPENCLAW_LOOKUP_TIMEOUT_SECONDS": "80",
+            },
+        ):
+            server = SyncServer()
+        self.addCleanup(server.conn.close)
+        with (
+            mock.patch.object(
+                server,
+                "_run_json_subprocess",
+                side_effect=subprocess.TimeoutExpired(["openclaw", "private fixture"], 90),
+            ) as run_mock,
+            mock.patch("services.andrea_sync.server.structured_log") as log_mock,
+        ):
+            result = server._run_direct_openclaw_lookup(
+                "fixture-task",
+                prompt="private fixture",
+                route_reason="structured_live_news",
+                success_reason="news_summary_ready",
+                success_fallback="fixture success",
+                failure_reason="news_summary_failed",
+                failure_reply="Live lookup did not finish.",
+            )
+
+        self.assertEqual(result, ("Live lookup did not finish.", "news_summary_failed"))
+        run_mock.assert_called_once()
+        argv = run_mock.call_args.args[0]
+        self.assertEqual(argv[argv.index("--timeout-seconds") + 1], "80")
+        self.assertEqual(run_mock.call_args.kwargs["timeout_seconds"], 90)
+        log_mock.assert_called_once_with(
+            "openclaw_lookup_runtime",
+            route="structured_live_news",
+            outcome="wait_timeout",
+            elapsed_ms=mock.ANY,
+            timeout_seconds=80,
+        )
 
     def test_run_direct_openclaw_lookup_rejects_embedding_quota_summary(self) -> None:
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"

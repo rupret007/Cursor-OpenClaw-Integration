@@ -2,6 +2,7 @@ import importlib.util
 import json
 import pathlib
 import re
+import subprocess
 import sys
 import unittest
 from unittest import mock
@@ -18,6 +19,25 @@ SPEC.loader.exec_module(MODULE)  # type: ignore[attr-defined]
 
 
 class AndreaSyncOpenClawHybridTests(unittest.TestCase):
+    def test_cli_timeout_outputs_only_a_stable_error(self) -> None:
+        argv = ["wrapper", "--task-id", "fixture-task", "--prompt", "private fixture"]
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(
+                MODULE,
+                "run_openclaw_hybrid",
+                side_effect=subprocess.TimeoutExpired(["openclaw", "private fixture"], 5),
+            ),
+            mock.patch("builtins.print") as print_mock,
+        ):
+            self.assertEqual(MODULE.main(), 1)
+
+        print_mock.assert_called_once()
+        self.assertEqual(
+            json.loads(print_mock.call_args.args[0]),
+            {"ok": False, "error": "openclaw_wait_timeout"},
+        )
+
     def test_build_prompt_for_collaboration_mentions_tri_llm_roles(self) -> None:
         prompt = MODULE._build_prompt(
             "tsk_demo",

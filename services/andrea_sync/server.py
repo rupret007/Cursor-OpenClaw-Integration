@@ -445,6 +445,13 @@ class SyncServer:
         self.openclaw_timeout_seconds = _env_int(
             "ANDREA_OPENCLAW_TIMEOUT_SECONDS", 900
         )
+        self.openclaw_lookup_timeout_seconds = max(
+            1,
+            min(
+                self.openclaw_timeout_seconds,
+                _env_int("ANDREA_OPENCLAW_LOOKUP_TIMEOUT_SECONDS", 150),
+            ),
+        )
         self.openclaw_thinking = os.environ.get("ANDREA_OPENCLAW_THINKING", "medium").strip() or "medium"
         # Fresh session per structured lookup (news, recent texts) avoids long-lived OpenClaw transcript bleed.
         self.openclaw_lookup_ephemeral_session = _env_bool(
@@ -3924,6 +3931,8 @@ class SyncServer:
         failure_reply: str,
     ) -> tuple[str, str]:
         contaminated_reason = f"{failure_reason}_contaminated"
+        started_at = time.monotonic()
+        outcome = "returned"
         try:
             result = self._create_openclaw_job(
                 task_id,
@@ -3933,9 +3942,22 @@ class SyncServer:
                 "",
                 "",
                 session_id=self._openclaw_lookup_session_id(task_id, route_reason),
+                timeout_seconds=self.openclaw_lookup_timeout_seconds,
             )
-        except Exception:  # noqa: BLE001
+        except subprocess.TimeoutExpired:
+            outcome = "wait_timeout"
             return failure_reply, failure_reason
+        except Exception:  # noqa: BLE001
+            outcome = "runtime_error"
+            return failure_reply, failure_reason
+        finally:
+            structured_log(
+                "openclaw_lookup_runtime",
+                route=route_reason,
+                outcome=outcome,
+                elapsed_ms=round((time.monotonic() - started_at) * 1000),
+                timeout_seconds=self.openclaw_lookup_timeout_seconds,
+            )
         summary = ""
         for candidate in (
             result.get("user_summary"),
@@ -4458,7 +4480,10 @@ class SyncServer:
         preferred_model_label: str,
         *,
         session_id: str,
+        timeout_seconds: int | None = None,
     ) -> Dict[str, Any]:
+        if timeout_seconds is None:
+            timeout_seconds = self.openclaw_timeout_seconds
         return self._run_json_subprocess(
             [
                 sys.executable,
@@ -4482,11 +4507,11 @@ class SyncServer:
                 "--preferred-model-label",
                 preferred_model_label,
                 "--timeout-seconds",
-                str(self.openclaw_timeout_seconds),
+                str(timeout_seconds),
                 "--thinking",
                 self.openclaw_thinking,
             ],
-            timeout_seconds=self.openclaw_timeout_seconds + 10,
+            timeout_seconds=timeout_seconds + 10,
         )
 
     def _create_cursor_job(

@@ -24,7 +24,12 @@ from services.andrea_sync.adapters import telegram as tg_adapt  # noqa: E402
 from services.andrea_sync.bus import handle_command  # noqa: E402
 from services.andrea_sync.experience_assurance import run_experience_assurance  # noqa: E402
 from services.andrea_sync.schema import EventType  # noqa: E402
-from services.andrea_sync.store import append_event, ensure_system_task, save_incident  # noqa: E402
+from services.andrea_sync.store import (  # noqa: E402
+    append_event,
+    ensure_system_task,
+    list_telegram_task_ids_for_chat,
+    save_incident,
+)
 
 
 class TestAndreaSyncHTTP(unittest.TestCase):
@@ -1658,6 +1663,70 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
         for term in recycled_terms:
             self.assertNotIn(term, third_reply)
         self.assertNotIn("JobQueued", [row["event_type"] for row in third["events"]])
+
+    def test_telegram_live_lookup_timeout_releases_followup_worker(self) -> None:
+        def post_message(update_id: int, chat_id: int, text: str) -> None:
+            message = {
+                "text": text,
+                "message_id": update_id,
+                "chat": {"id": chat_id},
+                "from": {"id": chat_id},
+            }
+            request = urllib.request.Request(
+                self._url("/v1/telegram/webhook"),
+                data=json.dumps({"update_id": update_id, "message": message}).encode(),
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Telegram-Bot-Api-Secret-Token": self._srv.telegram_header_secret,
+                },
+            )
+            with urllib.request.urlopen(request, timeout=5) as response:
+                self.assertEqual(response.status, 200)
+
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "lookup-started"
+            executable = Path(directory) / "openclaw"
+            executable.write_text('#!/bin/sh\n: > "$ANDREA_TEST_LOOKUP_MARKER"\nexec sleep 30\n')
+            executable.chmod(0o700)
+            with (
+                mock.patch.dict(os.environ, {
+                    "PATH": directory + os.pathsep + os.environ.get("PATH", ""),
+                    "ANDREA_TEST_LOOKUP_MARKER": str(marker),
+                }),
+                mock.patch.object(self._srv, "openclaw_lookup_timeout_seconds", 1),
+                mock.patch.object(
+                    self._srv,
+                    "_resolve_runtime_skill",
+                    return_value={"truth": {"status": "verified_available"}},
+                ) as skill,
+            ):
+                news_chat, greeting_chat = 7301, 7302
+                post_message(7301, news_chat, "What is the latest news today?")
+                post_message(7302, greeting_chat, "Hello!")
+                expected_chats = (news_chat, greeting_chat)
+                replies = {}
+                deadline = time.monotonic() + 14
+                while len(replies) != len(expected_chats) and time.monotonic() < deadline:
+                    for chat in expected_chats:
+                        if chat in replies:
+                            continue
+                        task_ids = self._srv.with_lock(
+                            lambda conn: list_telegram_task_ids_for_chat(conn, chat),
+                        )
+                        if task_ids:
+                            snapshot = self._srv._task_snapshot(task_ids[0])
+                            projection = snapshot["projection"]
+                            if projection["status"] == "completed":
+                                replies[chat] = projection["meta"]["assistant"]
+                    time.sleep(0.05)
+
+            self.assertTrue(marker.is_file())
+            skill.assert_called_once()
+            self.assertEqual(set(replies), {news_chat, greeting_chat})
+            self.assertEqual(replies[news_chat]["route"], "direct")
+            self.assertEqual(replies[news_chat]["reason"], "news_summary_failed")
+            self.assertNotIn("openclaw_wait_timeout", replies[news_chat]["last_reply"])
+            self.assertEqual(replies[greeting_chat]["route"], "direct")
 
     def test_telegram_recent_text_messages_use_bluebubbles_lane(self) -> None:
         body = json.dumps(

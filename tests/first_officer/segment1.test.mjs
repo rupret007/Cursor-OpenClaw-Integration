@@ -1,10 +1,15 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { test } from 'node:test';
 import { budgets, classifyRequest, createDispatch } from '../../first-officer/segment1/dispatch.mjs';
 import { answerSimple, fastModelRef, routeOwnerModel, standaloneSimple } from '../../first-officer/segment1/model-router.mjs';
 import { registerSegmentOne } from '../../first-officer/segment1/register.mjs';
 import { fleetStatus, openPullRequests, summarizeAndrea } from '../../first-officer/segment1/tools.mjs';
+import { andreaCommand, parseAndreaSummary, sshAndreaSummary } from '../../first-officer/segment1/andrea-ssh.mjs';
+import { runMacAndrea } from '../../first-officer/segment1/andrea-mac.mjs';
 
 const fixtures = [
   ["what's running / load on each machine", 'fleet'],
@@ -245,4 +250,63 @@ test('Andrea reads a bounded batch in parallel and returns themes without previe
   assert.equal(report.includes('sample-contact'), false);
   await assert.rejects(summarizeAndrea({ ...reader, messages: async () => { throw Error('timeout'); } }, now),
     /previews unavailable/);
+});
+
+test('the Mac key runs only the fixed read-only summary and returns aggregate activity', async () => {
+  await assert.rejects(runMacAndrea('anything else', () => assert.fail('No settings access')), /Only the Andrea summary/);
+  const now = new Date().toISOString();
+  const privatePreview = 'Confirm the meeting on the fictional outpost';
+  const syntheticToken = 'a'.repeat(32);
+  const requests = [];
+  const result = await runMacAndrea(andreaCommand, () => ({
+    BLUEBUBBLES_CONTROL_BASE_URL: 'http://localhost:4315',
+    BLUEBUBBLES_CONTROL_TOKEN: syntheticToken,
+    BLUEBUBBLES_CANONICAL_SELF_THREAD_JID: 'bb:owner',
+    BLUEBUBBLES_SELF_THREAD_ALIAS_JIDS: 'bb:owner-alias',
+  }), async (url, options) => {
+    requests.push(url.pathname);
+    assert.equal(url.hostname, 'localhost');
+    assert.equal(options.method, 'GET');
+    assert.equal(options.redirect, 'error');
+    assert.equal(options.headers.Authorization, 'Bearer ' + syntheticToken);
+    if (url.pathname === '/v1/bluebubbles/chats') {
+      return Response.json({ chats: ['owner', 'owner-alias', 'other'].map((id) => ({
+        chatJid: 'bb:' + id, isGroup: false, lastMessageAt: now,
+      })) });
+    }
+    assert.equal(url.pathname, '/v1/bluebubbles/chats/bb%3Aother/messages');
+    return Response.json({ messages: [{ chatJid: 'bb:other', timestamp: now, preview: privatePreview,
+      isBotMessage: false, isFromMe: false }] });
+  });
+  assert.equal(requests.length, 2);
+  assert.match(parseAndreaSummary(JSON.stringify(result)), /Topics detected in previews · scheduling, follow-up/);
+  assert.doesNotMatch(result.summary, /fictional outpost|bb:/);
+  assert.equal(JSON.stringify(result).includes(syntheticToken), false);
+  assert.throws(() => parseAndreaSummary(JSON.stringify({ ...result, summary: result.summary + '\n' + privatePreview })),
+    /response was invalid/);
+});
+
+test('Andrea SSH pins the host and identity and invokes one fixed command', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'fo-reader-fixture-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const payload = {
+    version: 1,
+    summary: 'Andrea · synced one-to-one text activity from the last 48 hours.\nAndrea returned no recent previews in the chats checked.',
+  };
+  await Promise.all([
+    writeFile(join(directory, 'route.json'), JSON.stringify({ host: 'fixture-mac', user: 'fixture' }), { mode: 0o600 }),
+    writeFile(join(directory, 'id_ed25519'), 'fixture identity', { mode: 0o600 }),
+    writeFile(join(directory, 'known_hosts'), 'fixture host pin', { mode: 0o600 }),
+  ]);
+  const signal = AbortSignal.timeout(30_000);
+  assert.equal(await sshAndreaSummary(signal, { directory, run: async (file, args, options) => {
+    assert.equal(file, '/usr/bin/nice');
+    assert.deepEqual(args.slice(-2), ['fixture-mac', andreaCommand]);
+    assert.ok(args.includes('-oStrictHostKeyChecking=yes'));
+    assert.ok(args.includes('-oBatchMode=yes'));
+    assert.ok(args.includes('-oClearAllForwardings=yes'));
+    assert.equal(options.signal, signal);
+    assert.ok(options.timeout < budgets.status);
+    return { stdout: JSON.stringify(payload) };
+  } }), payload.summary);
 });

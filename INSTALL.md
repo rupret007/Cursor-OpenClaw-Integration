@@ -22,6 +22,19 @@ printf 'Release %s\nPrivate bundle %s\n' "$release" "$stage_dir/first-officer-$r
 
 Pass the digest and the tar file to Jeff through a private channel. Put the tar file under `~/.openclaw/segment1-staged/` on bobserver and use the same PR checkout for the operator commands.
 
+## Connect Andrea on the Mac Mini
+
+If this is the first connection to Andrea from bobserver, run the provisioning helper from the Nuc. It uses Jeff’s existing SSH logins to both machines. Check that a normal SSH login to each already works from this terminal. Enter the Mac Mini SSH host and account when prompted.
+
+```bash
+read -r -p 'Mac Mini SSH host: ' mac_host
+read -r -p 'Mac Mini username: ' mac_user
+nice -n 10 python3 -B first-officer/provision-andrea.py \
+  --bob-host bobserver --mac-host "$mac_host" --mac-user "$mac_user"
+```
+
+The helper creates a dedicated key on bobserver and adds a restricted authorization on the Mac Mini for one summary command. The Mac reads Andrea locally using the settings already in its deployment. Bobserver receives counts and detected themes. Wait for `Andrea reader verified from bobserver.` before publishing or activating the gateway. The helper verifies an actual summary and leaves the gateway running.
+
 ## Check prerequisites on bobserver
 
 Run from the PR checkout as the account that owns `openclaw-gateway.service`. The GitHub CLI must authenticate as the configured owner account. The existing Andrea read-only bridge must answer from the service account using its private reader configuration.
@@ -36,6 +49,8 @@ baseline=daf8df40c3b03440d69db6b61a271362b4b442551c7d3648b0b87c6f8b046ecf
 if ! node --input-type=module - "/opt/openclaw-fo/first-officer-$baseline" >/dev/null 2>&1 <<'JS'
 import { pathToFileURL } from 'node:url';
 import { join } from 'node:path';
+import { sshAndreaSummary } from './first-officer/segment1/andrea-ssh.mjs';
+if (await sshAndreaSummary(AbortSignal.timeout(15000))) process.exit(0);
 const { createAndreaReader } = await import(pathToFileURL(join(process.argv[2], 'round6/runtime/andrea.mjs')));
 await createAndreaReader().chats();
 JS
@@ -47,7 +62,7 @@ read -r -p 'Enter the reviewed release digest: ' release
 [[ "$release" =~ ^[a-f0-9]{64}$ && "$release" != "$baseline" ]]
 ```
 
-If the Andrea check fails, resolve it while the current gateway is running. The reader expects `~/.config/openclaw-firstofficer/andrea-reader.json`, owned by the gateway user, with mode `600` in a directory with mode `700`. Restore the settings from the existing Andrea deployment. Its `BLUEBUBBLES_CONTROL_BASE_URL`, `BLUEBUBBLES_CONTROL_TOKEN`, and `BLUEBUBBLES_CANONICAL_SELF_THREAD_JID` correspond to the reader fields `baseUrl`, `token`, and `selfChat`. The reader needs an authenticated loopback route from bobserver to Andrea’s control API. Keep those settings private and rerun the preflight after restoring the file and route.
+If the Andrea check fails, resolve it while the current gateway is running. For a Mac-hosted Andrea, use the restricted SSH setup above. Existing authenticated loopback readers can continue using their private `~/.config/openclaw-firstofficer/andrea-reader.json`. Keep the Andrea control credential on its current host and use the Mac-hosted setup for new connections.
 
 ## Publish and activate the reviewed candidate
 
@@ -89,3 +104,5 @@ systemctl --user is-active --quiet openclaw-gateway.service
 ```
 
 If automatic recovery itself fails, use the config and pin in that private backup with the existing Round 13 recovery procedure. Keep those files private and preserve them until the restored service has passed its readiness check.
+
+To revoke the dedicated Mac reader as well, remove only the key line labeled `openclaw-firstofficer-andrea-read` from the Mac account’s `~/.ssh/authorized_keys`. This revokes First Officer’s reader access while preserving other Mac SSH logins.

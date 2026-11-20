@@ -15,7 +15,7 @@ import tempfile
 BASELINE = "daf8df40c3b03440d69db6b61a271362b4b442551c7d3648b0b87c6f8b046ecf"
 ROLLBACK_SLOT = "4759047e8a16d1691499d55c4b6656882e67bc2275a3297d2283aa9b01538753"
 RUNTIME = Path("round6/runtime")
-MODULES = ("dispatch.mjs", "model-router.mjs", "register.mjs", "tools.mjs")
+MODULES = ("andrea-ssh.mjs", "dispatch.mjs", "model-router.mjs", "register.mjs", "tools.mjs")
 OVERLAY = Path(__file__).resolve().parent / "segment1"
 INVENTORY = "SHA256SUMS"
 SAFE_NAME = re.compile(r"[a-zA-Z0-9_.-]+(?:/[a-zA-Z0-9_.-]+)*")

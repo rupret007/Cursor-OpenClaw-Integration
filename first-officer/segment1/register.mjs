@@ -1,6 +1,7 @@
 import { homedir } from 'node:os';
 import { isIP } from 'node:net';
 import { join } from 'node:path';
+import { sshAndreaSummary } from './andrea-ssh.mjs';
 import { classifyRequest, createDispatch } from './dispatch.mjs';
 import { answerSimple, standaloneSimple } from './model-router.mjs';
 import { fleetStatus, openPullRequests, summarizeAndrea } from './tools.mjs';
@@ -132,7 +133,8 @@ function toolRegistry(api, commands, liveConfig, services) {
     remember: { run: memory, failure: 'The private memory request failed. The fact wasn’t confirmed as saved.' },
     recall: { run: memory, failure: 'The private memory lookup failed. I couldn’t verify a saved fact.' },
     texts: {
-      run: async (_, { signal }) => plain(await summarizeAndrea(andreaReader(signal, services))),
+      run: async (_, { signal }) => plain(await sshAndreaSummary(signal) ??
+        await summarizeAndrea(andreaReader(signal, services))),
       failure: 'The live read through Andrea failed. Your recent text activity is unavailable.',
     },
     simple: {

@@ -25,6 +25,18 @@ STATE = Path.home() / ".ssh/openclaw-fo-andrea"
 PUBLIC_KEY = re.compile(r"ssh-ed25519 [A-Za-z0-9+/]{60,120}={0,2}")
 HOST = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]{0,126}")
 ACCOUNT = re.compile(r"[A-Za-z_][A-Za-z0-9_-]{0,59}")
+REMOTE_BOOTSTRAP = """
+import json
+import sys
+
+try:
+    request = json.load(sys.stdin)
+    state = {"__name__": "__main__", "REMOTE_PAYLOAD": request["payload"]}
+    exec(compile(request["source"], "<andrea-reader-helper>", "exec"), state)
+except Exception:
+    print(json.dumps({"problem": "The remote Python helper could not run."}))
+    sys.exit(1)
+"""
 DIAGNOSTIC_FAILURES = {
     "ssh-session": "SSH authentication or the Mac remote shell failed",
     "ssh-authentication": "SSH rejected the login",
@@ -312,11 +324,12 @@ def verify_from_bobserver(payload):
 
 
 def run_on_host(host, action, payload, source):
-    prefix = "REMOTE_PAYLOAD = " + repr(payload) + "\n"
+    command = shlex.join(["python3", "-c", REMOTE_BOOTSTRAP, action])
+    envelope = json.dumps({"payload": payload, "source": source})
     call = subprocess.run(
         ["ssh", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=8",
-         "-o", "NumberOfPasswordPrompts=2", host, "python3 - " + action],
-        input=prefix + source, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+         "-o", "NumberOfPasswordPrompts=2", host, command],
+        input=envelope, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, timeout=150, env={**os.environ, "LC_ALL": "C"},
     )
     if call.returncode == 255:
@@ -344,7 +357,7 @@ def run_on_host(host, action, payload, source):
     if not call.stdout:
         if call.returncode in (126, 127):
             raise ValueError("The remote shell could not start Python.")
-        raise ValueError("The SSH command returned no verification result.")
+        raise ValueError(f"The remote helper returned no verification result. Exit status {call.returncode}.")
     try:
         result = json.loads(call.stdout)
     except ValueError:

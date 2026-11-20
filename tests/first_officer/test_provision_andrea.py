@@ -1,5 +1,8 @@
 import importlib.util
+import json
 from pathlib import Path
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -130,3 +133,13 @@ def test_refresh_distinguishes_ssh_failure_without_dumping_stderr(provision, mon
     with pytest.raises(ValueError) as caught:
         module.run_on_host("fixture", "remote-mac", {}, "")
     assert str(caught.value) == detail
+
+
+def test_remote_bootstrap_returns_a_safe_result_if_the_helper_crashes(provision):
+    module, _ = provision
+    call = subprocess.run([sys.executable, "-c", module.REMOTE_BOOTSTRAP, "remote-mac"],
+                          input=json.dumps({"payload": {}, "source": "raise RuntimeError('private fixture data')"}),
+                          text=True, capture_output=True, check=False)
+    assert call.returncode == 1
+    assert json.loads(call.stdout) == {"problem": "The remote Python helper could not run."}
+    assert call.stderr == ""

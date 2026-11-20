@@ -90,7 +90,7 @@ nice -n 10 python3 -B first-officer/install.py activate "$backup"
 systemctl --user is-active --quiet openclaw-gateway.service
 ```
 
-Preparation validates the candidate with the existing verifier and OpenClaw before the service is stopped. With a root-owned pin, activation obtains sudo authorization before shutdown and preserves the pin’s owner, group and mode. Activation waits up to 120 seconds for local readiness and attempts to restore the prior config and pin if the switch fails. Run [the Telegram acceptance checks](LIVE-TEST.md) once the service is ready.
+Preparation validates the candidate with the existing verifier and the OpenClaw launcher used by the running service before shutdown. With a root-owned pin, activation obtains sudo authorization before shutdown and preserves the pin’s owner, group and mode. Activation waits up to 120 seconds for local readiness and attempts to restore the prior config and pin if the switch fails. Run [the Telegram acceptance checks](LIVE-TEST.md) once the service is ready.
 
 ## Roll back to the exact prior config and pin
 

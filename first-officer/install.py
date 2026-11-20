@@ -84,18 +84,54 @@ def patch_pin(contents, release):
     return "".join(lines).encode("utf-8")
 
 
-def verify_config(path, release):
-    for args, env, label in (
-        (["/usr/bin/python3", "-I", "-B", str(STORE / "verify-install.py"), str(path), release, ROLLBACK_SLOT],
-         None, "The installed release verifier rejected the config and pin"),
-        (["openclaw", "config", "validate"], {**os.environ, "OPENCLAW_CONFIG_PATH": str(path)},
-         "OpenClaw rejected the staged configuration"),
+def gateway_launcher():
+    effective = systemctl("show", "-p", "ExecStart", "--value", SERVICE, capture=True)
+    commands = re.findall(r"argv\[\]=([^;]+)", effective)
+    if len(commands) != 1:
+        raise ValueError("Could not identify the running gateway launcher")
+    args = shlex.split(commands[0])
+    if not args or "gateway" not in args:
+        raise ValueError("The running gateway command has an unsupported shape")
+    launcher = args[:args.index("gateway")]
+    if not launcher or not Path(launcher[0]).is_absolute():
+        raise ValueError("The running gateway launcher is not an absolute path")
+    binary = Path(launcher[0]).name
+    if binary in ("openclaw", "openclaw.mjs", "openclaw.js"):
+        return launcher
+    if binary in ("node", "nodejs") and any(
+        Path(arg).is_absolute() and Path(arg).suffix in (".js", ".mjs", ".cjs")
+        and "openclaw" in arg.lower() for arg in launcher[1:]
     ):
-        try:
-            subprocess.run(args, env=env, check=True, stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, timeout=60)
-        except (OSError, subprocess.SubprocessError):
-            raise ValueError(label) from None
+        return launcher
+    raise ValueError("The running gateway does not use a supported OpenClaw launcher")
+
+
+def verify_config(path, release):
+    verifier = ["/usr/bin/python3", "-I", "-B", str(STORE / "verify-install.py"), str(path), release, ROLLBACK_SLOT]
+    try:
+        subprocess.run(verifier, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        raise ValueError("The installed release verifier rejected the config and pin") from None
+
+    launcher = gateway_launcher()
+    label = "Round 13" if release == BASELINE else "candidate"
+    try:
+        validation = subprocess.run(
+            [*launcher, "config", "validate", "--json"],
+            env={**os.environ, "OPENCLAW_CONFIG_PATH": str(path)},
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=60,
+        )
+    except FileNotFoundError:
+        raise ValueError("The running gateway launcher is unavailable to the installer") from None
+    except subprocess.TimeoutExpired:
+        raise ValueError(f"OpenClaw timed out validating the {label} configuration") from None
+    try:
+        parsed = json.loads(validation.stdout)
+        valid = isinstance(parsed, dict) and parsed.get("valid") is True
+    except ValueError:
+        valid = False
+    if validation.returncode or not valid:
+        raise ValueError(f"OpenClaw rejected the {label} configuration using the running gateway launcher")
 
 
 def candidate_config(original, release):

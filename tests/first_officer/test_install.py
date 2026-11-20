@@ -148,3 +148,25 @@ def test_root_owned_pin_is_prepared_and_preserved_through_switch_and_rollback(co
     assert (config.read_bytes(), pin.read_bytes()) == original
     assert installer.pin_file(pin)[1] == [0, root_group, 0o644]
     assert actions == ["mktemp", "install", "mv"] * 2
+
+
+def test_schema_validation_uses_the_node_launcher_from_systemd(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "first-officer"))
+    installer = importlib.import_module("install")
+    config = tmp_path / "candidate-openclaw.json"
+    release = hashlib.sha256(b"candidate").hexdigest()
+    calls = []
+    launcher = ["/usr/bin/node", "--enable-source-maps", "/opt/openclaw/dist/index.js"]
+    monkeypatch.setattr(installer, "systemctl", lambda *args, **kwargs:
+                        "{ path=/usr/bin/node ; argv[]=" + " ".join(launcher) + " gateway ; ignore_errors=no ; }")
+
+    def run(args, **kwargs):
+        calls.append((args, kwargs))
+        return SimpleNamespace(stdout='{"valid":true}', returncode=0)
+
+    monkeypatch.setattr(installer.subprocess, "run", run)
+    installer.verify_config(config, release)
+    assert Path(calls[0][0][3]).name == "verify-install.py"
+    assert calls[0][1]["check"] is True
+    assert calls[1][0] == [*launcher, "config", "validate", "--json"]
+    assert calls[1][1]["env"]["OPENCLAW_CONFIG_PATH"] == str(config)

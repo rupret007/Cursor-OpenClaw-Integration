@@ -8,7 +8,7 @@ The candidate uses a private Telegram dispatcher and a tool registry for fleet, 
 
 The canary against the pinned bundle failed before the change and passed against the staged candidate. OpenClaw 2026.11.5 then received and answered synthetic Telegram updates in an isolated network. Across seven replies, typing and the acknowledgment both arrived within 1.44 seconds and the final replies arrived within 2.43 seconds. The run covered fleet and gate receipts, the GitHub failure path, the memory confirmation and recall, Andrea GETs, and a standalone model answer. The actual GitHub query was accepted under the configured account on the Nuc. Installer tests also covered a failed readiness check and byte-for-byte restoration of the prior config and pin.
 
-The unchanged baseline reported two Andrea doctor test failures in the local WSL run. The full hosted integration job and the Segment 1 job passed on the pull request. Jeff still needs the Andrea read-only preflight on bobserver, activation and [the live Telegram acceptance checks](LIVE-TEST.md). Production credentials, collector freshness and delivery times will be verified there.
+The unchanged baseline reported two Andrea doctor test failures in the local WSL run. The full hosted integration job and the Segment 1 job passed on the pull request. On bobserver, Jeff passed the checkout, uploaded archive, gateway and GitHub checks. The Andrea check failed because the gateway account’s private reader config is missing. The shell also lacked the complete Andrea control settings. Activation and [the live Telegram acceptance checks](LIVE-TEST.md) are pending.
 
 ## Later segments
 
@@ -23,4 +23,4 @@ The unchanged baseline reported two Andrea doctor test failures in the local WSL
 
 The backlog references the bobserver lanes `infra-20261118`, `consolidate-20261119` and `arch-research-20261118`.
 
-READY_FOR_JEFF_INSTALL
+BLOCKED: Restore the private Andrea reader configuration on bobserver and verify its loopback connection to Andrea’s control API before activation.

@@ -47,6 +47,8 @@ read -r -p 'Enter the reviewed release digest: ' release
 [[ "$release" =~ ^[a-f0-9]{64}$ && "$release" != "$baseline" ]]
 ```
 
+If the Andrea check fails, resolve it while the current gateway is running. The reader expects `~/.config/openclaw-firstofficer/andrea-reader.json`, owned by the gateway user, with mode `600` in a directory with mode `700`. Restore the settings from the existing Andrea deployment. Its `BLUEBUBBLES_CONTROL_BASE_URL`, `BLUEBUBBLES_CONTROL_TOKEN`, and `BLUEBUBBLES_CANONICAL_SELF_THREAD_JID` correspond to the reader fields `baseUrl`, `token`, and `selfChat`. The reader needs an authenticated loopback route from bobserver to Andrea’s control API. Keep those settings private and rerun the preflight after restoring the file and route.
+
 ## Publish and activate the reviewed candidate
 
 The service pin continues to use the root-owned verifier and its existing fallback slot. The private backup records the exact prior config and pin so the operator can return to Round 13.

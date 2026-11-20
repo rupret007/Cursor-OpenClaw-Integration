@@ -218,7 +218,7 @@ test('GitHub uses one live query and binds CI to the exact visible head', async 
 
 test('Andrea reads a bounded batch in parallel and returns themes without preview text or contacts', async () => {
   const now = Date.parse('2026-11-20T04:00:00Z');
-  const timestamp = new Date(now - 60000).toISOString();
+  const timestamp = new Date(now + 20).toISOString();
   let active = 0;
   let peak = 0;
   const syntheticPreview = 'Meet tomorrow with the demonstration character';

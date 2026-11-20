@@ -1,4 +1,5 @@
 import { homedir } from 'node:os';
+import { isIP } from 'node:net';
 import { join } from 'node:path';
 import { classifyRequest, createDispatch } from './dispatch.mjs';
 import { answerSimple, standaloneSimple } from './model-router.mjs';
@@ -30,13 +31,17 @@ async function telegramTyping(api, owner, liveConfig, signal) {
     await legacyTyping(owner, { cfg, accountId: account, signal });
     return;
   }
-  // Use the host-resolved SecretRef. This direct activity call is limited to
-  // the configured default account on the standard Telegram API.
-  if (channel.apiRoot || channel.proxy || typeof channel.botToken !== 'string' ||
+  // Use the resolved token and the same standard or local API as the account.
+  const root = new URL(channel.apiRoot ?? 'https://api.telegram.org');
+  const official = root.protocol === 'https:' && root.hostname === 'api.telegram.org' && !root.port;
+  const loopback = root.protocol === 'http:' && (root.hostname === 'localhost' ||
+    isIP(root.hostname) === 4 && root.hostname.startsWith('127.'));
+  if ((!official && !loopback) || root.username || root.password || root.search || root.hash ||
+      root.pathname !== '/' || channel.proxy || typeof channel.botToken !== 'string' ||
       !/^\d{6,12}:[A-Za-z0-9_-]{30,}$/.test(channel.botToken)) {
     throw new Error('Telegram typing transport is unavailable');
   }
-  const response = await fetch('https://api.telegram.org/bot' + channel.botToken + '/sendChatAction', {
+  const response = await fetch(new URL('/bot' + channel.botToken + '/sendChatAction', root), {
     method: 'POST', redirect: 'error', signal,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ chat_id: owner, action: 'typing' }),

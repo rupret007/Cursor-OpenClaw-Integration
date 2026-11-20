@@ -6,7 +6,9 @@ The copied settings showed the coding profile, an off sandbox, one main agent wi
 
 The candidate uses a private Telegram dispatcher and a tool registry for fleet, gate, quota, GitHub, memory and Andrea. It starts typing and a short acknowledgment in parallel with the work. Standalone questions use one bounded Flash completion with a short, static system prompt. Longer and contextual work routes through the existing OpenClaw model path. The existing memory confirmation applies to natural-language saves. Andrea uses its bounded, read-only chat reader and returns aggregate activity and detected themes.
 
-The isolated test against the pinned bundle failed before the change and passed against the staged candidate. The candidate also answered fleet and gate from a fresh synthetic collector, completed memory after its approval tap, and used two read-only Andrea requests against fixtures. The actual GitHub query was accepted under the configured account on the Nuc. Production credentials, collector freshness, Telegram delivery and response times still need the operator test.
+The canary against the pinned bundle failed before the change and passed against the staged candidate. OpenClaw 2026.11.5 then received and answered synthetic Telegram updates in an isolated network. Across seven replies, typing and the acknowledgment both arrived within 1.44 seconds and the final replies arrived within 2.43 seconds. The run covered fleet and gate receipts, the GitHub failure path, the memory confirmation and recall, Andrea GETs, and a standalone model answer. The actual GitHub query was accepted under the configured account on the Nuc. Installer tests also covered a failed readiness check and byte-for-byte restoration of the prior config and pin.
+
+The unchanged baseline reported two Andrea doctor test failures in the local WSL run. The full hosted integration job and the Segment 1 job passed on the pull request. Jeff still needs the Andrea read-only preflight on bobserver, activation and [the live Telegram acceptance checks](LIVE-TEST.md). Production credentials, collector freshness and delivery times will be verified there.
 
 ## Later segments
 
@@ -21,4 +23,4 @@ The isolated test against the pinned bundle failed before the change and passed 
 
 The backlog references the bobserver lanes `infra-20261118`, `consolidate-20261119` and `arch-research-20261118`.
 
-BLOCKED: Hosted CI and the operator-side Andrea, install and Telegram acceptance checks are pending.
+READY_FOR_JEFF_INSTALL

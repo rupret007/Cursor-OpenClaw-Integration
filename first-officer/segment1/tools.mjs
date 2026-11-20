@@ -157,7 +157,8 @@ const themes = new Map([
 
 export async function summarizeAndrea(reader, now = Date.now()) {
   const list = await reader.chats();
-  const inWindow = (at) => Number.isFinite(at) && at <= now && now - at <= recentMs;
+  // The reader can observe a new preview while this turn is already in flight.
+  const inWindow = (at) => recent(at, now, recentMs);
   const candidates = list.chats.filter((chat) => inWindow(Date.parse(chat.lastMessageAt)))
     .sort((a, b) => Date.parse(b.lastMessageAt) - Date.parse(a.lastMessageAt));
   const chats = candidates.slice(0, 4);

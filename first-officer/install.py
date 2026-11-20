@@ -185,7 +185,11 @@ def switch(backup, config, restore):
     verify_config(backup / ("original-openclaw.json" if restore else "candidate-openclaw.json"),
                   BASELINE if restore else release)
     systemctl("stop", SERVICE)
-    current_after_stop = (owner_file(config, 512 * 1024, private=True), owner_file(pin, 65_536))
+    try:
+        current_after_stop = (owner_file(config, 512 * 1024, private=True), owner_file(pin, 65_536))
+    except (OSError, ValueError):
+        systemctl("start", SERVICE)
+        raise ValueError("Could not recheck the config and pin after shutdown. Switch aborted.") from None
     if current_after_stop != before:
         systemctl("start", SERVICE)
         raise ValueError("Gateway config or pin changed during shutdown. Switch aborted.")

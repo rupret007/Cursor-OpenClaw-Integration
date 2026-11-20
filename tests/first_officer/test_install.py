@@ -1,7 +1,9 @@
 import hashlib
 import importlib
 import json
+import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -85,3 +87,64 @@ def test_switch_refuses_a_changed_config_without_stopping_the_service(controller
     with pytest.raises(ValueError, match="changed since preparation"):
         installer.switch(backup, config, restore=False)
     assert "stop" not in calls
+
+
+def test_root_owned_pin_is_prepared_and_preserved_through_switch_and_rollback(controller, monkeypatch, tmp_path):
+    installer, release, config, pin, _, calls = controller
+    assert os.getuid() != 0
+    pin.chmod(0o644)
+    original = config.read_bytes(), pin.read_bytes()
+    real_lstat = Path.lstat
+    root_group = 0
+
+    def simulated_lstat(path, *args, **kwargs):
+        info = real_lstat(path, *args, **kwargs)
+        if path != pin:
+            return info
+        return SimpleNamespace(st_uid=0, st_gid=root_group, st_mode=info.st_mode,
+                               st_nlink=info.st_nlink, st_size=info.st_size)
+
+    monkeypatch.setattr(Path, "lstat", simulated_lstat)
+    backup = tmp_path / "root-pin-backup"
+    installer.prepare(release, backup, config)
+    for member in backup.iterdir():
+        member.chmod(0o600)
+    assert json.loads((backup / "plan.json").read_text())["pin_identity"] == [0, root_group, 0o644]
+
+    def denied():
+        raise ValueError("Authorization denied")
+
+    monkeypatch.setattr(installer, "authorize_root_pin", denied)
+    with pytest.raises(ValueError, match="Authorization denied"):
+        installer.switch(backup, config, restore=False)
+    assert "stop" not in calls
+    assert (config.read_bytes(), pin.read_bytes()) == original
+
+    actions = []
+    temporary = pin.parent / ".fo-pin.ABCD1234"
+
+    def privileged(binary, *args, capture=False):
+        actions.append(Path(binary).name)
+        if binary.endswith("/mktemp"):
+            assert Path(args[0]).parent == pin.parent
+            assert capture
+            temporary.touch(exist_ok=False)
+            return str(temporary) + "\n"
+        if binary.endswith("/install"):
+            assert args[:8] == ("-o", "0", "-g", "0", "-m", "644", "-T", "--")
+            temporary.write_bytes(Path(args[-2]).read_bytes())
+            temporary.chmod(0o644)
+            assert Path(args[-1]) == temporary
+        if binary.endswith("/mv"):
+            assert args == ("-fT", "--", str(temporary), str(pin))
+            temporary.replace(pin)
+
+    monkeypatch.setattr(installer, "authorize_root_pin", lambda: calls.append("sudo-authorized"))
+    monkeypatch.setattr(installer, "sudo_pin", privileged)
+    installer.switch(backup, config, restore=False)
+    assert calls.index("sudo-authorized") < calls.index("stop")
+    assert installer.pin_line(release) in pin.read_text()
+    installer.switch(backup, config, restore=True)
+    assert (config.read_bytes(), pin.read_bytes()) == original
+    assert installer.pin_file(pin)[1] == [0, root_group, 0o644]
+    assert actions == ["mktemp", "install", "mv"] * 2

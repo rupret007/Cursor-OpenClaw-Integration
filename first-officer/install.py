@@ -52,6 +52,38 @@ def owner_file(path, max_size, private=False):
     return path.read_bytes()
 
 
+def pin_file(path):
+    info = path.lstat()
+    mode = stat.S_IMODE(info.st_mode)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid not in (0, os.getuid()) or info.st_nlink != 1 or mode & 0o022:
+        raise ValueError("The service pin has unsafe permissions")
+    if info.st_size > 65_536:
+        raise ValueError("The service pin exceeds the size limit")
+    return path.read_bytes(), [info.st_uid, info.st_gid, mode]
+
+
+def patch_pin(contents, release):
+    expected = shlex.split(pin_line(BASELINE).partition("=")[2])
+    expected_config = str(Path.home() / ".openclaw/openclaw.json")
+    lines = contents.decode("utf-8").splitlines(keepends=True)
+    found = []
+    for index, line in enumerate(lines):
+        key, separator, args = line.partition("=")
+        if separator and key.strip() == "ExecStartPre" and "verify-install.py" in args:
+            command = shlex.split(args)
+            if (len(command) in (6, 7) and command[0] == expected[0] and
+                    command[1:-4] in (["-I", "-B"], ["-B", "-I"], ["-IB"], ["-BI"]) and
+                    command[-4] == expected[3] and
+                    command[-3] in (expected[4], expected_config) and command[-2:] == expected[5:] and
+                    line.count(BASELINE) == 1):
+                found.append(index)
+    if len(found) != 1:
+        raise ValueError("The Round 13 verifier command did not match exactly once")
+    index = found[0]
+    lines[index] = lines[index].replace(BASELINE, release, 1)
+    return "".join(lines).encode("utf-8")
+
+
 def verify_config(path, release):
     for args, env, label in (
         (["/usr/bin/python3", "-I", "-B", str(STORE / "verify-install.py"), str(path), release, ROLLBACK_SLOT],
@@ -95,14 +127,16 @@ def prepare(release, backup, config):
     for entry in dropins:
         path = Path(entry)
         info = path.lstat()
-        if stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_size <= 65_536:
-            contents = owner_file(path, 65_536)
-            if pin_line(BASELINE) in contents.decode("utf-8").splitlines():
-                pins.append((path, contents))
+        if stat.S_ISREG(info.st_mode) and info.st_uid in (0, os.getuid()) and info.st_size <= 65_536:
+            try:
+                contents, identity = pin_file(path)
+                changed = patch_pin(contents, release)
+            except (OSError, ValueError):
+                continue
+            pins.append((path, contents, changed, identity))
     if len(pins) != 1:
         raise ValueError("Could not find the existing Round 13 service pin")
-    path, old_pin = pins[0]
-    new_pin = old_pin.replace(pin_line(BASELINE).encode(), pin_line(release).encode(), 1)
+    path, old_pin, new_pin, identity = pins[0]
     original = owner_file(config, 512 * 1024, private=True)
     updated = candidate_config(original, release)
     backup.mkdir(mode=0o700)
@@ -114,18 +148,57 @@ def prepare(release, backup, config):
         (backup / name).write_bytes(content)
     verify_config(backup / "original-openclaw.json", BASELINE)
     verify_config(backup / "candidate-openclaw.json", release)
-    (backup / "plan.json").write_text(json.dumps({"release": release, "pin": str(path)}) + "\n", encoding="utf-8")
+    (backup / "plan.json").write_text(
+        json.dumps({"release": release, "pin": str(path), "pin_identity": identity}) + "\n", encoding="utf-8",
+    )
 
 
-def replace_file(path, payload):
+def replace_file(path, payload, mode=0o600, gid=None):
     with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".fo-segment1-", delete=False) as handle:
         try:
+            if gid is not None and os.fstat(handle.fileno()).st_gid != gid:
+                os.fchown(handle.fileno(), -1, gid)
+            os.fchmod(handle.fileno(), mode)
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
             os.replace(handle.name, path)
         finally:
             Path(handle.name).unlink(missing_ok=True)
+
+
+def authorize_root_pin():
+    try:
+        subprocess.run(["sudo", "-v"], check=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        raise ValueError("Sudo authorization for the root-owned verifier pin failed") from None
+
+
+def sudo_pin(*args, capture=False):
+    return subprocess.run(["sudo", "-n", *args], check=True, text=True, timeout=20,
+                          stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL).stdout
+
+
+def replace_pin(path, payload, identity):
+    uid, gid, mode = identity
+    if uid == os.getuid():
+        replace_file(path, payload, mode, gid)
+        return
+
+    temporary = Path(sudo_pin("/usr/bin/mktemp", str(path.parent / ".fo-pin.XXXXXXXX"), capture=True).strip())
+    if temporary.parent != path.parent or not re.fullmatch(r"\.fo-pin\.[A-Za-z0-9]{8}", temporary.name):
+        raise ValueError("Could not confirm the privileged pin staging file")
+    try:
+        with tempfile.NamedTemporaryFile(prefix="fo-pin-source-") as source:
+            source.write(payload)
+            source.flush()
+            sudo_pin("/usr/bin/install", "-o", str(uid), "-g", str(gid), "-m", f"{mode:o}", "-T",
+                     "--", source.name, str(temporary))
+        sudo_pin("/usr/bin/mv", "-fT", "--", str(temporary), str(path))
+    finally:
+        if temporary.exists():
+            sudo_pin("/usr/bin/rm", "-f", "--", str(temporary))
 
 
 def wait_ready(config):
@@ -161,6 +234,7 @@ def switch(backup, config, restore):
     plan = json.loads(owner_file(backup / "plan.json", 4096, private=True))
     release = plan["release"]
     pin = Path(plan["pin"])
+    identity = plan["pin_identity"]
     if not DIGEST.fullmatch(release) or str(pin) not in shlex.split(
         systemctl("show", "-p", "DropInPaths", "--value", SERVICE, capture=True)
     ):
@@ -173,35 +247,40 @@ def switch(backup, config, restore):
         owner_file(backup / "candidate-openclaw.json", 512 * 1024, private=True),
         owner_file(backup / "candidate-pin.conf", 65_536, private=True),
     )
-    if pin_line(BASELINE) not in original[1].decode("utf-8").splitlines() or candidate != (
+    if candidate != (
         candidate_config(original[0], release),
-        original[1].replace(pin_line(BASELINE).encode(), pin_line(release).encode(), 1),
+        patch_pin(original[1], release),
     ):
         raise ValueError("The saved config and pin pair changed")
     before, after = (candidate, original) if restore else (original, candidate)
-    current = (owner_file(config, 512 * 1024, private=True), owner_file(pin, 65_536))
-    if current != before:
+    live_pin, live_identity = pin_file(pin)
+    current = (owner_file(config, 512 * 1024, private=True), live_pin)
+    if current != before or live_identity != identity:
         raise ValueError("Gateway config or pin changed since preparation. Switch aborted.")
     verify_config(backup / ("original-openclaw.json" if restore else "candidate-openclaw.json"),
                   BASELINE if restore else release)
+    if live_identity[0] != os.getuid():
+        authorize_root_pin()
     systemctl("stop", SERVICE)
     try:
-        current_after_stop = (owner_file(config, 512 * 1024, private=True), owner_file(pin, 65_536))
+        live_pin, live_identity = pin_file(pin)
+        current_after_stop = (owner_file(config, 512 * 1024, private=True), live_pin)
     except (OSError, ValueError):
         systemctl("start", SERVICE)
         raise ValueError("Could not recheck the config and pin after shutdown. Switch aborted.") from None
-    if current_after_stop != before:
+    if current_after_stop != before or live_identity != identity:
         systemctl("start", SERVICE)
         raise ValueError("Gateway config or pin changed during shutdown. Switch aborted.")
     try:
+        replace_pin(pin, after[1], identity)
         replace_file(config, after[0])
-        replace_file(pin, after[1])
         start(after[0])
     except (Exception, KeyboardInterrupt):
         try:
             systemctl("stop", SERVICE)
             replace_file(config, before[0])
-            replace_file(pin, before[1])
+            if pin_file(pin) != (before[1], identity):
+                replace_pin(pin, before[1], identity)
             start(before[0])
         except (Exception, KeyboardInterrupt):
             raise ValueError("Switch failed and automatic recovery failed. Use the private backup to recover.") from None

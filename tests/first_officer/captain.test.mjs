@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createCaptain, integrationCI } from '../../first-officer/segment1/captain.mjs';
 import { classifyRequest } from '../../first-officer/segment1/dispatch.mjs';
-import { diagnoseMacAndrea, diagnoseMacAndreaSync } from '../../first-officer/segment1/andrea-mac.mjs';
+import { diagnoseMacAndrea, diagnoseMacAndreaSync, runMacAndrea } from '../../first-officer/segment1/andrea-mac.mjs';
+import { andreaCommand, parseAndreaSummary } from '../../first-officer/segment1/andrea-ssh.mjs';
 import { summarizeAndrea } from '../../first-officer/segment1/tools.mjs';
 
 const head = 'a'.repeat(40);
@@ -137,4 +138,46 @@ test('Andrea upstream diagnostic returns only allowed status labels and age cate
   }, now);
   assert.deepEqual(result, { channel: 'connected', scope: 'allowlist', transport: 'reachable',
     webhook: 'unknown', shadowPoll: 'recent', lastInbound: 'older' });
+});
+
+test('the fixed Andrea summary uses a bounded fresh GET for a known allowlisted one-to-one thread', async () => {
+  const today = Date.now();
+  const allowed = 'iMessage;-;sample-thread';
+  const other = 'iMessage;-;other-thread';
+  const settings = {
+    BLUEBUBBLES_CONTROL_TOKEN: 'x'.repeat(24),
+    BLUEBUBBLES_CANONICAL_SELF_THREAD_JID: 'bb:iMessage;-;self-thread',
+    BLUEBUBBLES_BASE_URL: 'https://fixture.invalid',
+    BLUEBUBBLES_PASSWORD: 'fixture-password',
+    BLUEBUBBLES_ALLOWED_CHAT_GUIDS: allowed,
+  };
+  const examined = [];
+  const read = async (url, options, scope) => {
+    assert.equal(options.method, 'GET');
+    assert.equal(options.redirect, 'error');
+    if (url.pathname.endsWith('/status')) return Response.json({ status: { chatScope: scope } });
+    if (url.pathname.endsWith('/chats')) return Response.json({ chats: [other, allowed].map((guid) => ({
+      chatJid: 'bb:' + guid, isGroup: false, lastMessageAt: '2020-01-01T00:00:00Z',
+    })) });
+    if (url.pathname.endsWith('/messages')) return Response.json({ messages: [] });
+    examined.push(url.pathname);
+    assert.equal(url.hostname, 'fixture.invalid');
+    assert.equal(options.headers, undefined, 'The Andrea control credential stays on loopback');
+    assert.equal(decodeURIComponent(url.pathname), '/api/v1/chat/' + allowed + '/message');
+    assert.equal(url.searchParams.get('limit'), '20');
+    return Response.json({ data: [{
+      guid: 'fixture-one', text: 'Meet tomorrow at the demonstration library', dateCreated: today,
+      isFromMe: false, chats: [{ guid: allowed }],
+    }, {
+      guid: 'fixture-wrong-thread', text: 'fixture', dateCreated: today, isFromMe: false, chats: [{ guid: other }],
+    }] });
+  };
+  const denied = await runMacAndrea(andreaCommand, () => settings, (url, options) => read(url, options, 'contacts_only'), today);
+  assert.equal(denied.source, 'scope-unverified');
+  assert.deepEqual(examined, []);
+  const result = await runMacAndrea(andreaCommand, () => settings, (url, options) => read(url, options, 'allowlist'), today);
+  assert.equal(examined.length, 1);
+  assert.equal(result.source, 'live-provider');
+  assert.match(parseAndreaSummary(JSON.stringify(result)), /1 incoming, 0 outgoing across 1 recent conversations/);
+  assert.doesNotMatch(JSON.stringify(result), /sample-thread|demonstration library|fixture-password/);
 });

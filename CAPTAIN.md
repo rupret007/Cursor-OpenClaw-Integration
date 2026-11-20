@@ -34,14 +34,14 @@ nice -n 10 python3 -B first-officer/provision-andrea.py \
   --mac-host "$mac_host" --mac-user "$mac_user" --diagnose-sync
 ```
 
-If the channel is connected and its cache is stale, use Andrea's private Telegram owner chat to request a summary of one known, in-scope one-to-one thread with activity in the last 48 hours. Ask for counts and general themes. Andrea's targeted history refresh uses its configured chat scope and stores the fetched history locally. Record only whether the refresh succeeded and the inspected and stored counts. Verify recent previews with the original diagnostic before refreshing the reader.
-
-After the counts show a useful sample, Jeff can refresh the existing key’s forced command. The same public key and the same read-only summary operation are used. The helper rejects a refresh when the candidate finds zero recent previews.
+Jeff can refresh the existing key’s forced command from this checkout. The reviewed reader uses fresh cached previews when available. When the cache is stale, it can read a bounded sample of known one-to-one chats on Andrea's confirmed allowlist through the configured BlueBubbles provider. The helper checks for recent preview evidence on the Mac before changing the key and checks for it again from Bobserver afterward.
 
 ```bash
 nice -n 10 python3 -B first-officer/provision-andrea.py \
   --mac-host "$mac_host" --mac-user "$mac_user" --refresh-reader
 ```
+
+After it reports `Andrea reader verified from bobserver.`, send `summarize my texts` to **Bob the Bot**, the OpenClaw Telegram account. Compare the result privately with a recent thread. Use the error line to diagnose a refused refresh. `no-authorized-chats` means the candidate found no known, non-self, one-to-one chat matching Andrea's allowlist.
 
 ## Activate and run the supervised pilot
 

@@ -20,6 +20,7 @@ import tempfile
 KEY_LABEL = "openclaw-firstofficer-andrea-read"
 READER_COMMAND = "first-officer-andrea-summary-v1"
 MODULES = ("andrea-mac.mjs", "andrea-ssh.mjs", "tools.mjs")
+HISTORY_SOURCES = {"cache", "live-provider", "provider-unconfigured", "no-authorized-chats", "scope-unverified"}
 STATE = Path.home() / ".ssh/openclaw-fo-andrea"
 PUBLIC_KEY = re.compile(r"ssh-ed25519 [A-Za-z0-9+/]{60,120}={0,2}")
 HOST = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]{0,126}")
@@ -254,6 +255,17 @@ def prepare_mac(payload):
     for name in MODULES:
         write_once(reader / name, files[name].encode())
     main = str(reader / "andrea-mac.mjs")
+    refresh = payload.get("refresh") is True
+    if refresh:
+        env = {name: value for name, value in os.environ.items() if name != "SSH_ORIGINAL_COMMAND"}
+        proof = json.loads(quiet_run([node, main, "--diagnose-live"], env=env))
+        source = proof.get("source")
+        if source not in HISTORY_SOURCES:
+            raise ValueError("The candidate did not return verified live-history evidence")
+        if type(proof.get("recentTextPreviews")) is not int or not 1 <= proof["recentTextPreviews"] <= 80:
+            if type(proof.get("readFailures")) is int and proof["readFailures"] > 0:
+                raise ValueError("The candidate could not read the selected recent history")
+            raise ValueError("The candidate finds no recent previews. History source " + source + ".")
     result = json.loads(quiet_run([node, main], env={**os.environ, "SSH_ORIGINAL_COMMAND": READER_COMMAND}))
     if result.get("version") != 1 or not str(result.get("summary", "")).startswith("Andrea · "):
         raise ValueError("Mac reader did not return a verified summary")
@@ -261,7 +273,6 @@ def prepare_mac(payload):
     if "\n" in target or "\r" in target:
         raise ValueError("Mac reader command path is invalid")
     entry = f'restrict,command="{target}" {key} {KEY_LABEL}'.encode()
-    refresh = payload.get("refresh") is True
     if refresh and not re.search(r"\n\d+ incoming, \d+ outgoing across [1-4] recent conversations\.", result["summary"]):
         raise ValueError("The candidate reader still finds no recent text previews")
     add_restriction(entry, "refresh" if refresh else "install")
@@ -283,9 +294,15 @@ def verify_from_bobserver(payload):
     write_once(STATE / "known_hosts", f"{host} {pin}\n".encode())
     write_once(STATE / "route.json", (json.dumps({"host": host, "user": user}) + "\n").encode())
     encoded = base64.b64encode(payload["client"].encode()).decode("ascii")
+    verification = (
+        r"if (!/\n\d+ incoming, \d+ outgoing across [1-4] recent conversations\./.test(summary ?? '')) process.exit(1);"
+        if payload.get("require_recent") else
+        "if (!summary) process.exit(1);"
+    )
     code = (
         f"const m = await import('data:text/javascript;base64,{encoded}');"
-        "if (!(await m.sshAndreaSummary(AbortSignal.timeout(15000)))) process.exit(1);"
+        "const summary = await m.sshAndreaSummary(AbortSignal.timeout(15000));"
+        + verification
     )
     quiet_run(["node", "--input-type=module", "-e", code])
     return {"verified": True}
@@ -370,6 +387,7 @@ def main():
         phase = "Bobserver-to-Mac reader verification"
         result = run_on_host(args.bob_host, "remote-verify", {
             "host": args.mac_host, "user": args.mac_user, "pin": target["pin"], "client": files["andrea-ssh.mjs"],
+            "require_recent": args.refresh_reader,
         }, source)
         if result != {"verified": True}:
             raise ValueError("The reader did not verify")

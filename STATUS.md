@@ -14,7 +14,7 @@ Jeff activated release `ed545847333ee1691824cd8e3b0a528882b2b11c7f2479c1f63af9a0
 
 During follow-up, the deployed reader connected to Andrea and returned no recent previews. A later read also confirmed a partial chat list and zero recent-preview evidence, with no reported read errors. A Mac-local diagnostic now measures counts before and after the eligibility and freshness filters. The candidate can read up to four previews when chat metadata is stale and still enforces the 48-hour message window. The effect on Jeff's live data remains unverified.
 
-Jeff ran the Mac-local diagnostic. Andrea returned 100 indexed chats, including 83 eligible one-to-one chats. None of those had metadata in the last 48 hours. All four selected chat reads succeeded and returned 27 valid preview rows, with zero recent previews. The sync diagnostic showed a connected channel, registered webhook, recent shadow poll, an allowlist and an older last inbound event. It could not classify the transport state. Andrea's owner-only targeted history refresh can fetch one known, in-scope thread. The next check is whether that refresh produces recent previews for a privately verified thread.
+Jeff ran the Mac-local diagnostic. Andrea returned 100 indexed chats, including 83 eligible one-to-one chats. None of those had metadata in the last 48 hours. All four selected chat reads succeeded and returned 27 valid preview rows, with zero recent previews. The sync diagnostic showed a connected channel, registered webhook, recent shadow poll, an allowlist and an older last inbound event. It could not classify the transport state. Bob the Bot is the deployed OpenClaw Telegram account. The candidate can fetch fresh history on the Mac from Andrea's configured BlueBubbles provider for a known one-to-one chat on the current allowlist. Automated tests exercise that fallback. The operator refresh requires positive recent preview evidence before switching the reader.
 
 ## Captain upgrade
 
@@ -35,4 +35,4 @@ The captain can read current fleet, gate, PR and quota evidence, follow an exact
 
 The backlog references the bobserver lanes `infra-20261118`, `consolidate-20261119` and `arch-research-20261118`.
 
-BLOCKED: Andrea's live cache has no recent previews in the sampled chats. The owner-only targeted history refresh, operator activation, timed Telegram acceptance and supervised authority pilot remain pending.
+BLOCKED: Live verification of the new Andrea reader, operator activation, timed Telegram acceptance and the supervised authority pilot remain pending.

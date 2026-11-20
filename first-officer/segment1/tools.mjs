@@ -186,7 +186,10 @@ export async function inspectAndrea(reader, now = Date.now()) {
 }
 
 export async function summarizeAndrea(reader, now = Date.now()) {
-  const { groups, failures, complete, counts } = await inspectAndrea(reader, now);
+  return formatAndreaSummary(await inspectAndrea(reader, now));
+}
+
+export function formatAndreaSummary({ groups, failures, complete, counts }) {
   if (failures && failures === counts.selectedChats) throw new Error('Andrea previews unavailable');
   const messages = groups.flat();
   const incoming = messages.filter((message) => !message.isFromMe).length;

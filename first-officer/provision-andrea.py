@@ -24,6 +24,26 @@ STATE = Path.home() / ".ssh/openclaw-fo-andrea"
 PUBLIC_KEY = re.compile(r"ssh-ed25519 [A-Za-z0-9+/]{60,120}={0,2}")
 HOST = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]{0,126}")
 ACCOUNT = re.compile(r"[A-Za-z_][A-Za-z0-9_-]{0,59}")
+DIAGNOSTIC_FAILURES = {
+    "ssh-session": "SSH authentication or the Mac remote shell failed",
+    "ssh-timeout": "the SSH session timed out",
+    "remote-python": "the Mac Python diagnostic did not return a result",
+    "remote-runtime": "the Mac diagnostic failed before reading Andrea",
+    "node-unavailable": "Node is unavailable on the Mac",
+    "node-diagnostic": "Node could not start the Andrea diagnostic",
+    "settings-unavailable": "the Mac LaunchAgent settings could not be read",
+    "settings-invalid": "the Mac loopback reader settings failed validation",
+    "api-unreachable": "the Mac loopback API could not be reached before the timeout",
+    "api-authentication": "the Mac loopback API rejected reader authentication",
+    "api-response": "the Mac loopback API returned an invalid chat list or error",
+    "invalid-counts": "the Mac diagnostic returned invalid counts",
+}
+
+
+class DiagnosticError(ValueError):
+    def __init__(self, code):
+        self.code = code if code in DIAGNOSTIC_FAILURES else "remote-runtime"
+        super().__init__(DIAGNOSTIC_FAILURES[self.code])
 
 
 def private_file(path, limit=8192):
@@ -167,22 +187,39 @@ def reader_modules(payload):
     return files
 
 
+def validate_counts(counts):
+    fields = ("listedChats", "groupChats", "excludedChats", "returnedRows", "botRows",
+              "rowsWithValidTimestamp", "eligibleChats", "freshChatMetadata", "selectedChats",
+              "readFailures", "acceptedRows", "recentTextPreviews")
+    if (not isinstance(counts, dict) or counts.keys() != set(fields)
+            or any(type(value) is not int or not 0 <= value <= 100 for value in counts.values())):
+        raise DiagnosticError("invalid-counts")
+    return counts
+
+
 def diagnose_mac(payload):
-    node = mac_node()
+    try:
+        node = mac_node()
+    except ValueError:
+        raise DiagnosticError("node-unavailable") from None
     files = reader_modules(payload)
     with tempfile.TemporaryDirectory(prefix="fo-andrea-check-") as directory:
         path = Path(directory)
         for name in MODULES:
             write_once(path / name, files[name].encode())
         env = {name: value for name, value in os.environ.items() if name != "SSH_ORIGINAL_COMMAND"}
-        raw = quiet_run([node, str(path / "andrea-mac.mjs"), "--diagnose"], env=env)
-        counts = json.loads(raw)
-    fields = ("listedChats", "groupChats", "excludedChats", "returnedRows", "botRows",
-              "rowsWithValidTimestamp", "eligibleChats", "freshChatMetadata", "selectedChats",
-              "readFailures", "acceptedRows", "recentTextPreviews")
-    if counts.keys() != set(fields) or any(type(value) is not int or not 0 <= value <= 100 for value in counts.values()):
-        raise ValueError("Mac reader diagnostic did not return verified counts")
-    return counts
+        result = subprocess.run([node, str(path / "andrea-mac.mjs"), "--diagnose"],
+                                env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=20, text=True)
+        try:
+            counts = json.loads(result.stdout)
+        except ValueError:
+            raise DiagnosticError("node-diagnostic") from None
+    if result.returncode:
+        code = counts.get("problem") if isinstance(counts, dict) else None
+        if code in ("settings-unavailable", "settings-invalid", "api-unreachable", "api-authentication", "api-response"):
+            raise DiagnosticError(code)
+        raise DiagnosticError("node-diagnostic")
+    return validate_counts(counts)
 
 
 def prepare_mac(payload):
@@ -242,6 +279,17 @@ def run_on_host(host, action, payload, source):
         input=prefix + source, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
         text=True, timeout=150,
     )
+    if action == "remote-diagnose":
+        if call.returncode == 255:
+            raise DiagnosticError("ssh-session")
+        try:
+            result = json.loads(call.stdout)
+        except ValueError:
+            raise DiagnosticError("remote-python") from None
+        if call.returncode:
+            code = result.get("diagnostic") if isinstance(result, dict) else None
+            raise DiagnosticError(code if isinstance(code, str) else "remote-runtime")
+        return validate_counts(result)
     if not call.stdout:
         raise ValueError("The SSH command returned no verification result.")
     result = json.loads(call.stdout)
@@ -272,8 +320,14 @@ def main():
     if args.diagnose:
         try:
             counts = run_on_host(mac, "remote-diagnose", {"files": files}, source)
+        except DiagnosticError as error:
+            print(f"Andrea diagnostic failed [{error.code}]. {error}.", file=sys.stderr)
+            return 1
+        except subprocess.TimeoutExpired:
+            print("Andrea diagnostic failed [ssh-timeout]. The SSH session timed out.", file=sys.stderr)
+            return 1
         except (OSError, ValueError, subprocess.SubprocessError):
-            print("Andrea Mac reader diagnostic failed.", file=sys.stderr)
+            print("Andrea diagnostic failed [remote-runtime]. The Mac diagnostic did not complete.", file=sys.stderr)
             return 1
         print(json.dumps(counts, sort_keys=True))
         return 0
@@ -320,6 +374,9 @@ if __name__ == "__main__":
                 "remote-verify": lambda: verify_from_bobserver(REMOTE_PAYLOAD),
             }[mode]()
             print(json.dumps(result))
+        except DiagnosticError as error:
+            print(json.dumps({"diagnostic": error.code}))
+            raise SystemExit(1) from None
         except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
             detail = str(error) if type(error) is ValueError else "The host could not complete the reader check."
             print(json.dumps({"problem": detail}))

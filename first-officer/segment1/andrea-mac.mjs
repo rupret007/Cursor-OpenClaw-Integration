@@ -12,6 +12,13 @@ const execute = promisify(execFile);
 const maxBytes = 196_608;
 const chatId = /^bb:[^\s\x00-\x1f\x7f]{1,220}$/u;
 
+class ReaderError extends Error {
+  constructor(code) {
+    super(code);
+    this.code = code;
+  }
+}
+
 async function loadSettings() {
   const plist = join(homedir(), 'Library/LaunchAgents/com.nanoclaw.mac-mini.plist');
   const { stdout } = await execute('/usr/libexec/PlistBuddy', ['-c', 'Print :WorkingDirectory', plist], {
@@ -46,11 +53,17 @@ export function createMacAndreaReader(settings, transport = fetch, counts) {
   }
 
   async function get(path) {
-    const response = await transport(new URL(path, base), {
-      method: 'GET', redirect: 'error', signal: AbortSignal.timeout(4000),
-      headers: { Authorization: 'Bearer ' + token },
-    });
-    if (!response.ok || !response.body) throw new Error('Andrea read failed');
+    let response;
+    try {
+      response = await transport(new URL(path, base), {
+        method: 'GET', redirect: 'error', signal: AbortSignal.timeout(4000),
+        headers: { Authorization: 'Bearer ' + token },
+      });
+    } catch {
+      throw new ReaderError('api-unreachable');
+    }
+    if (response.status === 401 || response.status === 403) throw new ReaderError('api-authentication');
+    if (!response.ok || !response.body) throw new ReaderError('api-response');
     const reader = response.body.getReader();
     const parts = [];
     let size = 0;
@@ -104,18 +117,39 @@ export async function runMacAndrea(command, readSettings = loadSettings, transpo
 export async function diagnoseMacAndrea(readSettings = loadSettings, transport = fetch, now = Date.now()) {
   const source = { listedChats: 0, groupChats: 0, excludedChats: 0, returnedRows: 0,
     botRows: 0, rowsWithValidTimestamp: 0 };
-  const { counts } = await inspectAndrea(createMacAndreaReader(await readSettings(), transport, source), now);
-  return { ...source, ...counts };
+  let settings;
+  try {
+    settings = await readSettings();
+  } catch {
+    throw new ReaderError('settings-unavailable');
+  }
+  let reader;
+  try {
+    reader = createMacAndreaReader(settings, transport, source);
+  } catch {
+    throw new ReaderError('settings-invalid');
+  }
+  try {
+    const { counts } = await inspectAndrea(reader, now);
+    return { ...source, ...counts };
+  } catch (error) {
+    if (error instanceof ReaderError) throw error;
+    throw new ReaderError('api-response');
+  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const localDiagnostic = process.env.SSH_ORIGINAL_COMMAND === undefined &&
+    process.argv.length === 3 && process.argv[2] === '--diagnose';
   try {
-    const localDiagnostic = process.env.SSH_ORIGINAL_COMMAND === undefined &&
-      process.argv.length === 3 && process.argv[2] === '--diagnose';
     console.log(JSON.stringify(await (localDiagnostic
       ? diagnoseMacAndrea() : runMacAndrea(process.env.SSH_ORIGINAL_COMMAND))));
-  } catch {
-    console.error('Andrea read-only summary failed.');
+  } catch (error) {
+    if (localDiagnostic) {
+      console.log(JSON.stringify({ problem: error instanceof ReaderError ? error.code : 'node-diagnostic' }));
+    } else {
+      console.error('Andrea read-only summary failed.');
+    }
     process.exitCode = 1;
   }
 }

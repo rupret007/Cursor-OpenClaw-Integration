@@ -108,3 +108,15 @@ test('Andrea checks bounded previews when the chat metadata is stale and emits m
   assert.equal(counts.recentTextPreviews, 1);
   assert.ok(Object.values(counts).every(Number.isInteger));
 });
+
+test('Andrea diagnostics classify settings and API failures without returning response data', async () => {
+  const settings = { BLUEBUBBLES_CONTROL_TOKEN: 'x'.repeat(24), BLUEBUBBLES_CANONICAL_SELF_THREAD_JID: 'bb:owner' };
+  await assert.rejects(diagnoseMacAndrea(() => { throw new Error('private fixture path'); }),
+    { code: 'settings-unavailable', message: 'settings-unavailable' });
+  await assert.rejects(diagnoseMacAndrea(() => ({})),
+    { code: 'settings-invalid', message: 'settings-invalid' });
+  await assert.rejects(diagnoseMacAndrea(() => settings, async () => new Response('private fixture data', { status: 403 })),
+    { code: 'api-authentication', message: 'api-authentication' });
+  await assert.rejects(diagnoseMacAndrea(() => settings, async () => { throw new Error('private fixture address'); }),
+    { code: 'api-unreachable', message: 'api-unreachable' });
+});

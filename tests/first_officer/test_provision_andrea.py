@@ -1,5 +1,6 @@
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -64,3 +65,23 @@ def test_reader_refresh_and_restore_replace_only_the_dedicated_line(provision):
     assert key_file.read_bytes() == unrelated + new + b"\n"
     assert module.restore_mac() == {"restored": True}
     assert key_file.read_bytes() == unrelated + old + b"\n"
+
+
+@pytest.mark.parametrize(
+    ("status", "stdout", "expected"),
+    [
+        (255, "", "ssh-session"),
+        (127, "", "remote-python"),
+        (1, '{"diagnostic":"api-authentication"}', "api-authentication"),
+        (1, '{"diagnostic":"private fixture data"}', "remote-runtime"),
+        (0, '{"output":"private fixture data"}', "invalid-counts"),
+    ],
+)
+def test_diagnostic_exposes_only_known_failure_codes(provision, monkeypatch, status, stdout, expected):
+    module, _ = provision
+    monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs:
+                        SimpleNamespace(returncode=status, stdout=stdout))
+    with pytest.raises(module.DiagnosticError) as caught:
+        module.run_on_host("fixture", "remote-diagnose", {}, "")
+    assert caught.value.code == expected
+    assert "private fixture data" not in str(caught.value)

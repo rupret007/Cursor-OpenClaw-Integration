@@ -1728,6 +1728,73 @@ class TestAndreaSyncHTTPWebhookHeader(unittest.TestCase):
             self.assertNotIn("openclaw_wait_timeout", replies[news_chat]["last_reply"])
             self.assertEqual(replies[greeting_chat]["route"], "direct")
 
+    def test_telegram_live_lookup_requires_a_usable_openclaw_result(self) -> None:
+        cases = (
+            ("ok", [], "news_summary_failed"),
+            ("ok", [{"text": "Fixture news from the lookup."}], "news_summary_ready"),
+            (
+                "error",
+                [{"text": 'LOCKSTEP_JSON: {"status":"completed","summary":"Fixture partial result."}'}],
+                "news_summary_failed",
+            ),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / "openclaw"
+            executable.write_text('#!/bin/sh\nprintf "%s\\n" "$ANDREA_TEST_OPENCLAW_RESULT"\n')
+            executable.chmod(0o700)
+            with (
+                mock.patch.dict(os.environ, {"PATH": directory + os.pathsep + os.environ.get("PATH", "")}),
+                mock.patch.object(
+                    self._srv,
+                    "_resolve_runtime_skill",
+                    return_value={"truth": {"status": "verified_available"}},
+                ) as skill,
+            ):
+                for update_id, (status, payloads, reason) in enumerate(cases, start=7311):
+                    with self.subTest(status=status, reason=reason):
+                        fixture = {
+                            "status": status,
+                            "summary": "completed" if status == "ok" else "failed",
+                            "result": {"payloads": payloads},
+                        }
+                        message = {
+                            "text": "What is the latest news today?",
+                            "message_id": update_id,
+                            "chat": {"id": update_id},
+                            "from": {"id": update_id},
+                        }
+                        request = urllib.request.Request(
+                            self._url("/v1/telegram/webhook"),
+                            data=json.dumps({"update_id": update_id, "message": message}).encode(),
+                            headers={
+                                "Content-Type": "application/json",
+                                "X-Telegram-Bot-Api-Secret-Token": self._srv.telegram_header_secret,
+                            },
+                        )
+                        assistant = {}
+                        with mock.patch.dict(os.environ, {"ANDREA_TEST_OPENCLAW_RESULT": json.dumps(fixture)}):
+                            with urllib.request.urlopen(request, timeout=5) as response:
+                                self.assertEqual(response.status, 200)
+                            deadline = time.monotonic() + 5
+                            while time.monotonic() < deadline:
+                                task_ids = self._srv.with_lock(
+                                    lambda conn: list_telegram_task_ids_for_chat(conn, update_id),
+                                )
+                                if task_ids:
+                                    projection = self._srv._task_snapshot(task_ids[0])["projection"]
+                                    if projection["status"] == "completed":
+                                        assistant = projection["meta"]["assistant"]
+                                        break
+                                time.sleep(0.05)
+
+                        self.assertEqual(assistant.get("route"), "direct")
+                        self.assertEqual(assistant.get("reason"), reason)
+                        if reason == "news_summary_ready":
+                            self.assertEqual(assistant["last_reply"], "Fixture news from the lookup.")
+                        else:
+                            self.assertIn("couldn't pull a grounded live news summary", assistant["last_reply"])
+                self.assertEqual(skill.call_count, len(cases))
+
     def test_telegram_recent_text_messages_use_bluebubbles_lane(self) -> None:
         body = json.dumps(
             {

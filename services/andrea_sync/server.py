@@ -3738,7 +3738,6 @@ class SyncServer:
             ),
             route_reason="structured_personal_assistant_synthesis",
             success_reason="assistant_state_synthesis_ready",
-            success_fallback="",
             failure_reason="assistant_state_synthesis_failed",
             failure_reply="",
         )
@@ -3782,14 +3781,28 @@ class SyncServer:
             skill_key="brave-api-search",
             actor="server_grounded_research",
         )
-        if str(resolved.get("truth", {}).get("status") or "") != "verified_available":
+        lookup_status = str(resolved.get("truth", {}).get("status") or "unavailable")
+        lookup_reason = "grounded_research_unavailable"
+        lookup_summary = ""
+        if lookup_status == "verified_available":
+            lookup_summary, lookup_reason = self._run_direct_openclaw_lookup(
+                task_id,
+                prompt=self._build_grounded_research_prompt(classify_text),
+                route_reason="structured_grounded_research",
+                success_reason="grounded_research_ready",
+                failure_reason="grounded_research_failed",
+                failure_reply="I couldn't gather a grounded lookup summary cleanly just now.",
+            )
+        if lookup_reason != "grounded_research_ready":
             guidance_class = self._grounded_lookup_guidance_class(
                 classify_text=classify_text,
                 turn_domain=str(turn_plan.domain or ""),
             )
-            unavailable_base = "I couldn't verify live lookup capability right now, so I can only give a general answer."
-            if guidance_class == "everyday_utility":
-                unavailable_base = "I can't verify current conditions right now."
+            unavailable_base = lookup_summary
+            if not unavailable_base:
+                unavailable_base = "I couldn't verify live lookup capability right now, so I can only give a general answer."
+                if guidance_class == "everyday_utility":
+                    unavailable_base = "I can't verify current conditions right now."
             if guidance_class == "certificate_tls":
                 unavailable_base += " For SSL or certificate warnings, I can still help you triage likely causes from the exact warning details."
             n_opts = self._grounded_lookup_next_step_options(
@@ -3808,7 +3821,8 @@ class SyncServer:
                 "evidence_strength": 0,
                 "required_anchors": [],
                 "fallback_policy": "truthful_unavailable_lookup_fallback",
-                "lookup_status": str(resolved.get("truth", {}).get("status") or "unavailable"),
+                "lookup_status": lookup_status,
+                "lookup_reason": lookup_reason,
                 "answer_mode": "truthful_fallback_with_next_steps",
                 "uncertainty_mode": "thin",
                 "next_step_options": n_opts,
@@ -3819,16 +3833,7 @@ class SyncServer:
                 "utility_goal": ug,
                 "brevity_max_words_soft": int(bmw),
             }
-            return unavailable, "grounded_research_unavailable", contract
-        lookup_summary, lookup_reason = self._run_direct_openclaw_lookup(
-            task_id,
-            prompt=self._build_grounded_research_prompt(classify_text),
-            route_reason="structured_grounded_research",
-            success_reason="grounded_research_ready",
-            success_fallback="I gathered a grounded summary from verified lookup.",
-            failure_reason="grounded_research_failed",
-            failure_reply="I couldn't gather a grounded lookup summary cleanly just now.",
-        )
+            return unavailable, lookup_reason, contract
         summary = shared_sanitize_user_surface_text(str(lookup_summary or "").strip(), fallback="", limit=1200).strip()
         if not summary:
             return None
@@ -3926,7 +3931,6 @@ class SyncServer:
         prompt: str,
         route_reason: str,
         success_reason: str,
-        success_fallback: str,
         failure_reason: str,
         failure_reply: str,
     ) -> tuple[str, str]:
@@ -3958,13 +3962,12 @@ class SyncServer:
                 elapsed_ms=round((time.monotonic() - started_at) * 1000),
                 timeout_seconds=self.openclaw_lookup_timeout_seconds,
             )
-        summary = ""
+        if not isinstance(result, dict) or result.get("ok") is not True:
+            return failure_reply, failure_reason
         for candidate in (
             result.get("user_summary"),
             result.get("summary"),
             result.get("raw_text"),
-            result.get("blocked_reason"),
-            result.get("error"),
         ):
             raw_preview = str(candidate or "").strip()
             if raw_preview and is_stale_openclaw_narrative(raw_preview):
@@ -3975,14 +3978,9 @@ class SyncServer:
                 limit=500,
             ).strip()
             if sanitized and not _is_generic_openclaw_summary(sanitized):
-                summary = sanitized
-                break
-        if summary and is_stale_openclaw_narrative(summary):
-            return failure_reply, contaminated_reason
-        if result.get("ok"):
-            return summary or success_fallback, success_reason
-        if summary:
-            return summary, failure_reason
+                if is_stale_openclaw_narrative(sanitized):
+                    return failure_reply, contaminated_reason
+                return sanitized, success_reason
         return failure_reply, failure_reason
 
     def _fetch_live_news_summary(
@@ -4002,7 +4000,6 @@ class SyncServer:
             prompt=self._build_live_news_prompt(text),
             route_reason="structured_live_news",
             success_reason="news_summary_ready",
-            success_fallback="I pulled a live news summary for you.",
             failure_reason="news_summary_failed",
             failure_reply="I couldn't pull a grounded live news summary cleanly just now.",
         )
@@ -4026,7 +4023,6 @@ class SyncServer:
             ),
             route_reason="structured_recent_text_messages",
             success_reason="recent_text_messages_ready",
-            success_fallback="I pulled your recent text-message summary.",
             failure_reason="recent_text_messages_failed",
             failure_reply="I couldn't retrieve your recent text messages cleanly just now.",
         )

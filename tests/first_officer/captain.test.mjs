@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createCaptain, integrationCI } from '../../first-officer/segment1/captain.mjs';
 import { classifyRequest } from '../../first-officer/segment1/dispatch.mjs';
-import { diagnoseMacAndrea } from '../../first-officer/segment1/andrea-mac.mjs';
+import { diagnoseMacAndrea, diagnoseMacAndreaSync } from '../../first-officer/segment1/andrea-mac.mjs';
 import { summarizeAndrea } from '../../first-officer/segment1/tools.mjs';
 
 const head = 'a'.repeat(40);
@@ -119,4 +119,22 @@ test('Andrea diagnostics classify settings and API failures without returning re
     { code: 'api-authentication', message: 'api-authentication' });
   await assert.rejects(diagnoseMacAndrea(() => settings, async () => { throw new Error('private fixture address'); }),
     { code: 'api-unreachable', message: 'api-unreachable' });
+});
+
+test('Andrea upstream diagnostic returns only allowed status labels and age categories', async () => {
+  const now = Date.now();
+  const settings = { BLUEBUBBLES_CONTROL_TOKEN: 'x'.repeat(24), BLUEBUBBLES_CANONICAL_SELF_THREAD_JID: 'bb:owner' };
+  const result = await diagnoseMacAndreaSync(() => settings, async (url, request) => {
+    assert.equal(url.pathname, '/v1/bluebubbles/status');
+    assert.equal(request.method, 'GET');
+    return Response.json({ status: {
+      connected: true, chatScope: 'allowlist', transportState: 'reachable',
+      webhookRegistrationState: 'private fixture detail',
+      shadowPollLastOkAt: new Date(now - 1000).toISOString(),
+      lastInboundAt: new Date(now - 3 * 24 * 60 * 60_000).toISOString(),
+      lastInboundChatJid: 'private fixture detail',
+    } });
+  }, now);
+  assert.deepEqual(result, { channel: 'connected', scope: 'allowlist', transport: 'reachable',
+    webhook: 'unknown', shadowPoll: 'recent', lastInbound: 'older' });
 });

@@ -82,6 +82,7 @@ export function createMacAndreaReader(settings, transport = fetch, counts) {
   }
 
   return {
+    status: () => get('/v1/bluebubbles/status'),
     async chats() {
       const { chats } = await get('/v1/bluebubbles/chats?limit=100');
       if (!Array.isArray(chats) || chats.length > 100) throw new Error('Andrea chat list was invalid');
@@ -114,9 +115,7 @@ export async function runMacAndrea(command, readSettings = loadSettings, transpo
   return { version: 1, summary: await summarizeAndrea(createMacAndreaReader(await readSettings(), transport)) };
 }
 
-export async function diagnoseMacAndrea(readSettings = loadSettings, transport = fetch, now = Date.now()) {
-  const source = { listedChats: 0, groupChats: 0, excludedChats: 0, returnedRows: 0,
-    botRows: 0, rowsWithValidTimestamp: 0 };
+async function diagnosticRead(readSettings, transport, read, counts) {
   let settings;
   try {
     settings = await readSettings();
@@ -125,25 +124,55 @@ export async function diagnoseMacAndrea(readSettings = loadSettings, transport =
   }
   let reader;
   try {
-    reader = createMacAndreaReader(settings, transport, source);
+    reader = createMacAndreaReader(settings, transport, counts);
   } catch {
     throw new ReaderError('settings-invalid');
   }
   try {
-    const { counts } = await inspectAndrea(reader, now);
-    return { ...source, ...counts };
+    return await read(reader);
   } catch (error) {
     if (error instanceof ReaderError) throw error;
     throw new ReaderError('api-response');
   }
 }
 
+export async function diagnoseMacAndrea(readSettings = loadSettings, transport = fetch, now = Date.now()) {
+  const source = { listedChats: 0, groupChats: 0, excludedChats: 0, returnedRows: 0,
+    botRows: 0, rowsWithValidTimestamp: 0 };
+  return diagnosticRead(readSettings, transport, async (reader) => {
+    const { counts } = await inspectAndrea(reader, now);
+    return { ...source, ...counts };
+  }, source);
+}
+
+export async function diagnoseMacAndreaSync(readSettings = loadSettings, transport = fetch, now = Date.now()) {
+  const select = (value, allowed) => allowed.includes(value) ? value : 'unknown';
+  const age = (value, limit) => {
+    const elapsed = now - Date.parse(value ?? '');
+    return !Number.isFinite(elapsed) || elapsed < -30_000 ? 'unknown' : elapsed <= limit ? 'recent' : 'older';
+  };
+  return diagnosticRead(readSettings, transport, async (reader) => {
+    const { status } = await reader.status();
+    if (!status || typeof status !== 'object' || Array.isArray(status)) throw new ReaderError('api-response');
+    return {
+      channel: status.connected === true ? 'connected' : status.connected === false ? 'disconnected' : 'unknown',
+      scope: select(status.chatScope, ['allowlist', 'contacts_only', 'all_synced']),
+      transport: select(status.transportState, ['not_checked', 'reachable', 'auth_failed', 'unreachable']),
+      webhook: select(status.webhookRegistrationState, ['not_configured', 'registered', 'missing', 'auth_failed', 'unreachable']),
+      shadowPoll: age(status.shadowPollLastOkAt, 60 * 60_000),
+      lastInbound: age(status.lastInboundAt, 48 * 60 * 60_000),
+    };
+  });
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const option = process.argv[2];
   const localDiagnostic = process.env.SSH_ORIGINAL_COMMAND === undefined &&
-    process.argv.length === 3 && process.argv[2] === '--diagnose';
+    process.argv.length === 3 && (option === '--diagnose' || option === '--diagnose-sync');
   try {
     console.log(JSON.stringify(await (localDiagnostic
-      ? diagnoseMacAndrea() : runMacAndrea(process.env.SSH_ORIGINAL_COMMAND))));
+      ? (option === '--diagnose-sync' ? diagnoseMacAndreaSync() : diagnoseMacAndrea())
+      : runMacAndrea(process.env.SSH_ORIGINAL_COMMAND))));
   } catch (error) {
     if (localDiagnostic) {
       console.log(JSON.stringify({ problem: error instanceof ReaderError ? error.code : 'node-diagnostic' }));

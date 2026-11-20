@@ -107,3 +107,12 @@ def test_diagnostic_resolves_mac_style_temp_directory_symlink(provision, monkeyp
     with pytest.raises(module.DiagnosticError) as caught:
         module.diagnose_mac(payload)
     assert caught.value.code == "settings-unavailable"
+
+
+def test_only_allowed_sync_metadata_is_returned(provision):
+    module, _ = provision
+    status = {"channel": "connected", "scope": "allowlist", "transport": "reachable",
+              "webhook": "registered", "shadowPoll": "recent", "lastInbound": "older"}
+    assert module.validate_sync(status) == status
+    with pytest.raises(module.DiagnosticError):
+        module.validate_sync({**status, "channel": "private fixture detail"})

@@ -14,6 +14,8 @@ Jeff activated release `ed545847333ee1691824cd8e3b0a528882b2b11c7f2479c1f63af9a0
 
 During follow-up, the deployed reader connected to Andrea and returned no recent previews. A later read also confirmed a partial chat list and zero recent-preview evidence, with no reported read errors. A Mac-local diagnostic now measures counts before and after the eligibility and freshness filters. The candidate can read up to four previews when chat metadata is stale and still enforces the 48-hour message window. The effect on Jeff's live data remains unverified.
 
+Jeff ran the Mac-local diagnostic. Andrea returned 100 indexed chats, including 83 eligible one-to-one chats. None of those had metadata in the last 48 hours. All four selected chat reads succeeded and returned 27 valid preview rows, with zero recent previews. The next check compares this stale snapshot with the upstream connection, webhook and chat scope.
+
 ## Captain upgrade
 
 The live authority check showed Grok Bot still holds the shared lease. Takeover is off, the watchdog timer is inactive and the latest matching Grok check-in is stale. The pilot arming command requires a fresh Grok check-in and an explicit handoff at the expected epoch. The captain candidate reuses that lease and the existing lane runner. Jeff can grant the named Integration CI scope at the current epoch, pause dispatch and request handback in the private Telegram chat. The runner uses a separate subscription account from the two fleet quota receipts. The candidate reads the runner's own subscription quota before dispatch.
@@ -33,4 +35,4 @@ The captain can read current fleet, gate, PR and quota evidence, follow an exact
 
 The backlog references the bobserver lanes `infra-20261118`, `consolidate-20261119` and `arch-research-20261118`.
 
-BLOCKED: Jeff's Mac-local Andrea check, operator activation, timed Telegram acceptance and supervised authority pilot remain pending.
+BLOCKED: Andrea's live cache has no recent previews in the sampled chats. Upstream diagnosis, operator activation, timed Telegram acceptance and the supervised authority pilot remain pending.

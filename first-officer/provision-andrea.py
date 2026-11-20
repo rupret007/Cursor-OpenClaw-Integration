@@ -197,6 +197,23 @@ def validate_counts(counts):
     return counts
 
 
+def validate_sync(status):
+    states = {
+        "channel": {"connected", "disconnected"},
+        "scope": {"allowlist", "contacts_only", "all_synced"},
+        "transport": {"not_checked", "reachable", "auth_failed", "unreachable"},
+        "webhook": {"not_configured", "registered", "missing", "auth_failed", "unreachable"},
+        "shadowPoll": {"recent", "older"},
+        "lastInbound": {"recent", "older"},
+    }
+    if not isinstance(status, dict) or status.keys() != states.keys() or any(
+        not isinstance(value, str) or (value != "unknown" and value not in states[key])
+        for key, value in status.items()
+    ):
+        raise DiagnosticError("invalid-counts")
+    return status
+
+
 def diagnose_mac(payload):
     try:
         node = mac_node()
@@ -210,7 +227,8 @@ def diagnose_mac(payload):
         for name in MODULES:
             write_once(path / name, files[name].encode())
         env = {name: value for name, value in os.environ.items() if name != "SSH_ORIGINAL_COMMAND"}
-        result = subprocess.run([node, str(path / "andrea-mac.mjs"), "--diagnose"],
+        option = "--diagnose-sync" if payload.get("sync") else "--diagnose"
+        result = subprocess.run([node, str(path / "andrea-mac.mjs"), option],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=20, text=True)
         try:
             counts = json.loads(result.stdout)
@@ -221,7 +239,7 @@ def diagnose_mac(payload):
         if code in ("settings-unavailable", "settings-invalid", "api-unreachable", "api-authentication", "api-response"):
             raise DiagnosticError(code)
         raise DiagnosticError("node-diagnostic")
-    return validate_counts(counts)
+    return validate_sync(counts) if payload.get("sync") else validate_counts(counts)
 
 
 def prepare_mac(payload):
@@ -291,7 +309,7 @@ def run_on_host(host, action, payload, source):
         if call.returncode:
             code = result.get("diagnostic") if isinstance(result, dict) else None
             raise DiagnosticError(code if isinstance(code, str) else "remote-runtime")
-        return validate_counts(result)
+        return validate_sync(result) if payload.get("sync") else validate_counts(result)
     if not call.stdout:
         raise ValueError("The SSH command returned no verification result.")
     result = json.loads(call.stdout)
@@ -310,6 +328,7 @@ def main():
     parser.add_argument("--bob-host", default="bobserver")
     action = parser.add_mutually_exclusive_group()
     action.add_argument("--diagnose", action="store_true", help="Print only counts and freshness from the Mac reader")
+    action.add_argument("--diagnose-sync", action="store_true", help="Print only the Mac reader's upstream sync status")
     action.add_argument("--refresh-reader", action="store_true", help="Switch the existing restricted key to this reviewed reader")
     action.add_argument("--restore-reader", action="store_true", help="Restore the previous restricted Mac reader")
     args = parser.parse_args()
@@ -319,9 +338,9 @@ def main():
     module_dir = Path(__file__).with_name("segment1")
     files = {name: (module_dir / name).read_text(encoding="utf-8") for name in MODULES}
     mac = args.mac_user + "@" + args.mac_host
-    if args.diagnose:
+    if args.diagnose or args.diagnose_sync:
         try:
-            counts = run_on_host(mac, "remote-diagnose", {"files": files}, source)
+            counts = run_on_host(mac, "remote-diagnose", {"files": files, "sync": args.diagnose_sync}, source)
         except DiagnosticError as error:
             print(f"Andrea diagnostic failed [{error.code}]. {error}.", file=sys.stderr)
             return 1

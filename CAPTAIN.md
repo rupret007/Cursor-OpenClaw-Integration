@@ -27,6 +27,13 @@ nice -n 10 python3 -B first-officer/provision-andrea.py \
 
 Check `recentTextPreviews` against a real recent one-to-one thread privately. `freshChatMetadata` at zero with positive `recentTextPreviews` is evidence that the bounded preview fallback found activity missed by chat metadata. Zero accepted rows, a stale preview index or read errors require checking the Mac sync and eligibility counts before proceeding.
 
+If the reader returns valid rows and zero recent previews, check the upstream channel and chat scope from the same shell. The command reports only fixed status labels and age categories.
+
+```bash
+nice -n 10 python3 -B first-officer/provision-andrea.py \
+  --mac-host "$mac_host" --mac-user "$mac_user" --diagnose-sync
+```
+
 After the counts show a useful sample, Jeff can refresh the existing key’s forced command. The same public key and the same read-only summary operation are used. The helper rejects a refresh when the candidate finds zero recent previews.
 
 ```bash

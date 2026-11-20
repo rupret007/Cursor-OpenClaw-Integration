@@ -204,7 +204,9 @@ def diagnose_mac(payload):
         raise DiagnosticError("node-unavailable") from None
     files = reader_modules(payload)
     with tempfile.TemporaryDirectory(prefix="fo-andrea-check-") as directory:
-        path = Path(directory)
+        # macOS can expose its temp directory through /var, a symlink.
+        # Node's module URL uses the resolved path for its entry-point check.
+        path = Path(directory).resolve(strict=True)
         for name in MODULES:
             write_once(path / name, files[name].encode())
         env = {name: value for name, value in os.environ.items() if name != "SSH_ORIGINAL_COMMAND"}

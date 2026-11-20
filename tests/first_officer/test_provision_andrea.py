@@ -85,3 +85,25 @@ def test_diagnostic_exposes_only_known_failure_codes(provision, monkeypatch, sta
         module.run_on_host("fixture", "remote-diagnose", {}, "")
     assert caught.value.code == expected
     assert "private fixture data" not in str(caught.value)
+
+
+def test_diagnostic_resolves_mac_style_temp_directory_symlink(provision, monkeypatch):
+    module, home = provision
+    canonical = home / "physical"
+    canonical.mkdir()
+    alias = home / "alias"
+    alias.symlink_to(canonical, target_is_directory=True)
+    monkeypatch.setattr(module.tempfile, "tempdir", str(alias))
+    monkeypatch.setattr(module, "mac_node", lambda: "/fixture/node")
+
+    def invoke(args, **kwargs):
+        entry = Path(args[1])
+        assert entry == entry.resolve(strict=True)
+        assert entry.parent.parent == canonical
+        return SimpleNamespace(returncode=1, stdout='{"problem":"settings-unavailable"}')
+
+    monkeypatch.setattr(module.subprocess, "run", invoke)
+    payload = {"files": dict.fromkeys(module.MODULES, "// fixture")}
+    with pytest.raises(module.DiagnosticError) as caught:
+        module.diagnose_mac(payload)
+    assert caught.value.code == "settings-unavailable"

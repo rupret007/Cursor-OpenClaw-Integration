@@ -301,3 +301,22 @@ The prohibited live paths were not exercised. In particular, the installed
 gateway verifier and private release bundle are not present in this checkout,
 so the activation finding is established from the command ordering and
 interfaces rather than a live activation attempt.
+
+## FIXES
+
+Each finding was reproduced with a failing test, then fixed. The original FAIL above is unchanged. Local gates after these commits: secret scan clean (`Files 345`, `History commits 292`, `Logs 0`, before the commit that records this section; the file count includes the local gitignored `data/` tree), `bash scripts/test_integration.sh` passed 974 Python tests, and the Segment 1 and captain Node gate passed 23 tests. No live gateway, bobserver, Telegram, or production action was used. Phoenix, Restate and Hatchet were not installed.
+
+| Finding | Commit | Test |
+| --- | --- | --- |
+| PARTIAL/HIGH — restricted lookup routes refuse a normal query | `9cede96aad706d398a8733a7dd3a08daddde6d11` Serve restricted lookups for a normal query without an outbound tool. | `tests/first_officer/test_guard.py::test_normal_lookup_queries_work_through_the_fenced_boundary` |
+| PARTIAL/HIGH — confirmed outbound sends have no production tool | `62c46b336256e91f94c4614aad9b35fc144060fd` Install the outbound delivery tool so one confirmation delivers once. `4df9543bbd547682fb9a5b1daf8f9bbb553c37a0` stores that receipt beside the database that owns it. | `tests/test_andrea_sync.py::TestAndreaSync::test_exact_confirmation_delivers_once_and_binds_the_receipt` |
+| FIXED — Playwright report-level errors could pass | `d5e4ac00159f7ebe1ec4efa270072dcb93a6439d` Fail the Playwright gate on a report-level error. | `tests/first_officer/test_flaky.py::test_a_report_level_error_or_a_short_inventory_fails_the_gate` |
+| PARTIAL/HIGH — prepare validates the unpublished store path | `d822c299803ae4d20fd26278287818a7d1383a15` Verify the unpacked candidate before publish and prove rollback restores it. | `tests/first_officer/test_install.py::test_prepare_verifies_the_unpacked_candidate_and_rollback_restores_the_prior_bundle` |
+| PARTIAL/MEDIUM — hash chain accepted a complete reset | `e7fcb72e4c035fde0f5f3794c880fe46c05359e2` Keep the audit checkpoint outside the acceptance directory. | `tests/first_officer/test_cycle.py::test_resetting_the_acceptance_directory_does_not_erase_the_trust_anchor` |
+| FIXED — unsafe LiteLLM pricing was accepted | `3d31b0659c08fd9d9e5636255786de284f78a901` Reject routed models with unsafe LiteLLM prices. | `tests/first_officer/test_litellm_policy.py::test_a_routed_model_needs_finite_nonnegative_prices_and_one_charge` |
+| FIXED — private LiteLLM HTTPS endpoints were not enforced | `6dc997254318bfee39feea2cd2d4ac3d7daf5cc2` Require an allowlisted private address for LiteLLM HTTPS. | `tests/first_officer/test_litellm_policy.py::test_https_stays_on_an_allowlisted_private_endpoint` |
+| FIXED — secret scan ignored directory symlinks and named trees | `eb961812c93adbd9c303566371c3ff365141ed29` Reject directory symlinks and scan data and artifacts. | `tests/first_officer/test_privacy.py::test_a_directory_symlink_is_rejected_and_named_trees_are_scanned` |
+| HIGH — a Hatchet 5xx or 408 can dispatch the same lane to Restate | `1de23b6b1fb8fdfdbe33c759987c2498b849a357` Treat Hatchet 5xx and request timeouts as ambiguous and do not fail them over. | `tests/first_officer/test_lane_queue.py::test_hatchet_server_error_or_request_timeout_does_not_reach_restate` |
+| MEDIUM — queue credentials can be sent to any named HTTPS host | `43259d6424123676e903604a4a0623a8847b9e3d` Require an allowlist and private resolution before a named HTTPS queue gets credentials. | `tests/first_officer/test_lane_queue.py::test_named_https_queue_needs_an_allowlist_and_private_resolution` |
+| MEDIUM — history scan hides a sensitive pathname or rename | `7f00504e928dcd07e62df56b957c3cb034fe1829` Flag sensitive pathnames and renames in the history scan. | `tests/first_officer/test_privacy.py::test_history_flags_a_sensitive_pathname_and_a_rename` |
+| MEDIUM — usage CLI overrides can raise the stop gate | `aad075908505a6be3aeb5d376adb65376e96d344` Refuse usage thresholds that are looser than the defaults. | `tests/first_officer/test_usage.py::test_usage_overrides_may_only_be_stricter_than_the_defaults` |

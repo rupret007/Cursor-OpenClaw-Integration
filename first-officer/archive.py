@@ -86,10 +86,11 @@ def _manifest(repo, paths):
         if b"\0" in payload:
             raise ValueError("The review archive cannot include a binary file")
         text = payload.decode("utf-8", "replace")
-        if findings_in_text(text):
+        relative = path.relative_to(repo).as_posix()
+        if findings_in_text(text, path=relative):
             raise ValueError("The review archive contains a secret or personal data")
         digest = hashlib.sha256(payload).hexdigest()
-        lines.append(f"{digest}  {path.relative_to(repo).as_posix()}")
+        lines.append(f"{digest}  {relative}")
     manifest = ("\n".join(lines) + "\n").encode("utf-8")
     return manifest, hashlib.sha256(manifest).hexdigest()
 

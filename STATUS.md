@@ -58,6 +58,14 @@ The warning threshold is 90 percent and the stop threshold is 97 percent, verifi
 
 The gated run passed 889 Python tests in the offline integration gate, which now also compiles the First Officer LiteLLM and usage modules, and 22 Node tests. `INSTALL.md` documents the lane command.
 
+## Step 3: Hatchet lane queue and the Restate fallback
+
+`first-officer/lanes/queue.py` queues one review lane on Hatchet and calls Restate only when Hatchet definitely did not accept it. The Hatchet call is the documented stable trigger, `POST /api/v1/stable/tenants/{tenant}/workflow-runs/trigger`, and the run id is `run.metadata.id`. The Restate call is the documented send ingress, `POST /restate/send/{service}/{handler}`, with an `idempotency-key`. A connection refusal or HTTP 408, 425, 429, 500, 502, 503 or 504 is a definite refusal. A timeout, a dropped connection, a redirect, an authentication failure, or any other answer is unknown: the lane stays off Restate because Hatchet may already have it. The private append-only ledger records that unknown row and a later attempt sends nothing until an operator has looked. A definite refusal from both backends is retryable. The same lane, head and pull request are not sent twice, including when two dispatchers race. Tokens stay in the environment, HTTP is loopback-only, a public address is refused, and environment proxies are ignored so a credential cannot follow a redirect or a proxy.
+
+`tests/first_officer/test_lane_queue.py` proves this against two loopback servers that speak those HTTP contracts. Hatchet and Restate were not installed, and nothing was deployed. On November 20, 2026 the 16 tests passed on Python 3.12.15 and on Python 3.14.4. The primary returned HTTP 503 once and Restate returned `Accepted` with invocation `inv_fallback`; a repeat made no second call. A closed primary port also failed over. A timeout, an HTTP 401 and a redirect did not. An unreadable Restate answer was not retried. Two concurrent dispatchers produced one Hatchet run. The ledger stayed mode `0600` and contained neither token.
+
+The offline gate on this tree passed 918 Python tests, including those 16, and 22 Node tests. The gate compiles `first-officer/lanes/queue.py`. `INSTALL.md` documents the command.
+
 ## One combined release and a page Jeff can test from
 
 `first-officer/release.py` turns the whole release into one reviewed operation with one rollback. `build` stages the candidate from the verified prior bundle, runs the packaged Round 13 canary and the Segment 1 and captain gate against it, and packs it. `activate` confirms the running gateway, the owner's GitHub login and the existing Andrea read-only bridge before it changes anything, publishes the candidate read-only under its digest through a private staging directory, prepares the private rollback, switches with the existing installer and confirms readiness. `rollback` restores the exact prior config and pin. Every command accepts `--dry-run`, which prints the exact ordered commands and runs none of them.
@@ -71,7 +79,7 @@ The release is a plan of reviewed commands, so the whole sequence is tested with
 - Finish the timed Telegram checks and supervised authority pilot before expanding production scope.
 - DONE. LiteLLM provider failover and per-lane budgets are proven above. Applying the gateway route to the remaining API clients follows as each lane moves over.
 - DONE. Codex and Claude usage tracking, Central Time reset reporting, the 90 percent warning and the committed `HANDOFF.md` are proven above.
-- Hatchet lane queue pilot with Restate as fallback.
+- DONE. The Hatchet lane queue and the Restate fallback are proven above. Live Hatchet and Restate processes stay uninstalled until Jeff approves a host.
 - The runtime records local traces. Integrate Phoenix and OpenLLMetry and verify trace delivery.
 - The installed bundle reads flaky reports. Add the Playwright report producer and quarantine workflow.
 - The fleet reader consumes shared status. Finish the shared status view and admin console.

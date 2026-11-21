@@ -70,6 +70,19 @@ python3 first-officer/usage/track.py \
 
 The command exits `0` below the warning threshold, `3` once any window reaches 90 percent, and `4` once any window reaches 97 percent. On either warning it writes `HANDOFF.md` into the lane checkout and commits that one file locally. It never stages another path, never pushes, and refuses to commit on `main` or `master`. It also refuses to write a handoff whose text contains a credential or an address. Use `--warn-percent` and `--stop-percent` only to make the thresholds stricter.
 
+## Queue a review lane
+
+Hatchet is the primary. Restate is the fallback, and only after Hatchet has definitely refused the lane. The dispatcher does not install either service and does not start a worker. Point it at a loopback HTTP listener or a private HTTPS root. A public address is rejected. Put each token in the environment variable named by the policy, not in the policy file.
+
+The policy has two objects. `hatchet` carries `base_url`, `tenant`, `workflow` and `token_env`. `restate` carries `base_url`, `service`, `handler` and `token_env`. The ledger path is a private append-only file. The command creates it mode `0600` when it is missing.
+
+```bash
+python3 first-officer/lanes/queue.py "$queue_policy" "$lane_ledger" \
+  --lane review --head "$head" --pull-request "$number"
+```
+
+Exit `0` means the lane is queued. The line is `Lane review is queued on hatchet as <run>.` or `Lane review is queued on restate as <invocation>.` The same command again prints `was already queued` and does not send a second time. Exit `1` means it was not queued. A timeout, a dropped connection, a redirect or any answer other than a connection refusal or HTTP 408, 425, 429, 500, 502, 503 or 504 stays unknown and is not failed over. An unknown or pending ledger row blocks a later send until the backend has been checked. A definite refusal from both backends can be retried. The command never pushes, merges or sends a message.
+
 ## Check prerequisites on bobserver
 
 Run from the PR checkout as the account that owns `openclaw-gateway.service`. The GitHub CLI must authenticate as the configured owner account. The existing Andrea read-only bridge must answer from the service account using its private reader configuration.

@@ -1,6 +1,6 @@
 # What needs Jeff
 
-Everything else on this branch is already proven offline and in CI. The items below are the only ones that touch the live gateway, Telegram or production authority, so each one waits for you. Nothing on this list has been started.
+The offline work recorded in [STATUS.md](STATUS.md) can be checked with [TEST-NOW.md](TEST-NOW.md). The items below are the ones that touch the live gateway, Telegram or production authority, so each one waits for you. Nothing on this list has been started.
 
 Before any of it, you can verify the finished work yourself with [TEST-NOW.md](TEST-NOW.md). None of those checks touch anything live.
 

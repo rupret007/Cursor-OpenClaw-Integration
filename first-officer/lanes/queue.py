@@ -1,9 +1,20 @@
 #!/usr/bin/env python3
-"""Queue a review lane on Hatchet, fall back to Restate, and never dispatch one twice."""
+"""Queue one review lane on Hatchet, and use Restate only when Hatchet definitely refuses it.
+
+Hatchet is the primary. Its trigger is the documented stable REST call. Restate is the
+documented fallback ingress: ``POST /restate/send/{service}/{handler}`` with an
+``idempotency-key``. A timeout, a dropped connection, or any answer that is not a
+definite refusal stays on Hatchet and is never sent to Restate, because the primary may
+already have accepted the lane. The private ledger is append-only. A pending or unknown
+row blocks a second send until an operator has checked the backend.
+"""
 
 import argparse
+from contextlib import contextmanager
+import errno
 import fcntl
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -25,17 +36,25 @@ RUN_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 LOOPBACK = ("localhost", "127.0.0.1", "::1")
 TIMEOUT = 15
 MAX_BODY = 64 * 1024
-# A rejection the primary definitely did not accept. Anything else must not fail over.
-FAILOVER_STATUS = (429, 500, 502, 503, 504)
+MAX_LEDGER = 4 * 1024 * 1024
+# Statuses the backend answered, so the lane was definitely not accepted.
+# Restate documents 408, 425, 429 and 5xx as the transient set safe to retry.
+FAILOVER_STATUS = (408, 425, 429, 500, 502, 503, 504)
+HATCHET_FIELDS = ("base_url", "tenant", "workflow", "token_env")
+RESTATE_FIELDS = ("base_url", "service", "handler", "token_env")
 
 
-class NoFailover(Exception):
-    """The lane must not move to the fallback: the primary may have accepted it, or it is misconfigured."""
+class Refusal(Exception):
+    """The backend answered, or never connected, and did not accept the lane."""
+
+
+class Uncertain(Exception):
+    """The backend may have accepted the lane. Do not send it anywhere else."""
 
 
 class NoRedirect(HTTPRedirectHandler):
-    def redirect_request(self, *_args, **_kwargs):
-        return None
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise HTTPError(req.full_url, code, "The queue redirected the request", headers, fp)
 
 
 def canonical(request):
@@ -55,9 +74,16 @@ def idempotency_key(request):
 def endpoint(base_url):
     opener = build_opener(ProxyHandler({}), NoRedirect())
     url = urlsplit(base_url)
+    literal_address = False
+    if url.hostname:
+        try:
+            literal_address = not ipaddress.ip_address(url.hostname).is_loopback
+        except ValueError:
+            literal_address = False
     if (url.scheme not in ("http", "https") or not url.hostname or url.username is not None or
             url.password is not None or url.path not in ("", "/") or url.query or url.fragment or
-            (url.scheme == "http" and url.hostname not in LOOPBACK)):
+            (url.scheme == "http" and url.hostname not in LOOPBACK) or
+            (url.scheme == "https" and literal_address)):
         raise ValueError("Use a loopback queue URL or a private HTTPS root")
     return base_url.rstrip("/"), opener
 
@@ -66,31 +92,40 @@ def secret(name):
     if not ENV_NAME.fullmatch(name):
         raise ValueError("A queue credential is named by an environment variable")
     value = os.environ.get(name, "")
-    if not value or len(value) > 4096 or not value.isprintable():
+    if not value or len(value) > 4096 or not value.isprintable() or any(ch.isspace() for ch in value):
         raise ValueError("A queue credential is missing from the environment")
     return value
 
 
-def post(opener, url, headers, payload):
-    """Return the decoded body, or raise Uncertain when acceptance cannot be determined."""
+def post(opener, url, headers, payload, timeout):
+    """Return the decoded object, raise Refusal when nothing was accepted, or Uncertain."""
     request = Request(url, data=json.dumps(payload).encode(),
                       headers={"Content-Type": "application/json", **headers})
     try:
-        with opener.open(request, timeout=TIMEOUT) as response:
-            raw = response.read(MAX_BODY + 1)
+        response = opener.open(request, timeout=timeout)
     except HTTPError as error:
         error.close()
         if error.code in FAILOVER_STATUS:
-            raise ValueError(f"The queue refused the lane with HTTP {error.code}") from None
+            raise Refusal(f"The queue refused the lane with HTTP {error.code}") from None
         raise Uncertain(f"The queue answered HTTP {error.code}") from None
     except (socket.timeout, TimeoutError):
         raise Uncertain("The queue did not answer in time") from None
     except URLError as error:
         if isinstance(error.reason, (socket.timeout, TimeoutError)):
             raise Uncertain("The queue did not answer in time") from None
-        raise ValueError("The queue was unreachable") from None
+        if isinstance(error.reason, (ConnectionRefusedError, socket.gaierror)):
+            raise Refusal("The queue was unreachable") from None
+        raise Uncertain("The queue connection failed after the request was sent") from None
     except OSError:
         raise Uncertain("The queue connection failed after the request was sent") from None
+    if response is None:
+        raise Uncertain("The queue gave no answer")
+    try:
+        if getattr(response, "status", 200) >= 300:
+            raise Uncertain(f"The queue answered HTTP {response.status}")
+        raw = response.read(MAX_BODY + 1)
+    finally:
+        response.close()
     if len(raw) > MAX_BODY:
         raise Uncertain("The queue returned an oversized response")
     try:
@@ -108,95 +143,162 @@ def run_identifier(value):
     return value
 
 
-def hatchet(config, request, key):
+def hatchet(config, request, key, timeout, token):
     base, opener = endpoint(config["base_url"])
-    tenant = config["tenant"]
-    workflow = config["workflow"]
+    tenant, workflow = config["tenant"], config["workflow"]
     if not TENANT.fullmatch(tenant) or not NAME.fullmatch(workflow):
         raise ValueError("The Hatchet lane queue needs a tenant and a workflow name")
     body = post(opener, f"{base}/api/v1/stable/tenants/{quote(tenant)}/workflow-runs/trigger",
-                {"Authorization": "Bearer " + secret(config["token_env"])},
+                {"Authorization": "Bearer " + token},
                 {"workflowName": workflow, "input": request,
-                 "additionalMetadata": {"idempotencyKey": key}})
+                 "additionalMetadata": {"idempotencyKey": key}}, timeout)
     run = body.get("run") if isinstance(body.get("run"), dict) else body
     return run_identifier((run.get("metadata") or {}).get("id"))
 
 
-def restate(config, request, key):
+def restate(config, request, key, timeout, token):
     base, opener = endpoint(config["base_url"])
     service, handler = config["service"], config["handler"]
     if not NAME.fullmatch(service) or not NAME.fullmatch(handler):
         raise ValueError("The Restate lane queue needs a service and a handler")
-    headers = {"idempotency-key": key}
-    if config.get("token_env"):
-        headers["Authorization"] = "Bearer " + secret(config["token_env"])
-    body = post(opener, f"{base}/restate/send/{quote(service)}/{quote(handler)}", headers, request)
+    body = post(opener, f"{base}/restate/send/{quote(service)}/{quote(handler)}",
+                {"Authorization": "Bearer " + token, "idempotency-key": key},
+                request, timeout)
     if body.get("status") not in ("Accepted", "PreviouslyAccepted"):
         raise Uncertain("Restate did not accept the lane")
     return run_identifier(body.get("invocationId"))
 
 
-def ledger_entries(path):
+def _check_ledger(info):
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise ValueError("The lane ledger must be a private owner file")
+    if info.st_size > MAX_LEDGER:
+        raise ValueError("The lane ledger is too large to trust")
+
+
+@contextmanager
+def locked_ledger(path):
     try:
-        handle = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    except FileNotFoundError:
-        return {}
-    with os.fdopen(handle, encoding="utf-8") as file:
+        handle = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise ValueError("The lane ledger must be a private owner file") from None
+        raise
+    file = os.fdopen(handle, "r+", encoding="utf-8")
+    try:
         info = os.fstat(file.fileno())
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
-            raise ValueError("The lane ledger must be a private owner file")
-        if info.st_size > 4 * 1024 * 1024:
-            raise ValueError("The lane ledger is too large to trust")
-        return {row["key"]: row for row in map(json.loads, file.read().splitlines()) if row.get("key")}
-
-
-def record(path, entry):
-    handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(handle, "a", encoding="utf-8") as file:
+        if stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_size == 0:
+            os.fchmod(file.fileno(), 0o600)
+            info = os.fstat(file.fileno())
+        _check_ledger(info)
         fcntl.flock(file, fcntl.LOCK_EX)
-        file.write(json.dumps(entry, sort_keys=True) + "\n")
-        file.flush()
-        os.fsync(file.fileno())
+        yield file
+    finally:
+        file.close()
 
 
-def dispatch(config, request, ledger, now=None):
-    """Dispatch one lane exactly once. Only a definite refusal moves it to the fallback."""
+def latest(file, key):
+    file.seek(0)
+    found = None
+    for line in file.read().splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        if not isinstance(row, dict) or row.get("key") != key:
+            if not isinstance(row, dict) or not isinstance(row.get("key"), str):
+                raise ValueError("The lane ledger has an unreadable row")
+            continue
+        found = row
+    return found
+
+
+def append_entry(file, entry):
+    file.seek(0, os.SEEK_END)
+    file.write(json.dumps(entry, sort_keys=True) + "\n")
+    file.flush()
+    os.fsync(file.fileno())
+
+
+def _bounded_timeout(timeout):
+    if isinstance(timeout, bool) or type(timeout) not in (int, float) or not 0 < timeout <= TIMEOUT:
+        raise ValueError("The queue timeout must be within the reviewed limit")
+    return timeout
+
+
+def dispatch(config, request, ledger, now=None, timeout=TIMEOUT):
+    """Dispatch one lane once. Only a definite Hatchet refusal moves it to Restate."""
+    timeout = _bounded_timeout(timeout)
+    if now is None:
+        moment = int(time.time())
+    elif type(now) is int and 0 <= now < 1 << 42:
+        moment = now
+    else:
+        raise ValueError("The queue clock is unusable")
     key = idempotency_key(request)
-    ledger = Path(ledger)
-    existing = ledger_entries(ledger).get(key)
-    if existing is not None:
-        return {**existing, "reused": True}
     primary, fallback = config["hatchet"], config["restate"]
-    try:
-        backend, run = "hatchet", hatchet(primary, request, key)
-    except Uncertain as uncertain:
-        # Failing over here could run the same lane twice. Stop and let an operator look.
-        record(ledger, {"key": key, "backend": "hatchet", "run": None, "uncertain": str(uncertain),
-                        "at": int(now or time.time())})
-        raise ValueError(f"Hatchet outcome is unknown: {uncertain}. The lane was not failed over.") from None
-    except ValueError as refusal:
+    # A missing credential is misconfiguration, not a refusal, so it must not fail over.
+    hatchet_token = secret(primary["token_env"])
+    restate_token = secret(fallback["token_env"])
+    with locked_ledger(ledger) as file:
+        state = latest(file, key)
+        if state and state.get("phase") == "queued" and state.get("run"):
+            return {**state, "reused": True}
+        if state and state.get("phase") != "refused":
+            raise ValueError("The earlier queue attempt has an unknown outcome. "
+                             "The lane was not sent again.")
+
+        def note(phase, backend, run=None, detail=None):
+            entry = {"at": moment, "backend": backend, "head": request["head"], "key": key,
+                     "lane": request["lane"], "phase": phase, "run": run}
+            if detail:
+                entry["detail"] = detail
+            append_entry(file, entry)
+            return entry
+
+        note("pending", "hatchet")
         try:
-            backend, run = "restate", restate(fallback, request, key)
+            run = hatchet(primary, request, key, timeout, hatchet_token)
         except Uncertain as uncertain:
-            raise ValueError(f"Hatchet refused the lane ({refusal}) and the Restate outcome "
-                             f"is unknown: {uncertain}") from None
-        except ValueError as second:
-            raise ValueError(f"Hatchet refused the lane ({refusal}) and Restate refused it "
-                             f"({second}). The lane was not queued.") from None
-    entry = {"key": key, "backend": backend, "run": run, "lane": request["lane"],
-             "head": request["head"], "at": int(now or time.time())}
-    record(ledger, entry)
-    return {**entry, "reused": False}
+            note("uncertain", "hatchet", detail=str(uncertain))
+            raise ValueError(f"Hatchet outcome is unknown: {uncertain}. "
+                             "The lane was not failed over.") from None
+        except Refusal as refusal:
+            note("refused", "hatchet", detail=str(refusal))
+            note("pending", "restate")
+            try:
+                run = restate(fallback, request, key, timeout, restate_token)
+            except Uncertain as uncertain:
+                note("uncertain", "restate", detail=str(uncertain))
+                raise ValueError(f"Hatchet refused the lane ({refusal}) and the Restate outcome "
+                                 f"is unknown: {uncertain}") from None
+            except Refusal as second:
+                note("refused", "restate", detail=str(second))
+                raise ValueError(f"Hatchet refused the lane ({refusal}) and Restate refused it "
+                                 f"({second}). The lane was not queued.") from None
+            entry = note("queued", "restate", run)
+            return {**entry, "reused": False}
+        entry = note("queued", "hatchet", run)
+        return {**entry, "reused": False}
 
 
 def load_config(path):
-    text = Path(path).read_text(encoding="utf-8")
-    config = json.loads(text)
+    config = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(config, dict) or set(config) != {"hatchet", "restate"}:
         raise ValueError("The queue policy names its Hatchet primary and its Restate fallback")
-    for section in config.values():
-        if not isinstance(section, dict) or not isinstance(section.get("base_url"), str):
-            raise ValueError("Each queue backend needs a reviewed base URL")
+    expected = {"hatchet": HATCHET_FIELDS, "restate": RESTATE_FIELDS}
+    for name, fields in expected.items():
+        section = config[name]
+        if not isinstance(section, dict) or set(section) != set(fields):
+            raise ValueError(f"The {name} queue policy is incomplete")
+        if not all(isinstance(section[field], str) for field in fields):
+            raise ValueError(f"The {name} queue policy is incomplete")
+        endpoint(section["base_url"])
+        if not ENV_NAME.fullmatch(section["token_env"]):
+            raise ValueError("A queue credential is named by an environment variable")
+    if not TENANT.fullmatch(config["hatchet"]["tenant"]) or not NAME.fullmatch(config["hatchet"]["workflow"]):
+        raise ValueError("The Hatchet lane queue needs a tenant and a workflow name")
+    if not NAME.fullmatch(config["restate"]["service"]) or not NAME.fullmatch(config["restate"]["handler"]):
+        raise ValueError("The Restate lane queue needs a service and a handler")
     return config
 
 
@@ -215,8 +317,8 @@ def main(argv=None):
         verb = "was already queued on" if result["reused"] else "is queued on"
         print(f"Lane {result['lane']} {verb} {result['backend']} as {result['run']}.")
         return 0
-    except (OSError, KeyError, TypeError, ValueError) as error:
-        message = str(error) if type(error) is ValueError else "The lane queue operation failed"
+    except (OSError, KeyError, TypeError, ValueError, Refusal) as error:
+        message = str(error) if type(error) in (ValueError, Refusal) else "The lane queue operation failed"
         print(message, file=sys.stderr)
         return 1
 

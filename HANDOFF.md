@@ -1,13 +1,19 @@
 # First Officer handoff
 
-The 97% quota stop triggered on November 20, 2026 at 10:38:20 p.m. Central Time, during Step 1. Candace had used 49% of the five-hour window and 97% of the weekly window. They reset November 21 at 3:30:30 a.m. CST and November 26 at 8:33:31 a.m. CST, respectively. These readings came from Codex `account/rateLimits/read` using the active `CODEX_HOME`. Paid credits were unavailable.
+Resume on branch `codex-candace/fo-finish-20261120`. The commit that contains this file is the resume point. Use `git rev-parse HEAD`. Draft PR #36 targets `codex/first-officer-segment-1`.
 
-## Resume point
+## Done in this checkout
 
-- Branch `codex-candace/fo-finish-20261120` is stacked on `3d350baac7636fe068d5be6299991f5e776259b5`, the head of draft PR #33. The implementation head immediately before this handoff is `3821febcecd9444392e34886383c24e694bc561e`. Use `git rev-parse HEAD` for the handoff commit SHA. Recheck only the active account before resuming.
-- Step 1 of 8 is in progress. The Andrea routing commit `73e8b9dbefe1f8d12b0f3adedd6514fe7b585618` routes direct reply, stateful realization, QA evaluation and adjudication through the Andrea lane key. `bash scripts/test_integration.sh` passed for those changes with synthetic settings, Python 3.12.15 and Node 24.16.0 (877 tests and 133 subtests). The focused routing run passed 15 tests and the HTTP fixture observed all four completion paths. The baseline offline gate passed with 876 tests and 133 subtests after restoring Git metadata and supplying Node on the test PATH. The baseline Node gate passed 22 tests.
-- The implementation checkpoint stages a reviewed fallback policy and budgets, provisions native virtual keys, and binds OpenClaw to a dedicated lane key. `python -m pytest -q tests/first_officer/test_install.py` passed all 10 tests. The local config smoke verified private output permissions, fallback ordering, fail-closed budgets and refusal of an incomplete model allowlist. The full offline gate was restarted for the implementation checkpoint and its final result was pending at the stop.
-- The LiteLLM fixture started real temporary PostgreSQL and LiteLLM processes. It verified both native virtual keys and a synthetic primary HTTP 503. The initial startup needed a generated Prisma client. After generation, the initial synthetic budget blocked the fallback reservation. The fixture now uses a cap sized to two synthetic charges, and its rerun was still pending at the stop. The latest fixture also adds SCRAM and bypasses environment HTTP proxies for its loopback requests. Successful fallback, cumulative budget denial with no provider call and the independent lane's completion remain unverified.
-- Install `requirements-litellm-test.txt` in a Python 3.12 virtual environment, run the Prisma generation step in `.github/workflows/pull-request-integration.yml`, then run `python tests/first_officer/litellm-acceptance.py` with `FO_TEST_POSTGRES_BIN` pointing at PostgreSQL's binary directory. The Nuc has temporary extracted PostgreSQL 18 binaries at `/tmp/fo-litellm-postgres/usr/lib/postgresql/18/bin` and their libraries at `/tmp/fo-litellm-postgres/usr/lib/x86_64-linux-gnu`. If retained, use that library directory for `LD_LIBRARY_PATH` with `/tmp/fo-litellm-accept-venv/bin/python`. CI targets PostgreSQL 16 on Ubuntu 24.04.
-- Rerun the local gates. Once Step 1 passes locally, put its exact evidence in `STATUS.md`, push and open the single draft PR targeting `codex/first-officer-segment-1`. No finish-branch PR exists. Verify the gated CI jobs at the PR head before beginning Step 2.
-- Gateway activation, timed Telegram checks and the supervised production pilot await Jeff's approval. The rollback drill and the other four post-pilot tasks are listed in `STATUS.md`.
+Steps 1 and 2 are proven in `STATUS.md`. Step 3 is proven there too. `first-officer/lanes/queue.py` queues one review lane on Hatchet and calls Restate only after a definite refusal. `tests/first_officer/test_lane_queue.py` passed 16 tests on Python 3.12.15 and Python 3.14.4. The offline gate passed 918 Python tests and the Node gate passed 22. Hatchet and Restate are not installed. The proof uses loopback servers that speak the documented HTTP contracts. Nothing was deployed.
+
+## Next
+
+Step 4. Integrate Phoenix and OpenLLMetry and prove a trace arrives at a local collector. Do not use a hosted collector and do not spend money.
+
+## Open failures
+
+None in the local gates at this commit. Confirm the pull-request jobs are green on this head before treating CI as finished. Gateway activation, timed Telegram checks and the supervised authority pilot still wait for Jeff.
+
+## Do not
+
+No merges, no pushes to main, no force pushes, no deploys, no live gateway or Telegram changes, and no texts. Do not write to bobserver. Do not touch colima-vw, Vaultwarden, Podman, asgard, or Jeff's sessions.

@@ -19,7 +19,7 @@ This is the same gate CI runs. It takes about two minutes.
 bash scripts/test_integration.sh
 ```
 
-Expect `889 passed` from the Python suite and a final line `All integration checks passed.`. The `Handoff failed.` lines inside the exhaustive check are expected: that check deliberately feeds bad arguments and requires each one to be refused.
+Expect `918 passed` from the Python suite and a final line `All integration checks passed.`. The `Handoff failed.` lines inside the exhaustive check are expected: that check deliberately feeds bad arguments and requires each one to be refused.
 
 ## 2. The Segment 1 and captain gate
 
@@ -123,6 +123,16 @@ python3 -B first-officer/release.py --dry-run activate "$(printf 'a%.0s' {1..64}
 
 The build plan stages the candidate from your verified prior bundle, runs the packaged Round 13 canary and the Segment 1 gate against it, and packs it. The activate plan confirms the running gateway, the GitHub login and the Andrea read-only bridge before it touches anything, publishes the candidate read-only under its digest, prepares the private rollback, switches, and confirms readiness. It stops at the first failure. When you are ready to activate for real, drop `--dry-run`; until then nothing in this section changes anything.
 
+## 6. Step 3: Hatchet, then Restate only if Hatchet refuses
+
+This starts nothing outside the test. Two loopback servers stand in for the documented Hatchet trigger and the Restate send ingress. Hatchet answers HTTP 503 and Restate accepts the lane.
+
+```bash
+python3 -m pytest -q tests/first_officer/test_lane_queue.py
+```
+
+Expect `16 passed`. One of those tests is the failover: the primary is called once, Restate is called once with the same lane and an idempotency key, and a second dispatch sends nothing. The other tests keep a timeout, a redirect and an authentication failure from failing over, and they keep two concurrent dispatchers to a single run. No token is written to the ledger.
+
 ## What is not provable here yet
 
-Steps 3 through 8 in [STATUS.md](STATUS.md) are still in progress, and the timed Telegram checks and the supervised authority pilot still need a live gateway and your approval.
+Steps 4 through 8 in [STATUS.md](STATUS.md) are still in progress, and the timed Telegram checks and the supervised authority pilot still need a live gateway and your approval. Hatchet and Restate themselves are not installed. The queue command is ready to point at them when you approve a host.

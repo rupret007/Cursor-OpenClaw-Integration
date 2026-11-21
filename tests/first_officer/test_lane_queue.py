@@ -3,6 +3,8 @@ import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import socket
+import ssl
+import subprocess
 import threading
 import time
 
@@ -424,6 +426,62 @@ def test_policy_rejects_a_public_address_an_incomplete_backend_and_a_bad_request
         queue.idempotency_key({**REQUEST, "pull_request": True})
     with pytest.raises(ValueError, match="head"):
         queue.idempotency_key({**REQUEST, "head": "abc"})
+
+
+def _certificate(directory, host):
+    cert = directory / "cert.pem"
+    key = directory / "key.pem"
+    subprocess.run(
+        ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", str(key), "-out", str(cert),
+         "-days", "1", "-nodes", "-subj", f"/CN={host}", "-addext", f"subjectAltName=DNS:{host}"],
+        check=True, capture_output=True,
+    )
+    return cert
+
+
+def serve_tls(cert, routes):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(cert, cert.with_name("key.pem"))
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    server.routes = routes
+    server.seen = []
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def test_named_https_queue_connects_to_the_checked_address(tmp_path, tokens, monkeypatch):
+    """A second DNS answer must not move the bearer request off the checked address."""
+    host = "queue.internal"
+    cert = _certificate(tmp_path, host)
+    hatchet = serve_tls(cert, {HATCHET_PATH: {"body": {"run": {"metadata": {"id": "run_pinned"}}}}})
+    lookups = []
+    real = socket.getaddrinfo
+
+    def resolve(name, port, *args, **kwargs):
+        if name != host:
+            return real(name, port, *args, **kwargs)
+        lookups.append((name, port))
+        if len(lookups) > 1:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 1))]
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+    monkeypatch.setenv("FO_QUEUE_HOSTS", host)
+    monkeypatch.setenv("SSL_CERT_FILE", str(cert))
+    try:
+        queued = dispatch(
+            policy(f"https://{host}:{hatchet.server_address[1]}", "http://127.0.0.1:9"),
+            tmp_path / "lanes.jsonl",
+            timeout=2,
+        )
+    finally:
+        stop(hatchet)
+    assert queued["backend"] == "hatchet" and queued["run"] == "run_pinned"
+    assert [row["path"] for row in hatchet.seen] == [HATCHET_PATH]
+    assert hatchet.seen[0]["authorization"] == f"Bearer {HATCHET_TOKEN}"
+    assert lookups == [(host, None)]
 
 
 def test_cli_prints_the_fallback_and_refuses_a_protected_outcome(tmp_path, tokens, capsys):

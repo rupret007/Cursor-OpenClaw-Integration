@@ -5,6 +5,7 @@ import argparse
 from copy import deepcopy
 import fcntl
 import hashlib
+import importlib.util
 import ipaddress
 import json
 import os
@@ -124,6 +125,17 @@ HOST = re.compile(
 PRIVATE_ENDPOINT = "Use the local LiteLLM management URL or its private HTTPS root"
 
 
+def _pinhttp():
+    path = Path(__file__).resolve().parents[1] / "pinhttp.py"
+    spec = importlib.util.spec_from_file_location("fo_litellm_pinhttp", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+pinhttp = _pinhttp()
+
+
 def litellm_hosts():
     hosts = []
     for item in os.environ.get("FO_LITELLM_HOSTS", "").split(","):
@@ -163,6 +175,29 @@ def private_endpoint(hostname, resolve=None):
                 raise ValueError(PRIVATE_ENDPOINT) from None
     if not addresses or any(not _usable_private(address) for address in addresses):
         raise ValueError(PRIVATE_ENDPOINT)
+    return [str(address) for address in addresses]
+
+
+def _http_pins(hostname, resolve):
+    if hostname == "localhost":
+        resolver = resolve or socket.getaddrinfo
+        try:
+            answers = resolver(hostname, None)
+        except OSError:
+            raise ValueError(PRIVATE_ENDPOINT) from None
+        pins = []
+        for answer in answers:
+            try:
+                address = ipaddress.ip_address(answer[4][0])
+            except (TypeError, ValueError, IndexError):
+                raise ValueError(PRIVATE_ENDPOINT) from None
+            if not address.is_loopback:
+                raise ValueError(PRIVATE_ENDPOINT)
+            pins.append(str(address))
+        if not pins:
+            raise ValueError(PRIVATE_ENDPOINT)
+        return pins
+    return [str(ipaddress.ip_address(hostname))]
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -177,14 +212,17 @@ def proxy_request(base_url, master_key, route, payload=None, *, resolve=None):
             (url.scheme == "http" and url.hostname not in ("localhost", "127.0.0.1", "::1"))):
         raise ValueError(PRIVATE_ENDPOINT)
     if url.scheme == "https":
-        private_endpoint(url.hostname, resolve)
+        pins = private_endpoint(url.hostname, resolve)
+    else:
+        pins = _http_pins(url.hostname, resolve)
     if not TOKEN.fullmatch(master_key):
         raise ValueError("The LiteLLM master key is missing or invalid")
     request = Request(base_url.rstrip("/") + route,
                       data=json.dumps(payload).encode() if payload is not None else None,
                       headers={"Authorization": f"Bearer {master_key}", "Content-Type": "application/json"})
     try:
-        with build_opener(ProxyHandler({}), NoRedirect()).open(request, timeout=15) as response:
+        with build_opener(ProxyHandler({}), NoRedirect(), pinhttp.handler(url.scheme, pins)).open(
+                request, timeout=15) as response:
             raw = response.read(65_537)
             if len(raw) > 65_536:
                 raise ValueError("LiteLLM returned an oversized management response")

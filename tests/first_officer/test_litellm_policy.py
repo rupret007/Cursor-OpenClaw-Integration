@@ -1,6 +1,10 @@
 import importlib.util
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import socket
+import ssl
+import subprocess
+import threading
 
 import pytest
 
@@ -132,3 +136,78 @@ def test_https_stays_on_an_allowlisted_private_endpoint(monkeypatch):
     monkeypatch.delenv("FO_LITELLM_HOSTS", raising=False)
     monkeypatch.setenv("ANDREA_LITELLM_BASE_URL", "http://127.0.0.1:4000/v1")
     assert api._credentials()[0] == "http://127.0.0.1:4000/v1/chat/completions"
+
+
+def test_litellm_connects_to_the_checked_address(tmp_path, monkeypatch):
+    """A second DNS answer must not move the bearer request off the checked address."""
+    host = "litellm.internal"
+    cert = tmp_path / "cert.pem"
+    key = tmp_path / "key.pem"
+    subprocess.run(
+        ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", str(key), "-out", str(cert),
+         "-days", "1", "-nodes", "-subj", f"/CN={host}", "-addext", f"subjectAltName=DNS:{host}"],
+        check=True, capture_output=True,
+    )
+    seen = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen.append((self.path, self.headers.get("Authorization")))
+            body = b'{"ok":true}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or "0")
+            self.rfile.read(length)
+            seen.append((self.path, self.headers.get("Authorization")))
+            body = b'{"id":"pinned"}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(cert, key)
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    port = server.server_address[1]
+    lookups = []
+    real = socket.getaddrinfo
+
+    def resolve(name, answered_port, *args, **kwargs):
+        if name != host:
+            return real(name, answered_port, *args, **kwargs)
+        lookups.append((name, answered_port))
+        if len(lookups) > 1:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 1))]
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+    monkeypatch.setenv("FO_LITELLM_HOSTS", host)
+    monkeypatch.setenv("SSL_CERT_FILE", str(cert))
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
+    try:
+        assert configure.proxy_request(f"https://{host}:{port}", KEY, "/health") == {"ok": True}
+        assert lookups == [(host, None)]
+        assert seen == [("/health", f"Bearer {KEY}")]
+        lookups.clear()
+        seen.clear()
+        monkeypatch.setenv("ANDREA_LITELLM_API_KEY", KEY)
+        monkeypatch.setenv("ANDREA_LITELLM_MODEL", "alias")
+        monkeypatch.setenv("ANDREA_LITELLM_BASE_URL", f"https://{host}:{port}/v1")
+        assert api.litellm_chat({}, timeout_seconds=5, error_prefix="lane") == {"id": "pinned"}
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert lookups == [(host, None)]
+    assert seen == [("/v1/chat/completions", f"Bearer {KEY}")]

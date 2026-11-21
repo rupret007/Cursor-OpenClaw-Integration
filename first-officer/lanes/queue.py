@@ -7,7 +7,8 @@ documented fallback ingress: ``POST /restate/send/{service}/{handler}`` with an
 any 5xx, a dropped connection, or any answer that is not a definite refusal stays on
 Hatchet and is never sent to Restate. The primary may already have accepted the lane.
 The private ledger is append-only. A pending or unknown row blocks a second send until
-an operator has checked the backend.
+an operator has checked the backend. The request connects to the addresses that passed
+that check and does not resolve the name again.
 """
 
 import argparse
@@ -15,6 +16,7 @@ from contextlib import contextmanager
 import errno
 import fcntl
 import hashlib
+import importlib.util
 import ipaddress
 import json
 import os
@@ -26,7 +28,7 @@ import sys
 import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
-from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, Request
 
 
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
@@ -46,6 +48,17 @@ MAX_LEDGER = 4 * 1024 * 1024
 FAILOVER_STATUS = (425, 429)
 HATCHET_FIELDS = ("base_url", "tenant", "workflow", "token_env")
 RESTATE_FIELDS = ("base_url", "service", "handler", "token_env")
+
+
+def _pinhttp():
+    path = Path(__file__).resolve().parents[1] / "pinhttp.py"
+    spec = importlib.util.spec_from_file_location("fo_queue_pinhttp", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+pinhttp = _pinhttp()
 
 
 class Refusal(Exception):
@@ -112,6 +125,29 @@ def _private_named_host(hostname, resolve=None):
             raise ValueError("Use a loopback queue URL or a private HTTPS root") from None
     if not addresses or any(not _usable_private(address) for address in addresses):
         raise ValueError("Use a loopback queue URL or a private HTTPS root")
+    return [str(address) for address in addresses]
+
+
+def _loopback_name(hostname, resolve):
+    if hostname != "localhost":
+        raise ValueError("Use a loopback queue URL or a private HTTPS root")
+    resolver = resolve or socket.getaddrinfo
+    try:
+        answers = resolver(hostname, None)
+    except OSError:
+        raise ValueError("Use a loopback queue URL or a private HTTPS root") from None
+    pins = []
+    for answer in answers:
+        try:
+            address = ipaddress.ip_address(answer[4][0])
+        except (TypeError, ValueError, IndexError):
+            raise ValueError("Use a loopback queue URL or a private HTTPS root") from None
+        if not address.is_loopback:
+            raise ValueError("Use a loopback queue URL or a private HTTPS root")
+        pins.append(str(address))
+    if not pins:
+        raise ValueError("Use a loopback queue URL or a private HTTPS root")
+    return pins
 
 
 def endpoint(base_url, resolve=None):
@@ -126,12 +162,14 @@ def endpoint(base_url, resolve=None):
     if url.scheme == "http":
         if url.hostname not in LOOPBACK:
             raise ValueError("Use a loopback queue URL or a private HTTPS root")
+        pins = _loopback_name(url.hostname, resolve) if address is None else [str(address)]
     elif address is None:
-        _private_named_host(url.hostname, resolve)
+        pins = _private_named_host(url.hostname, resolve)
     elif not _usable_private(address):
         raise ValueError("Use a loopback queue URL or a private HTTPS root")
-    opener = build_opener(ProxyHandler({}), NoRedirect())
-    return base_url.rstrip("/"), opener
+    else:
+        pins = [str(address)]
+    return base_url.rstrip("/"), pinhttp.opener(url.scheme, pins, NoRedirect)
 
 
 def secret(name):

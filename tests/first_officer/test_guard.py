@@ -2,6 +2,7 @@ import importlib.util
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+import socket
 import sys
 import threading
 
@@ -45,13 +46,35 @@ def test_a_public_dual_stack_answer_is_allowed_and_a_private_address_is_not():
         seen.append(host)
         return ["8.8.8.8", "2001:4860:4860::8888"]
 
-    fetch.check_target("https://example.com/docs", allow, both)
+    assert fetch.check_target("https://example.com/docs", allow, both) == [
+        "8.8.8.8", "2001:4860:4860::8888"]
     assert seen == ["example.com"]
     fetch.check_target("https://example.com/docs", allow, lambda _host: ["2001:4860:4860::8888"])
     mapped_private = "::ffff:" + "10." + "1.2.3"
     for answers in (["8.8.8.8", "fd00::1"], ["8.8.8.8", "fe80::1"], [mapped_private]):
         with pytest.raises(ValueError, match="not allowed"):
             fetch.check_target("https://example.com/docs", allow, lambda _host, answers=answers: answers)
+
+
+def test_fetch_connects_to_the_checked_address_and_not_a_later_lookup(monkeypatch):
+    page = serve(b"<p>City hall vote passed today</p>")
+    port = page.server_address[1]
+
+    def blocked(*_args, **_kwargs):
+        raise AssertionError("the fetch resolved the name again")
+
+    monkeypatch.setattr(socket, "getaddrinfo", blocked)
+    try:
+        body, redirect = fetch._open(f"http://news.example:{port}/story", ["127.0.0.1"])
+        origin = f"http://127.0.0.1:{port}"
+        allow = fetch.load_allowlist({"version": 1, "fixtures": [origin]})
+        fenced = fetch.fetch(origin + "/story", allow, token=TOKEN)
+    finally:
+        page.shutdown()
+        page.server_close()
+    assert redirect is None and "City hall vote passed today" in body
+    assert "City hall vote passed today" in fenced
+    assert page.hits == 2
 
 
 def test_allowlist_is_exact_and_a_suffix_does_not_resolve():

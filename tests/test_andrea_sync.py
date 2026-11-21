@@ -5829,37 +5829,53 @@ class TestAndreaSync(unittest.TestCase):
     def test_build_direct_reply_rejects_openai_sessions_spawn_leak(self) -> None:
         from services.andrea_sync.andrea_router import build_direct_reply
 
-        mock_resp = mock.Mock()
-        mock_resp.__enter__ = mock.Mock(return_value=mock_resp)
-        mock_resp.__exit__ = mock.Mock(return_value=False)
-        mock_resp.read.return_value = json.dumps(
-            {
-                "choices": [
-                    {"message": {"content": "sessions_spawn.attachments.enabled is true"}}
-                ],
-            }
-        ).encode()
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        import threading
 
-        with mock.patch.dict(
-            os.environ,
-            {
-                "OPENAI_API_ENABLED": "1",
-                "ANDREA_LITELLM_API_KEY": "test-key",
-                "ANDREA_LITELLM_BASE_URL": "http://localhost:4000",
-                "ANDREA_LITELLM_MODEL": "test-andrea-model",
-            },
-            clear=False,
-        ):
-            with mock.patch(
-                "services.andrea_sync.litellm_api._opener.open",
-                return_value=mock_resp,
-            ) as proxy_request:
+        seen = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length") or "0")
+                self.rfile.read(length)
+                seen.append((self.path, self.headers.get("Authorization")))
+                body = json.dumps(
+                    {"choices": [{"message": {"content": "sessions_spawn.attachments.enabled is true"}}]}
+                ).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_args):
+                return
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        port = server.server_address[1]
+        try:
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "OPENAI_API_ENABLED": "1",
+                    "ANDREA_LITELLM_API_KEY": "test-key",
+                    "ANDREA_LITELLM_BASE_URL": f"http://127.0.0.1:{port}/v1",
+                    "ANDREA_LITELLM_MODEL": "test-andrea-model",
+                },
+                clear=False,
+            ):
                 reply = build_direct_reply(
                     "What should I know about the timeline for the kitchen project?",
                     history=[],
                     memory_notes=[],
                 )
-        proxy_request.assert_called_once()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+        self.assertEqual(seen, [("/v1/chat/completions", "Bearer test-key")])
         self.assertNotIn("sessions_spawn", reply.lower())
         self.assertNotIn("attachments.enabled", reply.lower())
 

@@ -6,7 +6,8 @@ normalization. Public pages are HTTPS on port 443 and must resolve to public
 unicast addresses. The only loopback form is an explicit fixture origin,
 `http://127.0.0.1:<port>`. One redirect is checked again. A second redirect, a
 private address, or a page that cannot be fenced is refused, and the body is
-not returned.
+not returned. The connection uses the addresses from that check and does not
+resolve the name again.
 """
 
 import importlib.util
@@ -26,6 +27,17 @@ def _fence():
 
 
 fence = _fence()
+
+
+def _pinhttp():
+    path = Path(__file__).resolve().parents[1] / "pinhttp.py"
+    spec = importlib.util.spec_from_file_location("fo_fetch_pinhttp", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+pinhttp = _pinhttp()
 
 
 LIMIT = 256 * 1024
@@ -134,12 +146,16 @@ def check_target(url, allowlist, resolve):
         origin = f"http://127.0.0.1:{parts.port}"
         if host != "127.0.0.1" or parts.port is None or origin not in allowlist["fixtures"]:
             raise ValueError("The fetch URL is not allowed")
-        return
+        return ["127.0.0.1"]
     if parts.port not in (None, 443) or host not in allowlist["hosts"]:
         raise ValueError("The fetch URL is not allowed")
-    addresses = resolve(host)
-    if not isinstance(addresses, list) or not addresses or any(not public_unicast(item) for item in addresses):
+    found = resolve(host)
+    if not isinstance(found, list) or not found or any(not public_unicast(item) for item in found):
         raise ValueError("The fetch URL is not allowed")
+    try:
+        return [str(ipaddress.ip_address(item)) for item in found]
+    except ValueError:
+        raise ValueError("The fetch URL is not allowed") from None
 
 
 def visible_text(page):
@@ -159,8 +175,8 @@ class _StopRedirect(request.HTTPRedirectHandler):
         return None
 
 
-def _open(url):
-    opener = request.build_opener(request.ProxyHandler({}), _StopRedirect)
+def _open(url, addresses):
+    opener = pinhttp.opener(parse.urlsplit(url).scheme, addresses, _StopRedirect)
     try:
         response = opener.open(request.Request(url, headers={"Accept": "text/plain, text/html"}), timeout=5)
     except error.HTTPError as failure:
@@ -200,11 +216,11 @@ def _open(url):
 
 
 def fetch(url, allowlist, resolve=system_resolve, token=None):
-    check_target(url, allowlist, resolve)
-    page, redirect = _open(url)
+    pinned = check_target(url, allowlist, resolve)
+    page, redirect = _open(url, pinned)
     if redirect is not None:
-        check_target(redirect, allowlist, resolve)
-        page, again = _open(redirect)
+        redirected = check_target(redirect, allowlist, resolve)
+        page, again = _open(redirect, redirected)
         if again is not None:
             raise ValueError("The fetch URL is not allowed")
     if page is None:

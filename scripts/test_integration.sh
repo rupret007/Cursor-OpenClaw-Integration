@@ -58,6 +58,7 @@ for f in "${BASE_DIR}/first-officer/litellm/configure.py" "${BASE_DIR}/first-off
          "${BASE_DIR}/first-officer/pilot/rollback_drill.py" \
          "${BASE_DIR}/first-officer/privacy/scan.py" \
          "${BASE_DIR}/first-officer/archive.py" \
+         "${BASE_DIR}/first-officer/pinhttp.py" \
          "${BASE_DIR}/first-officer/guard/sanitize.py" \
          "${BASE_DIR}/first-officer/guard/restricted_fetch.py" \
          "${BASE_DIR}/first-officer/guard/boundary.py"; do

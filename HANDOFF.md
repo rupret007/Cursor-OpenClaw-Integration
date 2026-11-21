@@ -14,7 +14,7 @@ Follow `RESEARCH-SETUP.md`. Leave Phoenix, Restate and Hatchet uninstalled until
 
 ## Open failures
 
-None in the local gates. The four pull-request jobs are checked on the push of the commit that contains this file. Gateway activation, timed Telegram checks, the live authority pilot and a live rollback still wait for Jeff. The gateway tar still needs the private prior bundle. The installed verifier check in `JEFF-ACTIONS.md` also waits for Jeff. Whether to provision an audit anchor outside the owner's writable state also waits for Jeff.
+None in the local gates. The four pull-request jobs passed on `aa6af5d85b609c75177b6f1760e47fe72fb710f0`. Gateway activation, timed Telegram checks, the live authority pilot and a live rollback still wait for Jeff. The gateway tar still needs the private prior bundle. The installed verifier check in `JEFF-ACTIONS.md` also waits for Jeff. Whether to provision an audit anchor outside the owner's writable state also waits for Jeff.
 
 ## Do not
 

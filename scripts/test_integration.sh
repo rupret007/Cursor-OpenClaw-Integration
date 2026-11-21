@@ -55,7 +55,9 @@ for f in "${BASE_DIR}/first-officer/litellm/configure.py" "${BASE_DIR}/first-off
          "${BASE_DIR}/first-officer/status/publish.py" \
          "${BASE_DIR}/first-officer/acceptance/cycle.py" \
          "${BASE_DIR}/first-officer/pilot/rehearse.py" \
-         "${BASE_DIR}/first-officer/pilot/rollback_drill.py"; do
+         "${BASE_DIR}/first-officer/pilot/rollback_drill.py" \
+         "${BASE_DIR}/first-officer/privacy/scan.py" \
+         "${BASE_DIR}/first-officer/archive.py"; do
   [[ -f "$f" ]] || { echo "Missing file: $f" >&2; exit 1; }
   python3 -m py_compile "$f"
 done
@@ -67,6 +69,7 @@ echo "[2/11] Python syntax compile..."
 python3 -m py_compile "$CLI"
 
 echo "[3/11] Unit tests..."
+python3 "${BASE_DIR}/first-officer/privacy/scan.py"
 python3 -m pytest -q "${BASE_DIR}/tests"
 
 echo "[4/11] Cursor handoff skill tests..."

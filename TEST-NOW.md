@@ -19,7 +19,7 @@ This is the same gate CI runs. It takes about two minutes.
 bash scripts/test_integration.sh
 ```
 
-Expect `940 passed` from the Python suite and a final line `All integration checks passed.`. The `Handoff failed.` lines inside the exhaustive check are expected: that check deliberately feeds bad arguments and requires each one to be refused.
+Expect `948 passed` from the Python suite and a final line `All integration checks passed.`. The `Handoff failed.` lines inside the exhaustive check are expected: that check deliberately feeds bad arguments and requires each one to be refused. Before the unit tests, the gate prints one line, `Secret scan clean. Files <n>. History commits <n>. Logs 0.`
 
 ## 2. The Segment 1 and captain gate
 
@@ -313,6 +313,43 @@ Restored the prior pin in <microseconds> us. The gateway was not touched.
 
 `/tmp/fo-rollback/pin.conf` contains the prior release pin, and `/tmp/fo-rollback/receipt.json` has `"gateway_touched": false` and `"restored": true`.
 
+## 13. Secrets and personal data
+
+This is the same scan the offline gate runs first. It reads this checkout, the commits reachable from it, and any log file under it. Nothing is sent anywhere.
+
+```bash
+python3 first-officer/privacy/scan.py
+```
+
+Expect one line and exit 0:
+
+```
+Secret scan clean. Files <n>. History commits <n>. Logs 0.
+```
+
+The two counts move when the branch moves. A line that names `credential`, `phone`, `address`, `email`, or `private-key` is a failure. The scan does not print the value.
+
+## 14. The review archive
+
+This packs a checksummed copy of the lane outside the checkout. It does not read the private prior bundle and it does not touch the gateway. The gateway tar still comes from `first-officer/release.py build` once that bundle is available.
+
+```bash
+rm -rf /tmp/fo-review
+python3 first-officer/archive.py pack /tmp/fo-review
+archive="$(printf '%s\n' /tmp/fo-review/first-officer-review-*.tar)"
+python3 first-officer/archive.py verify "$archive"
+```
+
+Pack prints three lines. The digest is 64 lowercase hex digits.
+
+```
+Review archive <digest>
+/tmp/fo-review/first-officer-review-<digest>.tar
+The gateway was not touched.
+```
+
+Verify prints `Review archive <digest> verified. The gateway was not touched.` The digest matches the pack line. The tar is mode 0600.
+
 ## What is not provable here yet
 
-The live gateway release, the timed Telegram checks and the supervised pilot on the real lease still need your approval. Hatchet, Restate and the Phoenix UI are not installed. No status collector is running on the machines. The ten gateway routine declarations stay inactive. The staged pilot lease is not the live one.
+The live gateway release, the timed Telegram checks and the supervised pilot on the real lease still need your approval. The gateway tar needs the private prior bundle, which is not in this repository. Hatchet, Restate and the Phoenix UI are not installed. No status collector is running on the machines. The ten gateway routine declarations stay inactive. The staged pilot lease is not the live one.

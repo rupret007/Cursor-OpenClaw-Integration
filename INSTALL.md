@@ -4,7 +4,7 @@ Jeff approves activation and runs the activation and rollback commands on bobser
 
 ## Stage on the Nuc
 
-From the reviewed PR checkout in a Linux shell, set `PRIOR_BUNDLE` to the private, extracted release bundle. The staging helper checks its inventory against the supported release pins. Use Node 24.16 or newer and Python 3.12 or newer.
+From the reviewed PR checkout in a Linux shell, set `PRIOR_BUNDLE` to the private, extracted release bundle. The staging helper checks its inventory against the supported release pins. `python3 -B first-officer/release.py build` runs this sequence and packs the candidate. Use Node 24.16 or newer and Python 3.12 or newer. The private prior bundle is not in this repository, so the gateway tar is not built here.
 
 ```bash
 set -euo pipefail
@@ -147,6 +147,29 @@ The drill writes a private copy, restores the prior config and pin, and prints t
 python3 first-officer/pilot/rollback_drill.py --root "$root"
 ```
 
+## Scan the checkout for secrets and personal data
+
+The scan reads this checkout, the commits reachable from it, and any `*.log` file or `logs` directory under it. Exit 0 prints one clean line. Exit 1 names the rule and the location and does not print the value. A shallow clone is refused. The offline gate runs this command before the unit tests.
+
+```bash
+python3 first-officer/privacy/scan.py
+```
+
+The clean line is `Secret scan clean. Files <n>. History commits <n>. Logs 0.` The counts move when the branch moves. A line that names `credential`, `phone`, `address`, `email`, or `private-key` is a failure.
+
+## Pack the review archive
+
+`pack` writes a checksummed tar of this lane outside the checkout. `verify` reads that tar and checks every file against `SHA256SUMS`. The archive is mode 0600. It does not read the private prior bundle and it does not call the gateway. A file the secret scan rejects stops the pack and leaves no archive.
+
+```bash
+rm -rf /tmp/fo-review
+python3 first-officer/archive.py pack /tmp/fo-review
+archive="$(printf '%s\n' /tmp/fo-review/first-officer-review-*.tar)"
+python3 first-officer/archive.py verify "$archive"
+```
+
+Pack prints `Review archive <digest>`, the tar path, and `The gateway was not touched.` Verify prints `Review archive <digest> verified. The gateway was not touched.` The two digests match. This tar is the offline copy. Gateway activation still uses the private prior bundle and `first-officer/release.py`.
+
 ## Check prerequisites on bobserver
 
 Run from the PR checkout as the account that owns `openclaw-gateway.service`. The GitHub CLI must authenticate as the configured owner account. The existing Andrea read-only bridge must answer from the service account using its private reader configuration.
@@ -178,7 +201,7 @@ If the Andrea check fails, resolve it while the current gateway is running. For 
 
 ## Publish and activate the reviewed candidate
 
-The service pin continues to use the root-owned verifier and its existing fallback slot. The private backup records the exact prior config and pin for rollback.
+`python3 -B first-officer/release.py activate` is the single activation command. It runs the sequence below, stops at the first failure, and records one private rollback. `--dry-run` prints the commands and runs none of them. The service pin continues to use the root-owned verifier and its existing fallback slot. The private backup records the exact prior config and pin for rollback.
 
 ```bash
 archive="$HOME/.openclaw/segment1-staged/first-officer-$release.tar"

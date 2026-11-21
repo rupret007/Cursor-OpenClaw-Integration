@@ -124,14 +124,30 @@ The release is a plan of reviewed commands, so the whole sequence is tested with
 
 The backlog references the bobserver lanes `infra-20261118`, `consolidate-20261119` and `arch-research-20261118`.
 
+## Secrets and personal data
+
+`first-officer/privacy/scan.py` reads the checkout, every commit reachable from it, and any log file under it. A credential, a phone number, a private or public address, an email outside the fixture hosts, or a private key is a finding. The report names the rule and the location. Identity trailers on a commit message stay out of the report. A shallow clone is refused. The only ignored credential strings are the two synthetic fixtures already used by the unit tests. The offline gate runs the command before the unit tests. The tests plant a credential, a phone number, an address and an email in a file, in a commit that later deletes the file, and in a log.
+
+On November 21, 2026 the command printed `Secret scan clean. Files 288. History commits 268. Logs 0.` That history count is this clone before the commit that records the scan. The offline gate then passed 948 Python tests, including the five privacy tests and the three archive tests. The Segment 1 gate passed 23 Node tests. `INSTALL.md` and `TEST-NOW.md` document the command. The pull-request job fetches the full history so CI runs the same scan.
+
+## Review archive
+
+`first-officer/archive.py pack` writes one mode-0600 tar of this lane outside the checkout and a `SHA256SUMS` manifest. `verify` checks every member against that manifest. A file the secret scan rejects stops the pack and leaves no archive. The command does not read the private prior bundle and does not call the gateway.
+
+On November 21, 2026 pack and verify agreed on digest `1782ce0bdc84b2f969a86d12beaafba64c21968452e30f5cf322130b83836d11`. That tar is the offline copy. The gateway tar still requires the private prior bundle and `first-officer/release.py build`.
+
+## Operator docs
+
+`CAPTAIN.md` points gateway activation at `first-officer/release.py` and records that the staged pilot and the staged pin restore leave the live lease alone. `LIVE-TEST.md` includes the untagged `summarize my texts` command and the `summarise` spelling, and it keeps the loopback page, the trace collector and the lane queue off the live check. `INSTALL.md` documents the scan and the review archive.
+
 ## Queued after step 8
 
 These additional acceptance items follow the eight ordered integration steps. Each requires the same local and CI gates and exact evidence before it can be marked done.
 
 - DONE for the staged file restore. The prior pin was written back and the read-back matched. The measured file restore was 114 us and did not touch the gateway. A live stop and start remains Jeff's.
-- Scan the repository, reachable Git history and relevant logs for secrets and personal data. Add an automated test that keeps the scan enforced.
-- DONE for the command and its gates. One combined release with a single activation command and rollback is proven above. The archive itself is built once the ordered steps land.
-- Update `CAPTAIN.md`, `INSTALL.md` and `LIVE-TEST.md` to reflect implemented and proven behavior, removing stale claims.
+- DONE. The secret and personal-data scan is enforced by the offline gate and by `tests/first_officer/test_privacy.py`. The November 21, 2026 scan was clean, as recorded above.
+- DONE for the review archive above. The gateway tar still waits on the private prior bundle. `first-officer/release.py` remains the single activation command and the single rollback.
+- DONE. `CAPTAIN.md`, `INSTALL.md` and `LIVE-TEST.md` match the staged pilot, the scan, the review archive and the live checks that still wait for Jeff.
 - Keep Cursor fallback within plan usage and ensure paid extras remain disabled. Prove the limit and disabled billing configuration with tests and evidence.
 
 BLOCKED: The `@andrea` and LiteLLM routing update is staged. Gateway activation, timed Telegram acceptance and the supervised authority pilot remain pending.

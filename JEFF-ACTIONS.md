@@ -6,7 +6,7 @@ Before any of it, you can verify the finished work yourself with [TEST-NOW.md](T
 
 ## 1. Approve and activate the combined release
 
-One digest, one command, one rollback. Build the candidate on the Nuc, read the digest, then activate on bobserver.
+One digest, one command, one rollback. Build the candidate on the Nuc from the private prior bundle, read the digest, then activate on bobserver. The review archive from `first-officer/archive.py` is the offline copy of this lane. It is not this activation.
 
 ```bash
 python3 -B first-officer/release.py build "$PRIOR_BUNDLE" "$staging"

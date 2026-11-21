@@ -58,6 +58,7 @@ The backlog references the bobserver lanes `infra-20261118`, `consolidate-202611
 
 These additional acceptance items follow the eight ordered integration steps. Each requires the same local and CI gates and exact evidence before it can be marked done.
 
+- Rehearse restoring the exact prior gateway release and pin on a staged copy and record the timing.
 - Scan the repository, reachable Git history and relevant logs for secrets and personal data. Add an automated test that keeps the scan enforced.
 - Produce one combined release bundle with a single activation command and rollback procedure, so Jeff reviews and approves the release once.
 - Update `CAPTAIN.md`, `INSTALL.md` and `LIVE-TEST.md` to reflect implemented and proven behavior, removing stale claims.

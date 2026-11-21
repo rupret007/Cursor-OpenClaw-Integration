@@ -39,6 +39,23 @@ For an existing restricted key, add `--refresh-reader` to the same command. The 
 
 The `@andrea` and LiteLLM routing update can reuse the verified Mac reader. Start with the Bobserver prerequisites below for this gateway-only upgrade.
 
+## Stage the LiteLLM lane policy
+
+Use a private copy of the current LiteLLM YAML and a reviewed JSON policy. The policy has a `fallbacks` object mapping each primary alias to an ordered list of fallback aliases and a `lanes` object keyed by lane name. Each lane specifies `models`, `max_budget` and `budget_duration`. Its model list must include the fallback aliases reachable from its primary aliases. Use the existing private environment references for the proxy master key and PostgreSQL connection.
+
+```bash
+python3 first-officer/litellm/configure.py "$proxy_config" "$lane_policy" render "$candidate_config"
+```
+
+After Jeff approves the proxy switch, use the management environment to provision each lane into its own private credential file. Repeating the command verifies the existing file against the reviewed policy. Load the Andrea lane key into `ANDREA_LITELLM_API_KEY` in Andrea's service environment, with `ANDREA_LITELLM_BASE_URL` and `ANDREA_LITELLM_MODEL` set to the reviewed endpoint and alias.
+
+```bash
+python3 first-officer/litellm/configure.py "$candidate_config" "$lane_policy" provision \
+  "$private_proxy_url" "$lane_name" "$lane_credential_file"
+```
+
+Use a distinct gateway lane key in `OPENCLAW_LITELLM_API_KEY`. The installer validates a candidate config that references this variable, so make it available to the operator's validation shell and the gateway service through their approved private environment before preparing the switch.
+
 ## Check prerequisites on bobserver
 
 Run from the PR checkout as the account that owns `openclaw-gateway.service`. The GitHub CLI must authenticate as the configured owner account. The existing Andrea read-only bridge must answer from the service account using its private reader configuration.

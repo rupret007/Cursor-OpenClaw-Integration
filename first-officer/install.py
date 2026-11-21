@@ -22,6 +22,7 @@ STORE = Path("/opt/openclaw-fo")
 SERVICE = "openclaw-gateway.service"
 PLUGIN = "first-officer-conductor"
 FAST_MODEL = "litellm/minimax-m3.1-flash"
+LANE_KEY_REF = "${OPENCLAW_LITELLM_API_KEY}"
 PIN_PREFIX = f"ExecStartPre=/usr/bin/python3 -I -B {STORE / 'verify-install.py'} %h/.openclaw/openclaw.json "
 DIGEST = re.compile(r"[0-9a-f]{64}")
 
@@ -134,7 +135,7 @@ def verify_config(path, release):
         raise ValueError(f"OpenClaw rejected the {label} configuration using the running gateway launcher")
 
 
-def candidate_config(original, release, previous=BASELINE):
+def candidate_config(original, release, previous=BASELINE, *, budgeted_litellm=True):
     cfg = json.loads(original)
     paths = cfg["plugins"]["load"]["paths"]
     base = STORE / f"first-officer-{previous}"
@@ -151,6 +152,11 @@ def candidate_config(original, release, previous=BASELINE):
     provider = cfg["models"]["providers"]["litellm"]
     if not any(row.get("id") == FAST_MODEL.split("/")[1] for row in provider.get("models", [])):
         raise ValueError("The existing fast model is unavailable in the gateway config")
+    if budgeted_litellm:
+        if any(name.lower() in {"authorization", "x-litellm-api-key", "x-api-key"}
+               for name in provider.get("headers", {})):
+            raise ValueError("A custom LiteLLM authorization header would bypass the gateway lane key")
+        provider["apiKey"] = LANE_KEY_REF
     cfg["plugins"]["load"]["paths"] = [path.replace(previous, release, 1) for path in expected]
     entry["llm"] = policy
     return (json.dumps(cfg, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
@@ -188,7 +194,8 @@ def prepare(release, backup, config, previous=BASELINE):
     verify_config(backup / "original-openclaw.json", previous)
     verify_config(backup / "candidate-openclaw.json", release)
     (backup / "plan.json").write_text(
-        json.dumps({"release": release, "previous": previous, "pin": str(path), "pin_identity": identity}) + "\n",
+        json.dumps({"release": release, "previous": previous, "pin": str(path), "pin_identity": identity,
+                    "budgeted_litellm": True}) + "\n",
         encoding="utf-8",
     )
 
@@ -289,7 +296,7 @@ def switch(backup, config, restore):
         owner_file(backup / "candidate-pin.conf", 65_536, private=True),
     )
     if candidate != (
-        candidate_config(original[0], release, previous),
+        candidate_config(original[0], release, previous, budgeted_litellm=plan.get("budgeted_litellm") is True),
         patch_pin(original[1], release, previous),
     ):
         raise ValueError("The saved config and pin pair changed")

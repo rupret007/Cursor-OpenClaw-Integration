@@ -27,7 +27,8 @@ def controller(tmp_path, monkeypatch):
                                str(base / "round6/runtime/first-officer-conductor.mjs")]},
             "entries": {installer.PLUGIN: {"enabled": True, "hooks": {"allowConversationAccess": True}}},
         },
-        "models": {"providers": {"litellm": {"models": [{"id": installer.FAST_MODEL.split("/")[1]}]}}},
+        "models": {"providers": {"litellm": {"apiKey": "${LEGACY_MODEL_KEY}",
+                                             "models": [{"id": installer.FAST_MODEL.split("/")[1]}]}}},
         "tools": {"deny": ["write", "message"]},
     }), encoding="utf-8")
     config.chmod(0o600)
@@ -56,6 +57,7 @@ def test_install_switch_and_rollback_preserve_prior_config_and_pin(controller):
     installer.switch(backup, config, restore=False)
     activated = json.loads(config.read_bytes())
     assert activated["tools"] == {"deny": ["write", "message"]}
+    assert activated["models"]["providers"]["litellm"]["apiKey"] == "${OPENCLAW_LITELLM_API_KEY}"
     auth = activated["plugins"]["entries"][installer.PLUGIN]
     assert auth["hooks"] == {"allowConversationAccess": True}
     assert auth["llm"]["allowedCompletionModels"] == [installer.FAST_MODEL]
@@ -63,6 +65,21 @@ def test_install_switch_and_rollback_preserve_prior_config_and_pin(controller):
     assert calls[-5:] == ["verify", "stop", "daemon-reload", "start", "ready"]
     installer.switch(backup, config, restore=True)
     assert (config.read_bytes(), pin.read_bytes()) == original
+
+
+def test_legacy_rollback_accepts_a_plan_without_the_lane_key_marker(controller):
+    installer, release, config, pin, backup, _ = controller
+    plan_path = backup / "plan.json"
+    plan = json.loads(plan_path.read_bytes())
+    plan.pop("budgeted_litellm")
+    plan_path.write_text(json.dumps(plan), encoding="utf-8")
+    prior = config.read_bytes()
+    old_candidate = installer.candidate_config(prior, release, budgeted_litellm=False)
+    (backup / "candidate-openclaw.json").write_bytes(old_candidate)
+    config.write_bytes(old_candidate)
+    pin.write_bytes((backup / "candidate-pin.conf").read_bytes())
+    installer.switch(backup, config, restore=True)
+    assert config.read_bytes() == prior
 
 
 def test_gateway_start_failure_restores_prior_bytes_and_reports_failure(controller, monkeypatch):

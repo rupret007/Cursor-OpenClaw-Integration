@@ -113,7 +113,7 @@ def public_unicast(raw):
         address = ipaddress.ip_address(raw)
     except ValueError:
         return False
-    return isinstance(address, ipaddress.IPv4Address) and address.is_global
+    return address.is_global
 
 
 def system_resolve(host):

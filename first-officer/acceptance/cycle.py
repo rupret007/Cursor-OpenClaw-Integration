@@ -17,10 +17,12 @@ from zoneinfo import ZoneInfo
 import errno
 import fcntl
 import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
 import re
+import secrets
 import stat
 import sys
 import time
@@ -127,15 +129,81 @@ def _digest_text(payload):
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
-def _append(file, previous, seq, body):
+def _mac(key, seq, digest):
+    return hmac.new(bytes.fromhex(key), f"{seq}.{digest}".encode(), hashlib.sha256).hexdigest()
+
+
+def _read_key(root):
+    path = root / "audit.key"
+    if path.is_symlink():
+        raise ValueError("The acceptance file must be a private owner file")
+    try:
+        handle = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise ValueError("The acceptance file must be a private owner file") from None
+        raise
+    with os.fdopen(handle, "r", encoding="utf-8") as file:
+        _check_private(os.fstat(file.fileno()))
+        key = file.read().strip()
+    if not DIGEST.fullmatch(key):
+        raise ValueError("The audit checkpoint was altered")
+    return key
+
+
+def _key(root):
+    current = _read_key(root)
+    if current is not None:
+        return current
+    path = root / "audit.key"
+    temporary = path.with_name(".audit.key.tmp")
+    handle = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(handle, "w", encoding="utf-8") as file:
+        file.write(secrets.token_hex(32) + "\n")
+        file.flush()
+        os.fsync(file.fileno())
+    os.replace(temporary, path)
+    os.chmod(path, 0o600)
+    return _read_key(root)
+
+
+def _checkpoint(root, seq, digest):
+    key = _key(root)
+    _write_json(root / "audit.head", {"digest": digest, "mac": _mac(key, seq, digest), "seq": seq})
+
+
+def _check_head(root, rows, previous):
+    head = _read_json(root / "audit.head", {"digest", "mac", "seq"})
+    key = _read_key(root)
+    if not rows:
+        if head is not None or key is not None:
+            raise ValueError("The audit chain was truncated")
+        return
+    if head is None or key is None:
+        raise ValueError("The audit chain has no checkpoint")
+    presented = str(head.get("mac", ""))
+    expected = _mac(key, head["seq"], head["digest"]) if type(head.get("seq")) is int else ""
+    if (type(head.get("seq")) is not int or head["seq"] != len(rows) - 1
+            or head.get("digest") != previous or not DIGEST.fullmatch(str(head.get("digest", "")))
+            or len(presented) != len(expected) or not hmac.compare_digest(presented, expected)):
+        if head.get("digest") != previous or head.get("seq") != len(rows) - 1:
+            raise ValueError("The audit chain was truncated")
+        raise ValueError("The audit checkpoint was altered")
+
+
+def _append(root, file, previous, seq, body):
     full = {**body, "prev": previous, "seq": seq}
     payload = canonical(full)
-    line = _digest_text(payload) + "\t" + payload + "\n"
+    digest = _digest_text(payload)
+    line = digest + "\t" + payload + "\n"
     file.seek(0, os.SEEK_END)
     file.write(line)
     file.flush()
     os.fsync(file.fileno())
-    return _digest_text(payload)
+    _checkpoint(root, seq, digest)
+    return digest
 
 
 def _read_json(path, expected):
@@ -207,7 +275,7 @@ def propose(root, text, now):
             if current["nonce"] == nonce and current["expires_at"] >= moment:
                 return {"digest": current["digest"], "expires_at": current["expires_at"], "nonce": nonce, "text": text}
             if current["expires_at"] < moment:
-                _append(audit, _rows(audit)[1], len(rows), {
+                _append(root, audit, _rows(audit)[1], len(rows), {
                     "action": "save-memory", "at": moment, "digest": current["digest"],
                     "kind": "refused", "nonce": current["nonce"], "reason": "expired",
                 })
@@ -220,7 +288,7 @@ def _audit_refusal(root, action, nonce, reason, moment):
     root = _root(root)
     with _locked(root / "audit.log") as audit:
         rows, previous = _rows(audit)
-        _append(audit, previous, len(rows), {
+        _append(root, audit, previous, len(rows), {
             "action": action, "at": moment, "digest": GENESIS, "kind": "refused", "nonce": nonce, "reason": reason,
         })
 
@@ -253,7 +321,7 @@ def confirm(root, nonce, presented, now):
         accepted = [body for _digest, body in rows if body["nonce"] == nonce and body["kind"] == "accepted"]
         pending = _read_json(pending_path, {"digest", "expires_at", "nonce", "text"})
         if accepted or pending is None or pending["nonce"] != nonce:
-            _append(audit, previous, len(rows), {
+            _append(root, audit, previous, len(rows), {
                 "action": "save-memory", "at": moment, "digest": presented, "kind": "refused",
                 "nonce": nonce, "reason": "not-pending",
             })
@@ -261,20 +329,20 @@ def confirm(root, nonce, presented, now):
         try:
             _pending_binding(pending)
         except ValueError:
-            _append(audit, previous, len(rows), {
+            _append(root, audit, previous, len(rows), {
                 "action": "save-memory", "at": moment, "digest": presented, "kind": "refused",
                 "nonce": nonce, "reason": "digest",
             })
             return {"saved": False, "reason": "digest"}
         recomputed = _digest(_approval(pending["nonce"], pending["text"], pending["expires_at"]))
         if presented != pending["digest"] or presented != recomputed:
-            _append(audit, previous, len(rows), {
+            _append(root, audit, previous, len(rows), {
                 "action": "save-memory", "at": moment, "digest": presented, "kind": "refused",
                 "nonce": nonce, "reason": "digest",
             })
             return {"saved": False, "reason": "digest"}
         if moment > pending["expires_at"]:
-            _append(audit, previous, len(rows), {
+            _append(root, audit, previous, len(rows), {
                 "action": "save-memory", "at": moment, "digest": presented, "kind": "refused",
                 "nonce": nonce, "reason": "expired",
             })
@@ -288,7 +356,7 @@ def confirm(root, nonce, presented, now):
             "saved_at": moment, "text": pending["text"],
         }
         memory["facts"].append(fact)
-        _append(audit, previous, len(rows), {
+        _append(root, audit, previous, len(rows), {
             "action": "save-memory", "at": moment, "digest": presented, "kind": "accepted", "nonce": nonce,
         })
         _write_json(memory_path, memory)
@@ -323,7 +391,7 @@ def run_routine(root, now, dry_run=True):
     }
     with _locked(root / "audit.log") as audit:
         rows, previous = _rows(audit)
-        _append(audit, previous, len(rows), {
+        _append(root, audit, previous, len(rows), {
             "action": "routine-dry-run", "at": moment, "digest": _digest(payload),
             "kind": "accepted", "next_run": following, "nonce": f"routine-{moment}",
         })
@@ -332,10 +400,16 @@ def run_routine(root, now, dry_run=True):
 
 
 def verify(root):
-    """Accept a clean chain. A changed, missing, or extra line is a failure."""
+    """Accept a clean chain. A changed, missing, extra, or truncated line is a failure."""
     root = _root(root)
     with _locked(root / "audit.log") as audit:
-        rows, _previous = _rows(audit)
+        rows, previous = _rows(audit)
+        _check_head(root, rows, previous)
+        pending = _read_json(root / "pending.json", {"digest", "expires_at", "nonce", "text"})
+    if pending is not None:
+        _pending_binding(pending)
+        if any(body["nonce"] == pending["nonce"] and body["kind"] == "accepted" for _line, body in rows):
+            raise ValueError("The pending approval has no audit line")
     seen = set()
     memory = _read_json(root / "memory.json", {"facts"}) or {"facts": []}
     if not isinstance(memory.get("facts"), list):
@@ -365,6 +439,8 @@ def verify(root):
             if body["digest"] != expected:
                 raise ValueError("The routine receipt does not match the audit")
             routine_lines.append(body)
+    if not routine_lines and (root / "receipt-lane-review.json").exists():
+        raise ValueError("The routine receipt has no audit line")
     if routine_lines:
         last = routine_lines[-1]
         receipt = _read_json(root / "receipt-lane-review.json", {

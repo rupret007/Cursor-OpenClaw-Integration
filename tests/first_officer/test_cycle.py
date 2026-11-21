@@ -100,6 +100,31 @@ def test_expired_secret_and_live_routine_do_not_save_or_send(tmp_path):
     assert not (tmp_path / "untouched").exists()
 
 
+def test_a_truncated_chain_or_an_orphan_receipt_does_not_verify(tmp_path):
+    root = tmp_path / "cycle"
+    cycle.run_routine(root, NOW)
+    assert cycle.verify(root) == 1
+    (root / "audit.log").write_text("", encoding="utf-8")
+    with pytest.raises(ValueError, match="truncated"):
+        cycle.verify(root)
+    for name in ("audit.head", "audit.key"):
+        leftover = root / name
+        if leftover.exists():
+            leftover.unlink()
+    with pytest.raises(ValueError, match="receipt"):
+        cycle.verify(root)
+
+    pending = tmp_path / "pending"
+    cycle.propose(pending, FACT, NOW)
+    assert cycle.verify(pending) == 0
+    broken = json.loads((pending / "pending.json").read_text(encoding="utf-8"))
+    broken["text"] = "A different sentence."
+    (pending / "pending.json").write_text(json.dumps(broken), encoding="utf-8")
+    (pending / "pending.json").chmod(0o600)
+    with pytest.raises(ValueError, match="pending|altered"):
+        cycle.verify(pending)
+
+
 def test_schedule_is_the_next_chicago_morning_and_two_confirms_save_once(tmp_path):
     morning = datetime(2026, 11, 20, 12, 30, tzinfo=timezone.utc)
     same_day = datetime(2026, 11, 20, 7, tzinfo=CHICAGO)

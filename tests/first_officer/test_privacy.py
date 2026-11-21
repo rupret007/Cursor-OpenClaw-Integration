@@ -119,6 +119,50 @@ def test_history_scans_a_quoted_path_and_the_deleted_credential(tmp_path):
     assert code == 1 and CREDENTIAL not in rendered
 
 
+def test_history_scans_a_credential_that_exists_only_in_a_merge(tmp_path):
+    """A credential introduced and removed only by merge resolutions is still a finding."""
+    root = tmp_path / "checkout"
+    root.mkdir()
+    run = lambda *args: subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
+    run("init", "-q", "-b", "main")
+    run("config", "user.email", "lane@example.invalid")
+    run("config", "user.name", "First Officer lane")
+    (root / "note.txt").write_text("base\n", encoding="utf-8")
+    run("add", "note.txt")
+    run("commit", "-q", "-m", "base")
+    run("checkout", "-q", "-b", "left")
+    (root / "note.txt").write_text("left\n", encoding="utf-8")
+    run("commit", "-aq", "-m", "left")
+    run("checkout", "-q", "main")
+    run("checkout", "-q", "-b", "right")
+    (root / "note.txt").write_text("right\n", encoding="utf-8")
+    run("commit", "-aq", "-m", "right")
+    run("checkout", "-q", "left")
+    conflict = subprocess.run(
+        ["git", "-C", str(root), "merge", "--no-commit", "right"], capture_output=True,
+    )
+    assert conflict.returncode != 0
+    (root / "note.txt").write_text(CREDENTIAL + "\n", encoding="utf-8")
+    run("add", "note.txt")
+    run("commit", "-q", "-m", "merge one")
+    run("checkout", "-q", "-b", "side", "main")
+    (root / "note.txt").write_text("side\n", encoding="utf-8")
+    run("commit", "-aq", "-m", "side")
+    run("checkout", "-q", "left")
+    again = subprocess.run(
+        ["git", "-C", str(root), "merge", "--no-commit", "side"], capture_output=True,
+    )
+    assert again.returncode != 0
+    (root / "note.txt").write_text("clean\n", encoding="utf-8")
+    run("add", "note.txt")
+    run("commit", "-q", "-m", "merge two")
+    findings, count = scan.scan_history(root)
+    assert count > 1
+    assert any(item["rule"] == "credential" and item["path"] == "note.txt" for item in findings)
+    rendered, code = scan.report({"files": 0, "commits": count, "logs": 0, "findings": findings})
+    assert code == 1 and CREDENTIAL not in rendered
+
+
 def test_the_repository_history_and_logs_stay_clean(capsys):
     result = scan.survey(ROOT)
     assert result["findings"] == []

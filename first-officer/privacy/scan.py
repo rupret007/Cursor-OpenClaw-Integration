@@ -4,7 +4,8 @@
 A finding names the rule and the location. It never includes the matched text.
 Known synthetic fixtures are the only credential strings that are ignored, and a
 different string of the same shape is a failure. The command exits 1 when any
-finding remains.
+finding remains. History includes one patch per parent of a merge, so a value
+that appears only in a merge result is still a finding.
 """
 
 import argparse
@@ -339,7 +340,9 @@ def scan_history(root):
             if key not in seen:
                 seen.add(key)
                 findings.append({"rule": finding["rule"], "path": "message", "commit": commit})
-    patch = _git(root, "log", "--all", "-p", "--no-color", "-U0", "--pretty=format:%H")
+    # `-m` emits one patch per merge parent. Plain `git log -p` omits merge
+    # results, so a credential that exists only in a merge resolution is missed.
+    patch = _git(root, "log", "--all", "-m", "-p", "--no-color", "-U0", "--pretty=format:%H")
     commit = ""
     path = ""
     for raw in patch.splitlines():

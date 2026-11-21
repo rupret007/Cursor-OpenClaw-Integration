@@ -114,14 +114,14 @@ The handoff names the branch, the head it describes, the step in progress and wh
 
 ## 5. The single activation command, with nothing activated
 
-The whole release is one command with one rollback. Print the exact plan without running any of it.
+The whole release is one activation command. The rollback restores the prior config, pin, and service. It does not delete the published candidate. Print the exact plan without running any of it.
 
 ```bash
 python3 -B first-officer/release.py --dry-run build "$PRIOR_BUNDLE" /tmp/fo-staging
 python3 -B first-officer/release.py --dry-run activate "$(printf 'a%.0s' {1..64})" /tmp/x.tar /tmp/fo-backup
 ```
 
-The build plan stages the candidate from your verified prior bundle, runs the packaged Round 13 canary and the Segment 1 gate against it, and packs it. The activate plan confirms the running gateway, the GitHub login and the Andrea read-only bridge before it touches anything, publishes the candidate read-only under its digest, prepares the private rollback, switches, and confirms readiness. It stops at the first failure. When you are ready to activate for real, drop `--dry-run`; until then nothing in this section changes anything.
+The build plan stages the candidate from your verified prior bundle, runs the packaged Round 13 canary and the Segment 1 gate against it, refuses to replace an existing archive, and packs it. The activate plan confirms the running gateway, the GitHub login and the Andrea read-only bridge before it touches anything, compares the manifest digest with the approved release, prepares the private rollback, publishes the candidate read-only under its digest, switches, and confirms readiness. It stops at the first failure. When you are ready to activate for real, drop `--dry-run`; until then nothing in this section changes anything.
 
 ## 6. Step 3: Hatchet, then Restate only if Hatchet refuses
 

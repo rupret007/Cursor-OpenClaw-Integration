@@ -7,6 +7,7 @@ delivery tool or the send method. A loopback carrier is the adapter.
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+import stat
 import tempfile
 import threading
 from unittest import mock
@@ -183,6 +184,151 @@ def test_unconfirmed_delivery_is_not_recorded(tmp_path, monkeypatch):
         finally:
             down.shutdown()
     finally:
+        db.unlink(missing_ok=True)
+
+
+def _bound_draft():
+    from services.andrea_sync.outbound import bind_draft, new_nonce
+
+    return bind_draft(
+        target="Candace",
+        body="hi from you",
+        principal="principal-1",
+        origin={"channel": "telegram", "chat_id": "9104", "message_id": "1"},
+        expires_at=1_900_000_000,
+        nonce=new_nonce(),
+        skill_key="bluebubbles",
+        label="text messaging",
+        created_at=1.0,
+    )
+
+
+def test_confirmed_send_is_not_retried_after_local_receipt_failure(tmp_path, monkeypatch):
+    """A confirmed carrier response that is not durably recorded must not be sent again.
+
+    This is the offline repro: the carrier returns one exact receipt, local
+    serialization of that receipt raises, the serializer is restored, and the
+    same draft is delivered again. The carrier must not be called twice.
+    """
+    import services.andrea_sync.outbound as outbound
+
+    carrier = serve("confirm")
+    try:
+        monkeypatch.setenv(
+            "ANDREA_OUTBOUND_CARRIER",
+            f"http://127.0.0.1:{carrier.server_address[1]}/deliver",
+        )
+        draft = _bound_draft()
+        outbox = tmp_path / "outbox.jsonl"
+        real_dumps = outbound.json.dumps
+
+        def dumps(payload, *args, **kwargs):
+            if (isinstance(payload, dict) and payload.get("source") == "tool"
+                    and payload.get("delivered") is True):
+                raise RuntimeError("local receipt serialization failed")
+            return real_dumps(payload, *args, **kwargs)
+
+        monkeypatch.setattr(outbound.json, "dumps", dumps)
+        with pytest.raises(outbound.DeliveryUncertain, match="manual check"):
+            outbound.deliver(draft, outbox)
+        monkeypatch.setattr(outbound.json, "dumps", real_dumps)
+        pending_file = outbox.with_name(outbox.name + ".pending")
+        assert draft["digest"] in pending_file.read_text(encoding="utf-8")
+        assert stat.S_IMODE(pending_file.stat().st_mode) == 0o600
+        assert len(carrier.seen) == 1
+        with pytest.raises(outbound.DeliveryUncertain, match="manual check"):
+            outbound.deliver(draft, outbox)
+        assert len(carrier.seen) == 1
+        request = json.loads(carrier.seen[0])
+        assert request["digest"] == draft["digest"]
+        assert "delivered" not in request
+    finally:
+        carrier.shutdown()
+
+
+def test_a_pending_send_is_recorded_from_a_digest_query_without_another_post(tmp_path, monkeypatch):
+    """When a later query can prove the digest, record that receipt and do not POST again."""
+    import services.andrea_sync.outbound as outbound
+
+    carrier = serve("confirm")
+    try:
+        monkeypatch.setenv(
+            "ANDREA_OUTBOUND_CARRIER",
+            f"http://127.0.0.1:{carrier.server_address[1]}/deliver",
+        )
+        draft = _bound_draft()
+        outbox = tmp_path / "outbox.jsonl"
+        real_dumps = outbound.json.dumps
+
+        def dumps(payload, *args, **kwargs):
+            if (isinstance(payload, dict) and payload.get("source") == "tool"
+                    and payload.get("delivered") is True):
+                raise RuntimeError("local receipt serialization failed")
+            return real_dumps(payload, *args, **kwargs)
+
+        monkeypatch.setattr(outbound.json, "dumps", dumps)
+        with pytest.raises(outbound.DeliveryUncertain):
+            outbound.deliver(draft, outbox)
+        monkeypatch.setattr(outbound.json, "dumps", real_dumps)
+        request = json.loads(carrier.seen[0])
+        receipt = {
+            "body": request["body"],
+            "carrier": carrier.carrier_id,
+            "delivered": True,
+            "digest": request["digest"],
+            "source": "tool",
+            "target": request["target"],
+            "tool": request["tool"],
+        }
+        monkeypatch.setattr(outbound, "_query_carrier", lambda _draft: receipt)
+        found = outbound.deliver(draft, outbox)
+        assert found["digest"] == draft["digest"]
+        assert found["carrier"] == carrier.carrier_id
+        assert len(carrier.seen) == 1
+        again = outbound.deliver(draft, outbox)
+        assert again["digest"] == draft["digest"]
+        assert len(carrier.seen) == 1
+    finally:
+        carrier.shutdown()
+
+
+def test_the_server_surfaces_an_unrecorded_confirmation_for_manual_check(tmp_path, monkeypatch):
+    """The production confirmation path must not call the carrier again or say the message was sent."""
+    import services.andrea_sync.outbound as outbound
+
+    db = Path(tempfile.mkstemp(suffix=".db")[1])
+    carrier = serve("confirm")
+    try:
+        server = _server(db, monkeypatch)
+        monkeypatch.setenv(
+            "ANDREA_OUTBOUND_CARRIER",
+            f"http://127.0.0.1:{carrier.server_address[1]}/deliver",
+        )
+        drafted, _pending = _draft(server, "tg-uncertain", 921)
+        real_dumps = outbound.json.dumps
+
+        def dumps(payload, *args, **kwargs):
+            if (isinstance(payload, dict) and payload.get("source") == "tool"
+                    and payload.get("delivered") is True):
+                raise RuntimeError("local receipt serialization failed")
+            return real_dumps(payload, *args, **kwargs)
+
+        monkeypatch.setattr(outbound.json, "dumps", dumps)
+        _confirmed, reason, reply = _confirm(server, "tg-uncertain-send", 922)
+        assert reason != "outbound_message_sent"
+        assert "I sent it" not in reply
+        assert "manual check" in reply
+        assert server._load_pending_outbound_draft(drafted)
+        assert len(carrier.seen) == 1
+        monkeypatch.setattr(outbound.json, "dumps", real_dumps)
+        _again, reason, reply = _confirm(server, "tg-uncertain-again", 923)
+        assert reason != "outbound_message_sent"
+        assert "I sent it" not in reply
+        assert "manual check" in reply
+        assert len(carrier.seen) == 1
+        assert server._load_pending_outbound_draft(drafted)
+    finally:
+        carrier.shutdown()
         db.unlink(missing_ok=True)
 
 

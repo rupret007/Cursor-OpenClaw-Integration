@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import hashlib
 import hmac
@@ -114,6 +115,18 @@ def receipt_matches(draft: Mapping[str, Any], receipt: Any) -> bool:
 CARRIER_ID = re.compile(r"[A-Za-z0-9_-]{8,64}")
 DISABLED = "Outbound delivery is disabled until a loopback carrier confirms it"
 UNCONFIRMED = "The carrier did not confirm delivery"
+UNCERTAIN = (
+    "The outbound send may already have reached the carrier and was not recorded. "
+    "It needs a manual check."
+)
+
+
+class DeliveryUncertain(ValueError):
+    """A carrier attempt has no durable receipt. Another send would be a guess."""
+
+
+class _CarrierRejected(ValueError):
+    """The carrier finished its answer and did not confirm this draft."""
 
 
 def _carrier_target() -> tuple[int, str]:
@@ -153,22 +166,22 @@ def _ask_carrier(draft: Mapping[str, Any]) -> dict[str, Any]:
         raw = response.read(4097)
         status = response.status
     except (OSError, http.client.HTTPException, TimeoutError):
-        raise ValueError(UNCONFIRMED) from None
+        raise DeliveryUncertain(UNCERTAIN) from None
     finally:
         connection.close()
     if status != 200 or len(raw) > 4096:
-        raise ValueError(UNCONFIRMED)
+        raise _CarrierRejected(UNCONFIRMED)
     try:
         payload = json.loads(raw)
     except (UnicodeError, json.JSONDecodeError):
-        raise ValueError(UNCONFIRMED) from None
+        raise DeliveryUncertain(UNCERTAIN) from None
     if not isinstance(payload, dict) or payload.get("delivered") is not True:
-        raise ValueError(UNCONFIRMED)
+        raise _CarrierRejected(UNCONFIRMED)
     carrier = payload.get("carrier")
     if (payload.get("target") != request["target"] or payload.get("body") != request["body"]
             or payload.get("digest") != request["digest"] or payload.get("tool") != request["tool"]
             or not isinstance(carrier, str) or not CARRIER_ID.fullmatch(carrier)):
-        raise ValueError(UNCONFIRMED)
+        raise _CarrierRejected(UNCONFIRMED)
     return {
         "body": payload["body"],
         "carrier": carrier,
@@ -178,6 +191,17 @@ def _ask_carrier(draft: Mapping[str, Any]) -> dict[str, Any]:
         "target": payload["target"],
         "tool": payload["tool"],
     }
+
+
+def _query_carrier(draft: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Look up one digest without sending.
+
+    The checked-in carrier protocol is a single POST. That POST is a send, and
+    the protocol has no digest query, so this returns None. The caller then
+    fails closed instead of posting again.
+    """
+    del draft
+    return None
 
 
 def _stored_for(file: Any, digest: str) -> dict[str, Any] | None:
@@ -191,12 +215,88 @@ def _stored_for(file: Any, digest: str) -> dict[str, Any] | None:
     return None
 
 
-def deliver(draft: Mapping[str, Any], outbox: Path) -> dict[str, Any]:
-    """Ask the carrier, then record that response and read it back.
+def _pending_path(outbox: Path) -> Path:
+    return outbox.with_name(outbox.name + ".pending")
 
-    The outbox does not mark a message delivered. A missing carrier, a refusal,
-    or a response for a different draft leaves no success record. A second call
-    with the same digest returns the stored carrier receipt and does not ask again.
+
+def _fsync_dir(directory: Path) -> None:
+    handle = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(handle)
+    finally:
+        os.close(handle)
+
+
+def _load_pending(outbox: Path) -> dict[str, Any]:
+    target = _pending_path(outbox)
+    if target.is_symlink():
+        raise ValueError("The outbound outbox must be a private file")
+    try:
+        handle = os.open(target, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return {}
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise ValueError("The outbound outbox must be a private file") from None
+        raise
+    with os.fdopen(handle, "r", encoding="utf-8") as file:
+        raw = file.read()
+    if not raw.strip():
+        return {}
+    try:
+        document = json.loads(raw)
+    except json.JSONDecodeError:
+        raise DeliveryUncertain(UNCERTAIN) from None
+    if not isinstance(document, dict):
+        raise DeliveryUncertain(UNCERTAIN)
+    return document
+
+
+def _store_pending(outbox: Path, pending: Mapping[str, Any]) -> None:
+    """Replace the pending file and fsync it before any carrier I/O continues."""
+    target = _pending_path(outbox)
+    if target.is_symlink() or target.parent.is_symlink():
+        raise ValueError("The outbound outbox must be a private file")
+    temporary = target.with_name(f".{target.name}.{secrets.token_hex(4)}.tmp")
+    payload = json.dumps(dict(pending), sort_keys=True, separators=(",", ":")) + "\n"
+    handle = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as file:
+            file.write(payload)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temporary, target)
+        os.chmod(target, 0o600)
+        _fsync_dir(target.parent)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+
+def _is_pending(pending: Mapping[str, Any], digest: str) -> bool:
+    entry = pending.get(digest)
+    return isinstance(entry, dict) and entry.get("state") == "pending" and entry.get("digest") == digest
+
+
+def _append_receipt(file: Any, record: Mapping[str, Any]) -> None:
+    line = json.dumps(dict(record), sort_keys=True, separators=(",", ":"))
+    file.seek(0, os.SEEK_END)
+    file.write(line + "\n")
+    file.flush()
+    os.fsync(file.fileno())
+
+
+def deliver(draft: Mapping[str, Any], outbox: Path) -> dict[str, Any]:
+    """Record a pending operation, then ask the carrier, then record its receipt.
+
+    The outbox does not mark a message delivered. The pending line is durable
+    before the carrier is contacted. A second call with a pending digest and no
+    receipt does not POST again: the protocol cannot query by digest, so the
+    call fails closed for a manual check. A stored receipt is returned as-is.
+    A completed refusal is not a send and may be tried again.
     """
     if not draft_binding_ok(draft):
         raise ValueError("The outbound draft is not bound")
@@ -213,13 +313,40 @@ def deliver(draft: Mapping[str, Any], outbox: Path) -> dict[str, Any]:
         existing = _stored_for(file, digest)
         if existing is not None and receipt_matches(draft, existing):
             return existing
-        record = _ask_carrier(draft)
-        line = json.dumps(record, sort_keys=True, separators=(",", ":"))
-        file.seek(0, os.SEEK_END)
-        file.write(line + "\n")
-        file.flush()
-        os.fsync(file.fileno())
-        found = _stored_for(file, digest)
+        pending = _load_pending(path)
+        if _is_pending(pending, digest):
+            queried = _query_carrier(draft)
+            if receipt_matches(draft, queried):
+                try:
+                    _append_receipt(file, queried)
+                    found = _stored_for(file, digest)
+                except DeliveryUncertain:
+                    raise
+                except (OSError, RuntimeError, TypeError, ValueError):
+                    raise DeliveryUncertain(UNCERTAIN) from None
+                if found is None or not receipt_matches(draft, found):
+                    raise DeliveryUncertain(UNCERTAIN)
+                pending.pop(digest, None)
+                _store_pending(path, pending)
+                return found
+            raise DeliveryUncertain(UNCERTAIN)
+        pending[digest] = {"digest": digest, "state": "pending"}
+        _store_pending(path, pending)
+        try:
+            record = _ask_carrier(draft)
+        except _CarrierRejected:
+            pending.pop(digest, None)
+            _store_pending(path, pending)
+            raise ValueError(UNCONFIRMED) from None
+        try:
+            _append_receipt(file, record)
+            found = _stored_for(file, digest)
+        except DeliveryUncertain:
+            raise
+        except (OSError, RuntimeError, TypeError, ValueError):
+            raise DeliveryUncertain(UNCERTAIN) from None
         if found is None or found.get("carrier") != record["carrier"] or found.get("delivered") is not True:
-            raise ValueError("The outbound delivery was not recorded")
+            raise DeliveryUncertain(UNCERTAIN)
+        pending.pop(digest, None)
+        _store_pending(path, pending)
         return found

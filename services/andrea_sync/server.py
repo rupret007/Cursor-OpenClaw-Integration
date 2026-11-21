@@ -72,7 +72,7 @@ from .dashboard import (
 )
 from .kill_switch import is_kill_switch_engaged, kill_switch_status
 from .observability import metric_log, structured_log
-from .outbound import bind_draft, deliver, draft_binding_ok, new_nonce, receipt_matches
+from .outbound import DeliveryUncertain, bind_draft, deliver, draft_binding_ok, new_nonce, receipt_matches
 from .orchestration_boundary import build_decision_profile
 from .policy_learning import record_routing_alignment
 from .resource_router import rank_execution_lanes
@@ -4059,6 +4059,8 @@ class SyncServer:
             return None
         try:
             receipt = tool(draft)
+        except DeliveryUncertain:
+            raise
         except Exception:  # noqa: BLE001
             return None
         if not receipt_matches(draft, receipt):
@@ -4074,9 +4076,16 @@ class SyncServer:
             "I could not send that message cleanly just now. The draft is still ready if you want me to revise it or try again.",
             "outbound_message_send_failed",
         )
+        uncertain = (
+            "I could not record whether that message was sent. It needs a manual check before it is tried again.",
+            "outbound_message_needs_check",
+        )
         if not self._outbound_context_matches(task_id, draft):
             return failure
-        receipt = self._outbound_tool_receipt(draft)
+        try:
+            receipt = self._outbound_tool_receipt(draft)
+        except DeliveryUncertain:
+            return uncertain
         if receipt is None:
             return failure
         self._clear_pending_outbound_draft(task_id)

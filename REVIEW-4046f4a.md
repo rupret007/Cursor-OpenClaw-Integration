@@ -143,3 +143,13 @@ checker remains a manual CLI and is not wired to a PR Playwright report.
 - Remaining external risks: the installed production verifier and loopback
   carrier implementation are absent from the checkout; no live gateway or
   carrier behavior was validated.
+
+## FIXES
+
+Each finding was reproduced with a failing test, then fixed. The original FAIL above is unchanged. Local gates after these commits: secret scan clean (`Files 359`, `History commits 312`, `Logs 0`, before the commit that records this section; the file count includes the local gitignored `data/` tree), `bash scripts/test_integration.sh` passed 988 Python tests, and the Segment 1 and captain Node gate passed 23 tests. No live gateway, bobserver, Telegram, or production action was used. Phoenix, Restate and Hatchet were not installed.
+
+| Finding | Commit | Test |
+| --- | --- | --- |
+| MEDIUM — deleting the actual owner-writable audit anchor still resets the chain | `350513412810a7b5df0e3a15de5fdae76ca4739e` Reject a reset that deletes the acceptance root and its trust anchor. | `tests/first_officer/test_cycle.py::test_deleting_the_acceptance_root_and_its_trust_anchor_does_not_verify` |
+| MEDIUM — an exact source may redirect to an unlisted page | `efaadb1164e0927d9d940151808dfe3d6e99f749` Refuse a redirect that is not an exact source for that route. | `tests/first_officer/test_guard.py::test_a_redirect_must_be_an_exact_source_or_it_is_not_fetched` |
+| PARTIAL — the production verifier contract is only a local stand-in | `23a9932d5e6eac7ee1ae17d087001ec83b9647cc` Call the installed verifier with the service pin's arguments. | `tests/first_officer/test_install.py::test_prepare_verifies_the_unpacked_candidate_and_rollback_restores_the_prior_bundle` and `tests/first_officer/test_install.py::test_schema_validation_uses_the_node_launcher_from_systemd` |

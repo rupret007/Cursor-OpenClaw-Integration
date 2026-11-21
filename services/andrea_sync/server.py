@@ -4,6 +4,7 @@ from __future__ import annotations
 import datetime as dt
 from dataclasses import replace
 import errno
+import importlib.util
 import json
 import os
 import re
@@ -4448,6 +4449,15 @@ class SyncServer:
                 )
         return None
 
+    def _lookup_boundary(self):
+        path = self.repo_root / "first-officer" / "guard" / "boundary.py"
+        spec = importlib.util.spec_from_file_location("fo_guard_boundary_server", path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError("The lookup boundary is unavailable")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
     def _create_openclaw_job(
         self,
         task_id: str,
@@ -4459,8 +4469,7 @@ class SyncServer:
         *,
         session_id: str,
     ) -> Dict[str, Any]:
-        return self._run_json_subprocess(
-            [
+        command = [
                 sys.executable,
                 str(self.repo_root / "scripts" / "andrea_sync_openclaw_hybrid.py"),
                 "--task-id",
@@ -4485,7 +4494,15 @@ class SyncServer:
                 str(self.openclaw_timeout_seconds),
                 "--thinking",
                 self.openclaw_thinking,
-            ],
+            ]
+        boundary = self._lookup_boundary()
+        if boundary.is_lookup(str(route_reason or "").strip()):
+            command.extend([
+                "--allowed-tools",
+                ",".join(boundary.tools_for(str(route_reason or "").strip())),
+            ])
+        return self._run_json_subprocess(
+            command,
             timeout_seconds=self.openclaw_timeout_seconds + 10,
         )
 

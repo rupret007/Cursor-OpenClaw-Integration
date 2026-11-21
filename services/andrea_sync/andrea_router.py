@@ -1,10 +1,12 @@
 """Andrea-first routing: direct assistant reply vs Cursor delegation."""
 from __future__ import annotations
 
-import os
-import re
 import ast
 from dataclasses import dataclass
+import importlib.util
+import os
+from pathlib import Path
+import re
 
 from .litellm_api import litellm_chat, litellm_configured
 from .orchestration_boundary import should_answer_before_delegate
@@ -725,6 +727,22 @@ def _lightweight_conversational_reply(text: str) -> str:
     return ""
 
 
+def _guard_boundary():
+    path = Path(__file__).resolve().parents[2] / "first-officer" / "guard" / "boundary.py"
+    spec = importlib.util.spec_from_file_location("fo_guard_boundary_router", path)
+    module = importlib.util.module_from_spec(spec)
+    if spec.loader is None:
+        raise RuntimeError("The lookup boundary is unavailable")
+    spec.loader.exec_module(module)
+    return module
+
+
+def durable_context(notes: list[str] | None) -> list[str]:
+    """Fenced memory lines only. An unfenced line is not a tool instruction."""
+    cleaned = [str(note or "").strip() for note in (notes or []) if str(note or "").strip()]
+    return list(_guard_boundary().data_notes(cleaned))
+
+
 def _scrub_history_for_direct(history: list[dict[str, str]] | None) -> list[dict[str, str]]:
     """Drop poisoned assistant turns and strip internal lines before the model call."""
     if not history:
@@ -825,11 +843,7 @@ def _openai_direct_reply(
             ),
         }
     ]
-    durable_notes = (
-        [str(note or "").strip() for note in (memory_notes or []) if str(note or "").strip()]
-        if inject_durable_memory
-        else []
-    )
+    durable_notes = durable_context(memory_notes) if inject_durable_memory else []
     if durable_notes:
         messages.append(
             {

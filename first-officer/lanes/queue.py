@@ -8,7 +8,8 @@ any 5xx, a dropped connection, or any answer that is not a definite refusal stay
 Hatchet and is never sent to Restate. The primary may already have accepted the lane.
 The private ledger is append-only. A pending or unknown row blocks a second send until
 an operator has checked the backend. The request connects to the addresses that passed
-that check and does not resolve the name again.
+that check and does not resolve the name again. An HTTPS address literal has to be
+listed in ``FO_QUEUE_HOSTS`` the same way a name does. Loopback HTTP does not.
 """
 
 import argparse
@@ -107,6 +108,17 @@ def _usable_private(address):
     return (address.is_loopback or address.is_private) and not address.is_multicast and not address.is_unspecified
 
 
+def _listed(address):
+    """Match an HTTPS address literal against the allowlist by address, not spelling."""
+    for host in queue_hosts():
+        try:
+            if ipaddress.ip_address(host) == address:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
 def _private_named_host(hostname, resolve=None):
     """A named HTTPS queue host must be allowlisted and resolve only to private addresses."""
     host = hostname.lower().rstrip(".")
@@ -165,7 +177,7 @@ def endpoint(base_url, resolve=None):
         pins = _loopback_name(url.hostname, resolve) if address is None else [str(address)]
     elif address is None:
         pins = _private_named_host(url.hostname, resolve)
-    elif not _usable_private(address):
+    elif not _usable_private(address) or not _listed(address):
         raise ValueError("Use a loopback queue URL or a private HTTPS root")
     else:
         pins = [str(address)]

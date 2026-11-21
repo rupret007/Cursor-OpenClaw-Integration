@@ -409,6 +409,25 @@ def test_named_https_queue_needs_an_allowlist_and_private_resolution(tmp_path, m
     assert accepted == "https://queue.internal"
 
 
+def test_a_private_https_literal_needs_the_queue_allowlist(tmp_path, monkeypatch):
+    monkeypatch.delenv("FO_QUEUE_HOSTS", raising=False)
+    path = tmp_path / "policy.json"
+    path.write_text(json.dumps(policy(f"https://{PRIVATE}", "http://127.0.0.1:9")))
+    with pytest.raises(ValueError, match="loopback"):
+        queue.load_config(path)
+    with pytest.raises(ValueError, match="loopback"):
+        queue.endpoint("https://127.0.0.1")
+    assert queue.endpoint("http://127.0.0.1:9")[0] == "http://127.0.0.1:9"
+
+    monkeypatch.setenv("FO_QUEUE_HOSTS", PRIVATE)
+    assert queue.endpoint(f"https://{PRIVATE}")[0] == f"https://{PRIVATE}"
+    with pytest.raises(ValueError, match="loopback"):
+        queue.endpoint("https://127.0.0.1")
+
+    monkeypatch.setenv("FO_QUEUE_HOSTS", "0:0:0:0:0:0:0:1")
+    assert queue.endpoint("https://[::1]")[0] == "https://[::1]"
+
+
 def test_policy_rejects_a_public_address_an_incomplete_backend_and_a_bad_request(tmp_path):
     path = tmp_path / "policy.json"
     path.write_text(json.dumps(policy("http://example.com", "http://127.0.0.1:9")))

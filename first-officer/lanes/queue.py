@@ -3,10 +3,11 @@
 
 Hatchet is the primary. Its trigger is the documented stable REST call. Restate is the
 documented fallback ingress: ``POST /restate/send/{service}/{handler}`` with an
-``idempotency-key``. A timeout, a dropped connection, or any answer that is not a
-definite refusal stays on Hatchet and is never sent to Restate, because the primary may
-already have accepted the lane. The private ledger is append-only. A pending or unknown
-row blocks a second send until an operator has checked the backend.
+``idempotency-key``. Those two backends do not share that key, so a timeout, HTTP 408,
+any 5xx, a dropped connection, or any answer that is not a definite refusal stays on
+Hatchet and is never sent to Restate. The primary may already have accepted the lane.
+The private ledger is append-only. A pending or unknown row blocks a second send until
+an operator has checked the backend.
 """
 
 import argparse
@@ -37,9 +38,10 @@ LOOPBACK = ("localhost", "127.0.0.1", "::1")
 TIMEOUT = 15
 MAX_BODY = 64 * 1024
 MAX_LEDGER = 4 * 1024 * 1024
-# Statuses the backend answered, so the lane was definitely not accepted.
-# Restate documents 408, 425, 429 and 5xx as the transient set safe to retry.
-FAILOVER_STATUS = (408, 425, 429, 500, 502, 503, 504)
+# Statuses the backend answered and the lane was definitely not accepted.
+# HTTP 408 and 5xx are ambiguous: Hatchet may already hold the lane, and Restate
+# does not share Hatchet's idempotency check, so they never fail over.
+FAILOVER_STATUS = (425, 429)
 HATCHET_FIELDS = ("base_url", "tenant", "workflow", "token_env")
 RESTATE_FIELDS = ("base_url", "service", "handler", "token_env")
 

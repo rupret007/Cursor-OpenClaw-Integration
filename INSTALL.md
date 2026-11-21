@@ -83,7 +83,7 @@ python3 first-officer/lanes/queue.py "$queue_policy" "$lane_ledger" \
   --lane review --head "$head" --pull-request "$number"
 ```
 
-Exit `0` means the lane is queued. The line is `Lane review is queued on hatchet as <run>.` or `Lane review is queued on restate as <invocation>.` The same command again prints `was already queued` and does not send a second time. Exit `1` means it was not queued. A timeout, a dropped connection, a redirect or any answer other than a connection refusal or HTTP 408, 425, 429, 500, 502, 503 or 504 stays unknown and is not failed over. An unknown or pending ledger row blocks a later send until the backend has been checked. A definite refusal from both backends can be retried. The command never pushes, merges or sends a message.
+Exit `0` means the lane is queued. The line is `Lane review is queued on hatchet as <run>.` or `Lane review is queued on restate as <invocation>.` The same command again prints `was already queued` and does not send a second time. Exit `1` means it was not queued. A timeout, HTTP 408, any 5xx, a dropped connection, a redirect, or any answer other than a connection refusal or HTTP 425 or 429 stays unknown and is not failed over. Hatchet and Restate do not share an idempotency check, so an ambiguous Hatchet answer never starts the same lane on Restate. An unknown or pending ledger row blocks a later send until the backend has been checked. A definite refusal from both backends can be retried. The command never pushes, merges or sends a message.
 
 ## Send one trace to local Phoenix
 

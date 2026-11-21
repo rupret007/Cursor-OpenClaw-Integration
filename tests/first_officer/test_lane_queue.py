@@ -134,8 +134,8 @@ def test_primary_success_never_calls_restate_and_a_repeat_is_free(tmp_path, toke
     assert oct(ledger.stat().st_mode & 0o777) == "0o600"
 
 
-def test_primary_503_fails_over_to_restate_and_the_repeat_does_not_send(tmp_path, tokens):
-    hatchet = serve({HATCHET_PATH: {"status": 503, "body": {"echo": HATCHET_TOKEN}}})
+def test_primary_429_fails_over_to_restate_and_the_repeat_does_not_send(tmp_path, tokens):
+    hatchet = serve({HATCHET_PATH: {"status": 429, "body": {"echo": HATCHET_TOKEN}}})
     restate = serve({RESTATE_PATH: {"body": {"invocationId": "inv_fallback", "status": "Accepted"}}})
     try:
         config = policy(urls(hatchet), urls(restate))
@@ -159,8 +159,27 @@ def test_primary_503_fails_over_to_restate_and_the_repeat_does_not_send(tmp_path
     assert HATCHET_TOKEN not in text and "echo" not in text and key in text
 
 
+@pytest.mark.parametrize("status", [408, 500, 502, 503, 504])
+def test_hatchet_server_error_or_request_timeout_does_not_reach_restate(tmp_path, tokens, status):
+    hatchet = serve({HATCHET_PATH: {"status": status, "body": {}}})
+    restate = serve({RESTATE_PATH: {"body": {"invocationId": "inv_no", "status": "Accepted"}}})
+    ledger = tmp_path / "lanes.jsonl"
+    config = policy(urls(hatchet), urls(restate))
+    try:
+        with pytest.raises(ValueError, match="not failed over"):
+            dispatch(config, ledger)
+        with pytest.raises(ValueError, match="not sent again"):
+            dispatch(config, ledger)
+    finally:
+        stop(hatchet)
+        stop(restate)
+    assert [row["path"] for row in hatchet.seen] == [HATCHET_PATH]
+    assert restate.seen == []
+    assert phases(ledger)[-1] == "uncertain"
+
+
 def test_previously_accepted_restate_run_is_the_same_lane(tmp_path, tokens):
-    hatchet = serve({HATCHET_PATH: {"status": 503, "body": {}}})
+    hatchet = serve({HATCHET_PATH: {"status": 429, "body": {}}})
     restate = serve({RESTATE_PATH: {"body": {"invocationId": "inv_same", "status": "PreviouslyAccepted"}}})
     try:
         result = dispatch(policy(urls(hatchet), urls(restate)), tmp_path / "lanes.jsonl")
@@ -241,8 +260,8 @@ def test_closed_port_is_a_definite_refusal_and_restate_answers(tmp_path, tokens)
 
 
 def test_both_backends_refusing_is_retryable_and_queues_nothing(tmp_path, tokens):
-    hatchet = serve({HATCHET_PATH: {"status": 503, "body": {}}})
-    restate = serve({RESTATE_PATH: {"status": 503, "body": {}}})
+    hatchet = serve({HATCHET_PATH: {"status": 429, "body": {}}})
+    restate = serve({RESTATE_PATH: {"status": 429, "body": {}}})
     ledger = tmp_path / "lanes.jsonl"
     config = policy(urls(hatchet), urls(restate))
     try:
@@ -258,7 +277,7 @@ def test_both_backends_refusing_is_retryable_and_queues_nothing(tmp_path, tokens
 
 
 def test_restate_uncertainty_after_a_refusal_is_not_retried(tmp_path, tokens):
-    hatchet = serve({HATCHET_PATH: {"status": 503, "body": {}}})
+    hatchet = serve({HATCHET_PATH: {"status": 429, "body": {}}})
     restate = serve({RESTATE_PATH: {"raw": b"not-json"}})
     ledger = tmp_path / "lanes.jsonl"
     config = policy(urls(hatchet), urls(restate))
@@ -378,7 +397,7 @@ def test_policy_rejects_a_public_address_an_incomplete_backend_and_a_bad_request
 
 
 def test_cli_prints_the_fallback_and_refuses_a_protected_outcome(tmp_path, tokens, capsys):
-    hatchet = serve({HATCHET_PATH: {"status": 503, "body": {}}})
+    hatchet = serve({HATCHET_PATH: {"status": 429, "body": {}}})
     restate = serve({RESTATE_PATH: {"body": {"invocationId": "inv_cli", "status": "Accepted"}}})
     policy_path = tmp_path / "policy.json"
     policy_path.write_text(json.dumps(policy(urls(hatchet), urls(restate))))

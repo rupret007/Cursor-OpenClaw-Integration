@@ -1,4 +1,6 @@
+import hashlib
 import importlib.util
+import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import socket
@@ -211,3 +213,115 @@ def test_litellm_connects_to_the_checked_address(tmp_path, monkeypatch):
         server.server_close()
     assert lookups == [(host, None)]
     assert seen == [("/v1/chat/completions", f"Bearer {KEY}")]
+
+
+def _digest(value):
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+def test_a_failed_local_write_does_not_leave_a_second_active_key(tmp_path):
+    """The proxy is asked for a key only after the pending file is durable."""
+    state = {"created": 0, "records": {}, "serial": 0}
+
+    class Handler(BaseHTTPRequestHandler):
+        def _send(self, payload):
+            raw = json.dumps(payload).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def do_GET(self):
+            if self.path.startswith("/key/info"):
+                query = self.path.split("?", 1)[1] if "?" in self.path else ""
+                digest = dict(part.split("=", 1) for part in query.split("&") if "=" in part).get("key", "")
+                info = state["records"].get(digest)
+                self._send({"info": info} if info else {})
+                return
+            self.send_response(404)
+            self.end_headers()
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or "0")
+            body = json.loads(self.rfile.read(length).decode())
+            if self.path == "/key/delete":
+                for value in body.get("keys") or []:
+                    state["records"].pop(_digest(value), None)
+                self._send({})
+                return
+            if self.path != "/key/generate":
+                self.send_response(404)
+                self.end_headers()
+                return
+            requested = body.get("key")
+            if not isinstance(requested, str):
+                state["serial"] += 1
+                requested = "sk-" + "server" + f"{state['serial']:08d}"
+            issued = requested
+            if state.get("swap"):
+                state["swap"] = False
+                issued = "sk-" + "differentkeyvalue1"
+            digest = _digest(issued)
+            if digest not in state["records"]:
+                state["created"] += 1
+                record = {name: value for name, value in body.items() if name != "key"}
+                record["status"] = "active"
+                record["budget_reset_at"] = "2099-01-01T00:00:00Z"
+                state["records"][digest] = record
+            self._send({"key": issued})
+
+        def log_message(self, *_args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    directory = tmp_path / "keys"
+    directory.mkdir(mode=0o700)
+    credential = directory / "review.key"
+    master = "sk-" + "masterkeyvalue"
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    policy = PLAN["lanes"]["review"]
+    try:
+        directory.chmod(0o500)
+        with pytest.raises(OSError):
+            configure.provision_file(base, master, "review", policy, credential)
+        assert state["created"] == 0
+        assert state["records"] == {}
+        assert not credential.exists()
+        assert not credential.with_name(credential.name + ".pending").exists()
+        directory.chmod(0o700)
+        configure.provision_file(base, master, "review", policy, credential)
+        local = configure.read_key(credential)
+        assert state["created"] == 1
+        assert _digest(local) in state["records"]
+        assert not credential.with_name(credential.name + ".pending").exists()
+        configure.provision_file(base, master, "review", policy, credential)
+        assert state["created"] == 1
+        assert list(state["records"]) == [_digest(local)]
+
+        other = directory / "recovered.key"
+        pending = other.with_name(other.name + ".pending")
+        recovery = "sk-" + "pendingrecover0123"
+        configure.write_private(pending, recovery + "\n")
+        configure.provision_file(base, master, "review", policy, other)
+        assert state["created"] == 2
+        assert _digest(configure.read_key(other)) == _digest(recovery)
+        configure.provision_file(base, master, "review", policy, other)
+        assert state["created"] == 2
+        assert _digest(recovery) in state["records"]
+
+        state["swap"] = True
+        swapped = directory / "swapped.key"
+        before = state["created"]
+        with pytest.raises(ValueError):
+            configure.provision_file(base, master, "review", policy, swapped)
+        assert _digest("sk-" + "differentkeyvalue1") not in state["records"]
+        assert not swapped.exists()
+        configure.provision_file(base, master, "review", policy, swapped)
+        assert state["created"] == before + 2
+        assert _digest(configure.read_key(swapped)) in state["records"]
+        assert _digest("sk-" + "differentkeyvalue1") not in state["records"]
+    finally:
+        server.shutdown()
+        server.server_close()

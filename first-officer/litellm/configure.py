@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import socket
 import stat
 import sys
@@ -256,9 +257,33 @@ def verify_lane(base_url, master_key, key, lane, policy):
         raise ValueError("Stored virtual key policy differs from the reviewed lane policy")
 
 
-def create_lane(base_url, master_key, lane, policy):
-    key = proxy_request(base_url, master_key, "/key/generate", lane_parameters(lane, policy)).get("key")
-    if not isinstance(key, str) or not TOKEN.fullmatch(key) or key == master_key:
+def create_lane(base_url, master_key, lane, policy, key=None):
+    payload = lane_parameters(lane, policy)
+    if key is not None:
+        if not TOKEN.fullmatch(key) or key == master_key:
+            raise ValueError("Expected a virtual key distinct from the master key")
+        payload = {**payload, "key": key}
+    issued = proxy_request(base_url, master_key, "/key/generate", payload).get("key")
+    if not isinstance(issued, str) or not TOKEN.fullmatch(issued) or issued == master_key:
+        raise ValueError("LiteLLM returned no usable virtual key")
+    if key is not None and issued != key:
+        try:
+            revoke_lane(base_url, master_key, issued)
+        finally:
+            raise ValueError("LiteLLM returned a different virtual key")
+    return issued
+
+
+def revoke_lane(base_url, master_key, key):
+    """Revoke one virtual key. The key is not included in the raised error."""
+    if not TOKEN.fullmatch(key) or key == master_key:
+        raise ValueError("Expected a virtual key distinct from the master key")
+    proxy_request(base_url, master_key, "/key/delete", {"keys": [key]})
+
+
+def _new_key():
+    key = "sk-" + secrets.token_urlsafe(32)
+    if not TOKEN.fullmatch(key):
         raise ValueError("LiteLLM returned no usable virtual key")
     return key
 
@@ -301,8 +326,15 @@ def provision_file(base_url, master_key, lane, policy, credential):
             try:
                 key = read_key(pending)
             except FileNotFoundError:
-                key = create_lane(base_url, master_key, lane, policy)
+                key = _new_key()
+                # The pending file is the recovery record. Do not ask the proxy
+                # to create a key until this write has succeeded.
                 write_private(pending, key + "\n")
+            try:
+                create_lane(base_url, master_key, lane, policy, key)
+            except ValueError:
+                # The same key may already be registered after a crash.
+                pass
             verify_lane(base_url, master_key, key, lane, policy)
             os.replace(pending, credential)
             os.fsync(directory)

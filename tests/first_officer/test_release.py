@@ -175,6 +175,173 @@ def test_release_build_only_packs_a_clean_reviewed_overlay(tmp_path, monkeypatch
         assert list(staging.glob("*.tar")) == []
 
 
+CANARY_PATH = "round6/runtime/addons/index.mjs"
+DASHBOARD_SKILL = "round6/runtime/addons/skills/security-ship-gate/SKILL.md"
+INSTINCT_SKILL = "round6/runtime/addons/skills/instinct-with-bob-and-andrea/SKILL.md"
+DASHBOARD_PLACEHOLDER = "the dashboard verify allowlist address Jeff already set"
+INSTINCT_PLACEHOLDER = "the Instinct legal opt-out address in their terms"
+
+
+def _candidate_scanner():
+    spec = importlib.util.spec_from_file_location(
+        "fo_stage_candidate_scan", ROOT / "first-officer/privacy/scan.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _packaged_prior_files(canary_token, dashboard_email, instinct_emails, extra=""):
+    first, second = instinct_emails
+    return {
+        CANARY_PATH: (
+            "const logProbe = 'FO_ADDONS_LOG_CANARY ' + 'Authorization: Bearer "
+            + canary_token + "';\n" + extra
+        ),
+        DASHBOARD_SKILL: (
+            "Allowlists tight - dashboard verify email only " + dashboard_email
+            + " unless Jeff widens.\n"
+        ),
+        INSTINCT_SKILL: (
+            "Arbitration opt-out by emailing " + first + " (or " + second
+            + " per some ToS copies) within 30 days.\n"
+            "Arbitration opt-out uses " + first + " before the window closes.\n"
+        ),
+    }
+
+
+def _stage_synthetic_prior(tmp_path, monkeypatch, files, name):
+    """Stage through the real release function. Only the pin allowlist is extended."""
+    stage = importlib.import_module("stage")
+    root = tmp_path / name
+    baseline = root / "prior"
+    baseline.mkdir(parents=True)
+    (baseline / "first-officer-conductor.mjs").write_text(
+        "import { ownerFallbacks } from './round6/runtime/model-failover.mjs';\n"
+        "const selection = await routeOwnerModel(event, api.config, routeFor, ownerFallbacks);\n",
+        encoding="utf-8",
+    )
+    for filename, text in files.items():
+        path = baseline / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8", newline="\n")
+    names = sorted(path.relative_to(baseline).as_posix()
+                   for path in baseline.rglob("*") if path.is_file())
+    manifest = "".join(
+        f"{stage.digest((baseline / filename).read_bytes())}  {filename}\n" for filename in names
+    ).encode()
+    (baseline / stage.INVENTORY).write_bytes(manifest)
+    pin = stage.digest(manifest)
+    monkeypatch.setattr(stage, "SUPPORTED_BASES", (*stage.SUPPORTED_BASES, pin))
+    staging = root / "staging"
+    staging.mkdir()
+    release_id = stage.stage_release(baseline, staging)
+    candidate = staging / f"first-officer-{release_id}"
+    stage.verify_inventory(candidate, release_id)
+    return baseline, candidate
+
+
+def _files_only(scan, root, capsys):
+    code = scan.main(["--root", str(root), "--files-only"])
+    captured = capsys.readouterr()
+    report = captured.err if code else captured.out
+    return code, report, captured
+
+
+def test_stage_rewrites_packaged_canary_and_skill_emails_before_the_scan(tmp_path, monkeypatch, capsys):
+    """stage_release rewrites the packaged files, then the real files-only scan is clean."""
+    scan = _candidate_scanner()
+    canary_token = "synthetic-canary-token" + "-value"
+    dashboard_email = "operator" + "@" + "private.test"
+    instinct_a = "legal" + "@" + "vendor.test"
+    instinct_b = "optout" + "@" + "vendor.test"
+    assert scan.bearer_token_is_credential(canary_token)
+    assert canary_token not in scan.BEARER_FIXTURES
+    assert scan.BEARER_FIXTURE == "ANDREA_SYNC_INTERNAL_TOKEN"
+    assert scan.personal_email(dashboard_email)
+    assert scan.personal_email(instinct_a)
+    assert scan.personal_email(instinct_b)
+    files = _packaged_prior_files(canary_token, dashboard_email, (instinct_a, instinct_b))
+    baseline, candidate = _stage_synthetic_prior(tmp_path, monkeypatch, files, "clean")
+
+    before, before_report, _before_captured = _files_only(scan, baseline, capsys)
+    assert before == 1
+    assert set(before_report.splitlines()[1:]) == {
+        "credential round6/runtime/addons/index.mjs:1",
+        "email round6/runtime/addons/skills/security-ship-gate/SKILL.md:1",
+        "email round6/runtime/addons/skills/instinct-with-bob-and-andrea/SKILL.md:1",
+        "email round6/runtime/addons/skills/instinct-with-bob-and-andrea/SKILL.md:2",
+    }
+    for secret in (canary_token, dashboard_email, instinct_a, instinct_b):
+        assert secret not in before_report
+    for name, text in files.items():
+        assert (baseline / name).read_text(encoding="utf-8") == text
+
+    code, report, captured = _files_only(scan, candidate, capsys)
+    assert code == 0 and captured.err == ""
+    assert report.startswith("Secret scan clean.")
+    packaged = "\n".join((candidate / name).read_text(encoding="utf-8") for name in files)
+    for secret in (canary_token, dashboard_email, instinct_a, instinct_b):
+        assert secret not in report and secret not in packaged
+    canary = (candidate / CANARY_PATH).read_text(encoding="utf-8")
+    assert "FO_ADDONS_LOG_CANARY" in canary
+    matches = list(scan.BEARER.finditer(canary))
+    assert len(matches) == 1 and matches[0].group(1) == scan.BEARER_FIXTURE
+    assert scan.findings_in_text(canary) == []
+    dashboard = (candidate / DASHBOARD_SKILL).read_text(encoding="utf-8")
+    instinct = (candidate / INSTINCT_SKILL).read_text(encoding="utf-8")
+    assert dashboard.count(DASHBOARD_PLACEHOLDER) == 1 and "@" not in dashboard
+    assert instinct.count(INSTINCT_PLACEHOLDER) == 3 and "@" not in instinct
+    assert scan.findings_in_text(dashboard) == [] and scan.findings_in_text(instinct) == []
+
+
+def test_stage_leaves_a_different_bearer_and_email_for_the_files_only_scan(tmp_path, monkeypatch, capsys):
+    """A bearer outside the canary line and an email outside the two skills still fail the scan."""
+    scan = _candidate_scanner()
+    canary_token = "synthetic-canary-token" + "-value"
+    other_token = "different-bearer-token" + "-value"
+    dashboard_email = "operator" + "@" + "private.test"
+    instinct_a = "legal" + "@" + "vendor.test"
+    instinct_b = "optout" + "@" + "vendor.test"
+    remaining_email = "remain" + "@" + "private.test"
+    assert scan.bearer_token_is_credential(other_token)
+    assert other_token not in scan.BEARER_FIXTURES
+    assert scan.personal_email(remaining_email)
+    extra = "const other = 'Authorization: Bearer " + other_token + "';\n"
+    files = _packaged_prior_files(canary_token, dashboard_email, (instinct_a, instinct_b), extra)
+    files["round6/runtime/addons/other-note.md"] = "Reach " + remaining_email + " for the other note.\n"
+    baseline, candidate = _stage_synthetic_prior(tmp_path, monkeypatch, files, "strict")
+
+    before, before_report, _before_captured = _files_only(scan, baseline, capsys)
+    assert before == 1
+    assert {
+        "credential round6/runtime/addons/index.mjs:1",
+        "credential round6/runtime/addons/index.mjs:2",
+        "email round6/runtime/addons/skills/security-ship-gate/SKILL.md:1",
+        "email round6/runtime/addons/skills/instinct-with-bob-and-andrea/SKILL.md:1",
+        "email round6/runtime/addons/skills/instinct-with-bob-and-andrea/SKILL.md:2",
+        "email round6/runtime/addons/other-note.md:1",
+    } == set(before_report.splitlines()[1:])
+
+    code, report, captured = _files_only(scan, candidate, capsys)
+    assert code == 1 and captured.out == ""
+    assert set(report.splitlines()[1:]) == {
+        "credential round6/runtime/addons/index.mjs:2",
+        "email round6/runtime/addons/other-note.md:1",
+    }
+    for secret in (canary_token, other_token, dashboard_email, instinct_a, instinct_b, remaining_email):
+        assert secret not in report
+    canary = (candidate / CANARY_PATH).read_text(encoding="utf-8")
+    canary_line, other_line = canary.splitlines()
+    assert scan.BEARER.search(canary_line).group(1) == scan.BEARER_FIXTURE
+    assert scan.BEARER.search(other_line).group(1) == other_token
+    assert other_token in canary and canary_token not in canary
+    assert remaining_email in (candidate / "round6/runtime/addons/other-note.md").read_text(encoding="utf-8")
+    assert "@" not in (candidate / DASHBOARD_SKILL).read_text(encoding="utf-8")
+    assert "@" not in (candidate / INSTINCT_SKILL).read_text(encoding="utf-8")
+    for name, text in files.items():
+        assert (baseline / name).read_text(encoding="utf-8") == text
+
+
 def test_activate_checks_the_digest_and_writes_rollback_before_publish(tmp_path):
     recorder = Recorder(activate_replies())
     assert release.main(["activate", CANDIDATE, str(tmp_path / "a.tar"), str(tmp_path)], recorder) == 0

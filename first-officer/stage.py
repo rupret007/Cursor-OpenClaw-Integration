@@ -3,6 +3,7 @@
 
 import argparse
 import hashlib
+import importlib.util
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -151,6 +152,86 @@ def wire_model_router(root, *, already_wired):
     write_source(conductor, replace_once(text, original, updated))
 
 
+PACKAGED_CANARY = Path("round6/runtime/addons/index.mjs")
+PACKAGED_SKILLS = (
+    (Path("round6/runtime/addons/skills/security-ship-gate/SKILL.md"),
+     "the dashboard verify allowlist address Jeff already set"),
+    (Path("round6/runtime/addons/skills/instinct-with-bob-and-andrea/SKILL.md"),
+     "the Instinct legal opt-out address in their terms"),
+)
+
+
+def _packaged_scanner():
+    """The files-only scanner. Exemptions stay exact strings in that module."""
+    cached = getattr(_packaged_scanner, "module", None)
+    if cached is not None:
+        return cached
+    path = Path(__file__).resolve().parent / "privacy" / "scan.py"
+    spec = importlib.util.spec_from_file_location("fo_stage_scan", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    _packaged_scanner.module = module
+    return module
+
+
+def _rewrite_log_canary(text, scanner):
+    """Point the packaged log canary at the existing bearer fixture."""
+    if "FO_ADDONS_LOG_CANARY" not in text:
+        return text
+    lines = text.splitlines(keepends=True)
+    found = 0
+    rewritten = []
+    fixture = scanner.BEARER_FIXTURE
+    for line in lines:
+        if "FO_ADDONS_LOG_CANARY" not in line:
+            rewritten.append(line)
+            continue
+        found += 1
+        matches = list(scanner.BEARER.finditer(line))
+        if len(matches) != 1:
+            raise ValueError("Packaged log canary did not match the expected bearer")
+        start, end = matches[0].span(1)
+        if line[start:end] != fixture:
+            line = line[:start] + fixture + line[end:]
+        rewritten.append(line)
+    if found != 1:
+        raise ValueError("Packaged log canary did not match the expected bearer")
+    return "".join(rewritten)
+
+
+def _rewrite_skill_emails(text, placeholder, scanner):
+    """Replace every email address in one packaged skill document."""
+    if scanner.EMAIL.search(placeholder):
+        raise ValueError("Packaged skill placeholder is an email address")
+    updated = scanner.EMAIL.sub(lambda _match, replacement=placeholder: replacement, text)
+    if scanner.EMAIL.search(updated):
+        raise ValueError("Packaged skill document still contains an email address")
+    return updated
+
+
+def sanitize_packaged_prior_bundle(root):
+    """Rewrite packaged canary and skill files before the candidate inventory is sealed.
+
+    Only the log-canary bearer and emails in the two skill documents change.
+    Any other bearer-shaped token or email remains for the files-only scan.
+    """
+    scanner = _packaged_scanner()
+    canary = root / PACKAGED_CANARY
+    if canary.is_file() and not canary.is_symlink():
+        text = canary.read_text(encoding="utf-8")
+        updated = _rewrite_log_canary(text, scanner)
+        if updated != text:
+            write_source(canary, updated)
+    for name, placeholder in PACKAGED_SKILLS:
+        path = root / name
+        if not path.is_file() or path.is_symlink():
+            continue
+        text = path.read_text(encoding="utf-8")
+        updated = _rewrite_skill_emails(text, placeholder, scanner)
+        if updated != text:
+            write_source(path, updated)
+
+
 def _reviewed_overlay(head):
     repo = OVERLAY.parents[1]
 
@@ -197,6 +278,7 @@ def stage_release(baseline, destination, *, reviewed_head=None):
         wire_model_router(working, already_wired=pin != BASELINE)
         if pin in (BASELINE, SEGMENT1):
             wire_captain(working)
+        sanitize_packaged_prior_bundle(working)
         names = sorted(file.relative_to(working).as_posix() for file in working.rglob("*")
                        if file.is_file() and file.name != INVENTORY)
         manifest = "".join(f"{digest((working / name).read_bytes())}  {name}\n" for name in names).encode("utf-8")

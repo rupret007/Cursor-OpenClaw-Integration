@@ -198,30 +198,51 @@ def trust_dir(root):
     return base / hashlib.sha256(str(root).encode()).hexdigest()
 
 
-def _checkpoint(root, seq, digest):
-    key = _key(root)
-    document = {"digest": digest, "mac": _mac(key, seq, digest), "seq": seq}
-    _write_json(root / "audit.head", document)
+def witness_dir(root):
+    """Keep a second checkpoint outside the per-root trust directory.
+
+    Deleting the acceptance root and trust_dir(root) removes every file that
+    function names. This copy sits beside that trust base, so the same reset
+    still has a checkpoint for verify to reject.
+    """
+    root = Path(root).resolve()
     trust = trust_dir(root)
-    if trust.is_symlink() or trust.parent.is_symlink():
+    base = trust.parent
+    witness_base = base.parent / f"{base.name}-witness"
+    if (witness_base == base or _contained(witness_base, root) or _contained(witness_base, root.parent)
+            or _contained(witness_base, base) or _contained(witness_base, trust)
+            or _contained(trust, witness_base) or _contained(base, witness_base)):
+        raise ValueError("The audit trust anchor must stay outside the acceptance parent")
+    return witness_base / trust.name
+
+
+def _write_anchor(directory, document):
+    if directory.is_symlink() or directory.parent.is_symlink():
         raise ValueError("The acceptance file must be a private owner file")
-    trust.mkdir(mode=0o700, parents=True, exist_ok=True)
-    os.chmod(trust, 0o700)
-    os.chmod(trust.parent, 0o700)
-    info = trust.lstat()
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(directory, 0o700)
+    os.chmod(directory.parent, 0o700)
+    info = directory.lstat()
     if info.st_uid != os.getuid() or not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o077:
         raise ValueError("The acceptance file must be a private owner file")
-    _write_json(trust / "audit.head", document)
+    _write_json(directory / "audit.head", document)
 
 
-def _trusted_head(root):
-    trust = trust_dir(root)
-    path = trust / "audit.head"
-    if trust.is_symlink() or path.is_symlink():
+def _read_anchor(directory):
+    path = directory / "audit.head"
+    if directory.is_symlink() or path.is_symlink():
         raise ValueError("The acceptance file must be a private owner file")
     if not path.exists():
         return None
     return _read_json(path, {"digest", "mac", "seq"})
+
+
+def _checkpoint(root, seq, digest):
+    key = _key(root)
+    document = {"digest": digest, "mac": _mac(key, seq, digest), "seq": seq}
+    _write_json(root / "audit.head", document)
+    _write_anchor(trust_dir(root), document)
+    _write_anchor(witness_dir(root), document)
 
 
 def _same_head(left, right):
@@ -237,12 +258,14 @@ def _same_head(left, right):
 def _check_head(root, rows, previous):
     head = _read_json(root / "audit.head", {"digest", "mac", "seq"})
     key = _read_key(root)
-    trusted = _trusted_head(root)
+    trusted = _read_anchor(trust_dir(root))
+    witness = _read_anchor(witness_dir(root))
     if not rows:
-        if head is not None or key is not None or trusted is not None:
+        if head is not None or key is not None or trusted is not None or witness is not None:
             raise ValueError("The audit chain was truncated")
         return
-    if head is None or key is None or trusted is None or not _same_head(trusted, head):
+    if (head is None or key is None or trusted is None or witness is None
+            or not _same_head(trusted, head) or not _same_head(witness, head)):
         raise ValueError("The audit chain has no checkpoint")
     presented = str(head.get("mac", ""))
     expected = _mac(key, head["seq"], head["digest"]) if type(head.get("seq")) is int else ""

@@ -101,6 +101,33 @@ def test_expired_secret_and_live_routine_do_not_save_or_send(tmp_path):
     assert not (tmp_path / "untouched").exists()
 
 
+def test_deleting_the_acceptance_root_and_its_trust_anchor_does_not_verify(tmp_path):
+    """Removing the acceptance root and the real trust directory must not verify as fresh."""
+    root = tmp_path / "cycle"
+    cycle.run_routine(root, NOW)
+    trust = cycle.trust_dir(root)
+    witness = cycle.witness_dir(root)
+    assert (trust / "audit.head").is_file()
+    assert (witness / "audit.head").is_file()
+    assert trust.resolve() not in witness.resolve().parents
+    assert witness.resolve() not in trust.resolve().parents
+    assert root.resolve() not in witness.resolve().parents
+    assert root.parent.resolve() not in witness.resolve().parents
+    shutil.rmtree(root)
+    shutil.rmtree(trust)
+    with pytest.raises(ValueError, match="truncated"):
+        cycle.verify(root)
+    assert (witness / "audit.head").is_file()
+    kept = tmp_path / "kept"
+    cycle.run_routine(kept, NOW)
+    shutil.rmtree(cycle.witness_dir(kept))
+    with pytest.raises(ValueError, match="checkpoint|truncated"):
+        cycle.verify(kept)
+    fresh = tmp_path / "unused"
+    assert cycle.verify(fresh) == 0
+    assert not cycle.witness_dir(fresh).exists()
+
+
 def test_deleting_the_acceptance_directory_and_its_sibling_does_not_verify(tmp_path):
     """Wiping the acceptance root and the sibling copy must not look like a fresh root."""
     root = tmp_path / "cycle"

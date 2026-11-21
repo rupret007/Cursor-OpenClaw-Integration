@@ -9,7 +9,9 @@ a credential that happened to be in the environment.
 """
 
 from contextlib import contextmanager
+import importlib.util
 import os
+from pathlib import Path
 from urllib.parse import urlsplit
 import re
 
@@ -18,7 +20,20 @@ SPAN = "first-officer.lane"
 LOOPBACK = ("localhost", "127.0.0.1", "::1")
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 SHA = re.compile(r"[0-9a-f]{40}")
-SECRET = re.compile(r"sk-[A-Za-z0-9_-]{8,}|gh[pousr]_|Bearer |api[_-]?key", re.IGNORECASE)
+# Shapes the shared rule does not spell. Dropping them would accept a short
+# classic-token prefix, an api-key word, or a case-insensitive sk- prefix.
+_EXTRA = re.compile(r"sk-[A-Za-z0-9_-]{8,}|gh[pousr]_|Bearer |api[_-]?key", re.IGNORECASE)
+
+
+def _enforced_secret():
+    path = Path(__file__).resolve().parents[1] / "privacy" / "scan.py"
+    spec = importlib.util.spec_from_file_location("fo_enforced_secret_trace", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.enforced_secret
+
+
+SECRET = _enforced_secret()
 FIELDS = {
     "fo.lane": NAME,
     "fo.head": SHA,
@@ -53,7 +68,8 @@ def clean_attributes(attributes):
     cleaned = {}
     for key in sorted(attributes):
         value = attributes[key]
-        if not isinstance(value, str) or SECRET.search(value) or not FIELDS[key].fullmatch(value):
+        if (not isinstance(value, str) or _EXTRA.search(value) or SECRET.search(value)
+                or not FIELDS[key].fullmatch(value)):
             raise ValueError("A trace attribute is not usable")
         cleaned[key] = value
     return cleaned

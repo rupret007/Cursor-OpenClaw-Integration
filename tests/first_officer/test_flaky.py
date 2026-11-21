@@ -84,6 +84,49 @@ def test_producer_redacts_scanner_credential_shapes():
     assert reported["tests"][0]["attempts"][0]["error"] == "plain failure"
 
 
+def test_producer_redacts_punctuated_bearer_tokens():
+    """Punctuation-only bearer tokens are redacted. The exact fixture is not."""
+    fixture = "ANDREA_SYNC_INTERNAL_TOKEN"
+    same_shape = fixture[:-1] + "M"
+    longer_shape = fixture + "S"
+    mixed = "ab-cd.ef_ghijklm"
+    symbols = "aa_bb" + "-cc.dd/ee+ff~gg"
+    pure = "a" * 16
+    alnum = "A" * 12 + "7" * 8
+    parts = [
+        "boom",
+        "Bearer " + same_shape,
+        "bearer " + longer_shape,
+        "Bearer " + mixed,
+        "BEARER " + symbols,
+        "bearer " + pure,
+        "Bearer " + alnum,
+        "Bearer " + fixture,
+    ]
+    message = " ".join(parts)
+    expected = " ".join(["boom", *["[redacted]"] * 6, "Bearer " + fixture])
+    events = flaky.produce(report(
+        ("blinks", "chromium", [attempt("failed", message=message)], "unexpected"),
+    ))
+    rendered = json.dumps(events)
+    secrets = (same_shape, longer_shape, mixed, symbols, pure, alnum)
+    leaked = [secret in rendered for secret in secrets]
+    print("attempt_leaked", any(leaked), "fixture_kept", fixture in rendered)
+    assert events["tests"][0]["attempts"][0]["error"] == expected
+    assert any(leaked) is False
+    assert fixture in rendered
+
+    raw = report(("blinks", "chromium", [attempt("failed", message="plain failure")], "unexpected"))
+    raw["errors"] = [message]
+    reported = flaky.produce(raw)
+    rendered = json.dumps(reported)
+    leaked = [secret in rendered for secret in secrets]
+    print("report_leaked", any(leaked), "fixture_kept", fixture in rendered)
+    assert reported["errors"] == [expected]
+    assert any(leaked) is False
+    assert reported["tests"][0]["attempts"][0]["error"] == "plain failure"
+
+
 def test_clean_run_is_green_and_every_other_outcome_is_not():
     clean = flaky.produce(report(("stays green", "chromium", [attempt("passed")], "expected")))
     assert flaky.evaluate(clean, [], TODAY, inventory(clean)) == {

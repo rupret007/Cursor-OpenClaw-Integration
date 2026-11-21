@@ -10,10 +10,10 @@ import argparse
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import html
+import importlib.util
 import json
 import os
 from pathlib import Path
-import re
 import sys
 
 
@@ -21,8 +21,18 @@ NODES = ("mac-mini", "nucbox", "macbook-pro")
 COUNTS = ("running", "active", "queued", "stalled")
 MAX_BYTES = 3000
 FRESH_S = 300
-SECRET = re.compile(r"sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9]{8,}|\b(?:\d{1,3}\.){3}\d{1,3}\b")
 _server = None
+
+
+def _enforced_secret():
+    path = Path(__file__).resolve().parents[1] / "privacy" / "scan.py"
+    spec = importlib.util.spec_from_file_location("fo_enforced_secret_status", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.enforced_secret
+
+
+SECRET = _enforced_secret()
 
 
 def _natural(value, limit):

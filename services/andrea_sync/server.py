@@ -380,7 +380,7 @@ class SyncServer:
         self.outbound_outbox = (
             Path(configured_outbox).expanduser()
             if configured_outbox
-            else self.db_path.with_name("outbound-deliveries.jsonl")
+            else self.db_path.with_name(self.db_path.name + ".outbound.jsonl")
         )
         self.outbound_delivery_tool = self._deliver_outbound
         self.conn = connect(self.db_path)

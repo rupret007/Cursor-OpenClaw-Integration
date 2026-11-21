@@ -4048,6 +4048,10 @@ class TestAndreaSync(unittest.TestCase):
 
         server = SyncServer()
         self.assertIs(server.outbound_delivery_tool.__func__, SyncServer._deliver_outbound)
+        self.assertEqual(
+            server.outbound_outbox,
+            self.db_path.with_name(self.db_path.name + ".outbound.jsonl"),
+        )
 
         def submit(external_id: str, text: str, message_id: int) -> str:
             result = handle_command(

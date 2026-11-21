@@ -3994,6 +3994,8 @@ class TestAndreaSync(unittest.TestCase):
         )
         self.assertEqual(server._load_pending_outbound_draft(drafted).get("message"), "hi from you")
 
+        # This case is the missing tool. The installed tool is covered separately.
+        server.outbound_delivery_tool = None
         with mock.patch.object(
             server,
             "_create_openclaw_job",
@@ -4036,6 +4038,83 @@ class TestAndreaSync(unittest.TestCase):
         self.assertIn("Candace", reply)
         self.assertFalse(server._load_pending_outbound_draft(drafted))
         self.assertNotIn("Synthetic success", reply)
+
+    def test_exact_confirmation_delivers_once_and_binds_the_receipt(self) -> None:
+        """A plain server delivers the confirmed draft once through its own tool."""
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.outbound import receipt_matches
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+        self.assertIs(server.outbound_delivery_tool.__func__, SyncServer._deliver_outbound)
+
+        def submit(external_id: str, text: str, message_id: int) -> str:
+            result = handle_command(
+                server.conn,
+                {
+                    "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                    "channel": "telegram",
+                    "external_id": external_id,
+                    "payload": {
+                        "text": text,
+                        "chat_id": 9104,
+                        "message_id": message_id,
+                        "from_user": 77,
+                    },
+                },
+            )
+            return str(result["task_id"])
+
+        drafted = submit("tg-deliver-once-draft", "Tell Candace hi from you", 801)
+        with mock.patch.object(
+            server,
+            "_resolve_messaging_capability",
+            return_value={
+                "skill_key": "bluebubbles",
+                "label": "text messaging",
+                "truth": {"status": "verified_available"},
+            },
+        ):
+            server._handle_task_followups(drafted)
+        pending = server._load_pending_outbound_draft(drafted)
+        self.assertEqual(pending.get("target"), "Candace")
+        self.assertEqual(pending.get("message"), "hi from you")
+        confirmed = submit("tg-deliver-once-confirm", "send it", 802)
+        server._handle_task_followups(confirmed)
+        projection = project_task_dict(server.conn, confirmed, "telegram")
+        self.assertEqual(
+            projection["meta"]["assistant"]["reason"],
+            "outbound_message_sent",
+        )
+        self.assertIn("Candace", projection["meta"]["assistant"]["last_reply"])
+        self.assertFalse(server._load_pending_outbound_draft(confirmed))
+        stored = [
+            json.loads(line)
+            for line in server.outbound_outbox.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        self.assertEqual(len(stored), 1)
+        self.assertTrue(receipt_matches(pending, stored[0]))
+        self.assertEqual(stored[0]["target"], "Candace")
+        self.assertEqual(stored[0]["body"], "hi from you")
+        self.assertEqual(stored[0]["digest"], pending["digest"])
+        again = server.outbound_delivery_tool(pending)
+        self.assertEqual(again["digest"], pending["digest"])
+        repeated = [
+            json.loads(line)
+            for line in server.outbound_outbox.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        self.assertEqual(repeated, stored)
+        second = submit("tg-deliver-once-again", "send it", 803)
+        server._handle_task_followups(second)
+        final = [
+            json.loads(line)
+            for line in server.outbound_outbox.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        self.assertEqual(final, stored)
 
     def test_server_confirmation_sends_pending_outbound_message(self) -> None:
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"

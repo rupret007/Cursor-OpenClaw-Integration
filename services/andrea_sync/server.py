@@ -72,7 +72,7 @@ from .dashboard import (
 )
 from .kill_switch import is_kill_switch_engaged, kill_switch_status
 from .observability import metric_log, structured_log
-from .outbound import bind_draft, draft_binding_ok, new_nonce, receipt_matches
+from .outbound import bind_draft, deliver, draft_binding_ok, new_nonce, receipt_matches
 from .orchestration_boundary import build_decision_profile
 from .policy_learning import record_routing_alignment
 from .resource_router import rank_execution_lanes
@@ -376,6 +376,13 @@ class SyncServer:
     def __init__(self) -> None:
         self.repo_root = _repo_root()
         self.db_path = default_db_path()
+        configured_outbox = os.environ.get("ANDREA_OUTBOUND_OUTBOX", "").strip()
+        self.outbound_outbox = (
+            Path(configured_outbox).expanduser()
+            if configured_outbox
+            else self.db_path.with_name("outbound-deliveries.jsonl")
+        )
+        self.outbound_delivery_tool = self._deliver_outbound
         self.conn = connect(self.db_path)
         migrate(self.conn)
         ensure_system_task(self.conn)
@@ -4031,6 +4038,10 @@ class SyncServer:
         except (TypeError, ValueError):
             return False
         return True
+
+    def _deliver_outbound(self, draft: Dict[str, Any]) -> Dict[str, Any]:
+        """The production delivery tool. The receipt is the stored delivery."""
+        return deliver(draft, self.outbound_outbox)
 
     def _outbound_tool_receipt(self, draft: Dict[str, Any]) -> Dict[str, Any] | None:
         """A delivery tool returns the receipt. The model status is not consulted."""

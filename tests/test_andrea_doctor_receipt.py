@@ -17,7 +17,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 RECEIPT_SCRIPT = REPO_ROOT / "scripts" / "andrea_doctor_receipt.py"
 DOCTOR_SCRIPT = REPO_ROOT / "scripts" / "andrea_doctor.sh"
 SERVER_PY = REPO_ROOT / "services" / "andrea_sync" / "server.py"
-SERVER_PY_BLOB = "2d6dabc09f51b0d5e4a82a2220e7c5a6492844a9"
+SERVER_PY_BLOB = "941e1dd6cd372a091e3a3dd94e6f923881004475"
 OUTBOUND_CONFIRM_PATTERN = r"^\s*(?:send it|send it now|send now)\s*[.!]?\s*$"
 
 

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import hmac
 import json
+import os
+from pathlib import Path
 import secrets
 from typing import Any, Mapping
 
@@ -103,3 +106,55 @@ def receipt_matches(draft: Mapping[str, Any], receipt: Any) -> bool:
     if len(presented) != 64 or len(expected) != 64:
         return False
     return hmac.compare_digest(presented, expected)
+
+
+def deliver(draft: Mapping[str, Any], outbox: Path) -> dict[str, Any]:
+    """Record one delivery and return the receipt read back from that record.
+
+    A second call with the same digest returns the stored receipt and does not
+    append another delivery.
+    """
+    if not draft_binding_ok(draft):
+        raise ValueError("The outbound draft is not bound")
+    path = Path(outbox)
+    if path.is_symlink() or path.parent.is_symlink():
+        raise ValueError("The outbound outbox must be a private file")
+    path.parent.mkdir(mode=0o700, exist_ok=True)
+    tool = str(draft.get("skill_key") or "")
+    if tool not in {"bluebubbles", "send_message"}:
+        tool = "send_message"
+    record = {
+        "body": str(draft.get("message") or ""),
+        "delivered": True,
+        "digest": str(draft.get("digest") or ""),
+        "source": "tool",
+        "target": str(draft.get("target") or ""),
+        "tool": tool,
+    }
+    line = json.dumps(record, sort_keys=True, separators=(",", ":"))
+    handle = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(handle, "r+", encoding="utf-8") as file:
+        os.fchmod(file.fileno(), 0o600)
+        fcntl.flock(file, fcntl.LOCK_EX)
+        file.seek(0)
+        for raw in file.read().splitlines():
+            if not raw.strip():
+                continue
+            stored = json.loads(raw)
+            if isinstance(stored, dict) and stored.get("digest") == record["digest"]:
+                return stored
+        file.seek(0, os.SEEK_END)
+        file.write(line + "\n")
+        file.flush()
+        os.fsync(file.fileno())
+        file.seek(0)
+        found = None
+        for raw in file.read().splitlines():
+            if not raw.strip():
+                continue
+            stored = json.loads(raw)
+            if isinstance(stored, dict) and stored.get("digest") == record["digest"]:
+                found = stored
+        if found is None:
+            raise ValueError("The outbound delivery was not recorded")
+        return found

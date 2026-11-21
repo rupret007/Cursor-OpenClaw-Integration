@@ -155,6 +155,75 @@ const themes = new Map([
   ['follow-up', /\b(?:reminder|follow up|follow-up|check in|checking in|update|confirm)\b/i],
 ]);
 
+const activityTopics = [
+  ['travel', /\b(?:airport|flight|hotel|layover|road trip|vacation|boarding|train|rideshare)\b/],
+  ['logistics', /\b(?:pick[ -]?up|drop[ -]?off|bring|carpool|delivery|parking|address|directions|entrance|ride)\b/],
+  ['work', /\b(?:at work|to work|for work|work (?:hours|shift|schedule)|office|client|coworker|project|deadline|review meeting|pull request|deploy(?:ment)?)\b/],
+  ['events', /\b(?:party|birthday|wedding|concert|game night|rehearsal|tickets?|ceremony|showtime)\b/],
+  ['family', /\b(?:mom|dad|parents?|grandma|grandpa|kids|family|siblings?)\b/],
+  ['payments', /\b(?:payments?|invoice|receipt|refund|paid|paying|reimburse(?:ment)?|bill)\b/],
+  ['orders', /\b(?:placed (?:an |the |your |my )?order|orders?|shipment|shipped|package|tracking number)\b/],
+  ['food', /\b(?:breakfast|lunch|dinner|pizza|food|groceries|restaurant|meal|menu|snacks?)\b/],
+  ['shared-material', /\b(?:attachment|document|slides|screenshot|spreadsheets?|photos?|pdf|link to)\b/],
+  ['scheduling', /\b(?:meet(?:ing)?|appointments?|schedule|calendar|reschedul\w*|availability|what time|which day|(?:mon|tues|wednes|thurs|fri|satur|sun)day)\b|\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\b/],
+  ['follow-up', /\b(?:reminder|follow[ -]up|check(?:ing)? in|quick update|touch base|circle back)\b/],
+];
+
+const activityIntents = [
+  ['ask-time', /^(?:(?:hey[,!]?|(?:does )?anyone know|(?:can|could) (?:you|someone|everyone) confirm) )?(?:what time\b|(?:on )?which day\b|when\s+(?:are|is|do|does|did|will|can|could|should|would)\b)/],
+  ['ask-location', /^(?:(?:hey[,!]?|(?:does )?anyone know) )?(?:what(?:'s| is) the address\b|which (?:entrance|location)\b|where\s+(?:are|is|do|does|did|will|can|could|should|would)\b)/],
+  ['ask-confirmation', /\b(?:please confirm|(?:can|could|would) (?:you|someone|everyone) confirm|let me know if (?:that|this) works)\b|^(?:are we still|is (?:that|this|it) (?:still )?(?:right|correct|on|confirmed)|does (?:that|this) (?:still )?work)\b/],
+  ['request-action', /^(?:hey[,!]?\s+)?(?:please\s+\w+|(?:can|could|would|will) (?:you|someone|anyone)\s+\w+|let (?:me|us) know|don't forget to)\b/],
+  ['ask-question', /\?|^(?:(?:what|who|why|how|which)\s+(?:are|is|do|does|did|will|can|could|should|would)|any(?:one)? (?:ideas|thoughts|know))\b/],
+  ['plan-changed', /^(?:(?:quick update|fyi)[,:]\s*)?(?:change of plans|(?:we|i) (?:need|have) to (?:reschedule|cancel|postpone)|(?:we|i) (?:rescheduled|canceled|cancelled|postponed)|(?:(?:the|our|my) )?(?:meeting|appointment|event|call|reservation|flight) (?:is|was|has been|got) (?:rescheduled|canceled|cancelled|postponed|moved))\b/],
+  ['plan-confirmed', /^(?:(?:quick update|fyi)[,:]\s*)?(?:we(?:'re| are) (?:still on|all set)|see you (?:at|on|tomorrow|tonight)|(?:(?:the|our|my) )?(?:meeting|appointment|event|call|reservation|flight) (?:is|was|has been) (?:confirmed|booked)|(?:we|i) (?:confirmed|booked) (?:our |the |a )?(?:meeting|appointment|reservation|flight))\b/],
+  ['share-item', /^(?:here(?:'s| is) (?:a |the )?(?:link|file|document|photo|screenshot)|attaching|i (?:attached|uploaded))\b/],
+  ['share-update', /^(?:quick update|status update|fyi)\b|\b(?:i (?:just )?(?:finished|completed|sent|paid|arrived)|(?:order|package) (?:shipped|arrived)|(?:it|order|package) (?:is|was) (?:ready|delivered))\b/],
+  ['acknowledgment', /^(?:thanks(?: so much)?|thank you|got it|ok(?:ay)?|sounds good|will do|great)[.!\s]*$/],
+];
+
+const activityDevelopments = new Map([
+  ['ask-time', 'question'], ['ask-location', 'question'], ['ask-confirmation', 'question'],
+  ['ask-question', 'question'], ['request-action', 'request'], ['plan-changed', 'plan-changed'],
+  ['plan-confirmed', 'plan-confirmed'], ['share-item', 'shared-item'], ['share-update', 'update'],
+]);
+
+export function describeAndreaActivity(groups) {
+  const messages = groups.flatMap((group, conversation) => group.map((row) => ({
+    conversation, timestamp: Date.parse(row.timestamp), preview: row.preview, isFromMe: row.isFromMe,
+  }))).filter(({ timestamp, preview, isFromMe }) =>
+    Number.isFinite(timestamp) && typeof preview === 'string' && preview.trim() && typeof isFromMe === 'boolean')
+    .sort((a, b) => b.timestamp - a.timestamp);
+  const topics = new Set();
+  const developments = new Set();
+  let latest = null;
+
+  for (const message of messages) {
+    const preview = message.preview.trim().toLowerCase().replaceAll('’', "'").replace(/\s+/g, ' ');
+    const plain = preview.replace(/https?:\/\/\S+/g, '').trim();
+    const includesLink = plain !== preview;
+    const labels = activityTopics.filter(([label, pattern]) =>
+      (label === 'shared-material' && includesLink) || pattern.test(plain)).map(([label]) => label);
+    const intent = activityIntents.find(([, pattern]) => pattern.test(plain))?.[0] ??
+      (includesLink ? 'share-item' : 'other');
+    if (!labels.length && intent === 'ask-time') labels.push('scheduling');
+    if (!labels.length && intent === 'ask-location') labels.push('logistics');
+    for (const label of labels) topics.add(label);
+    const development = activityDevelopments.get(intent);
+    if (development) developments.add(development);
+
+    if (latest === null && !message.isFromMe) {
+      const outgoing = messages.filter((candidate) => candidate.conversation === message.conversation && candidate.isFromMe);
+      // A later outgoing preview shows activity in the same chat, not which message it answered.
+      const reply = outgoing.some(({ timestamp }) => timestamp > message.timestamp) ? 'later' :
+        outgoing.some(({ timestamp }) => timestamp < message.timestamp) ? 'earlier' : 'none';
+      latest = { intent, topic: labels[0] ?? null, reply };
+    }
+  }
+
+  return { topics: [...topics].slice(0, 4), developments: [...developments].slice(0, 3), latest };
+}
+
 export async function inspectAndrea(reader, now = Date.now()) {
   const list = await reader.chats();
   // The reader can observe a new preview while this turn is already in flight.

@@ -172,9 +172,10 @@ def test_schema_validation_uses_the_node_launcher_from_systemd(tmp_path, monkeyp
     assert calls[1][1]["env"]["OPENCLAW_CONFIG_PATH"] == str(config)
 
 
-def test_upgrade_from_installed_segment1_restores_its_exact_bytes(controller, tmp_path):
+@pytest.mark.parametrize("prior_name", ["SEGMENT1", "CAPTAIN"])
+def test_upgrade_from_installed_release_restores_its_exact_bytes(controller, tmp_path, prior_name):
     installer, release, config, pin, _, _ = controller
-    prior = installer.SEGMENT1
+    prior = getattr(importlib.import_module("stage"), prior_name)
     config.write_bytes(installer.candidate_config(config.read_bytes(), prior))
     pin.write_text("[Service]\n" + installer.pin_line(prior) + "\n")
     old = config.read_bytes(), pin.read_bytes()
@@ -186,3 +187,45 @@ def test_upgrade_from_installed_segment1_restores_its_exact_bytes(controller, tm
     assert installer.pin_line(release) in pin.read_text()
     installer.switch(backup, config, restore=True)
     assert (config.read_bytes(), pin.read_bytes()) == old
+
+
+def test_upgrade_from_captain_rejects_custom_model_policy(controller):
+    installer, release, config, _, _, _ = controller
+    prior = importlib.import_module("stage").CAPTAIN
+    active = json.loads(installer.candidate_config(config.read_bytes(), prior))
+    entry = active["plugins"]["entries"][installer.PLUGIN]
+    entry["llm"]["allowModelOverride"] = False
+    with pytest.raises(ValueError, match="custom model policy"):
+        installer.candidate_config(json.dumps(active), release, prior)
+
+
+def test_stage_from_captain_preserves_wiring_and_refreshes_overlay(controller, tmp_path, monkeypatch):
+    stage = importlib.import_module("stage")
+    baseline = tmp_path / "captain-base"
+    runtime = baseline / stage.RUNTIME
+    segment = runtime / "segment1"
+    segment.mkdir(parents=True)
+    conductor = runtime / "first-officer-conductor.mjs"
+    conductor.write_bytes(b"already wired")
+    old_tool = segment / "tools.mjs"
+    old_tool.write_bytes(b"old overlay")
+    manifest = b"".join(
+        f"{stage.digest(path.read_bytes())}  {path.relative_to(baseline).as_posix()}\n".encode()
+        for path in (conductor, old_tool)
+    )
+    (baseline / stage.INVENTORY).write_bytes(manifest)
+    captain = stage.digest(manifest)
+    monkeypatch.setattr(stage, "CAPTAIN", captain)
+    monkeypatch.setattr(stage, "SUPPORTED_BASES", (stage.BASELINE, stage.SEGMENT1, captain))
+    destination = tmp_path / "staging"
+    destination.mkdir()
+
+    release = stage.stage_release(baseline, destination)
+
+    candidate = destination / f"first-officer-{release}"
+    assert (candidate / stage.RUNTIME / conductor.name).read_bytes() == b"already wired"
+    assert (candidate / stage.RUNTIME / "segment1" / old_tool.name).read_text(encoding="utf-8") == (
+        stage.OVERLAY / old_tool.name
+    ).read_text(encoding="utf-8")
+    assert old_tool.read_bytes() == b"old overlay"
+    stage.verify_inventory(candidate, release)

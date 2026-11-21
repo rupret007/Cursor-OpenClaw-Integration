@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a private Segment 1 candidate from the verified Round 13 inventory."""
+"""Build a private First Officer candidate from a verified release inventory."""
 
 import argparse
 import hashlib
@@ -14,7 +14,8 @@ import tempfile
 
 BASELINE = "daf8df40c3b03440d69db6b61a271362b4b442551c7d3648b0b87c6f8b046ecf"
 SEGMENT1 = "ed545847333ee1691824cd8e3b0a528882b2b11c7f2479c1f63af9a0e8def456"
-SUPPORTED_BASES = (BASELINE, SEGMENT1)
+CAPTAIN = "2df63b9d08cb2a6741c626db5469d5fd71add93a31ed87abed9fdfbc061ac802"
+SUPPORTED_BASES = (BASELINE, SEGMENT1, CAPTAIN)
 ROLLBACK_SLOT = "4759047e8a16d1691499d55c4b6656882e67bc2275a3297d2283aa9b01538753"
 RUNTIME = Path("round6/runtime")
 MODULES = ("andrea-ssh.mjs", "captain.mjs", "captain-state.py", "dispatch.mjs",
@@ -148,7 +149,7 @@ def stage_release(baseline, destination):
         raise ValueError("Choose a staging directory outside the release")
     pin = digest((baseline / INVENTORY).read_bytes())
     if pin not in SUPPORTED_BASES:
-        raise ValueError("Choose the verified Round 13 or installed Segment 1 bundle")
+        raise ValueError("Choose a verified Round 13, Segment 1, or Captain bundle")
     verify_inventory(baseline, pin)
     with tempfile.TemporaryDirectory(prefix=".fo-stage-", dir=destination) as temp:
         working = Path(temp) / "bundle"
@@ -167,7 +168,8 @@ def stage_release(baseline, destination):
             wire_dispatch(working)
             wire_memory(working)
             wire_model_router(working)
-        wire_captain(working)
+        if pin in (BASELINE, SEGMENT1):
+            wire_captain(working)
         names = sorted(file.relative_to(working).as_posix() for file in working.rglob("*")
                        if file.is_file() and file.name != INVENTORY)
         manifest = "".join(f"{digest((working / name).read_bytes())}  {name}\n" for name in names).encode("utf-8")
@@ -184,7 +186,7 @@ def stage_release(baseline, destination):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("baseline", type=Path, help="Verified Round 13 or Segment 1 release directory")
+    parser.add_argument("baseline", type=Path, help="Verified Round 13, Segment 1, or Captain release directory")
     parser.add_argument("staging_directory", type=Path, help="Private directory for the candidate")
     args = parser.parse_args()
     os.umask(0o077)

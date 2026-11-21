@@ -178,7 +178,8 @@ test('the fixed Andrea summary reads an exact allowlisted thread missing from th
   const result = await runMacAndrea(andreaCommand, () => settings, (url, options) => read(url, options, 'allowlist'), today);
   assert.equal(examined.length, 1);
   assert.equal(result.source, 'live-provider');
-  assert.match(parseAndreaSummary(JSON.stringify(result)), /1 incoming, 0 outgoing across 1 recent conversations/);
+  assert.match(result.summary, /1 incoming, 0 outgoing across 1 recent conversations\./);
+  assert.match(parseAndreaSummary(JSON.stringify(result)), /1 incoming, 0 outgoing across 1 recent conversation\./);
   assert.doesNotMatch(JSON.stringify(result), /sample-thread|demonstration library|fixture-password/);
 });
 
@@ -202,7 +203,10 @@ test('the Andrea reader returns a separate approved-group aggregate and preserve
   };
   const result = await runMacAndrea(andreaCommand, () => settings, read, now);
   assert.match(result.summary, /one-to-one.*\nAndrea returned no recent previews/);
-  assert.match(parseAndreaSummary(JSON.stringify(result)), /approved group chats.*\n1 incoming/);
+  assert.match(result.groupSummary, /approved group chats.*\n1 incoming/);
+  const rendered = parseAndreaSummary(JSON.stringify(result));
+  assert.match(rendered, /approved group chats.*\nTopics · scheduling\./);
+  assert.match(rendered, /1 incoming, 0 outgoing across 1 recent conversation\./);
   assert.doesNotMatch(JSON.stringify(result), /approved-group|demonstration library|fixture-password/);
   assert.throws(() => parseAndreaSummary(JSON.stringify({ ...result, groupSummary: result.summary })), /invalid/);
 });

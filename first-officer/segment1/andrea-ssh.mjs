@@ -8,8 +8,9 @@ export const andreaCommand = 'first-officer-andrea-summary-v1';
 const execute = promisify(execFile);
 const title = 'Andrea · synced one-to-one text activity from the last 48 hours.';
 const groupTitle = 'Andrea · activity in approved group chats from the last 48 hours.';
+const countLine = /^\d{1,2} incoming, \d{1,2} outgoing across [1-4] recent conversations\.$/;
 const lineFormats = [
-  /^\d{1,2} incoming, \d{1,2} outgoing across [1-4] recent conversations\.$/,
+  countLine,
   /^The latest message was incoming in [1-4] of those conversations\.$/,
   /^Topics detected in previews · (?:scheduling|travel or pickup|payments or orders|follow-up)(?:, (?:scheduling|travel or pickup|payments or orders|follow-up))*\.$/,
   /^Andrea returned no recent previews in the chats checked\.$/,
@@ -18,15 +19,80 @@ const lineFormats = [
   /^Andrea returned a partial chat list\.$/,
 ];
 
+const activityTopics = new Map([
+  ['scheduling', 'scheduling'], ['travel', 'travel'], ['logistics', 'pickups and logistics'],
+  ['work', 'work'], ['events', 'events'], ['family', 'family'], ['payments', 'payments'],
+  ['orders', 'orders and deliveries'], ['food', 'food'], ['shared-material', 'shared files or links'],
+  ['follow-up', 'follow-ups'],
+]);
+const activityDevelopments = new Map([
+  ['question', 'questions'], ['request', 'action requests'], ['plan-confirmed', 'plan confirmations'],
+  ['plan-changed', 'changes of plans'], ['update', 'updates'], ['shared-item', 'shared items'],
+]);
+const latestNotes = new Map([
+  ['ask-time', 'asks about timing'], ['ask-location', 'asks about a location'],
+  ['ask-confirmation', 'asks for confirmation'], ['ask-question', 'asks a question'],
+  ['request-action', 'asks someone to do something'], ['plan-confirmed', 'confirms a plan'],
+  ['plan-changed', 'raises a change of plans'], ['share-update', 'shares an update'],
+  ['share-item', 'shares a link or file'], ['acknowledgment', 'is a brief acknowledgment'],
+  ['other', null],
+]);
+
+function exactKeys(value, keys) {
+  return value && typeof value === 'object' && !Array.isArray(value) &&
+    Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+}
+
+function validLabels(list, labels, maximum) {
+  return Array.isArray(list) && list.length <= maximum && new Set(list).size === list.length &&
+    list.every((label) => labels.has(label));
+}
+
+function validActivity(activity) {
+  if (!exactKeys(activity, ['topics', 'developments', 'latest']) ||
+      !validLabels(activity.topics, activityTopics, 4) ||
+      !validLabels(activity.developments, activityDevelopments, 3)) return false;
+  const { latest } = activity;
+  return latest === null || (exactKeys(latest, ['intent', 'topic', 'reply']) && latestNotes.has(latest.intent) &&
+    (latest.topic === null || activityTopics.has(latest.topic)) && ['later', 'earlier', 'none'].includes(latest.reply));
+}
+
+function formatActivity(heading, lines, { topics, developments, latest }) {
+  const result = [heading];
+  if (topics.length) result.push('Topics · ' + topics.map((key) => activityTopics.get(key)).join(', ') + '.');
+  if (developments.length) {
+    result.push('Recent activity · ' + developments.map((key) => activityDevelopments.get(key)).join(', ') + '.');
+  }
+  if (latest) {
+    let note = latestNotes.get(latest.intent);
+    const topic = activityTopics.get(latest.topic);
+    if (topic && latest.intent === 'other') note = 'mentions ' + topic;
+    if (topic && ['ask-question', 'share-update'].includes(latest.intent)) note += ' about ' + topic;
+    if (note) {
+      result.push('Latest incoming · ' + note + '.');
+      if (latest.reply === 'earlier') result.push('It came after your last outgoing message in that conversation.');
+      if (latest.reply === 'later') result.push('You posted in that conversation afterward.');
+    }
+  }
+  if (result.length === 1) result.push('The recent previews did not give Andrea a clear topic or request.');
+  for (const line of lines) {
+    if (line.startsWith('The latest message was incoming') || line.startsWith('Topics detected in previews')) continue;
+    result.push(line.replace('across 1 recent conversations.', 'across 1 recent conversation.'));
+  }
+  return result.join('\n');
+}
+
 export function parseAndreaSummary(payload) {
-  const { version, summary: directSummary, groupSummary } = JSON.parse(payload) ?? {};
+  const { version, summary: directSummary, groupSummary, activity } = JSON.parse(payload) ?? {};
   const grouped = groupSummary !== undefined;
+  const heading = grouped ? groupTitle : title;
   const summary = grouped ? groupSummary : directSummary;
   const lines = typeof summary === 'string' && summary.length <= 1000 ? summary.split('\n') : [];
-  if (version !== 1 || lines.shift() !== (grouped ? groupTitle : title) || lines.length < 1 ||
+  if (version !== 1 || lines.shift() !== heading || lines.length < 1 ||
       lines.length > lineFormats.length || lines.some((line) => !lineFormats.some((format) => format.test(line)))) {
     throw new Error('Andrea summary response was invalid');
   }
+  if (countLine.test(lines[0]) && validActivity(activity)) return formatActivity(heading, lines, activity);
   return summary;
 }
 

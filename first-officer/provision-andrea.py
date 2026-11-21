@@ -93,6 +93,22 @@ def write_once(path, payload):
             staging.unlink(missing_ok=True)
 
 
+def replace_reader_backup(path, payload):
+    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as handle:
+        staging = Path(handle.name)
+        try:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+            os.replace(staging, path)
+        finally:
+            staging.unlink(missing_ok=True)
+
+
+def reader_backup_path(entry):
+    return STATE / ("reader.previous-" + hashlib.sha256(entry).hexdigest())
+
+
 def public_key(text):
     key = " ".join(text.split()[:2])
     if not PUBLIC_KEY.fullmatch(key):
@@ -117,7 +133,7 @@ def quiet_run(args, *, env=None, timeout=20):
                           env=env, check=True, timeout=timeout).stdout
 
 
-def add_restriction(entry, mode="install"):
+def add_restriction(entry=None, mode="install"):
     directory = Path.home() / ".ssh"
     directory.mkdir(mode=0o700, exist_ok=True)
     info = directory.lstat()
@@ -142,13 +158,20 @@ def update_authorized_keys(path, entry, mode):
             raise ValueError("The Mac authorized keys file exceeds the size limit")
         rows = current.splitlines(keepends=True)
         matches = [line.rstrip(b"\r\n") for line in rows if line.rstrip(b"\r\n").endswith(b" " + KEY_LABEL.encode())]
+        if mode == "restore":
+            if len(matches) != 1:
+                raise ValueError("The existing restricted reader key could not be verified")
+            try:
+                entry = private_file(reader_backup_path(matches[0]))
+            except FileNotFoundError:
+                entry = private_file(STATE / "reader.previous")
         if matches == [entry]:
+            if mode != "install":
+                restricted_key(entry)
             return
         if matches:
             if mode == "install" or len(matches) != 1 or restricted_key(matches[0]) != restricted_key(entry):
                 raise ValueError("An existing First Officer reader key needs operator review")
-            if mode == "refresh":
-                write_once(STATE / "reader.previous", matches[0])
             updated = b"".join(entry + b"\n" if line.rstrip(b"\r\n") == matches[0] else line for line in rows)
         else:
             if mode != "install":
@@ -161,10 +184,26 @@ def update_authorized_keys(path, entry, mode):
                 temp.write(updated)
                 temp.flush()
                 os.fsync(temp.fileno())
-                live = path.lstat()
-                if (live.st_dev, live.st_ino, live.st_mtime_ns) != (info.st_dev, info.st_ino, info.st_mtime_ns):
-                    raise ValueError("Mac authorized keys changed during reader update")
-                os.replace(staged, path)
+                if mode == "refresh":
+                    backup = reader_backup_path(entry)
+                    try:
+                        previous_backup = private_file(backup)
+                    except FileNotFoundError:
+                        previous_backup = None
+                    # The active entry keeps its own rollback point even if the switch is interrupted.
+                    replace_reader_backup(backup, matches[0])
+                try:
+                    live = path.lstat()
+                    if (live.st_dev, live.st_ino, live.st_mtime_ns) != (info.st_dev, info.st_ino, info.st_mtime_ns):
+                        raise ValueError("Mac authorized keys changed during reader update")
+                    os.replace(staged, path)
+                except (OSError, ValueError):
+                    if mode == "refresh":
+                        if previous_backup is None:
+                            backup.unlink()
+                        else:
+                            replace_reader_backup(backup, previous_backup)
+                    raise
             finally:
                 staged.unlink(missing_ok=True)
 
@@ -308,7 +347,7 @@ def prepare_mac(payload):
 
 
 def restore_mac():
-    add_restriction(private_file(STATE / "reader.previous"), "restore")
+    add_restriction(mode="restore")
     return {"restored": True}
 
 
@@ -323,7 +362,9 @@ def verify_from_bobserver(payload):
     write_once(STATE / "route.json", (json.dumps({"host": host, "user": user}) + "\n").encode())
     encoded = base64.b64encode(payload["client"].encode()).decode("ascii")
     verification = (
-        r"if (!/\n\d+ incoming, \d+ outgoing across [1-4] recent conversations\./.test(summary ?? '')) process.exit(1);"
+        r"if (!/\n\d+ incoming, \d+ outgoing across [1-4] recent conversations?\./.test(summary ?? '')) process.exit(1);"
+        r"if (!/\n(?:(?:Topics|Recent activity|Latest incoming) · [^\n]+|The recent previews did not give Andrea a clear "
+        r"topic or request\.)(?:\n|$)/.test(summary ?? '')) process.exit(1);"
         if payload.get("require_recent") else
         "if (!summary) process.exit(1);"
     )

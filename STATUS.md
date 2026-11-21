@@ -26,6 +26,8 @@ The live authority check showed Grok Bot still holds the shared lease. Takeover 
 
 The captain can read current fleet, gate, PR and quota evidence, follow an exact PR head, launch one review lane for it and verify the result against the current GitHub head. The local tests exercise stale grants, duplicate submissions, pause, failed lanes, mismatched heads and the Andrea diagnostic. A private Nuc rehearsal using the installed fence and watchdog code confirmed explicit handoff, epoch advancement, pause, handback, stale-grant rejection and disarm. Production authority remained with Grok Bot. The [Captain guide](CAPTAIN.md) covers the Mac check, operator activation, supervised pilot and rollback.
 
+Jeff shared the live Andrea reply from Bob the Bot. It confirms delivery and a live read from the approved groups. The count-only reply failed the content check. The follow-up candidate classifies questions, requests, plan changes and discussion topics on the Mac and sends only fixed labels to the gateway. Preview text and identifiers stay on the Mac. The [Telegram check](LIVE-TEST.md) now requires a useful, accurate finding from a recent approved thread and captures latency.
+
 ## Later segments
 
 - LiteLLM for all API calls with per-lane budgets and provider fallback.
@@ -39,4 +41,4 @@ The captain can read current fleet, gate, PR and quota evidence, follow an exact
 
 The backlog references the bobserver lanes `infra-20261118`, `consolidate-20261119` and `arch-research-20261118`.
 
-BLOCKED: The reviewed gateway is active. Timed Telegram acceptance and the supervised authority pilot remain pending.
+BLOCKED: The Andrea content fix needs an approved gateway upgrade, a Mac reader refresh and timed Telegram acceptance. The supervised authority pilot remains pending.

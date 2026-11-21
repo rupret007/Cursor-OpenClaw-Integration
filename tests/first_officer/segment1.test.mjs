@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -8,7 +8,7 @@ import { budgets, classifyRequest, createDispatch } from '../../first-officer/se
 import { answerSimple, fastModelRef, routeOwnerModel, standaloneSimple } from '../../first-officer/segment1/model-router.mjs';
 import { registerSegmentOne } from '../../first-officer/segment1/register.mjs';
 import { fleetStatus, openPullRequests, summarizeAndrea } from '../../first-officer/segment1/tools.mjs';
-import { andreaCommand, parseAndreaSummary, sshAndreaSummary } from '../../first-officer/segment1/andrea-ssh.mjs';
+import { andreaCommand, parseAndreaSummary } from '../../first-officer/segment1/andrea-ssh.mjs';
 import { runMacAndrea } from '../../first-officer/segment1/andrea-mac.mjs';
 
 const fixtures = [
@@ -279,27 +279,64 @@ test('the Mac key runs only the fixed read-only summary and returns aggregate ac
       isBotMessage: false, isFromMe: false }] });
   });
   assert.equal(requests.length, 2);
-  assert.match(parseAndreaSummary(JSON.stringify(result)), /Topics detected in previews · scheduling, follow-up/);
+  assert.match(result.summary, /Topics detected in previews · scheduling, follow-up/);
+  assert.match(parseAndreaSummary(JSON.stringify(result)), /Topics · scheduling/);
   assert.doesNotMatch(result.summary, /fictional outpost|bb:/);
   assert.equal(JSON.stringify(result).includes(syntheticToken), false);
   assert.throws(() => parseAndreaSummary(JSON.stringify({ ...result, summary: result.summary + '\n' + privatePreview })),
     /response was invalid/);
 });
 
-test('Andrea SSH pins the host and identity and invokes one fixed command', async (t) => {
+test('Andrea SSH pins one command and renders safe findings from approved Mac group history', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'fo-reader-fixture-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
-  const payload = {
-    version: 1,
-    summary: 'Andrea · synced one-to-one text activity from the last 48 hours.\nAndrea returned no recent previews in the chats checked.',
-  };
+  const now = Date.parse('2026-11-20T06:00:00Z');
+  const group = 'iMessage;+;fixture-approved';
+  const privateMarker = 'fixture-private-marker';
+  const payload = await runMacAndrea(andreaCommand, () => ({
+    BLUEBUBBLES_CONTROL_TOKEN: 'x'.repeat(24),
+    BLUEBUBBLES_CANONICAL_SELF_THREAD_JID: 'bb:iMessage;-;fixture-owner',
+    BLUEBUBBLES_BASE_URL: 'https://fixture.invalid',
+    BLUEBUBBLES_PASSWORD: 'fixture-provider-credential',
+    BLUEBUBBLES_ALLOWED_CHAT_GUIDS: group,
+  }), async (url, options) => {
+    assert.equal(options.method, 'GET');
+    if (url.pathname.endsWith('/status')) return Response.json({ status: { chatScope: 'allowlist' } });
+    if (url.pathname.endsWith('/chats')) return Response.json({ chats: [] });
+    assert.equal(decodeURIComponent(url.pathname), '/api/v1/chat/' + group + '/message');
+    return Response.json({ data: [
+      { guid: 'fixture-row-1', text: 'What time is the meeting? ' + privateMarker,
+        dateCreated: now, isFromMe: false, chats: [{ guid: group, isGroup: true }] },
+      { guid: 'fixture-row-2', text: 'The meeting was confirmed.',
+        dateCreated: now - 1000, isFromMe: true, chats: [{ guid: group, isGroup: true }] },
+      { guid: 'fixture-row-3', text: 'I attached the document.',
+        dateCreated: now - 2000, isFromMe: false, chats: [{ guid: group, isGroup: true }] },
+      { guid: 'fixture-row-4', text: 'I paid the invoice.', dateCreated: now,
+        isFromMe: false, chats: [{ guid: 'iMessage;+;fixture-unapproved', isGroup: true }] },
+    ] });
+  }, now);
+  assert.equal(payload.version, 1);
+  assert.equal(payload.summary, 'Andrea · synced one-to-one text activity from the last 48 hours.\n' +
+    'Andrea returned no recent previews in the chats checked.');
+  assert.equal(payload.groupSummary, [
+    'Andrea · activity in approved group chats from the last 48 hours.',
+    '2 incoming, 1 outgoing across 1 recent conversations.',
+    'The latest message was incoming in 1 of those conversations.',
+    'Topics detected in previews · scheduling.',
+  ].join('\n'));
+  const wire = JSON.stringify(payload);
+  const privateData = /fixture-(?:private-marker|approved|unapproved|owner|row|provider-credential)|fixture\.invalid|What time is the meeting|The meeting was confirmed|I attached the document|I paid the invoice/;
+  assert.doesNotMatch(wire, privateData);
   await Promise.all([
     writeFile(join(directory, 'route.json'), JSON.stringify({ host: 'fixture-mac', user: 'fixture' }), { mode: 0o600 }),
     writeFile(join(directory, 'id_ed25519'), 'fixture identity', { mode: 0o600 }),
     writeFile(join(directory, 'known_hosts'), 'fixture host pin', { mode: 0o600 }),
   ]);
   const signal = AbortSignal.timeout(30_000);
-  assert.equal(await sshAndreaSummary(signal, { directory, run: async (file, args, options) => {
+  // Provisioning loads the gateway parser as a standalone data URI.
+  const source = await readFile(new URL('../../first-officer/segment1/andrea-ssh.mjs', import.meta.url));
+  const standalone = await import('data:text/javascript;base64,' + source.toString('base64'));
+  const summary = await standalone.sshAndreaSummary(signal, { directory, run: async (file, args, options) => {
     assert.equal(file, '/usr/bin/nice');
     assert.deepEqual(args.slice(-2), ['fixture-mac', andreaCommand]);
     assert.ok(args.includes('-oStrictHostKeyChecking=yes'));
@@ -307,6 +344,43 @@ test('Andrea SSH pins the host and identity and invokes one fixed command', asyn
     assert.ok(args.includes('-oClearAllForwardings=yes'));
     assert.equal(options.signal, signal);
     assert.ok(options.timeout < budgets.status);
-    return { stdout: JSON.stringify(payload) };
-  } }), payload.summary);
+    return { stdout: wire };
+  } });
+  assert.match(summary, /approved group chats from the last 48 hours/);
+  assert.match(summary, /\b2 incoming, 1 outgoing across 1 recent conversation\./);
+  assert.match(summary, /Topics · scheduling/);
+  assert.match(summary, /Recent activity · questions, plan confirmations, shared items\./);
+  assert.match(summary, /Latest incoming · asks about timing\./);
+  assert.match(summary, /It came after your last outgoing message in that conversation\./);
+  assert.doesNotMatch(summary, /The latest message was incoming|payments/);
+  assert.doesNotMatch(summary, privateData);
+});
+
+test('Andrea rejects arbitrary activity details and preserves validated legacy summaries', () => {
+  const summary = 'Andrea · synced one-to-one text activity from the last 48 hours.\n' +
+    '1 incoming, 0 outgoing across 1 recent conversations.\n' +
+    'The latest message was incoming in 1 of those conversations.';
+  const legacy = { version: 1, summary };
+  const unclassified = { topics: [], developments: [], latest: { intent: 'other', topic: null, reply: 'none' } };
+  const parse = (payload) => parseAndreaSummary(JSON.stringify(payload));
+  assert.equal(parse(legacy), summary);
+  assert.match(parse({ ...legacy, activity: unclassified }),
+    /The recent previews did not give Andrea a clear topic or request\./);
+
+  const marker = 'fixture-private-preview';
+  for (const activity of [
+    { ...unclassified, topics: ['scheduling', marker] },
+    { ...unclassified, topics: ['scheduling', 'travel', 'logistics', 'work', 'events'] },
+    { ...unclassified, developments: [marker] },
+    { ...unclassified, latest: { ...unclassified.latest, intent: marker } },
+    { ...unclassified, latest: { ...unclassified.latest, topic: marker } },
+    { ...unclassified, latest: { ...unclassified.latest, reply: marker } },
+    { ...unclassified, latest: { ...unclassified.latest, preview: marker } },
+    { ...unclassified, preview: marker },
+    marker,
+  ]) {
+    assert.equal(parse({ ...legacy, activity }), summary);
+  }
+  assert.throws(() => parse({ ...legacy, summary: summary + '\n' + marker, activity: unclassified }),
+    /response was invalid/);
 });

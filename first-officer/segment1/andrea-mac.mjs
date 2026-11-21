@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { andreaCommand } from './andrea-ssh.mjs';
-import { formatAndreaSummary, inspectAndrea } from './tools.mjs';
+import { describeAndreaActivity, formatAndreaSummary, inspectAndrea } from './tools.mjs';
 
 const execute = promisify(execFile);
 const maxBytes = 196_608;
@@ -220,9 +220,11 @@ export async function runMacAndrea(command, readSettings = loadSettings, transpo
   const { view, source, grouped, cached } = await inspectMacHistory(await readSettings(), transport, now);
   // The previous gateway can still read the one-to-one result during a
   // staged upgrade. The updated client validates the group summary separately.
-  return grouped ? { version: 1, summary: formatAndreaSummary(cached, { allowEmpty: true }), source,
+  const result = grouped ? { version: 1, summary: formatAndreaSummary(cached, { allowEmpty: true }), source,
     groupSummary: formatAndreaSummary(view, { grouped: true }) } :
     { version: 1, summary: formatAndreaSummary(view), source };
+  if (view.counts.recentTextPreviews) result.activity = describeAndreaActivity(view.groups);
+  return result;
 }
 
 async function diagnosticRead(readSettings, transport, read, counts) {

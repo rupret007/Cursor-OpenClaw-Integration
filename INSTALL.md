@@ -1,10 +1,10 @@
 # Install First Officer
 
-Jeff runs the activation and rollback commands on bobserver. The captain upgrade starts from the verified Segment 1 bundle currently pinned by the gateway. Keep the bundle and config backup in private storage.
+Jeff approves activation and runs the activation and rollback commands on bobserver. The Andrea summary upgrade starts from the verified Captain bundle currently pinned by the gateway. Keep the bundle and config backup in private storage.
 
 ## Stage on the Nuc
 
-From the reviewed PR checkout in a Linux shell, set `PRIOR_BUNDLE` to the private, extracted Segment 1 bundle. The staging helper accepts the pinned Segment 1 and Round 13 inventories. Use Node 24.16 or newer and Python 3.12 or newer.
+From the reviewed PR checkout in a Linux shell, set `PRIOR_BUNDLE` to the private, extracted Captain bundle. The staging helper accepts the verified Captain, Segment 1 and Round 13 inventories. Use Node 24.16 or newer and Python 3.12 or newer.
 
 ```bash
 set -euo pipefail
@@ -33,7 +33,9 @@ nice -n 10 python3 -B first-officer/provision-andrea.py \
   --bob-host bobserver --mac-host "$mac_host" --mac-user "$mac_user"
 ```
 
-The helper creates a dedicated key on bobserver and adds a restricted authorization on the Mac Mini for one summary command. The Mac reads Andrea locally using the settings already in its deployment. Bobserver receives counts and detected themes. Wait for `Andrea reader verified from bobserver.` before publishing or activating the gateway. The helper verifies an actual summary and leaves the gateway running.
+The helper creates a dedicated key on bobserver and adds a restricted authorization on the Mac Mini for one summary command. The Mac reads Andrea locally using the settings already in its deployment. Bobserver receives counts and fixed activity labels.
+
+For an existing restricted key, add `--refresh-reader` to the same command. The helper tests the candidate against recent history and then verifies the refreshed reader from bobserver. Wait for `Andrea reader verified from bobserver.` before publishing or activating the gateway. The gateway keeps running during the reader refresh.
 
 ## Check prerequisites on bobserver
 
@@ -45,7 +47,7 @@ umask 077
 systemctl --user is-active --quiet openclaw-gateway.service
 test "$(gh api user --hostname github.com --jq .login 2>/dev/null)" = rupret007
 test -x /usr/bin/gh
-baseline=ed545847333ee1691824cd8e3b0a528882b2b11c7f2479c1f63af9a0e8def456
+baseline=2df63b9d08cb2a6741c626db5469d5fd71add93a31ed87abed9fdfbc061ac802
 if ! node --input-type=module - "/opt/openclaw-fo/first-officer-$baseline" >/dev/null 2>&1 <<'JS'
 import { pathToFileURL } from 'node:url';
 import { join } from 'node:path';
@@ -62,7 +64,7 @@ read -r -p 'Enter the reviewed release digest: ' release
 [[ "$release" =~ ^[a-f0-9]{64}$ && "$release" != "$baseline" ]]
 ```
 
-If the Andrea check fails, resolve it while the current gateway is running. For a Mac-hosted Andrea, use the restricted SSH setup above. Existing authenticated loopback readers can continue using their private `~/.config/openclaw-firstofficer/andrea-reader.json`. Keep the Andrea control credential on its current host and use the Mac-hosted setup for new connections.
+If the Andrea check fails, resolve it while the current gateway is running. For a Mac-hosted Andrea, use the restricted SSH setup above. Existing authenticated loopback readers can continue using their private `~/.config/openclaw-firstofficer/andrea-reader.json`. Keep the Andrea control credential on its current host and use the Mac-hosted setup for new connections. Set `baseline` to the verified active release on hosts running an earlier pinned bundle.
 
 ## Publish and activate the reviewed candidate
 
@@ -104,5 +106,7 @@ systemctl --user is-active --quiet openclaw-gateway.service
 ```
 
 If automatic recovery itself fails, use the config and pin in that private backup with the existing Round 13 recovery procedure. Keep those files private and preserve them until the restored service has passed its readiness check.
+
+If the Mac reader was refreshed for this upgrade, restore the prior restricted command using [the Captain rollback steps](CAPTAIN.md#take-back-control-and-roll-back).
 
 To revoke the dedicated Mac reader as well, remove only the key line labeled `openclaw-firstofficer-andrea-read` from the Mac account’s `~/.ssh/authorized_keys`. This revokes First Officer’s reader access while preserving other Mac SSH logins.

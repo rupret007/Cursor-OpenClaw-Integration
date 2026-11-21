@@ -15,7 +15,7 @@ import tempfile
 import time
 from urllib.request import ProxyHandler, build_opener
 
-from stage import BASELINE, ROLLBACK_SLOT, SEGMENT1, SUPPORTED_BASES, verify_inventory
+from stage import BASELINE, ROLLBACK_SLOT, SUPPORTED_BASES, verify_inventory
 
 
 STORE = Path("/opt/openclaw-fo")
@@ -145,7 +145,8 @@ def candidate_config(original, release, previous=BASELINE):
     entry = cfg["plugins"]["entries"][PLUGIN]
     policy = {"allowModelOverride": True, "allowedModels": [FAST_MODEL], "allowedCompletionModels": [FAST_MODEL]}
     prior_policy = entry.get("llm")
-    if entry.get("enabled") is not True or (prior_policy != policy if previous == SEGMENT1 else bool(prior_policy)):
+    custom_policy = bool(prior_policy) if previous == BASELINE else prior_policy != policy
+    if entry.get("enabled") is not True or custom_policy:
         raise ValueError("The conductor has a custom model policy or is disabled")
     provider = cfg["models"]["providers"]["litellm"]
     if not any(row.get("id") == FAST_MODEL.split("/")[1] for row in provider.get("models", [])):

@@ -1,6 +1,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -46,7 +47,8 @@ def test_mac_setup_appends_only_its_restricted_key_and_preserves_existing_keys(p
     assert key_file.read_bytes() == previous + entry + b"\n"
 
 
-def test_reader_refresh_and_restore_replace_only_the_dedicated_line(provision):
+@pytest.mark.parametrize("switch_error", [OSError, KeyboardInterrupt])
+def test_repeated_reader_refresh_restores_the_immediately_previous_restriction(provision, monkeypatch, switch_error):
     module, home = provision
     root = home / ".local/libexec/openclaw-firstofficer-andrea"
     key = module.make_key()["public"]
@@ -57,17 +59,69 @@ def test_reader_refresh_and_restore_replace_only_the_dedicated_line(provision):
         script.write_text("// local synthetic reader")
         return f'restrict,command="/usr/bin/node {script}" {key} {module.KEY_LABEL}'.encode()
 
-    old, new = entry("a"), entry("b")
+    legacy, old, first, second = entry("a"), entry("b"), entry("c"), entry("d")
     key_file = home / ".ssh/authorized_keys"
     unrelated = b"# Unrelated entry is preserved.\n"
     key_file.write_bytes(unrelated)
     key_file.chmod(0o600)
     module.add_restriction(old)
-    module.add_restriction(new, "refresh")
-    module.add_restriction(new, "refresh")
-    assert key_file.read_bytes() == unrelated + new + b"\n"
-    assert module.restore_mac() == {"restored": True}
-    assert key_file.read_bytes() == unrelated + old + b"\n"
+    module.write_once(module.STATE / "reader.previous", legacy)
+    module.add_restriction(first, "refresh")
+    assert key_file.read_bytes() == unrelated + first + b"\n"
+    first_backup = module.reader_backup_path(first)
+    second_backup = module.reader_backup_path(second)
+    assert module.private_file(first_backup) == old
+
+    second_backup.write_bytes(first)
+    second_backup.chmod(0o644)
+    with pytest.raises(ValueError, match="Reader file is not private"):
+        module.add_restriction(second, "refresh")
+    second_backup.unlink()
+    assert key_file.read_bytes() == unrelated + first + b"\n"
+    assert module.private_file(first_backup) == old
+
+    replace = module.os.replace
+
+    def reject_authorized_keys_update(source, destination):
+        if destination == key_file:
+            raise switch_error("synthetic authorized keys replacement failure")
+        return replace(source, destination)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(module.os, "replace", reject_authorized_keys_update)
+        with pytest.raises(switch_error, match="synthetic authorized keys replacement failure"):
+            module.add_restriction(second, "refresh")
+    assert key_file.read_bytes() == unrelated + first + b"\n"
+    assert module.private_file(first_backup) == old
+
+    module.add_restriction(second, "refresh")
+    module.add_restriction(second, "refresh")
+    assert key_file.read_bytes() == unrelated + second + b"\n"
+    assert module.private_file(second_backup) == first
+    for prior in (first, old, legacy, legacy):
+        assert module.restore_mac() == {"restored": True}
+        assert key_file.read_bytes() == unrelated + prior + b"\n"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="The reader verification uses Node")
+def test_bobserver_refresh_verifies_singular_and_plural_activity_and_rejects_empty_history(provision):
+    module, _ = provision
+    public = module.make_key()["public"]
+    payload = {"host": "fixture", "user": "operator", "pin": public, "require_recent": True}
+    for count, noun, activity in (
+        (1, "conversation", "Topics · scheduling."),
+        (2, "conversations", "The recent previews did not give Andrea a clear topic or request."),
+    ):
+        summary = f"Andrea · fixture history.\n{activity}\n2 incoming, 1 outgoing across {count} recent {noun}."
+        source = "export const sshAndreaSummary = () => " + json.dumps(summary)
+        assert module.verify_from_bobserver({**payload, "client": source}) == {"verified": True}
+    for summary in (
+        "Andrea returned no recent previews.",
+        "Andrea · fixture history.\n2 incoming, 1 outgoing across 2 recent conversations.",
+    ):
+        source = "export const sshAndreaSummary = () => " + json.dumps(summary)
+        with pytest.raises(subprocess.CalledProcessError):
+            module.verify_from_bobserver({**payload, "client": source})
 
 
 @pytest.mark.parametrize(

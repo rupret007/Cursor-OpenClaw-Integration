@@ -42,6 +42,22 @@ def activate_replies():
             "Reserve a private staging directory under the release store": PUBLISH}
 
 
+def write_private_rollback(backup):
+    """The files install.py prepare leaves before a rollback path may be printed."""
+    backup.mkdir(mode=0o700)
+    backup.chmod(0o700)
+    for name in (
+        "plan.json",
+        "original-openclaw.json",
+        "candidate-openclaw.json",
+        "original-pin.conf",
+        "candidate-pin.conf",
+    ):
+        path = backup / name
+        path.write_text('{"ready": true}\n', encoding="utf-8")
+        path.chmod(0o600)
+
+
 def test_dry_run_prints_the_ordered_plan_and_runs_nothing(tmp_path, capsys):
     recorder = Recorder()
     assert release.main(["--dry-run", "build", str(tmp_path / "prior"), str(tmp_path),
@@ -194,7 +210,15 @@ def test_install_doc_verifies_the_candidate_after_it_is_read_only():
 
 def test_one_activate_command_preflights_publishes_and_switches_in_order(tmp_path, capsys):
     recorder = Recorder(activate_replies())
-    assert release.main(["activate", CANDIDATE, str(tmp_path / "a.tar"), str(tmp_path)], recorder) == 0
+    backup = tmp_path / "switch"
+
+    def runner(entry, substitutions):
+        result = recorder(entry, substitutions)
+        if entry["what"] == "Prepare the switch and record the private rollback":
+            write_private_rollback(backup)
+        return result
+
+    assert release.main(["activate", CANDIDATE, str(tmp_path / "a.tar"), str(tmp_path)], runner) == 0
 
     order = [what for what, _ in recorder.calls]
     assert order == [
@@ -228,8 +252,12 @@ def test_one_activate_command_preflights_publishes_and_switches_in_order(tmp_pat
     assert prepare[-6:] == ["--release", CANDIDATE, "--from-release", ACTIVE, "--candidate", prepare[-1]]
     assert prepare[-1].endswith(f"/first-officer-{CANDIDATE}")
     printed = capsys.readouterr().out
-    assert f"Keep this private rollback directory: {tmp_path / 'switch'}" in printed
-    assert f"rollback {tmp_path / 'switch'}" in printed
+    assert f"Keep this private rollback directory: {backup}" in printed
+    assert f"rollback {backup}" in printed
+    assert printed.index("-> Prepare the switch and record the private rollback") < printed.index(
+        f"Keep this private rollback directory: {backup}")
+    assert printed.index(f"Keep this private rollback directory: {backup}") < printed.index(
+        "-> Refuse to republish an existing release directory")
 
 
 def test_activation_copy_is_readable_by_the_operator_at_verification(tmp_path, monkeypatch):
@@ -305,11 +333,67 @@ def test_activate_stops_at_the_first_failure_and_points_at_the_rollback(tmp_path
     assert release.main(["activate", CANDIDATE, str(tmp_path / "a.tar"), str(tmp_path)], recorder) == 1
 
     assert [what for what, _ in recorder.calls][-1] == "Check the candidate inventory against the reviewed digest"
+    assert "Prepare the switch and record the private rollback" not in dict(recorder.calls)
     assert "Refuse to republish an existing release directory" not in dict(recorder.calls)
     captured = capsys.readouterr()
+    backup = tmp_path / "switch"
     assert "Release step failed" in captured.err
+    assert "roll back with the printed private backup directory" not in captured.err
+    assert "Keep this private rollback directory" not in captured.out
+    assert "Keep this private rollback directory" not in captured.err
+    assert str(backup) not in captured.out
+    assert str(backup) not in captured.err
+    assert not backup.exists()
+
+
+def test_activate_points_at_the_rollback_only_after_the_backup_exists(tmp_path, capsys):
+    recorder = Recorder(activate_replies())
+    backup = tmp_path / "switch"
+
+    def runner(entry, substitutions):
+        result = recorder(entry, substitutions)
+        if entry["what"] == "Prepare the switch and record the private rollback":
+            write_private_rollback(backup)
+        if entry["what"] == "Refuse to republish an existing release directory":
+            raise ValueError("Release step failed: Refuse to republish an existing release directory")
+        return result
+
+    assert release.main(["activate", CANDIDATE, str(tmp_path / "a.tar"), str(tmp_path)], runner) == 1
+    captured = capsys.readouterr()
+    assert "Release step failed" in captured.err
+    assert "Switch the gateway to the reviewed release" not in dict(recorder.calls)
+    assert captured.out.index("-> Prepare the switch and record the private rollback") < captured.out.index(
+        f"Keep this private rollback directory: {backup}")
+    assert f"rollback {backup}" not in captured.out
     assert "roll back with the printed private backup directory" in captured.err
-    assert f"Keep this private rollback directory: {tmp_path / 'switch'}" in captured.out
+    assert str(backup) in captured.err or str(backup) in captured.out
+
+
+def test_activate_does_not_advertise_an_incomplete_rollback_directory(tmp_path, capsys):
+    recorder = Recorder(activate_replies())
+    backup = tmp_path / "switch"
+
+    def runner(entry, substitutions):
+        result = recorder(entry, substitutions)
+        if entry["what"] == "Prepare the switch and record the private rollback":
+            backup.mkdir(mode=0o700)
+            backup.chmod(0o700)
+            plan = backup / "plan.json"
+            plan.write_text("{}\n", encoding="utf-8")
+            plan.chmod(0o600)
+        if entry["what"] == "Place the candidate at its store path":
+            raise ValueError("Release step failed: Place the candidate at its store path")
+        return result
+
+    assert release.main(["activate", CANDIDATE, str(tmp_path / "a.tar"), str(tmp_path)], runner) == 1
+    captured = capsys.readouterr()
+    assert "Release step failed" in captured.err
+    assert "Switch the gateway to the reviewed release" not in dict(recorder.calls)
+    assert "Keep this private rollback directory" not in captured.out
+    assert "Keep this private rollback directory" not in captured.err
+    assert "roll back with the printed private backup directory" not in captured.err
+    assert str(backup) not in captured.out
+    assert str(backup) not in captured.err
 
 
 def test_activate_refuses_a_foreign_github_login_and_an_unexpected_staging_directory(tmp_path, capsys):

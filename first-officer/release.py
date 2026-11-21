@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import stat
 import subprocess
 import sys
 import tempfile
@@ -117,6 +118,34 @@ def rollback_plan(repo, backup):
     ]
 
 
+def rollback_backup_ready(backup):
+    """True when prepare has written a private rollback directory the installer can use."""
+    backup = Path(backup)
+    names = (
+        "plan.json",
+        "original-openclaw.json",
+        "candidate-openclaw.json",
+        "original-pin.conf",
+        "candidate-pin.conf",
+    )
+    try:
+        info = backup.lstat()
+    except OSError:
+        return False
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077:
+        return False
+    for name in names:
+        path = backup / name
+        try:
+            member = path.lstat()
+        except OSError:
+            return False
+        if (not stat.S_ISREG(member.st_mode) or member.st_uid != os.getuid() or member.st_nlink != 1
+                or stat.S_IMODE(member.st_mode) & 0o077 or member.st_size == 0):
+            return False
+    return True
+
+
 def describe(plan):
     lines = []
     for index, entry in enumerate(plan, 1):
@@ -182,10 +211,18 @@ def activate(repo, release, archive, backup_parent, runner, dry_run, baseline=AN
         if dry_run:
             print(describe(plan))
             return 0
-        print(f"Keep this private rollback directory: {backup}")
-        run(plan, {}, runner)
+
+        def run_and_record_backup(entry, substitutions):
+            output = runner(entry, substitutions)
+            if (entry["what"] == "Prepare the switch and record the private rollback"
+                    and rollback_backup_ready(backup)):
+                print(f"Keep this private rollback directory: {backup}")
+            return output
+
+        run(plan, {}, run_and_record_backup)
     print(f"First Officer release {release} is active.")
-    print(f"Roll back with: python3 -B first-officer/release.py rollback {backup}")
+    if rollback_backup_ready(backup):
+        print(f"Roll back with: python3 -B first-officer/release.py rollback {backup}")
     return 0
 
 
@@ -229,8 +266,11 @@ def main(argv=None, runner=execute):
         message = str(error) if type(error) is ValueError else "The release operation failed"
         print(message, file=sys.stderr)
         if args.command == "activate" and not args.dry_run:
-            print("If the gateway was switched, roll back with the printed private backup directory.",
-                  file=sys.stderr)
+            backup = Path(args.backup_parent) / "switch"
+            if rollback_backup_ready(backup):
+                print(f"Keep this private rollback directory: {backup}", file=sys.stderr)
+                print("If the gateway was switched, roll back with the printed private backup directory.",
+                      file=sys.stderr)
         return 1
 
 

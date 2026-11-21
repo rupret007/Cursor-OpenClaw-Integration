@@ -15,7 +15,7 @@ python3 -B first-officer/release.py activate "$release" "$archive" "$backup_pare
 
 Preview either one with `--dry-run` first; it prints the exact ordered commands and runs none of them. Activation refuses to start unless the gateway is already running, the GitHub CLI is authenticated as the owner account and the existing Andrea read-only bridge answers. It compares the manifest digest with the approved release and records the private rollback before it publishes the candidate. It then publishes the candidate read-only under its digest, switches, and waits for readiness. It stops at the first failure.
 
-The rollback is the printed private backup directory.
+The private rollback directory is printed only after that backup exists. A failure before then does not name a missing path.
 
 ```bash
 python3 -B first-officer/release.py rollback "$backup"

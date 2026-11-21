@@ -49,6 +49,10 @@ python3 -m py_compile "${BASE_DIR}/scripts/andrea_lockstep_telegram_e2e.py"
 while IFS= read -r _py; do
   python3 -m py_compile "$_py"
 done < <(find "${BASE_DIR}/services" -name "*.py" 2>/dev/null | sort)
+for f in "${BASE_DIR}/first-officer/litellm/configure.py" "${BASE_DIR}/first-officer/usage/track.py"; do
+  [[ -f "$f" ]] || { echo "Missing file: $f" >&2; exit 1; }
+  python3 -m py_compile "$f"
+done
 
 echo "[2/11] Python syntax compile..."
 python3 -m py_compile "$CLI"

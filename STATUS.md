@@ -48,11 +48,21 @@ The gated run on the same tree passed 878 Python tests in the offline integratio
 
 The installed gateway add-on diagnostic found 49 skills and ten inactive routine declarations. It verified the skill route, fetched-page quarantine, restricted fetch, redaction and delivery outcomes using dry runs. Scheduled routine execution still needs proof.
 
+## Step 2: Codex and Claude usage tracking
+
+`first-officer/usage/track.py` reports both windows for each account the lane was given. The Codex reading reuses the lane runner's own parser in `first-officer/segment1/runner-quota.py`, so the five-hour and weekly windows cannot drift from the captain's admission check. The Claude reading parses the unified subscription headers a claude.ai login receives, converting `anthropic-ratelimit-unified-5h-utilization` and its seven-day counterpart from a fraction into a percentage and reading each `-reset` as epoch seconds. A `rejected` status is treated as fully consumed whatever the fraction reports, an unknown status is refused, and a missing or unparsable header fails closed rather than reading as healthy. A reading whose reset has already passed is rejected as stale. A window the lane was not given is reported as unread instead of being assumed healthy.
+
+Every reset is rendered in America/Chicago. Tests pin a reset inside Central Standard Time and another inside Central Daylight Time, and pin midnight and noon, so an hour or an abbreviation cannot silently shift.
+
+The warning threshold is 90 percent and the stop threshold is 97 percent, verified at 89.9, 90, 96.9 and 97. On a warning the lane writes `HANDOFF.md` with the branch, the head it describes, the step in progress, what comes next and any open failures, then commits that one file locally. Tests prove it commits only `HANDOFF.md` while unrelated staged edits remain uncommitted in the working tree, that it adds no remote and pushes nothing, that it refuses `main` and `master`, that it refuses a head outside the branch's history or an abbreviated head, that it refuses a handoff whose text contains a credential or an address, and that it does not repeat an unchanged document. The command exits 0, 3 and 4 for healthy, warned and stopped.
+
+The gated run passed 889 Python tests in the offline integration gate, which now also compiles the First Officer LiteLLM and usage modules, and 22 Node tests. `INSTALL.md` documents the lane command.
+
 ## Remaining integration and acceptance
 
 - Finish the timed Telegram checks and supervised authority pilot before expanding production scope.
 - DONE. LiteLLM provider failover and per-lane budgets are proven above. Applying the gateway route to the remaining API clients follows as each lane moves over.
-- The quota readers and captain admission checks are present. Finish Codex and Claude usage tracking, Central Time reset alerts at 90% and `HANDOFF.md`.
+- DONE. Codex and Claude usage tracking, Central Time reset reporting, the 90 percent warning and the committed `HANDOFF.md` are proven above.
 - Hatchet lane queue pilot with Restate as fallback.
 - The runtime records local traces. Integrate Phoenix and OpenLLMetry and verify trace delivery.
 - The installed bundle reads flaky reports. Add the Playwright report producer and quarantine workflow.

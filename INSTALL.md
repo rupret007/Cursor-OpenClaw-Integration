@@ -56,6 +56,20 @@ python3 first-officer/litellm/configure.py "$candidate_config" "$lane_policy" pr
 
 Use a distinct gateway lane key in `OPENCLAW_LITELLM_API_KEY`. The installer validates a candidate config that references this variable, so make it available to the operator's validation shell and the gateway service through their approved private environment before preparing the switch.
 
+## Track Codex and Claude usage from a lane
+
+Run the tracker before each step and before any long turn. It reads whichever accounts the lane was given and reports both windows for each, with every reset rendered in America/Chicago so CST and CDT are never confused.
+
+Save the Codex reading as the raw `account/rateLimits/read` result from the lane's own `CODEX_HOME`. Save the Claude reading as a JSON object of the response headers from a claude.ai login, which carries `anthropic-ratelimit-unified-status` plus the `5h` and `7d` utilization and reset headers. Pass only the account the lane runs on; a window that is not supplied is reported as unread rather than assumed healthy.
+
+```bash
+python3 first-officer/usage/track.py \
+  --codex "$codex_reading" --codex-account "$lane_account" --claude "$claude_headers" \
+  --repo "$lane_checkout" --step "Step 3" --next "Start step 4" --failure "none"
+```
+
+The command exits `0` below the warning threshold, `3` once any window reaches 90 percent, and `4` once any window reaches 97 percent. On either warning it writes `HANDOFF.md` into the lane checkout and commits that one file locally. It never stages another path, never pushes, and refuses to commit on `main` or `master`. It also refuses to write a handoff whose text contains a credential or an address. Use `--warn-percent` and `--stop-percent` only to make the thresholds stricter.
+
 ## Check prerequisites on bobserver
 
 Run from the PR checkout as the account that owns `openclaw-gateway.service`. The GitHub CLI must authenticate as the configured owner account. The existing Andrea read-only bridge must answer from the service account using its private reader configuration.

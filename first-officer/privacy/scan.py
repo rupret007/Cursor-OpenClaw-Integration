@@ -36,10 +36,11 @@ BLOCKED = (
 )
 MAX_BYTES = 1_048_576
 CREDENTIAL = re.compile(
-    r"(?<![A-Za-z0-9])(?:sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9]{16,}|"
-    r"(?:AKIA|ASIA)[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|\d{8,10}:[A-Za-z0-9_-]{35})"
+    r"(?<![A-Za-z0-9])(?:sk-[A-Za-z0-9_-]{8,}|github_pat_[A-Za-z0-9_]{16,}|"
+    r"gh[pousr]_[A-Za-z0-9]{16,}|(?:AKIA|ASIA)[0-9A-Z]{16}|"
+    r"xox[baprs]-[A-Za-z0-9-]{10,}|\d{8,10}:[A-Za-z0-9_-]{35})"
 )
-BEARER = re.compile(r"(?<![A-Za-z0-9])Bearer ([A-Za-z0-9._~+/-]{16,})")
+BEARER = re.compile(r"(?i)(?<![A-Za-z0-9])bearer ([A-Za-z0-9._~+/-]{16,})")
 NANP = re.compile(r"(?<!\d)(?:\+?1[\s.-]?)?(?:\(\d{3}\)[\s.-]?|\d{3}[\s.-])\d{3}[\s.-]\d{4}(?!\d)")
 E164 = re.compile(r"(?<![A-Za-z0-9])\+[1-9]\d{10,14}(?!\d)")
 ADDRESS = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")

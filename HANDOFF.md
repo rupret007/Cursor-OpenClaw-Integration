@@ -8,11 +8,11 @@ Steps 1 through 8 and the review fixes for `0878331` and `cfaa966` have local ev
 
 ## Next
 
-Follow `RESEARCH-SETUP.md`. Leave Phoenix, Restate and Hatchet uninstalled until Jeff approves a host and the licenses are checked. Phoenix 22.0.0 is the tracing target, not Langfuse, and its license is read from the image before any install. The status page stays on loopback and Tailscale Serve. Never Funnel and never a public bind. Cursor plan usage is still open. Do not activate the live pilot or roll back the live gateway. Do not install Llama Prompt Guard unless Jeff asks, and do not add LLM Guard. Confirm the four pull-request jobs on this head after it is pushed. Do not merge.
+Follow `RESEARCH-SETUP.md`. Leave Phoenix, Restate and Hatchet uninstalled until Jeff approves a host and the licenses are checked. Phoenix 22.0.0 is the tracing target, not Langfuse, and its license is read from the image before any install. The status page stays on loopback and Tailscale Serve. Never Funnel and never a public bind. Cursor plan usage is still open. Do not activate the live pilot or roll back the live gateway. Do not install Llama Prompt Guard unless Jeff asks, and do not add LLM Guard. Do not merge.
 
 ## Open failures
 
-None in the local gates. Gateway activation, timed Telegram checks, the live authority pilot and a live rollback still wait for Jeff. The gateway tar still needs the private prior bundle. The four pull-request jobs still need a green result on this head.
+None in the local gates. The four pull-request jobs passed on `0a3da48`. Gateway activation, timed Telegram checks, the live authority pilot and a live rollback still wait for Jeff. The gateway tar still needs the private prior bundle.
 
 ## Do not
 

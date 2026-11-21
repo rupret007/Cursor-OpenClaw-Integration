@@ -3,6 +3,7 @@
 
 import argparse
 import fcntl
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -149,7 +150,27 @@ def installed_verifier(path, release):
             str(Path(path)), pinned[5], pinned[6]]
 
 
+def _acceptance_cycle():
+    path = Path(__file__).resolve().parent / "acceptance" / "cycle.py"
+    spec = importlib.util.spec_from_file_location("fo_acceptance_cycle", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _enforce_audit_anchor():
+    """The installed verifier path fails closed when the production seal is required."""
+    cycle = _acceptance_cycle()
+    if not cycle.production_anchor_targets():
+        return
+    root = os.environ.get("FO_ACCEPTANCE_ROOT", "").strip()
+    if not root:
+        raise ValueError(cycle.ANCHOR_MISMATCH)
+    cycle.enforce_production_anchor(root)
+
+
 def verify_config(path, release, candidate=None):
+    _enforce_audit_anchor()
     if candidate is not None:
         # The installed verifier reads the store path. Those files are not there
         # during preparation, so this checks the unpacked copies instead.

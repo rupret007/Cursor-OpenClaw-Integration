@@ -118,9 +118,13 @@ Run `init` once for a new acceptance directory to write the empty audit checkpoi
 
 `verify` checks the hash chain, checkpoints, saved facts, pending approval, and routine receipt. The external checkpoint lives under `.fo-audit-trust/<root-hash>/audit.head` above the acceptance directory's parent. `FO_AUDIT_TRUST_BASE` can set another base outside that parent. A second checkpoint sits in a separate directory beside the first base. `init` also writes `root.id` under a directory named by adding `-identity` to that base's name. Deleting the acceptance directory and both checkpoints leaves that identity. `init` then refuses, and `verify` does not accept a replacement chain.
 
-`init` also writes `anchor.json` under a directory named by adding `-anchor` to that base's name. That file is outside the acceptance root, its parent, the trust directory, the witness directory, and the identity directory. Deleting those four leaves the anchor file. `init` then refuses, and `verify` does not accept an empty replacement. Set `FO_AUDIT_ANCHOR` to one file outside those directories when the anchor should live somewhere else. The directory must be mode `0700`, the file mode `0600`, and both owned by the operator. Create that empty file before the first `init`. `init` and `verify` fail closed when the configured file is missing or does not match the chain.
+`init` also writes `anchor.json` under a directory named by adding `-anchor` to that base's name. That file is outside the acceptance root, its parent, the trust directory, the witness directory, and the identity directory. Deleting those four leaves the anchor file. `init` then refuses, and `verify` does not accept an empty replacement. Set `FO_AUDIT_ANCHOR` to one owner-writable file outside those directories only for that extra copy. That file is mode `0600` in a mode `0700` directory owned by the operator. It is not the production seal. Do not point it at `/var/lib/openclaw-fo/audit-anchor`.
 
-The anchor file is not a trust anchor. This user can delete it. With `FO_AUDIT_ANCHOR` unset, deleting `anchor.json` as well lets `init` mint a new empty chain that `verify` accepts with zero lines. With `FO_AUDIT_ANCHOR` set, a missing file fails closed, and replacing that file with a new empty one still lets `init` start a new chain. Jeff decides whether the path is somewhere this user cannot create or delete. Use `init` only to start a new audit or to initialize older state containing only a valid pending approval.
+The production seal is `/var/lib/openclaw-fo/audit-anchor`. Jeff creates or updates it on bobserver during activation, with the sudo commands in the activation block below. The directory `/var/lib/openclaw-fo/` is `root:root` mode `0755`. The file is `root:root` mode `0444`, so the OpenClaw service user can read it and cannot write or replace it. Mode `0600` is not used, because the service must be able to read the file. Only that root step creates or updates the file. `export-anchor` writes a private payload that does not contain the audit key. Success from that command is `Audit anchor payload written.` The sudo commands are silent and exit 0.
+
+`init` and `verify` fail closed when that seal is missing, replaced, not owned by `root:root`, or not mode-restricted. Group or other write fails. A file the service user can write fails. A user-writable `FO_AUDIT_ANCHOR` file does not bless a new chain while this seal is required. Deleting the acceptance directory, the trust directory, the witness directory, `root.id`, and `anchor.json` does not bless a new empty chain while `/var/lib/openclaw-fo/audit-anchor` remains. If `verify` fails closed, it exits 1 and does not print `Audit chain verified`. Leave the root-owned file in place. Do not delete it to start a new chain. Initialize a new acceptance directory only before that file exists. After it exists, run the same sudo commands again only for a chain `verify` already accepts.
+
+Use `init` only to start a new audit or to initialize older state containing only a valid pending approval, and only before the root-owned seal exists.
 
 ```bash
 python3 first-officer/acceptance/cycle.py --root "$root" init
@@ -222,6 +226,14 @@ backup_parent="$(mktemp -d "$HOME/.openclaw/backups/fo-segment1.XXXXXXXX")"
 backup="$backup_parent/switch"
 nice -n 10 python3 -B first-officer/install.py prepare "$backup" --release "$release" --from-release "$baseline" --candidate "$candidate"
 printf 'Keep this private rollback directory: %s\n' "$backup"
+export FO_ACCEPTANCE_ROOT="$root"
+anchor_payload="$backup/audit-anchor"
+python3 -B first-officer/acceptance/cycle.py --root "$FO_ACCEPTANCE_ROOT" export-anchor "$anchor_payload"
+sudo install -d -o root -g root -m 0755 /var/lib/openclaw-fo
+sudo install -o root -g root -m 0444 "$anchor_payload" /var/lib/openclaw-fo/audit-anchor
+sudo chown root:root /var/lib/openclaw-fo /var/lib/openclaw-fo/audit-anchor
+sudo chmod 0755 /var/lib/openclaw-fo
+sudo chmod 0444 /var/lib/openclaw-fo/audit-anchor
 published="/opt/openclaw-fo/first-officer-$release"
 sudo test ! -e "$published"
 publish_dir="$(sudo mktemp -d /opt/openclaw-fo/.segment1-publish.XXXXXXXX)"
@@ -234,7 +246,7 @@ nice -n 10 python3 -B first-officer/install.py activate "$backup"
 systemctl --user is-active --quiet openclaw-gateway.service
 ```
 
-The manifest digest is compared with the approved release, and the private rollback directory is written, before the candidate is published. Preparation checks that the unpacked candidate contains the plugin files the new config names. It does not pass that directory to the installed verifier. The installed verifier is the program named by the service pin, `/opt/openclaw-fo/verify-install.py`, called with the config path, the release digest, and the rollback slot, and with no further argument. Preparation runs that command for the prior config. `verify-candidate` runs the same command for the candidate once the plugin files are at the store path and that directory has been made read-only. A non-zero exit removes the store directory and does not stop the gateway. The same check runs again inside activation, before the gateway is stopped. This read-only command must exit 0:
+The manifest digest is compared with the approved release, and the private rollback directory is written, before the candidate is published. The same activation installs the root-owned audit anchor before that publish. `export-anchor` prints `Audit anchor payload written.` The sudo commands print nothing and exit 0. If the anchor is missing, replaced, not owned by root, or not mode-restricted, `verify` and the installed verifier fail closed, exit 1, and do not switch the gateway. Leave `/var/lib/openclaw-fo/audit-anchor` in place. Deleting owner-writable copies does not bless a new empty chain while that file remains. Preparation checks that the unpacked candidate contains the plugin files the new config names. It does not pass that directory to the installed verifier. The installed verifier is the program named by the service pin, `/opt/openclaw-fo/verify-install.py`, called with the config path, the release digest, and the rollback slot, and with no further argument. Preparation runs that command for the prior config. `verify-candidate` runs the same command for the candidate once the plugin files are at the store path and that directory has been made read-only. A non-zero exit removes the store directory and does not stop the gateway. The same check runs again inside activation, before the gateway is stopped. This read-only command must exit 0:
 
 ```bash
 python3 -I -B /opt/openclaw-fo/verify-install.py "$backup/candidate-openclaw.json" "$release" 4759047e8a16d1691499d55c4b6656882e67bc2275a3297d2283aa9b01538753

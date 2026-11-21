@@ -264,9 +264,9 @@ def durable_anchor_path(root):
     """Return the anchor file outside the root and the three owner-writable copies.
 
     FO_AUDIT_ANCHOR names that file. Otherwise it sits beside the trust base.
-    The owner can delete either path, so neither one is a trust anchor. A
-    configured file is required before init, and init and verify fail closed
-    when it is missing or the binding does not match.
+    The owner can delete either path. The root-owned production seal is
+    /var/lib/openclaw-fo/audit-anchor, written only by the activation sudo step.
+    A user-writable file does not satisfy that seal.
     """
     root = Path(root).resolve()
     trust = trust_dir(root)
@@ -361,7 +361,195 @@ ANCHOR_MISMATCH = (
     "The audit anchor is missing or does not match. "
     "A new empty chain is not a verified history."
 )
+ANCHOR_REPLACED = "The audit anchor was replaced."
+ANCHOR_OWNER = "The audit anchor is not owned by root."
+ANCHOR_MODE = "The audit anchor is not mode-restricted."
 ANCHOR_FIELDS = {"digest", "key", "mac", "root", "seq"}
+SEAL_FIELDS = {"digest", "key_id", "mac", "root", "seq"}
+PRODUCTION_ANCHOR_DIR = Path("/var/lib/openclaw-fo")
+PRODUCTION_ANCHOR = PRODUCTION_ANCHOR_DIR / "audit-anchor"
+
+
+def _key_id(key):
+    return hashlib.sha256(str(key).encode()).hexdigest()
+
+
+def production_anchor_targets():
+    """Paths that must be root-owned seals. An override does not relax that check.
+
+    The default file is required once its directory exists, including when that
+    directory is the wrong type. FO_PRODUCTION_AUDIT_ANCHOR adds a path and still
+    requires root:root and a mode the service can read but cannot write.
+    """
+    targets = []
+    seen = set()
+
+    def add(path):
+        path = Path(path)
+        key = str(path.absolute())
+        if key not in seen:
+            seen.add(key)
+            targets.append(path)
+
+    override = os.environ.get("FO_PRODUCTION_AUDIT_ANCHOR", "").strip()
+    if override:
+        add(Path(override).expanduser())
+    try:
+        PRODUCTION_ANCHOR_DIR.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        add(PRODUCTION_ANCHOR)
+    return targets
+
+
+def _service_writable(info, path):
+    mode = stat.S_IMODE(info.st_mode)
+    if mode & 0o022:
+        return True
+    # Root can write every file. The service user is not root, so the mode bits
+    # are what keep that user from writing. A non-root caller also loses when an
+    # ACL or owner bit lets this process write.
+    return os.geteuid() != 0 and os.access(path, os.W_OK)
+
+
+def _read_production_seal(path):
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        raise ValueError(ANCHOR_MISSING) from None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise ValueError(ANCHOR_REPLACED)
+    if info.st_uid != 0 or info.st_gid != 0:
+        raise ValueError(ANCHOR_OWNER)
+    mode = stat.S_IMODE(info.st_mode)
+    if not mode & stat.S_IROTH or _service_writable(info, path):
+        raise ValueError(ANCHOR_MODE)
+    directory = path.parent
+    try:
+        parent = directory.lstat()
+    except FileNotFoundError:
+        raise ValueError(ANCHOR_MISSING) from None
+    if stat.S_ISLNK(parent.st_mode) or not stat.S_ISDIR(parent.st_mode):
+        raise ValueError(ANCHOR_REPLACED)
+    if parent.st_uid != 0 or parent.st_gid != 0:
+        raise ValueError(ANCHOR_OWNER)
+    parent_mode = stat.S_IMODE(parent.st_mode)
+    if not parent_mode & stat.S_IXOTH or _service_writable(parent, directory):
+        raise ValueError(ANCHOR_MODE)
+    if info.st_size > 1024 * 1024 or info.st_size == 0:
+        raise ValueError(ANCHOR_MISMATCH)
+    try:
+        handle = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise ValueError(ANCHOR_REPLACED) from None
+        raise
+    with os.fdopen(handle, "r", encoding="utf-8") as file:
+        payload = file.read()
+    if payload.strip() == "":
+        raise ValueError(ANCHOR_MISMATCH)
+    try:
+        document = json.loads(payload)
+    except json.JSONDecodeError:
+        raise ValueError(ANCHOR_MISMATCH) from None
+    if not isinstance(document, dict) or set(document) != SEAL_FIELDS:
+        raise ValueError(ANCHOR_MISMATCH)
+    return document
+
+
+def _seal_matches(document, root, key, rows, head):
+    if not isinstance(document, dict) or set(document) != SEAL_FIELDS or key is None or head is None:
+        return False
+    seq = document.get("seq")
+    if type(seq) is not int or type(head.get("seq")) is not int or head["seq"] < seq:
+        return False
+    digest = str(document.get("digest", ""))
+    mac = str(document.get("mac", ""))
+    key_id = str(document.get("key_id", ""))
+    presented_root = str(document.get("root", ""))
+    expected_id = _key_id(key)
+    expected_root = _identity_root(root)
+    expected_mac = _mac(key, seq, digest) if DIGEST.fullmatch(digest) else ""
+    if (len(key_id) != len(expected_id) or len(presented_root) != len(expected_root)
+            or len(mac) != len(expected_mac) or not expected_mac
+            or not hmac.compare_digest(key_id, expected_id)
+            or not hmac.compare_digest(presented_root, expected_root)
+            or not hmac.compare_digest(mac, expected_mac)):
+        return False
+    if seq == -1:
+        return digest == GENESIS
+    if seq < 0 or seq >= len(rows):
+        return False
+    return rows[seq][0] == digest
+
+
+def _read_chain_state(root):
+    """Read an existing chain without creating one. A missing log is an absent chain."""
+    root = Path(root)
+    log = root / "audit.log"
+    try:
+        info = log.lstat()
+    except FileNotFoundError:
+        return None
+    if stat.S_ISLNK(info.st_mode):
+        raise ValueError("The acceptance file must be a private owner file")
+    key = _read_key(root)
+    handle = os.open(log, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(handle, "r", encoding="utf-8") as audit:
+        _check_private(os.fstat(audit.fileno()))
+        rows, previous = _rows(audit)
+    if not _check_head(root, rows, previous):
+        return None
+    head = _read_json(root / "audit.head", {"digest", "mac", "seq"})
+    if key is None or head is None:
+        return None
+    return key, rows, head
+
+
+def enforce_production_anchor(root, key=None, rows=None, head=None):
+    """Fail closed unless every required seal is root-owned, unwritable, and the same chain."""
+    targets = production_anchor_targets()
+    if not targets:
+        return
+    documents = [_read_production_seal(target) for target in targets]
+    if key is None or rows is None or head is None:
+        state = _read_chain_state(root)
+        if state is None:
+            raise ValueError(ANCHOR_MISMATCH)
+        key, rows, head = state
+    for document in documents:
+        if not _seal_matches(document, root, key, rows, head):
+            raise ValueError(ANCHOR_MISMATCH)
+
+
+def export_anchor(root, dest):
+    """Write the current chain's seal for the root step. This does not install it.
+
+    The payload has no audit key. Only the sudo activation step copies it to the
+    root-owned path and sets the mode the service can read.
+    """
+    root = _root(root)
+    state = _read_chain_state(root)
+    if state is None:
+        raise ValueError(MISSING_AUDIT)
+    key, _rows, head = state
+    identity = _read_identity(root)
+    anchor = _read_durable_anchor(root)
+    if identity is None or not _same_identity(identity, root, key):
+        raise ValueError(RESET_AUDIT)
+    if not _same_durable(anchor, root, key, head):
+        raise ValueError(ANCHOR_MISMATCH)
+    destination = Path(dest)
+    if destination.is_symlink():
+        raise ValueError("The acceptance file must be a private owner file")
+    _write_json(destination, {
+        "digest": head["digest"],
+        "key_id": _key_id(key),
+        "mac": _mac(key, head["seq"], head["digest"]),
+        "root": _identity_root(root),
+        "seq": head["seq"],
+    })
 
 
 def _require_private_dir(directory):
@@ -488,6 +676,10 @@ def _mutation_rows(root, audit):
     rows, previous = _rows(audit)
     if not _check_head(root, rows, previous):
         raise ValueError(MISSING_AUDIT)
+    if production_anchor_targets():
+        enforce_production_anchor(
+            root, _read_key(root), rows, _read_json(root / "audit.head", {"digest", "mac", "seq"}),
+        )
     return rows, previous
 
 
@@ -550,6 +742,8 @@ def _pending_binding(current):
 def initialize(root):
     """Establish the empty audit checkpoint through an explicit operator action."""
     root = _root(root)
+    if production_anchor_targets():
+        enforce_production_anchor(root)
     with _locked(root / "audit.log") as audit:
         rows, previous = _rows(audit)
         identity = _read_identity(root)
@@ -727,6 +921,8 @@ def run_routine(root, now, dry_run=True):
 def verify(root):
     """Accept a clean chain. A changed, missing, extra, or truncated line is a failure."""
     root = _root(root)
+    if production_anchor_targets():
+        enforce_production_anchor(root)
     with _locked(root / "audit.log") as audit:
         rows, previous = _rows(audit)
         initialized = _check_head(root, rows, previous)
@@ -809,6 +1005,8 @@ def main(argv=None):
     confirm_command.add_argument("nonce")
     confirm_command.add_argument("digest")
     commands.add_parser("routine")
+    export_command = commands.add_parser("export-anchor")
+    export_command.add_argument("dest", type=Path)
     commands.add_parser("verify")
     args = parser.parse_args(argv)
     moment = int(time.time())
@@ -832,6 +1030,9 @@ def main(argv=None):
         elif args.command == "routine":
             receipt = run_routine(args.root, moment)
             print(f"Dry run {receipt['routine']} at {receipt['ran_at']} next {receipt['next_run']}. Sent no message.")
+        elif args.command == "export-anchor":
+            export_anchor(args.root, args.dest)
+            print("Audit anchor payload written.")
         else:
             count = verify(args.root)
             print(f"Audit chain verified: {count} lines.")

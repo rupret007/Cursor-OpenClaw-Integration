@@ -1,8 +1,11 @@
 import importlib.util
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import shutil
+import subprocess
+import sys
 import threading
 from zoneinfo import ZoneInfo
 
@@ -154,7 +157,7 @@ def test_reinitializing_after_deleting_the_log_and_heads_does_not_verify(tmp_pat
     anchor = cycle.durable_anchor_path(root)
     anchor.unlink()
     cycle.initialize(root)
-    # Residual, not a fix: this file is owner-writable. Deleting it too lets a new empty chain verify.
+    # The owner-writable file can still be deleted when the root-owned seal is not installed.
     assert cycle.verify(root) == 0
 
 
@@ -237,9 +240,185 @@ def test_configured_audit_anchor_fails_closed_when_missing_or_mismatched(tmp_pat
     anchor.write_text("", encoding="utf-8")
     anchor.chmod(0o600)
     cycle.initialize(root)
-    # Residual, not a fix: the owner can replace the configured file with a new empty one.
+    # The owner-writable configured file can still be replaced when the root-owned seal is not installed.
     assert cycle.verify(root) == 0
     shutil.rmtree(anchor.parent)
+
+
+def _plant(path, payload, mode):
+    path.write_bytes(payload)
+    path.chmod(mode)
+    if os.geteuid() == 0:
+        os.chown(path, 65534, 65534)
+    return path
+
+
+def test_production_anchor_fails_closed_for_a_non_root_user(tmp_path, monkeypatch):
+    """Missing, replaced, unowned, and writable seals fail closed. A non-root user does not skip them."""
+    monkeypatch.delenv("FO_AUDIT_ANCHOR", raising=False)
+    monkeypatch.delenv("FO_PRODUCTION_AUDIT_ANCHOR", raising=False)
+    root = tmp_path / "cycle"
+    cycle.initialize(root)
+    cycle.run_routine(root, NOW)
+    assert cycle.verify(root) == 1
+    default_anchor = cycle.durable_anchor_path(root)
+    payload = tmp_path / "payload"
+    assert cycle.main(["--root", str(root), "export-anchor", str(payload)]) == 0
+    body = payload.read_text(encoding="utf-8")
+    document = json.loads(body)
+    assert set(document) == cycle.SEAL_FIELDS
+    assert "key" not in document
+    key = (root / "audit.key").read_text(encoding="utf-8").strip()
+    leaked = key in body
+    assert leaked is False
+    assert payload.stat().st_mode & 0o077 == 0
+
+    missing = tmp_path / "no-such-anchor"
+    monkeypatch.setenv("FO_PRODUCTION_AUDIT_ANCHOR", str(missing))
+    with pytest.raises(ValueError, match="missing"):
+        cycle.verify(root)
+    with pytest.raises(ValueError, match="missing"):
+        cycle.initialize(root)
+
+    monkeypatch.setenv("FO_PRODUCTION_AUDIT_ANCHOR", str(_plant(tmp_path / "unowned", payload.read_bytes(), 0o444)))
+    with pytest.raises(ValueError, match="not owned by root|not mode-restricted"):
+        cycle.verify(root)
+    monkeypatch.setenv("FO_PRODUCTION_AUDIT_ANCHOR", str(_plant(tmp_path / "mode600", payload.read_bytes(), 0o600)))
+    with pytest.raises(ValueError, match="not owned by root|not mode-restricted"):
+        cycle.verify(root)
+    monkeypatch.setenv("FO_PRODUCTION_AUDIT_ANCHOR", str(_plant(tmp_path / "writable", payload.read_bytes(), 0o666)))
+    with pytest.raises(ValueError, match="not owned by root|not mode-restricted"):
+        cycle.verify(root)
+    replaced = json.loads(body)
+    replaced["digest"] = ("1" if replaced["digest"][:1] == "0" else "0") + replaced["digest"][1:]
+    monkeypatch.setenv(
+        "FO_PRODUCTION_AUDIT_ANCHOR",
+        str(_plant(tmp_path / "replaced", json.dumps(replaced).encode(), 0o444)),
+    )
+    with pytest.raises(ValueError, match="not owned by root|match|replaced"):
+        cycle.verify(root)
+
+    operator = tmp_path.parent / f".fo-operator-anchor-{tmp_path.name}"
+    operator.mkdir(mode=0o700, exist_ok=True)
+    operator.chmod(0o700)
+    local = operator / "anchor.json"
+    local.write_text("", encoding="utf-8")
+    local.chmod(0o600)
+    monkeypatch.setenv("FO_AUDIT_ANCHOR", str(local))
+    monkeypatch.setenv("FO_PRODUCTION_AUDIT_ANCHOR", str(missing))
+    for place in (root, cycle.trust_dir(root), cycle.witness_dir(root), cycle.identity_dir(root)):
+        shutil.rmtree(place)
+    if default_anchor.exists():
+        default_anchor.unlink()
+    with pytest.raises(ValueError, match="missing|match|replaced|not owned by root|not mode-restricted|owner cannot delete"):
+        cycle.initialize(root)
+    with pytest.raises(ValueError, match="missing|match|replaced|not owned by root|not mode-restricted|owner cannot delete"):
+        cycle.verify(root)
+    shutil.rmtree(operator)
+
+
+def root_owned_anchor_cases(tmp_path):
+    """Root-owned mode checks. The caller is uid 0 inside a user namespace, or really root."""
+    assert os.geteuid() == 0
+    os.environ.pop("FO_AUDIT_ANCHOR", None)
+    tmp_path = Path(tmp_path)
+    root = tmp_path / "cycle"
+    cycle.initialize(root)
+    cycle.run_routine(root, NOW)
+    expected = cycle.verify(root)
+    payload = tmp_path / "payload"
+    cycle.export_anchor(root, payload)
+    directory = tmp_path / "anchor-dir"
+    directory.mkdir(mode=0o755)
+    os.chmod(directory, 0o755)
+    os.chown(directory, 0, 0)
+    anchor = directory / "audit-anchor"
+    anchor.write_bytes(payload.read_bytes())
+    os.chmod(anchor, 0o444)
+    os.chown(anchor, 0, 0)
+    os.environ["FO_PRODUCTION_AUDIT_ANCHOR"] = str(anchor)
+    if cycle.verify(root) != expected:
+        raise RuntimeError("readable root seal was refused")
+
+    os.chmod(anchor, 0o644)
+    document = json.loads(anchor.read_text(encoding="utf-8"))
+    document["root"] = "0" * 64 if document["root"][:1] != "0" else "1" * 64
+    anchor.write_text(json.dumps(document), encoding="utf-8")
+    os.chmod(anchor, 0o444)
+    os.chown(anchor, 0, 0)
+    try:
+        cycle.verify(root)
+    except ValueError as error:
+        if "match" not in str(error) and "replaced" not in str(error):
+            raise
+    else:
+        raise RuntimeError("replaced seal was accepted")
+
+    os.chmod(anchor, 0o644)
+    anchor.write_bytes(payload.read_bytes())
+    os.chmod(anchor, 0o600)
+    os.chown(anchor, 0, 0)
+    try:
+        cycle.verify(root)
+    except ValueError as error:
+        if "mode-restricted" not in str(error):
+            raise
+    else:
+        raise RuntimeError("mode 0600 was accepted")
+
+    os.chmod(anchor, 0o666)
+    try:
+        cycle.verify(root)
+    except ValueError as error:
+        if "mode-restricted" not in str(error):
+            raise
+    else:
+        raise RuntimeError("writable seal was accepted")
+
+    os.chmod(anchor, 0o444)
+    os.chmod(directory, 0o777)
+    try:
+        cycle.verify(root)
+    except ValueError as error:
+        if "mode-restricted" not in str(error):
+            raise
+    else:
+        raise RuntimeError("replaceable directory was accepted")
+    os.chmod(directory, 0o755)
+
+    for place in (root, cycle.trust_dir(root), cycle.witness_dir(root), cycle.identity_dir(root)):
+        shutil.rmtree(place)
+    local = cycle.durable_anchor_path(root)
+    if local.exists():
+        local.unlink()
+    try:
+        cycle.initialize(root)
+    except ValueError:
+        pass
+    else:
+        raise RuntimeError("reset initialize returned")
+    try:
+        cycle.verify(root)
+    except ValueError:
+        pass
+    else:
+        raise RuntimeError("reset verify returned")
+    print("anchor-ok")
+
+
+def test_root_owned_anchor_mode_and_replacement(tmp_path):
+    """The readable root-owned seal is accepted. 0600, group write, and a replaced seal are not."""
+    if os.geteuid() == 0:
+        root_owned_anchor_cases(tmp_path)
+        return
+    completed = subprocess.run(
+        ["unshare", "--user", "--map-root-user", sys.executable, "-B", str(Path(__file__).resolve()),
+         "--root-anchor-selftest", str(tmp_path)],
+        check=False, text=True, capture_output=True, timeout=60,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "anchor-ok"
+    assert "key" not in completed.stdout
 
 
 def test_a_configured_anchor_inside_an_owner_copy_is_refused(tmp_path, monkeypatch):
@@ -478,3 +657,7 @@ def test_command_prints_the_verified_fact_and_the_dry_run(tmp_path):
     assert receipt["sent"] is False
     source = Path(cycle.__file__).read_text(encoding="utf-8")
     assert "subprocess" not in source and "urllib" not in source
+
+
+if __name__ == "__main__" and len(sys.argv) > 1 and sys.argv[1] == "--root-anchor-selftest":
+    root_owned_anchor_cases(Path(sys.argv[2]))

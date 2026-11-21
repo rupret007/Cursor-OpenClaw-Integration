@@ -2,6 +2,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import sys
@@ -193,6 +194,66 @@ def test_activate_checks_the_digest_and_writes_rollback_before_publish(tmp_path)
     assert recorder.calls[pack_at - 1][1][:3] == ["test", "!", "-e"]
 
 
+def _paste(argv):
+    parts = []
+    for part in argv:
+        if part.startswith("$"):
+            parts.append(f'"{part}"')
+        else:
+            parts.append(part)
+    return " ".join(parts)
+
+
+def test_activate_dry_run_prints_the_root_audit_anchor_commands(tmp_path, capsys):
+    """Dry-run prints the sudo seal commands and runs none of them."""
+    existed = Path("/var/lib/openclaw-fo").exists()
+    recorder = Recorder()
+    assert release.main(["--dry-run", "activate", CANDIDATE, str(tmp_path / "a.tar"), str(tmp_path)], recorder) == 0
+    assert recorder.calls == []
+    printed = capsys.readouterr().out
+    payload = str(tmp_path / "switch" / "audit-anchor")
+    lines = [" ".join(shlex.quote(part) for part in argv) for argv in release.audit_anchor_commands(payload)]
+    cursor = printed.index("Export the audit anchor payload")
+    assert "export-anchor" in printed[cursor:]
+    for line in lines:
+        found = printed.index(line, cursor)
+        cursor = found + len(line)
+    assert cursor < printed.index("verify-candidate")
+    paste = [_paste(argv) for argv in release.audit_anchor_commands("$anchor_payload")]
+    for name in ("JEFF-ACTIONS.md", "INSTALL.md"):
+        text = (ROOT / name).read_text(encoding="utf-8")
+        doc_at = 0
+        for argv, line in zip(release.audit_anchor_commands("$anchor_payload"), paste):
+            found = text.index(line, doc_at)
+            doc_at = found + len(line)
+            assert shlex.split(line) == argv
+    assert Path("/var/lib/openclaw-fo").exists() == existed
+    assert "Audit anchor payload written." in (ROOT / "JEFF-ACTIONS.md").read_text(encoding="utf-8")
+    assert "Audit anchor payload written." in (ROOT / "INSTALL.md").read_text(encoding="utf-8")
+
+
+def test_installed_verifier_fails_closed_when_the_audit_anchor_is_untrusted(tmp_path, monkeypatch):
+    installer = importlib.import_module("install")
+    monkeypatch.setenv("FO_ACCEPTANCE_ROOT", str(tmp_path / "cycle"))
+    monkeypatch.setenv("FO_PRODUCTION_AUDIT_ANCHOR", str(tmp_path / "missing-anchor"))
+    calls = []
+
+    def boom(*args, **kwargs):
+        calls.append(args)
+        raise AssertionError("the installed verifier ran")
+
+    monkeypatch.setattr(installer.subprocess, "run", boom)
+    with pytest.raises(ValueError, match="missing"):
+        installer.verify_config(tmp_path / "openclaw.json", CANDIDATE)
+    anchor = tmp_path / "user-anchor"
+    anchor.write_text("{}\n", encoding="utf-8")
+    anchor.chmod(0o666)
+    monkeypatch.setenv("FO_PRODUCTION_AUDIT_ANCHOR", str(anchor))
+    with pytest.raises(ValueError, match="not owned by root|not mode-restricted|match|replaced"):
+        installer.verify_config(tmp_path / "openclaw.json", CANDIDATE, candidate=tmp_path)
+    assert calls == []
+
+
 def test_install_doc_verifies_the_candidate_after_it_is_read_only():
     text = (ROOT / "INSTALL.md").read_text(encoding="utf-8")
     start = text.index('published="/opt/openclaw-fo/first-officer-$release"')
@@ -229,6 +290,12 @@ def test_one_activate_command_preflights_publishes_and_switches_in_order(tmp_pat
         "Compare the manifest digest with the approved release",
         "Check the candidate inventory against the reviewed digest",
         "Prepare the switch and record the private rollback",
+        "Export the audit anchor payload",
+        "Create the root-owned audit anchor directory",
+        "Install the audit anchor for the service to read",
+        "Give the audit anchor to root",
+        "Keep the service from replacing the audit anchor directory",
+        "Keep the audit anchor readable and not writable by the service",
         "Refuse to republish an existing release directory",
         "Reserve a private staging directory under the release store",
         "Copy the candidate into the staging directory",

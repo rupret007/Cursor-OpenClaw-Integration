@@ -2,6 +2,7 @@
 """Run the whole First Officer release as one reviewed operation with one rollback."""
 
 import argparse
+import importlib.util
 import os
 from pathlib import Path
 import re
@@ -60,11 +61,49 @@ def build_plan(repo, bundle, staging, test_home, reviewed_head):
     ]
 
 
+def _acceptance_cycle():
+    path = Path(__file__).resolve().parent / "acceptance" / "cycle.py"
+    spec = importlib.util.spec_from_file_location("fo_acceptance_cycle", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def audit_anchor_commands(payload):
+    """Sudo commands that create or update the root-owned seal. Dry-run prints them and runs none."""
+    cycle = _acceptance_cycle()
+    directory = str(cycle.PRODUCTION_ANCHOR_DIR)
+    target = str(cycle.PRODUCTION_ANCHOR)
+    return [
+        ["sudo", "install", "-d", "-o", "root", "-g", "root", "-m", "0755", directory],
+        ["sudo", "install", "-o", "root", "-g", "root", "-m", "0444", str(payload), target],
+        ["sudo", "chown", "root:root", directory, target],
+        ["sudo", "chmod", "0755", directory],
+        ["sudo", "chmod", "0444", target],
+    ]
+
+
 def activate_plan(repo, release, archive, extract, backup, baseline=ANDREA_SUMMARY):
     """Preflight, publish and switch on bobserver. Jeff runs this once, after approving the digest."""
     candidate = extract / f"first-officer-{release}"
     published = STORE / f"first-officer-{release}"
     staged = "{publish}"
+    acceptance = os.environ.get("FO_ACCEPTANCE_ROOT", "").strip() or "$FO_ACCEPTANCE_ROOT"
+    payload = Path(backup) / "audit-anchor"
+    anchor = [
+        step("Export the audit anchor payload",
+             [sys.executable, "-B", repo / "first-officer/acceptance/cycle.py",
+              "--root", acceptance, "export-anchor", payload]),
+    ]
+    anchor_actions = (
+        "Create the root-owned audit anchor directory",
+        "Install the audit anchor for the service to read",
+        "Give the audit anchor to root",
+        "Keep the service from replacing the audit anchor directory",
+        "Keep the audit anchor readable and not writable by the service",
+    )
+    for what, argv in zip(anchor_actions, audit_anchor_commands(payload)):
+        anchor.append(step(what, argv))
     return [
         step("Confirm the gateway is running before any change",
              ["systemctl", "--user", "is-active", "--quiet", SERVICE]),
@@ -86,6 +125,7 @@ def activate_plan(repo, release, archive, extract, backup, baseline=ANDREA_SUMMA
         step("Prepare the switch and record the private rollback",
              [sys.executable, "-B", repo / "first-officer/install.py", "prepare", backup,
               "--release", release, "--from-release", baseline, "--candidate", candidate], cwd=repo),
+        *anchor,
         step("Refuse to republish an existing release directory",
              ["sudo", "test", "!", "-e", published]),
         step("Reserve a private staging directory under the release store",

@@ -13,7 +13,7 @@ python3 -B first-officer/release.py build "$PRIOR_BUNDLE" "$staging" --reviewed-
 python3 -B first-officer/release.py activate "$release" "$archive" "$backup_parent"
 ```
 
-Preview either one with `--dry-run` first; it prints the exact ordered commands and runs none of them. Activation refuses to start unless the gateway is already running, the GitHub CLI is authenticated as the owner account and the existing Andrea read-only bridge answers. It compares the manifest digest with the approved release and records the private rollback before it publishes the candidate. It then publishes the candidate read-only under its digest, switches, and waits for readiness. It stops at the first failure.
+Preview either one with `--dry-run` first; it prints the exact ordered commands and runs none of them. Activation refuses to start unless the gateway is already running, the GitHub CLI is authenticated as the owner account and the existing Andrea read-only bridge answers. It compares the manifest digest with the approved release and records the private rollback before it publishes the candidate. It installs the root-owned audit anchor from section 5 after that rollback is recorded and before it publishes. It then publishes the candidate read-only under its digest, switches, and waits for readiness. It stops at the first failure.
 
 The private rollback directory is printed only after that backup exists. A failure before then does not name a missing path.
 
@@ -64,8 +64,24 @@ The staged file restore already ran. On November 20, 2026 it printed `Restored t
 python3 -B first-officer/release.py rollback "$backup"
 ```
 
-## 5. Decide where the audit anchor lives
+## 5. Install the root-owned audit anchor during activation
 
-The acceptance audit refuses a new empty chain after the acceptance root, the trust directory, the witness directory, and `root.id` are deleted, as long as its anchor file is still there. That file is mode 0600 and this user can delete it. It is not a trust anchor. Offline checks do not put it on another machine or under another user.
+You run this on bobserver while activating. It is the sudo step that creates or updates the audit anchor. The file is `/var/lib/openclaw-fo/audit-anchor`. The directory is `/var/lib/openclaw-fo/`. Both are `root:root`. The directory is mode `0755`. The file is mode `0444`, so the OpenClaw service user can read it and cannot write or replace it. Mode `0600` is not used, because the service must be able to read the file. Only this root step creates or updates the file. Do not point `FO_AUDIT_ANCHOR` at it. That variable is still only an owner-writable copy, and a user-writable copy does not bless a new chain while this file is required.
 
-With `FO_AUDIT_ANCHOR` unset, the file is `anchor.json` beside the trust base. Deleting that file as well lets `init` create a new empty chain that `verify` accepts. Set `FO_AUDIT_ANCHOR` to a file outside the acceptance root, its parent, and those three directories if a missing file should fail closed. Create the empty file, mode 0600, in a mode 0700 directory you own, before the first `init`. A missing or mismatched file does not verify as an empty continuation. Replacing it with a new empty file still lets `init` start a new chain. The path only preserves history if this user cannot create or delete it. That placement is your decision.
+Set `FO_ACCEPTANCE_ROOT` to the acceptance directory you already initialized, and `$backup` to the private rollback directory from activation. `export-anchor` writes a private payload. The payload does not contain the audit key. Run these commands before the candidate is published. `--dry-run` prints them and runs none of them.
+
+```bash
+export FO_ACCEPTANCE_ROOT="$root"
+anchor_payload="$backup/audit-anchor"
+python3 -B first-officer/acceptance/cycle.py --root "$FO_ACCEPTANCE_ROOT" export-anchor "$anchor_payload"
+sudo install -d -o root -g root -m 0755 /var/lib/openclaw-fo
+sudo install -o root -g root -m 0444 "$anchor_payload" /var/lib/openclaw-fo/audit-anchor
+sudo chown root:root /var/lib/openclaw-fo /var/lib/openclaw-fo/audit-anchor
+sudo chmod 0755 /var/lib/openclaw-fo
+sudo chmod 0444 /var/lib/openclaw-fo/audit-anchor
+python3 first-officer/acceptance/cycle.py --root "$FO_ACCEPTANCE_ROOT" verify
+```
+
+Success from `export-anchor` is `Audit anchor payload written.` The sudo commands print nothing and exit 0. Success from `verify` is `Audit chain verified: <n> lines.`
+
+If export, verify, or the installed verifier fails closed, stop. Do not publish the candidate and do not switch the gateway. The command exits 1. The message says the anchor is missing, was replaced, is not owned by root, or is not mode-restricted. Leave `/var/lib/openclaw-fo/audit-anchor` in place. Deleting the acceptance directory, the trust directory, the witness directory, `root.id`, `anchor.json`, or replacing a user-writable `FO_AUDIT_ANCHOR` file does not bless a new empty chain while this root-owned file remains. Do not delete that file to start a new chain. Initialize a new acceptance directory only before the file exists. After it exists, run these sudo commands again only when `verify` would accept the current chain and that chain is the history you intend to keep.

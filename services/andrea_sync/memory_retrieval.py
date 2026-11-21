@@ -1,4 +1,8 @@
-"""Retrieval helpers for episodic / preference memory (Phase 3)."""
+"""Retrieval helpers for episodic / preference memory (Phase 3).
+
+The lines returned here are untrusted. `build_memory_notes_for_principal`
+fences them before injection. Callers do not inject the raw lines.
+"""
 from __future__ import annotations
 
 import json

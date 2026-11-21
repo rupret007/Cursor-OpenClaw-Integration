@@ -8,6 +8,7 @@ from pathlib import Path, PurePosixPath
 import re
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 
@@ -24,6 +25,7 @@ MODULES = ("andrea-ssh.mjs", "captain.mjs", "captain-state.py", "dispatch.mjs",
 OVERLAY = Path(__file__).resolve().parent / "segment1"
 INVENTORY = "SHA256SUMS"
 SAFE_NAME = re.compile(r"[a-zA-Z0-9_.-]+(?:/[a-zA-Z0-9_.-]+)*")
+COMMIT = re.compile(r"[0-9a-f]{40}")
 
 
 def digest(payload):
@@ -149,7 +151,24 @@ def wire_model_router(root, *, already_wired):
     write_source(conductor, replace_once(text, original, updated))
 
 
-def stage_release(baseline, destination):
+def _reviewed_overlay(head):
+    repo = OVERLAY.parents[1]
+
+    def git(*args):
+        try:
+            return subprocess.run(["git", "-C", str(repo), *args], check=True,
+                                  capture_output=True, encoding="utf-8").stdout
+        except (OSError, subprocess.SubprocessError):
+            raise ValueError("Could not read the reviewed checkout") from None
+
+    if not COMMIT.fullmatch(head) or git("rev-parse", "--verify", "HEAD").strip() != head:
+        raise ValueError("The checkout does not match the reviewed head")
+    if git("status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none"):
+        raise ValueError("The reviewed checkout must be clean")
+    return {name: git("show", f"{head}:{(OVERLAY / name).relative_to(repo).as_posix()}") for name in MODULES}
+
+
+def stage_release(baseline, destination, *, reviewed_head=None):
     baseline = baseline.resolve(strict=True)
     destination = destination.resolve(strict=True)
     if not destination.is_dir() or destination.is_relative_to(baseline):
@@ -158,14 +177,15 @@ def stage_release(baseline, destination):
     if pin not in SUPPORTED_BASES:
         raise ValueError("Choose a verified First Officer bundle from a supported release")
     verify_inventory(baseline, pin)
+    sources = (_reviewed_overlay(reviewed_head) if reviewed_head is not None else
+               {name: (OVERLAY / name).read_text(encoding="utf-8") for name in MODULES})
     with tempfile.TemporaryDirectory(prefix=".fo-stage-", dir=destination) as temp:
         working = Path(temp) / "bundle"
         shutil.copytree(baseline, working, symlinks=True)
         verify_inventory(working, pin)
         install = working / RUNTIME / "segment1"
         install.mkdir(exist_ok=True)
-        for name in MODULES:
-            source = (OVERLAY / name).read_text(encoding="utf-8")
+        for name, source in sources.items():
             target = install / name
             if target.exists():
                 write_source(target, source)
@@ -195,10 +215,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("baseline", type=Path, help="Verified First Officer release directory")
     parser.add_argument("staging_directory", type=Path, help="Private directory for the candidate")
+    parser.add_argument("--reviewed-head", help="Full approved Git commit for the overlay")
     args = parser.parse_args()
     os.umask(0o077)
     try:
-        print(stage_release(args.baseline, args.staging_directory))
+        print(stage_release(args.baseline, args.staging_directory, reviewed_head=args.reviewed_head))
     except (OSError, ValueError) as error:
         # OS exceptions can disclose local paths or unexpected filenames.
         print(str(error) if type(error) is ValueError else "Could not read or stage the release", file=sys.stderr)

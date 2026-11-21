@@ -1,0 +1,327 @@
+import hashlib
+import importlib.util
+import json
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+import socket
+import ssl
+import subprocess
+import threading
+
+import pytest
+
+
+ROOT = Path(__file__).resolve().parents[2]
+spec = importlib.util.spec_from_file_location(
+    "fo_litellm_configure", ROOT / "first-officer/litellm/configure.py")
+configure = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(configure)
+api_spec = importlib.util.spec_from_file_location(
+    "fo_litellm_api", ROOT / "services/andrea_sync/litellm_api.py")
+api = importlib.util.module_from_spec(api_spec)
+api_spec.loader.exec_module(api)
+
+KEY = "sk-" + "abcd1234efgh5678"
+PUBLIC = "8.8.8.8"
+PRIVATE = "10." + "0.0.5"
+
+
+PLAN = {
+    "fallbacks": {"primary": ["fallback"]},
+    "lanes": {"review": {
+        "models": ["primary", "fallback"], "max_budget": 1, "budget_duration": "1d",
+    }},
+}
+
+
+def catalog(*rows):
+    return {
+        "model_list": list(rows),
+        "general_settings": {
+            "master_key": "os.environ/LITELLM_MASTER_KEY",
+            "database_url": "os.environ/DATABASE_URL",
+        },
+    }
+
+
+def row(alias, input_price, output_price, *, where="litellm_params"):
+    prices = {}
+    if input_price is not None:
+        prices["input_cost_per_token"] = input_price
+    if output_price is not None:
+        prices["output_cost_per_token"] = output_price
+    return {"model_name": alias, where: prices}
+
+
+def test_a_routed_model_needs_finite_nonnegative_prices_and_one_charge():
+    rendered = configure.candidate_config(catalog(
+        row("primary", 0.001, 0.002),
+        row("fallback", 0, 0.002, where="model_info"),
+    ), PLAN)
+    assert rendered["litellm_settings"]["block_requests_for_models_without_pricing"] is True
+
+    agreed = row("primary", 0.001, 0.002)
+    agreed["model_info"] = {"input_cost_per_token": 0.001, "output_cost_per_token": 0.002}
+    configure.candidate_config(catalog(agreed, row("fallback", 0.1, 0.1)), PLAN)
+    conflict = row("primary", 0.001, 0.002)
+    conflict["model_info"] = {"input_cost_per_token": 0.003, "output_cost_per_token": 0.002}
+    with pytest.raises(ValueError, match="pricing"):
+        configure.candidate_config(catalog(conflict, row("fallback", 0.1, 0.1)), PLAN)
+
+    for primary in (
+        row("primary", -1, 0.1),
+        row("primary", float("nan"), 0.1),
+        row("primary", float("inf"), 0.1),
+        row("primary", "0.1", 0.1),
+        row("primary", True, 0.1),
+        row("primary", 0, 0),
+        row("primary", 0.1, None),
+    ):
+        with pytest.raises(ValueError, match="pricing"):
+            configure.candidate_config(catalog(primary, row("fallback", 0.1, 0.1)), PLAN)
+
+
+def _answers(address):
+    def resolve(_host, _port):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", (address, 0))]
+    return resolve
+
+
+def test_https_stays_on_an_allowlisted_private_endpoint(monkeypatch):
+    opened = []
+
+    def explode(*_args, **_kwargs):
+        opened.append(True)
+        raise AssertionError("credentials were sent")
+
+    monkeypatch.setattr(configure, "build_opener", explode)
+    monkeypatch.delenv("FO_LITELLM_HOSTS", raising=False)
+    with pytest.raises(ValueError, match="private"):
+        configure.proxy_request("https://litellm.invalid", KEY, "/health")
+    assert opened == []
+
+    monkeypatch.setenv("FO_LITELLM_HOSTS", "litellm.internal")
+    with pytest.raises(ValueError, match="private"):
+        configure.proxy_request("https://litellm.internal", KEY, "/health", resolve=_answers(PUBLIC))
+    with pytest.raises(ValueError, match="private"):
+        configure.proxy_request("https://other.internal", KEY, "/health", resolve=_answers(PRIVATE))
+    assert opened == []
+
+    with pytest.raises(AssertionError, match="credentials were sent"):
+        configure.proxy_request("https://litellm.internal", KEY, "/health", resolve=_answers(PRIVATE))
+    with pytest.raises(AssertionError, match="credentials were sent"):
+        configure.proxy_request("http://127.0.0.1:4000", KEY, "/health")
+    assert opened == [True, True]
+
+    monkeypatch.delenv("FO_LITELLM_HOSTS", raising=False)
+    monkeypatch.setenv("ANDREA_LITELLM_API_KEY", KEY)
+    monkeypatch.setenv("ANDREA_LITELLM_MODEL", "alias")
+    monkeypatch.setenv("ANDREA_LITELLM_BASE_URL", "https://litellm.invalid/v1")
+    assert api._credentials() is None
+    with pytest.raises(RuntimeError, match="proxy_unconfigured"):
+        api.litellm_chat({}, timeout_seconds=1, error_prefix="lane")
+
+    monkeypatch.setenv("FO_LITELLM_HOSTS", "litellm.internal")
+    monkeypatch.setenv("ANDREA_LITELLM_BASE_URL", "https://litellm.internal/v1")
+    assert api._credentials(resolve=_answers(PUBLIC)) is None
+    endpoint, key = api._credentials(resolve=_answers(PRIVATE))
+    assert endpoint == "https://litellm.internal/v1/chat/completions"
+    assert key == KEY
+
+    monkeypatch.setenv("FO_LITELLM_HOSTS", PUBLIC)
+    monkeypatch.setenv("ANDREA_LITELLM_BASE_URL", f"https://{PUBLIC}/v1")
+    assert api._credentials() is None
+    monkeypatch.setenv("FO_LITELLM_HOSTS", PRIVATE)
+    monkeypatch.setenv("ANDREA_LITELLM_BASE_URL", f"https://{PRIVATE}/v1")
+    assert api._credentials()[0] == f"https://{PRIVATE}/v1/chat/completions"
+
+    monkeypatch.delenv("FO_LITELLM_HOSTS", raising=False)
+    monkeypatch.setenv("ANDREA_LITELLM_BASE_URL", "http://127.0.0.1:4000/v1")
+    assert api._credentials()[0] == "http://127.0.0.1:4000/v1/chat/completions"
+
+
+def test_litellm_connects_to_the_checked_address(tmp_path, monkeypatch):
+    """A second DNS answer must not move the bearer request off the checked address."""
+    host = "litellm.internal"
+    cert = tmp_path / "cert.pem"
+    key = tmp_path / "key.pem"
+    subprocess.run(
+        ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", str(key), "-out", str(cert),
+         "-days", "1", "-nodes", "-subj", f"/CN={host}", "-addext", f"subjectAltName=DNS:{host}"],
+        check=True, capture_output=True,
+    )
+    seen = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen.append((self.path, self.headers.get("Authorization")))
+            body = b'{"ok":true}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or "0")
+            self.rfile.read(length)
+            seen.append((self.path, self.headers.get("Authorization")))
+            body = b'{"id":"pinned"}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(cert, key)
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    port = server.server_address[1]
+    lookups = []
+    real = socket.getaddrinfo
+
+    def resolve(name, answered_port, *args, **kwargs):
+        if name != host:
+            return real(name, answered_port, *args, **kwargs)
+        lookups.append((name, answered_port))
+        if len(lookups) > 1:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 1))]
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+    monkeypatch.setenv("FO_LITELLM_HOSTS", host)
+    monkeypatch.setenv("SSL_CERT_FILE", str(cert))
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
+    try:
+        assert configure.proxy_request(f"https://{host}:{port}", KEY, "/health") == {"ok": True}
+        assert lookups == [(host, None)]
+        assert seen == [("/health", f"Bearer {KEY}")]
+        lookups.clear()
+        seen.clear()
+        monkeypatch.setenv("ANDREA_LITELLM_API_KEY", KEY)
+        monkeypatch.setenv("ANDREA_LITELLM_MODEL", "alias")
+        monkeypatch.setenv("ANDREA_LITELLM_BASE_URL", f"https://{host}:{port}/v1")
+        assert api.litellm_chat({}, timeout_seconds=5, error_prefix="lane") == {"id": "pinned"}
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert lookups == [(host, None)]
+    assert seen == [("/v1/chat/completions", f"Bearer {KEY}")]
+
+
+def _digest(value):
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+def test_a_failed_local_write_does_not_leave_a_second_active_key(tmp_path):
+    """The proxy is asked for a key only after the pending file is durable."""
+    state = {"created": 0, "records": {}, "serial": 0}
+
+    class Handler(BaseHTTPRequestHandler):
+        def _send(self, payload):
+            raw = json.dumps(payload).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def do_GET(self):
+            if self.path.startswith("/key/info"):
+                query = self.path.split("?", 1)[1] if "?" in self.path else ""
+                digest = dict(part.split("=", 1) for part in query.split("&") if "=" in part).get("key", "")
+                info = state["records"].get(digest)
+                self._send({"info": info} if info else {})
+                return
+            self.send_response(404)
+            self.end_headers()
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or "0")
+            body = json.loads(self.rfile.read(length).decode())
+            if self.path == "/key/delete":
+                for value in body.get("keys") or []:
+                    state["records"].pop(_digest(value), None)
+                self._send({})
+                return
+            if self.path != "/key/generate":
+                self.send_response(404)
+                self.end_headers()
+                return
+            requested = body.get("key")
+            if not isinstance(requested, str):
+                state["serial"] += 1
+                requested = "sk-" + "server" + f"{state['serial']:08d}"
+            issued = requested
+            if state.get("swap"):
+                state["swap"] = False
+                issued = "sk-" + "differentkeyvalue1"
+            digest = _digest(issued)
+            if digest not in state["records"]:
+                state["created"] += 1
+                record = {name: value for name, value in body.items() if name != "key"}
+                record["status"] = "active"
+                record["budget_reset_at"] = "2099-01-01T00:00:00Z"
+                state["records"][digest] = record
+            self._send({"key": issued})
+
+        def log_message(self, *_args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    directory = tmp_path / "keys"
+    directory.mkdir(mode=0o700)
+    credential = directory / "review.key"
+    master = "sk-" + "masterkeyvalue"
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    policy = PLAN["lanes"]["review"]
+    try:
+        directory.chmod(0o500)
+        with pytest.raises(OSError):
+            configure.provision_file(base, master, "review", policy, credential)
+        assert state["created"] == 0
+        assert state["records"] == {}
+        assert not credential.exists()
+        assert not credential.with_name(credential.name + ".pending").exists()
+        directory.chmod(0o700)
+        configure.provision_file(base, master, "review", policy, credential)
+        local = configure.read_key(credential)
+        assert state["created"] == 1
+        assert _digest(local) in state["records"]
+        assert not credential.with_name(credential.name + ".pending").exists()
+        configure.provision_file(base, master, "review", policy, credential)
+        assert state["created"] == 1
+        assert list(state["records"]) == [_digest(local)]
+
+        other = directory / "recovered.key"
+        pending = other.with_name(other.name + ".pending")
+        recovery = "sk-" + "pendingrecover0123"
+        configure.write_private(pending, recovery + "\n")
+        configure.provision_file(base, master, "review", policy, other)
+        assert state["created"] == 2
+        assert _digest(configure.read_key(other)) == _digest(recovery)
+        configure.provision_file(base, master, "review", policy, other)
+        assert state["created"] == 2
+        assert _digest(recovery) in state["records"]
+
+        state["swap"] = True
+        swapped = directory / "swapped.key"
+        before = state["created"]
+        with pytest.raises(ValueError):
+            configure.provision_file(base, master, "review", policy, swapped)
+        assert _digest("sk-" + "differentkeyvalue1") not in state["records"]
+        assert not swapped.exists()
+        configure.provision_file(base, master, "review", policy, swapped)
+        assert state["created"] == before + 2
+        assert _digest(configure.read_key(swapped)) in state["records"]
+        assert _digest("sk-" + "differentkeyvalue1") not in state["records"]
+    finally:
+        server.shutdown()
+        server.server_close()

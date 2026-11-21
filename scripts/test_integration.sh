@@ -49,11 +49,31 @@ python3 -m py_compile "${BASE_DIR}/scripts/andrea_lockstep_telegram_e2e.py"
 while IFS= read -r _py; do
   python3 -m py_compile "$_py"
 done < <(find "${BASE_DIR}/services" -name "*.py" 2>/dev/null | sort)
+for f in "${BASE_DIR}/first-officer/litellm/configure.py" "${BASE_DIR}/first-officer/usage/track.py" \
+         "${BASE_DIR}/first-officer/release.py" "${BASE_DIR}/first-officer/lanes/queue.py" \
+         "${BASE_DIR}/first-officer/tracing/deliver.py" "${BASE_DIR}/first-officer/qa/flaky.py" \
+         "${BASE_DIR}/first-officer/status/publish.py" \
+         "${BASE_DIR}/first-officer/acceptance/cycle.py" \
+         "${BASE_DIR}/first-officer/pilot/rehearse.py" \
+         "${BASE_DIR}/first-officer/pilot/rollback_drill.py" \
+         "${BASE_DIR}/first-officer/privacy/scan.py" \
+         "${BASE_DIR}/first-officer/archive.py" \
+         "${BASE_DIR}/first-officer/pinhttp.py" \
+         "${BASE_DIR}/first-officer/guard/sanitize.py" \
+         "${BASE_DIR}/first-officer/guard/restricted_fetch.py" \
+         "${BASE_DIR}/first-officer/guard/boundary.py"; do
+  [[ -f "$f" ]] || { echo "Missing file: $f" >&2; exit 1; }
+  python3 -m py_compile "$f"
+done
+for f in "${BASE_DIR}/TEST-NOW.md" "${BASE_DIR}/JEFF-ACTIONS.md"; do
+  [[ -f "$f" ]] || { echo "Missing file: $f" >&2; exit 1; }
+done
 
 echo "[2/11] Python syntax compile..."
 python3 -m py_compile "$CLI"
 
 echo "[3/11] Unit tests..."
+python3 "${BASE_DIR}/first-officer/privacy/scan.py"
 python3 -m pytest -q "${BASE_DIR}/tests"
 
 echo "[4/11] Cursor handoff skill tests..."

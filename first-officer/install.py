@@ -3,11 +3,13 @@
 
 import argparse
 import fcntl
+import importlib.util
 import json
 import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -22,6 +24,7 @@ STORE = Path("/opt/openclaw-fo")
 SERVICE = "openclaw-gateway.service"
 PLUGIN = "first-officer-conductor"
 FAST_MODEL = "litellm/minimax-m3.1-flash"
+LANE_KEY_REF = "${OPENCLAW_LITELLM_API_KEY}"
 PIN_PREFIX = f"ExecStartPre=/usr/bin/python3 -I -B {STORE / 'verify-install.py'} %h/.openclaw/openclaw.json "
 DIGEST = re.compile(r"[0-9a-f]{64}")
 
@@ -106,12 +109,88 @@ def gateway_launcher():
     raise ValueError("The running gateway does not use a supported OpenClaw launcher")
 
 
-def verify_config(path, release):
-    verifier = ["/usr/bin/python3", "-I", "-B", str(STORE / "verify-install.py"), str(path), release, ROLLBACK_SLOT]
+def _require_unpacked_plugins(config_path, release, candidate):
+    """Map unpublished store paths onto files that exist in the unpacked candidate."""
     try:
-        subprocess.run(verifier, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
-    except (OSError, subprocess.SubprocessError):
-        raise ValueError("The installed release verifier rejected the config and pin") from None
+        paths = json.loads(Path(config_path).read_text(encoding="utf-8"))["plugins"]["load"]["paths"]
+    except (OSError, ValueError, KeyError, TypeError):
+        raise ValueError("The candidate config does not name the unpacked release") from None
+    root = Path(candidate)
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError("The candidate release must be a directory")
+    prefix = str(STORE / f"first-officer-{release}") + "/"
+    if not isinstance(paths, list) or not paths:
+        raise ValueError("The candidate config does not name the unpacked release")
+    for raw in paths:
+        if not isinstance(raw, str) or not raw.startswith(prefix):
+            raise ValueError("The candidate config does not name the unpacked release")
+        relative = Path(raw[len(prefix):])
+        if relative.is_absolute() or ".." in relative.parts or relative.as_posix() != raw[len(prefix):]:
+            raise ValueError("The candidate config does not name the unpacked release")
+        plugin = root / relative
+        if plugin.is_symlink() or not plugin.is_file():
+            raise ValueError("The unpacked candidate is missing a plugin file")
+
+
+def installed_verifier(path, release):
+    """Return the service pin's verifier command for this config.
+
+    The pin runs `verify-install.py` with the config, the release digest, and the
+    rollback slot. The unpacked candidate directory is not an argument. That
+    program is not in this checkout. Preparation checks the unpacked plugins
+    itself. This command runs once those files are readable at the store path,
+    before the gateway is switched.
+    """
+    pinned = shlex.split(pin_line(release).partition("=")[2])
+    if (len(pinned) != 7 or pinned[:3] != ["/usr/bin/python3", "-I", "-B"]
+            or Path(pinned[3]).name != "verify-install.py"
+            or pinned[5] != release or pinned[6] != ROLLBACK_SLOT):
+        raise ValueError("The installed release verifier rejected the config and pin")
+    return [pinned[0], pinned[1], pinned[2], str(STORE / "verify-install.py"),
+            str(Path(path)), pinned[5], pinned[6]]
+
+
+def _acceptance_cycle():
+    path = Path(__file__).resolve().parent / "acceptance" / "cycle.py"
+    spec = importlib.util.spec_from_file_location("fo_acceptance_cycle", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _enforce_audit_anchor():
+    """The installed verifier path fails closed when the production seal is required."""
+    cycle = _acceptance_cycle()
+    if not cycle.production_anchor_targets():
+        return
+    root = os.environ.get("FO_ACCEPTANCE_ROOT", "").strip()
+    if not root:
+        raise ValueError(cycle.ANCHOR_MISMATCH)
+    cycle.enforce_production_anchor(root)
+
+
+def verify_config(path, release, candidate=None, *, enforce_anchor=True):
+    """Validate one saved config and pin pair.
+
+    Preparation, candidate verification, and activation fail closed when a
+    production seal is required. Rollback passes ``enforce_anchor=False`` so a
+    missing or damaged acceptance directory or seal cannot block restoration
+    of the prior pair. The config and pin are still checked on every path.
+    """
+    if enforce_anchor:
+        _enforce_audit_anchor()
+    if candidate is not None:
+        # The installed verifier reads the store path. Those files are not there
+        # during preparation, so this checks the unpacked copies instead.
+        _require_unpacked_plugins(path, release, candidate)
+    else:
+        try:
+            subprocess.run(
+                installed_verifier(path, release), check=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60,
+            )
+        except (OSError, subprocess.SubprocessError):
+            raise ValueError("The installed release verifier rejected the config and pin") from None
 
     launcher = gateway_launcher()
     label = "Round 13" if release == BASELINE else "candidate"
@@ -134,7 +213,7 @@ def verify_config(path, release):
         raise ValueError(f"OpenClaw rejected the {label} configuration using the running gateway launcher")
 
 
-def candidate_config(original, release, previous=BASELINE):
+def candidate_config(original, release, previous=BASELINE, *, budgeted_litellm=True):
     cfg = json.loads(original)
     paths = cfg["plugins"]["load"]["paths"]
     base = STORE / f"first-officer-{previous}"
@@ -151,15 +230,22 @@ def candidate_config(original, release, previous=BASELINE):
     provider = cfg["models"]["providers"]["litellm"]
     if not any(row.get("id") == FAST_MODEL.split("/")[1] for row in provider.get("models", [])):
         raise ValueError("The existing fast model is unavailable in the gateway config")
+    if budgeted_litellm:
+        if any(name.lower() in {"authorization", "x-litellm-api-key", "x-api-key"}
+               for name in provider.get("headers", {})):
+            raise ValueError("A custom LiteLLM authorization header would bypass the gateway lane key")
+        provider["apiKey"] = LANE_KEY_REF
     cfg["plugins"]["load"]["paths"] = [path.replace(previous, release, 1) for path in expected]
     entry["llm"] = policy
     return (json.dumps(cfg, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
 
 
-def prepare(release, backup, config, previous=BASELINE):
+def prepare(release, backup, config, previous=BASELINE, candidate=None):
     if previous not in SUPPORTED_BASES or not DIGEST.fullmatch(release) or release in (*SUPPORTED_BASES, ROLLBACK_SLOT):
         raise ValueError("Expected a distinct, full candidate digest")
-    root = STORE / f"first-officer-{release}"
+    root = Path(candidate) if candidate is not None else STORE / f"first-officer-{release}"
+    if root.is_symlink():
+        raise ValueError("The candidate release must be a directory")
     verify_inventory(root, release)
     dropins = shlex.split(systemctl("show", "-p", "DropInPaths", "--value", SERVICE, capture=True))
     pins = []
@@ -186,11 +272,59 @@ def prepare(release, backup, config, previous=BASELINE):
     for name, content in files.items():
         (backup / name).write_bytes(content)
     verify_config(backup / "original-openclaw.json", previous)
-    verify_config(backup / "candidate-openclaw.json", release)
+    verify_config(backup / "candidate-openclaw.json", release, root)
     (backup / "plan.json").write_text(
-        json.dumps({"release": release, "previous": previous, "pin": str(path), "pin_identity": identity}) + "\n",
+        json.dumps({"release": release, "previous": previous, "pin": str(path), "pin_identity": identity,
+                    "budgeted_litellm": True}) + "\n",
         encoding="utf-8",
     )
+
+
+def _fsync_parent(path):
+    try:
+        handle = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError:
+        return
+    try:
+        os.fsync(handle)
+    finally:
+        os.close(handle)
+
+
+def _known_pair(config_bytes, pin_bytes, original, candidate):
+    return (config_bytes in (original[0], candidate[0]) and pin_bytes in (original[1], candidate[1]))
+
+
+def _saved_pair(backup, name):
+    return (
+        owner_file(backup / f"{name}-openclaw.json", 512 * 1024, private=True),
+        owner_file(backup / f"{name}-pin.conf", 65_536, private=True),
+    )
+
+
+def _expected_candidate(original, release, previous, plan):
+    return (
+        candidate_config(original[0], release, previous, budgeted_litellm=plan.get("budgeted_litellm") is True),
+        patch_pin(original[1], release, previous),
+    )
+
+
+def _write_journal(backup, target):
+    temporary = backup / ".switch-journal.json.tmp"
+    payload = (json.dumps({"target": target}) + "\n").encode()
+    handle = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(handle, "wb") as file:
+        file.write(payload)
+        file.flush()
+        os.fsync(file.fileno())
+    os.replace(temporary, backup / "switch-journal.json")
+    os.chmod(backup / "switch-journal.json", 0o600)
+    _fsync_parent(backup)
+
+
+def _clear_journal(backup):
+    (backup / "switch-journal.json").unlink(missing_ok=True)
+    _fsync_parent(backup)
 
 
 def replace_file(path, payload, mode=0o600, gid=None):
@@ -203,6 +337,7 @@ def replace_file(path, payload, mode=0o600, gid=None):
             handle.flush()
             os.fsync(handle.fileno())
             os.replace(handle.name, path)
+            _fsync_parent(path.parent)
         finally:
             Path(handle.name).unlink(missing_ok=True)
 
@@ -236,6 +371,7 @@ def replace_pin(path, payload, identity):
             sudo_pin("/usr/bin/install", "-o", str(uid), "-g", str(gid), "-m", f"{mode:o}", "-T",
                      "--", source.name, str(temporary))
         sudo_pin("/usr/bin/mv", "-fT", "--", str(temporary), str(path))
+        _fsync_parent(path.parent)
     finally:
         if temporary.exists():
             sudo_pin("/usr/bin/rm", "-f", "--", str(temporary))
@@ -267,6 +403,76 @@ def start(config):
     wait_ready(config)
 
 
+def _discard_unverified_candidate(release):
+    """Remove a candidate the installed verifier rejected before it is published."""
+    if not DIGEST.fullmatch(str(release)) or release in (*SUPPORTED_BASES, ROLLBACK_SLOT):
+        raise ValueError("The installed release verifier rejected the config and pin")
+    published = STORE / f"first-officer-{release}"
+    if published.is_symlink():
+        raise ValueError("The installed release verifier rejected the config and pin")
+    if not published.exists():
+        return
+    if not published.is_dir() or published.parent != STORE:
+        raise ValueError("The installed release verifier rejected the config and pin")
+    if published.stat().st_uid == os.getuid():
+        shutil.rmtree(published)
+        return
+    subprocess.run(
+        ["sudo", "-n", "rm", "-rf", "--", str(published)],
+        check=True, timeout=60, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+
+def _discard_inactive_candidate(backup, config, plan):
+    """Only clean up if the complete prior pair is live and no switch is in progress."""
+    journal = backup / "switch-journal.json"
+    try:
+        try:
+            journal.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            return
+        release = plan["release"]
+        previous = plan.get("previous", BASELINE)
+        pin = Path(plan["pin"])
+        dropins = shlex.split(systemctl("show", "-p", "DropInPaths", "--value", SERVICE, capture=True))
+        if previous not in SUPPORTED_BASES or str(pin) not in dropins:
+            return
+        original = _saved_pair(backup, "original")
+        live_pin, identity = pin_file(pin)
+        if identity != plan["pin_identity"] or (owner_file(config, 512 * 1024, private=True), live_pin) != original:
+            return
+        if _saved_pair(backup, "candidate") != _expected_candidate(original, release, previous, plan):
+            return
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        return
+    _discard_unverified_candidate(release)
+
+
+def verify_installed_candidate(backup, config):
+    """Verify the candidate at its store path and clean it up on rejection if inactive.
+
+    The gateway is still running. The installed verifier receives the config
+    containing the candidate's store paths.
+    """
+    info = backup.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o077 or info.st_uid != os.getuid():
+        raise ValueError("The installation backup must be a private operator directory")
+    plan = json.loads(owner_file(backup / "plan.json", 4096, private=True))
+    release = plan["release"]
+    if not DIGEST.fullmatch(release) or release in (*SUPPORTED_BASES, ROLLBACK_SLOT):
+        raise ValueError("Expected a distinct, full candidate digest")
+    published = STORE / f"first-officer-{release}"
+    if published.is_symlink() or not published.is_dir():
+        raise ValueError("The installed release verifier rejected the config and pin")
+    try:
+        verify_config(backup / "candidate-openclaw.json", release)
+    except ValueError:
+        _discard_inactive_candidate(backup, config, plan)
+        raise
+
+
 def switch(backup, config, restore):
     info = backup.lstat()
     if not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o077 or info.st_uid != os.getuid():
@@ -280,49 +486,56 @@ def switch(backup, config, restore):
         systemctl("show", "-p", "DropInPaths", "--value", SERVICE, capture=True)
     ):
         raise ValueError("The current service or release does not match the saved installation plan")
-    original = (
-        owner_file(backup / "original-openclaw.json", 512 * 1024, private=True),
-        owner_file(backup / "original-pin.conf", 65_536, private=True),
-    )
-    candidate = (
-        owner_file(backup / "candidate-openclaw.json", 512 * 1024, private=True),
-        owner_file(backup / "candidate-pin.conf", 65_536, private=True),
-    )
-    if candidate != (
-        candidate_config(original[0], release, previous),
-        patch_pin(original[1], release, previous),
-    ):
+    original = _saved_pair(backup, "original")
+    candidate = _saved_pair(backup, "candidate")
+    if candidate != _expected_candidate(original, release, previous, plan):
         raise ValueError("The saved config and pin pair changed")
-    before, after = (candidate, original) if restore else (original, candidate)
+    after = original if restore else candidate
     live_pin, live_identity = pin_file(pin)
-    current = (owner_file(config, 512 * 1024, private=True), live_pin)
-    if current != before or live_identity != identity:
+    current_config = owner_file(config, 512 * 1024, private=True)
+    if live_identity != identity or not _known_pair(current_config, live_pin, original, candidate):
         raise ValueError("Gateway config or pin changed since preparation. Switch aborted.")
-    verify_config(backup / ("original-openclaw.json" if restore else "candidate-openclaw.json"),
-                  previous if restore else release)
+    try:
+        # Activation keeps the seal gate. Rollback must still restore the saved
+        # pair when the acceptance directory or seal is missing or damaged.
+        verify_config(backup / ("original-openclaw.json" if restore else "candidate-openclaw.json"),
+                      previous if restore else release, enforce_anchor=not restore)
+    except ValueError:
+        if not restore:
+            _discard_inactive_candidate(backup, config, plan)
+        raise
+    _write_journal(backup, "original" if restore else "candidate")
     if live_identity[0] != os.getuid():
         authorize_root_pin()
     systemctl("stop", SERVICE)
     try:
         live_pin, live_identity = pin_file(pin)
-        current_after_stop = (owner_file(config, 512 * 1024, private=True), live_pin)
+        current_config = owner_file(config, 512 * 1024, private=True)
     except (OSError, ValueError):
         systemctl("start", SERVICE)
         raise ValueError("Could not recheck the config and pin after shutdown. Switch aborted.") from None
-    if current_after_stop != before or live_identity != identity:
+    if live_identity != identity or not _known_pair(current_config, live_pin, original, candidate):
         systemctl("start", SERVICE)
         raise ValueError("Gateway config or pin changed during shutdown. Switch aborted.")
+    # Recovery is the saved prior pair for every accepted entry. A mixed live
+    # config and pin, or a complete candidate, must not be started again when
+    # the switched pair fails readiness.
+    recovery = original
     try:
-        replace_pin(pin, after[1], identity)
-        replace_file(config, after[0])
+        if live_pin != after[1]:
+            replace_pin(pin, after[1], identity)
+        if owner_file(config, 512 * 1024, private=True) != after[0]:
+            replace_file(config, after[0])
         start(after[0])
+        _clear_journal(backup)
     except (Exception, KeyboardInterrupt):
         try:
             systemctl("stop", SERVICE)
-            replace_file(config, before[0])
-            if pin_file(pin) != (before[1], identity):
-                replace_pin(pin, before[1], identity)
-            start(before[0])
+            replace_file(config, recovery[0])
+            if pin_file(pin) != (recovery[1], identity):
+                replace_pin(pin, recovery[1], identity)
+            start(recovery[0])
+            _clear_journal(backup)
         except (Exception, KeyboardInterrupt):
             raise ValueError("Switch failed and automatic recovery failed. Use the private backup to recover.") from None
         raise ValueError("Switch failed. The prior configuration and service were restored.") from None
@@ -330,10 +543,12 @@ def switch(backup, config, restore):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("prepare", "activate", "rollback"))
+    parser.add_argument("action", choices=("prepare", "verify-candidate", "activate", "rollback"))
     parser.add_argument("backup", type=Path)
     parser.add_argument("--release")
     parser.add_argument("--from-release", choices=SUPPORTED_BASES, default=BASELINE)
+    parser.add_argument("--candidate", type=Path,
+                        help="Unpacked candidate to validate before it is published")
     args = parser.parse_args()
     os.umask(0o077)
     config = Path.home() / ".openclaw/openclaw.json"
@@ -341,7 +556,9 @@ def main():
         with (config.parent / ".fo-segment1-install.lock").open("ab") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             if args.action == "prepare":
-                prepare(args.release or "", args.backup, config, args.from_release)
+                prepare(args.release or "", args.backup, config, args.from_release, args.candidate)
+            elif args.action == "verify-candidate":
+                verify_installed_candidate(args.backup, config)
             else:
                 switch(args.backup, config, restore=args.action == "rollback")
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:

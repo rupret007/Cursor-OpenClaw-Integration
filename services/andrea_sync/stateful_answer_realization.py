@@ -4,8 +4,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from typing import Any, Iterable, List, Mapping, Sequence
 
@@ -16,6 +14,7 @@ from .assistant_answer_composer import (
     is_continuation_fallback_family_text,
     is_strict_cursor_domain_recall_question,
 )
+from .litellm_api import litellm_chat, litellm_configured
 from .model_router import model_for_role
 from .turn_intelligence import TurnPlan, resolve_answer_family_profile
 from .user_surface import sanitize_user_surface_text
@@ -63,7 +62,7 @@ def stateful_realization_enabled() -> bool:
         return False
     if not _env_truthy("OPENAI_API_ENABLED", False):
         return False
-    return bool((os.environ.get("OPENAI_API_KEY") or "").strip())
+    return litellm_configured()
 
 
 def partial_evidence_realization_enabled() -> bool:
@@ -244,9 +243,6 @@ def _evidence_strength(evidence_lines: Sequence[str]) -> int:
 
 
 def _openai_json_chat(*, system: str, user: str, model: str, timeout_seconds: int) -> dict[str, Any]:
-    api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
-    if not api_key:
-        raise RuntimeError("stateful_realization_missing_key")
     payload: dict[str, Any] = {
         "model": model,
         "temperature": 0.35,
@@ -257,23 +253,9 @@ def _openai_json_chat(*, system: str, user: str, model: str, timeout_seconds: in
             {"role": "user", "content": user},
         ],
     }
-    req = urllib.request.Request(
-        "https://api.openai.com/v1/chat/completions",
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        method="POST",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
+    data = litellm_chat(
+        payload, timeout_seconds=timeout_seconds, error_prefix="stateful_realization"
     )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as err:
-        raw = err.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"stateful_realization_http_{err.code}:{raw[:240]}") from err
-    except urllib.error.URLError as err:
-        raise RuntimeError(f"stateful_realization_transport:{err}") from err
     choices = data.get("choices") if isinstance(data, dict) else None
     if not isinstance(choices, list) or not choices:
         raise RuntimeError("stateful_realization_no_choices")
@@ -632,7 +614,7 @@ def maybe_realize_stateful_reply(
     )
     if not inp.deterministic_reply or not inp.evidence_lines:
         return None
-    model = (os.environ.get("ANDREA_DIRECT_OPENAI_MODEL") or "gpt-4o-mini").strip()
+    model = os.environ["ANDREA_LITELLM_MODEL"].strip()
     timeout_seconds = max(
         5,
         int((os.environ.get("ANDREA_STATEFUL_REALIZATION_TIMEOUT_SECONDS") or "18").strip()),
@@ -920,7 +902,7 @@ def maybe_realize_grounded_technical_reply(
             technical_uncertainty_assist_enabled()
             and mode in {"partial_evidence_helpful_answer", "truthful_fallback_with_next_steps"}
         ):
-            assist_model = (os.environ.get("ANDREA_DIRECT_OPENAI_MODEL") or "").strip() or model_for_role("verifier")
+            assist_model = os.environ["ANDREA_LITELLM_MODEL"].strip()
             if assist_model and assist_model != model:
                 parsed_assist = _run_grounded_model(assist_model)
                 assist_reply = (
@@ -979,7 +961,7 @@ def maybe_realize_grounded_technical_reply(
         and mode in {"partial_evidence_helpful_answer", "truthful_fallback_with_next_steps"}
         and (_looks_fallback_shaped_reply(reply) or "general answer" in reply.lower())
     ):
-        assist_model = (os.environ.get("ANDREA_DIRECT_OPENAI_MODEL") or "").strip() or model_for_role("verifier")
+        assist_model = os.environ["ANDREA_LITELLM_MODEL"].strip()
         if assist_model and assist_model != model:
             parsed_assist = _run_grounded_model(assist_model)
             assist_reply = (

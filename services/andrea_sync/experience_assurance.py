@@ -321,9 +321,16 @@ class ExperienceHarness:
 
         # Strip leaked process env from other unittest modules; patch.dict(..., clear=False)
         # cannot delete keys, so leftovers would still affect SyncServer.
+        # --llm-eval asks to keep the lane, which is the ANDREA_LITELLM_* target,
+        # not the OPENAI_* names.
+        litellm_lane = {
+            "ANDREA_LITELLM_API_KEY",
+            "ANDREA_LITELLM_BASE_URL",
+            "ANDREA_LITELLM_MODEL",
+        }
         self._leaked_env_backup.clear()
         for key in list(os.environ.keys()):
-            if self._preserve_openai_for_eval and key.startswith("OPENAI_"):
+            if self._preserve_openai_for_eval and (key.startswith("OPENAI_") or key in litellm_lane):
                 continue
             if (
                 key.startswith("ANDREA_")
@@ -392,7 +399,7 @@ class ExperienceHarness:
             env_patch["ANDREA_ROUTING_EVAL_EXPORT"] = str(routing_eval_export).strip()
         if not self._preserve_openai_for_eval:
             env_patch["OPENAI_API_ENABLED"] = "0"
-            env_patch["OPENAI_API_KEY"] = ""
+            env_patch["ANDREA_LITELLM_API_KEY"] = ""
         self._stack.enter_context(mock.patch.dict(os.environ, env_patch, clear=False))
         self.server = SyncServer()
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.server))

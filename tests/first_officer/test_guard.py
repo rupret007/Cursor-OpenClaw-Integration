@@ -583,3 +583,145 @@ def test_an_empty_fetched_page_is_not_a_grounded_success(monkeypatch, tmp_path):
             assert again["ok"] is False and again["summary"] == ""
     finally:
         page.shutdown()
+
+
+class RedirectHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.server.hits += 1
+        self.server.paths.append(self.path)
+        target = self.server.redirects.get(self.path)
+        if target:
+            self.send_response(302)
+            self.send_header("Location", target)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        body = self.server.routes.get(self.path, b"")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt, *args):
+        return
+
+
+def serve_redirects(routes, redirects):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
+    server.hits = 0
+    server.paths = []
+    server.routes = routes
+    server.redirects = redirects
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server
+
+
+def test_a_redirect_must_be_an_exact_source_or_it_is_not_fetched(monkeypatch, tmp_path):
+    """A reviewed page may redirect only to another exact source of that same route."""
+    boundary = load("fo_boundary_redirect", "first-officer/guard/boundary.py")
+    hybrid = load("fo_hybrid_redirect", "scripts/andrea_sync_openclaw_hybrid.py")
+    page = serve_redirects(
+        {
+            "/other": b"unreviewed page",
+            "/also": b"City hall vote passed",
+            "/research": b"Certificate expiry note",
+        },
+        {"/news": "/other"},
+    )
+    try:
+        origin = f"http://127.0.0.1:{page.server_address[1]}"
+        news = origin + "/news"
+        other = origin + "/other"
+        also = origin + "/also"
+        research = origin + "/research"
+        allow_path = tmp_path / "allow.json"
+
+        def write_sources(news_sources):
+            allow_path.write_text(json.dumps({
+                "version": 1,
+                "hosts": [],
+                "fixtures": [origin],
+                "sources": {
+                    "structured_live_news": news_sources,
+                    "structured_grounded_research": [research],
+                },
+            }), encoding="utf-8")
+
+        write_sources([news])
+        loaded = boundary.load_allowlist(allow_path)
+        with pytest.raises(ValueError, match="not allowed"):
+            fetch.fetch(news, loaded, token=TOKEN)
+        assert page.paths == ["/news"]
+        refused = boundary.run_lookup("structured_live_news", "What is the news?", allowlist=loaded)
+        assert refused["ok"] is False
+        assert refused["status"] != "completed"
+        assert "unreviewed page" not in refused["summary"]
+        assert page.paths == ["/news", "/news"]
+
+        page.redirects["/news"] = "/research"
+        with pytest.raises(ValueError, match="not allowed"):
+            fetch.fetch(news, loaded, token=TOKEN)
+        assert "/research" not in page.paths
+        assert page.paths.count("/other") == 0
+
+        page.redirects["/news"] = "/also"
+        write_sources([news, also])
+        listed = boundary.load_allowlist(allow_path)
+        followed = fetch.fetch(news, listed, token=TOKEN)
+        assert "City hall vote passed" in followed
+        assert "unreviewed page" not in followed
+        assert page.paths.count("/also") == 1
+        assert page.paths.count("/other") == 0
+        looked = boundary.run_lookup("structured_live_news", "What is the news?", allowlist=listed)
+        assert looked["ok"] is True
+        assert "City hall vote passed" in looked["summary"]
+        assert "unreviewed page" not in looked["summary"]
+
+        page.redirects["/also"] = "/other"
+        before_other = page.paths.count("/other")
+        with pytest.raises(ValueError, match="not allowed"):
+            fetch.fetch(news, listed, token=TOKEN)
+        assert page.paths.count("/other") == before_other
+
+        page.redirects["/news"] = "/other"
+        page.redirects.pop("/also", None)
+        write_sources([news])
+        monkeypatch.setenv("FO_FETCH_ALLOWLIST", str(allow_path))
+        monkeypatch.setenv("ANDREA_SYNC_DB", str(tmp_path / "sync.db"))
+        monkeypatch.setenv("ANDREA_SYNC_TELEGRAM_NOTIFIER", "0")
+        monkeypatch.setenv("ANDREA_SYNC_BACKGROUND_ENABLED", "0")
+        monkeypatch.setenv("ANDREA_SYNC_TELEGRAM_WEBHOOK_AUTOFIX", "0")
+        monkeypatch.setenv("ANDREA_SYNC_PUBLIC_BASE", "")
+        monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+        def explode(*_args, **_kwargs):
+            raise AssertionError("lookup must not launch the openclaw agent")
+
+        monkeypatch.setattr(hybrid.subprocess, "run", explode)
+        if str(ROOT) not in sys.path:
+            sys.path.insert(0, str(ROOT))
+        from services.andrea_sync.server import SyncServer
+
+        monkeypatch.setattr(SyncServer, "_run_queue", lambda self: None)
+        server = SyncServer()
+        prompt = server._build_live_news_prompt("What is the news?")
+        produced = _lookup(hybrid, "structured_live_news", prompt)
+        assert produced["ok"] is False
+        assert "unreviewed page" not in produced["summary"]
+        assert produced["tools_invoked"] == []
+        reply, reason = server._run_direct_openclaw_lookup(
+            "task-redirect-news",
+            prompt=prompt,
+            route_reason="structured_live_news",
+            success_reason="news_summary_ready",
+            success_fallback="I pulled a live news summary for you.",
+            failure_reason="news_summary_failed",
+            failure_reply="I couldn't pull a grounded live news summary cleanly just now.",
+        )
+        assert reason != "news_summary_ready"
+        assert reply != "I pulled a live news summary for you."
+        assert "unreviewed page" not in reply
+        assert page.paths.count("/other") == 0
+    finally:
+        page.shutdown()

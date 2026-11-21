@@ -4,10 +4,11 @@
 An empty allowlist refuses every fetch. Hosts must match exactly after IDNA
 normalization. Public pages are HTTPS on port 443 and must resolve to public
 unicast addresses. The only loopback form is an explicit fixture origin,
-`http://127.0.0.1:<port>`. One redirect is checked again. A second redirect, a
-private address, or a page that cannot be fenced is refused, and the body is
-not returned. The connection uses the addresses from that check and does not
-resolve the name again.
+`http://127.0.0.1:<port>`. One redirect is followed only when that next page is
+an exact source for the same route. Any other redirect, including a second hop,
+is refused before that URL is contacted. A private address or a page that
+cannot be fenced is refused, and the body is not returned. The connection uses
+the addresses from that check and does not resolve the name again.
 """
 
 import importlib.util
@@ -215,14 +216,26 @@ def _open(url, addresses):
         raise ValueError("The page was not read") from None
 
 
+def _redirect_ok(current, target, allowlist):
+    """A hop is allowed only when both pages are exact sources of one route."""
+    sources = allowlist.get("sources") or {}
+    for urls in sources.values():
+        if current in urls and target in urls:
+            return True
+    return False
+
+
 def fetch(url, allowlist, resolve=system_resolve, token=None):
-    pinned = check_target(url, allowlist, resolve)
-    page, redirect = _open(url, pinned)
-    if redirect is not None:
-        redirected = check_target(redirect, allowlist, resolve)
-        page, again = _open(redirect, redirected)
-        if again is not None:
+    current = url
+    page = None
+    for hop in range(2):
+        pinned = check_target(current, allowlist, resolve)
+        page, redirect = _open(current, pinned)
+        if redirect is None:
+            break
+        if hop == 1 or not _redirect_ok(current, redirect, allowlist):
             raise ValueError("The fetch URL is not allowed")
+        current = redirect
     if page is None:
         raise ValueError("The page was not read")
     text = visible_text(page)

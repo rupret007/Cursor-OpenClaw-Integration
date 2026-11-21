@@ -41,6 +41,14 @@ def fenced(text):
     return isinstance(text, str) and FENCE.fullmatch(text) is not None
 
 
+def inner_text(text):
+    """Return the visible text inside one complete fence."""
+    match = FENCE.fullmatch(text) if isinstance(text, str) else None
+    if match is None:
+        return "" if text is None else str(text)
+    return match.group(3)
+
+
 def visible_to_tools(text):
     """Fenced text is data. Anything else can still reach the tool gate."""
     return not fenced(text)

@@ -117,24 +117,37 @@ def _visible(page):
     return match.group(3)
 
 
+def _export_text(summary, limit, untrusted):
+    clipped = summary[:limit]
+    if untrusted and clipped:
+        return sanitize.fence("lookup", clipped, limit)
+    return clipped
+
+
 def _finish(allowed, refused, invoked, fenced_pages, *, status, summary, blocked):
-    """Return one lookup. Fenced pages are data and are not admitted as tool calls."""
+    """Return one lookup. Fenced pages are data and are not admitted as tool calls.
+
+    Completed text taken from those pages is exported inside one fence. A later
+    reader that feeds a model or tool parser sees data, not a tool call. Operator
+    messages for a lookup that never read a page stay plain.
+    """
     for page in fenced_pages:
         _visible(page)
     text = summary.strip()
+    untrusted = bool(fenced_pages)
     return {
         "ok": status == "completed",
         "backend": "restricted_lookup",
         "execution_lane": "restricted_lookup",
         "delegated_to_cursor": False,
-        "summary": text[:2000],
-        "user_summary": text[:500],
+        "summary": _export_text(text, 2000, untrusted),
+        "user_summary": _export_text(text, 500, untrusted),
         "collaboration_trace": [],
         "machine_collaboration_trace": [],
         "phase_outputs": {},
         "blocked_reason": blocked,
         "internal_trace": "",
-        "raw_text": text[:4000],
+        "raw_text": _export_text(text, 4000, untrusted),
         "tools_invoked": invoked,
         "tools_refused": refused,
         "allowed_tools": list(allowed),

@@ -358,6 +358,15 @@ def test_normal_lookup_queries_work_through_the_fenced_boundary(monkeypatch, tmp
         assert "bluebubbles" not in news["tools_invoked"] and "send_message" not in news["tools_invoked"]
         assert "bluebubbles" in news["tools_refused"]
         assert sanitize.fenced(news["fenced"]) and not sanitize.visible_to_tools(news["fenced"])
+        for field in ("summary", "user_summary", "raw_text"):
+            assert "City hall vote passed" in news[field]
+            assert not sanitize.visible_to_tools(news[field])
+        assert not sanitize.visible_to_tools(recent["summary"])
+        assert not sanitize.visible_to_tools(recent["user_summary"])
+        assert not sanitize.visible_to_tools(recent["raw_text"])
+        assert not sanitize.visible_to_tools(synthesis["summary"])
+        assert not sanitize.visible_to_tools(synthesis["user_summary"])
+        assert not sanitize.visible_to_tools(synthesis["raw_text"])
         with pytest.raises(ValueError, match="not a tool call"):
             boundary.admit("structured_live_news", "fetch", news["fenced"])
         with pytest.raises(ValueError, match="cannot use that tool"):
@@ -403,6 +412,7 @@ def test_normal_lookup_queries_work_through_the_fenced_boundary(monkeypatch, tmp
             "assistant_state_synthesis_ready", "assistant_state_synthesis_failed",
         )
         assert news_reason == "news_summary_ready" and "City hall vote passed" in served_news
+        assert "<<UNTRUSTED" not in served_news and "<<END " not in served_news
         assert research_reason == "grounded_research_ready" and "Certificate expiry" in served_research
         assert recent_reason == "recent_text_messages_ready" and "Lunch is at noon" in served_recent
         assert synthesis_reason == "assistant_state_synthesis_ready" and "Walk the dog at noon" in served_synthesis

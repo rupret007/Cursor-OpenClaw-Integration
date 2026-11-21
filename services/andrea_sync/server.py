@@ -204,6 +204,31 @@ def _clip(value: Any, limit: int) -> str:
     return str(value or "")[:limit]
 
 
+_LOOKUP_INNER = None
+
+
+def _lookup_visible_text(value: Any) -> str:
+    """Unwrap one lookup fence for the person reading the reply.
+
+    The stored summary, user_summary, and raw_text stay fenced so a tool parser
+    cannot treat fetched text as a tool call. This display step is the only place
+    those fields become a sentence.
+    """
+    global _LOOKUP_INNER
+    text = str(value or "").strip()
+    if not text.startswith("<<UNTRUSTED "):
+        return text
+    if _LOOKUP_INNER is None:
+        path = _repo_root() / "first-officer" / "guard" / "sanitize.py"
+        spec = importlib.util.spec_from_file_location("fo_lookup_sanitize", path)
+        module = importlib.util.module_from_spec(spec)
+        if spec.loader is None:
+            return text
+        spec.loader.exec_module(module)
+        _LOOKUP_INNER = module.inner_text
+    return str(_LOOKUP_INNER(text) or "").strip()
+
+
 def _sanitize_user_surface_text(text: Any, *, fallback: str = "") -> str:
     sanitized = shared_sanitize_user_surface_text(text, fallback=fallback, limit=500)
     return sanitized or "I ran into an internal limitation while working on that."
@@ -3954,11 +3979,11 @@ class SyncServer:
             result.get("blocked_reason"),
             result.get("error"),
         ):
-            raw_preview = str(candidate or "").strip()
+            raw_preview = _lookup_visible_text(candidate)
             if raw_preview and is_stale_openclaw_narrative(raw_preview):
                 return failure_reply, contaminated_reason
             sanitized = shared_sanitize_user_surface_text(
-                candidate,
+                raw_preview,
                 fallback="",
                 limit=500,
             ).strip()

@@ -2,6 +2,7 @@ import importlib.util
 from datetime import datetime, timezone
 import json
 import os
+import types
 from pathlib import Path
 import shutil
 import subprocess
@@ -9,6 +10,7 @@ import sys
 import threading
 from zoneinfo import ZoneInfo
 
+import stat
 import pytest
 
 
@@ -406,10 +408,48 @@ def root_owned_anchor_cases(tmp_path):
     print("anchor-ok")
 
 
+def _stat(uid, gid, mode, *, size=128, directory=False):
+    kind = stat.S_IFDIR if directory else stat.S_IFREG
+    return types.SimpleNamespace(st_uid=uid, st_gid=gid, st_mode=kind | mode, st_size=size)
+
+
+def test_production_seal_metadata_accepts_only_root_owned_service_readable_seals():
+    """Uid 0, gid 0, mode 0444, and a 0755 root-owned directory are required."""
+    parent = _stat(0, 0, 0o755, directory=True)
+    assert cycle.production_seal_metadata_ok(_stat(0, 0, 0o444), parent) is None
+    assert cycle.production_seal_metadata_ok(_stat(0, 0, 0o644, size=0), parent) == cycle.ANCHOR_MISMATCH
+    assert cycle.production_seal_metadata_ok(_stat(1, 0, 0o444), parent) == cycle.ANCHOR_OWNER
+    assert cycle.production_seal_metadata_ok(_stat(0, 1, 0o444), parent) == cycle.ANCHOR_OWNER
+    assert cycle.production_seal_metadata_ok(_stat(0, 0, 0o600), parent) == cycle.ANCHOR_MODE
+    assert cycle.production_seal_metadata_ok(_stat(0, 0, 0o664), parent) == cycle.ANCHOR_MODE
+    assert cycle.production_seal_metadata_ok(_stat(0, 0, 0o666), parent) == cycle.ANCHOR_MODE
+    file_ok = _stat(0, 0, 0o444)
+    assert cycle.production_seal_metadata_ok(file_ok, _stat(0, 0, 0o777, directory=True)) == cycle.ANCHOR_MODE
+    assert cycle.production_seal_metadata_ok(file_ok, _stat(1, 0, 0o755, directory=True)) == cycle.ANCHOR_OWNER
+    link = types.SimpleNamespace(st_uid=0, st_gid=0, st_mode=stat.S_IFLNK | 0o777, st_size=128)
+    assert cycle.production_seal_metadata_ok(link, parent) == cycle.ANCHOR_REPLACED
+
+
+def _can_map_root_user():
+    if os.geteuid() == 0:
+        return True
+    completed = subprocess.run(
+        ["unshare", "--user", "--map-root-user", "true"],
+        check=False, text=True, capture_output=True, timeout=10,
+    )
+    return completed.returncode == 0
+
+
 def test_root_owned_anchor_mode_and_replacement(tmp_path):
     """The readable root-owned seal is accepted. 0600, group write, and a replaced seal are not."""
+    test_production_seal_metadata_accepts_only_root_owned_service_readable_seals()
     if os.geteuid() == 0:
         root_owned_anchor_cases(tmp_path)
+        return
+    if not _can_map_root_user():
+        # GitHub-hosted runners refuse user namespaces. The policy is still
+        # tested above, and fail-closed filesystem cases stay in
+        # test_production_anchor_fails_closed_for_a_non_root_user.
         return
     completed = subprocess.run(
         ["unshare", "--user", "--map-root-user", sys.executable, "-B", str(Path(__file__).resolve()),

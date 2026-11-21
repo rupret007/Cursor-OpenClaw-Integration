@@ -413,32 +413,48 @@ def _service_writable(info, path):
     return os.geteuid() != 0 and os.access(path, os.W_OK)
 
 
+
+def production_seal_metadata_ok(info, parent):
+    """Return None if lstat results are a root-owned, service-readable seal.
+
+    The caller still has to refuse a writable path or a payload mismatch.
+    This predicate is the uid, gid, type, and mode policy used by
+    `_read_production_seal`.
+    """
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        return ANCHOR_REPLACED
+    if info.st_uid != 0 or info.st_gid != 0:
+        return ANCHOR_OWNER
+    mode = stat.S_IMODE(info.st_mode)
+    if not mode & stat.S_IROTH or mode & 0o022:
+        return ANCHOR_MODE
+    if info.st_size > 1024 * 1024 or info.st_size == 0:
+        return ANCHOR_MISMATCH
+    if stat.S_ISLNK(parent.st_mode) or not stat.S_ISDIR(parent.st_mode):
+        return ANCHOR_REPLACED
+    if parent.st_uid != 0 or parent.st_gid != 0:
+        return ANCHOR_OWNER
+    parent_mode = stat.S_IMODE(parent.st_mode)
+    if not parent_mode & stat.S_IXOTH or parent_mode & 0o022:
+        return ANCHOR_MODE
+    return None
+
+
 def _read_production_seal(path):
     try:
         info = path.lstat()
     except FileNotFoundError:
         raise ValueError(ANCHOR_MISSING) from None
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-        raise ValueError(ANCHOR_REPLACED)
-    if info.st_uid != 0 or info.st_gid != 0:
-        raise ValueError(ANCHOR_OWNER)
-    mode = stat.S_IMODE(info.st_mode)
-    if not mode & stat.S_IROTH or _service_writable(info, path):
-        raise ValueError(ANCHOR_MODE)
     directory = path.parent
     try:
         parent = directory.lstat()
     except FileNotFoundError:
         raise ValueError(ANCHOR_MISSING) from None
-    if stat.S_ISLNK(parent.st_mode) or not stat.S_ISDIR(parent.st_mode):
-        raise ValueError(ANCHOR_REPLACED)
-    if parent.st_uid != 0 or parent.st_gid != 0:
-        raise ValueError(ANCHOR_OWNER)
-    parent_mode = stat.S_IMODE(parent.st_mode)
-    if not parent_mode & stat.S_IXOTH or _service_writable(parent, directory):
+    reason = production_seal_metadata_ok(info, parent)
+    if reason is not None:
+        raise ValueError(reason)
+    if _service_writable(info, path) or _service_writable(parent, directory):
         raise ValueError(ANCHOR_MODE)
-    if info.st_size > 1024 * 1024 or info.st_size == 0:
-        raise ValueError(ANCHOR_MISMATCH)
     try:
         handle = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     except OSError as error:

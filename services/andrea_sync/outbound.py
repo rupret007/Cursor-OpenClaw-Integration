@@ -126,7 +126,7 @@ class DeliveryUncertain(ValueError):
 
 
 class _CarrierRejected(ValueError):
-    """The carrier finished its answer and did not confirm this draft."""
+    """The carrier explicitly declined the exact draft."""
 
 
 def _carrier_target() -> tuple[int, str]:
@@ -170,17 +170,19 @@ def _ask_carrier(draft: Mapping[str, Any]) -> dict[str, Any]:
     finally:
         connection.close()
     if status != 200 or len(raw) > 4096:
-        raise _CarrierRejected(UNCONFIRMED)
+        raise DeliveryUncertain(UNCERTAIN)
     try:
         payload = json.loads(raw)
     except (UnicodeError, json.JSONDecodeError):
         raise DeliveryUncertain(UNCERTAIN) from None
-    if not isinstance(payload, dict) or payload.get("delivered") is not True:
-        raise _CarrierRejected(UNCONFIRMED)
+    if not isinstance(payload, dict) or type(payload.get("delivered")) is not bool:
+        raise DeliveryUncertain(UNCERTAIN)
     carrier = payload.get("carrier")
     if (payload.get("target") != request["target"] or payload.get("body") != request["body"]
             or payload.get("digest") != request["digest"] or payload.get("tool") != request["tool"]
             or not isinstance(carrier, str) or not CARRIER_ID.fullmatch(carrier)):
+        raise DeliveryUncertain(UNCERTAIN)
+    if payload["delivered"] is False:
         raise _CarrierRejected(UNCONFIRMED)
     return {
         "body": payload["body"],
@@ -296,7 +298,7 @@ def deliver(draft: Mapping[str, Any], outbox: Path) -> dict[str, Any]:
     before the carrier is contacted. A second call with a pending digest and no
     receipt does not POST again: the protocol cannot query by digest, so the
     call fails closed for a manual check. A stored receipt is returned as-is.
-    A completed refusal is not a send and may be tried again.
+    Only an explicit refusal that matches the exact draft permits another POST.
     """
     if not draft_binding_ok(draft):
         raise ValueError("The outbound draft is not bound")

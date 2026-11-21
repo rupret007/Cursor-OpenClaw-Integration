@@ -31,7 +31,7 @@ class Carrier(BaseHTTPRequestHandler):
             request = json.loads(raw)
         except json.JSONDecodeError:
             request = {}
-        delivered = self.server.mode == "confirm"
+        delivered = self.server.mode != "deny"
         payload = {
             "body": request.get("body"),
             "carrier": self.server.carrier_id,
@@ -40,6 +40,12 @@ class Carrier(BaseHTTPRequestHandler):
             "target": request.get("target"),
             "tool": request.get("tool"),
         }
+        if self.server.mode == "inexact":
+            payload["digest"] = "0" * 64
+        elif self.server.mode == "incomplete":
+            payload = {"delivered": False}
+        elif self.server.mode == "oversize":
+            payload["padding"] = "x" * 4096
         data = json.dumps(payload).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -168,6 +174,7 @@ def test_unconfirmed_delivery_is_not_recorded(tmp_path, monkeypatch):
             assert "I sent it" not in reply
             assert server._load_pending_outbound_draft(drafted)
             assert _successes(server) == []
+            assert len(denied.seen) == 2
         finally:
             denied.shutdown()
 
@@ -201,6 +208,33 @@ def _bound_draft():
         label="text messaging",
         created_at=1.0,
     )
+
+
+@pytest.mark.parametrize("mode", ["down", "oversize", "inexact", "incomplete"])
+def test_ambiguous_carrier_reply_keeps_confirmation_in_manual_check(tmp_path, monkeypatch, mode):
+    server = _server(tmp_path / "sync.db", monkeypatch)
+    carrier = serve(mode)
+    try:
+        monkeypatch.setenv(
+            "ANDREA_OUTBOUND_CARRIER",
+            f"http://127.0.0.1:{carrier.server_address[1]}/deliver",
+        )
+        drafted, draft = _draft(server, "tg-ambiguous-draft", 911)
+        _, first_reason, first_reply = _confirm(server, "tg-ambiguous-first", 912)
+        _, next_reason, next_reply = _confirm(server, "tg-ambiguous-repeat", 913)
+
+        assert len(carrier.seen) == 1
+        assert json.loads(carrier.seen[0])["digest"] == draft["digest"]
+        assert first_reason == next_reason == "outbound_message_needs_check"
+        assert "manual check" in first_reply and "manual check" in next_reply
+        assert _stored(server) == []
+        assert server._load_pending_outbound_draft(drafted)["digest"] == draft["digest"]
+        pending = server.outbound_outbox.with_name(server.outbound_outbox.name + ".pending")
+        assert json.loads(pending.read_text(encoding="utf-8"))[draft["digest"]]["state"] == "pending"
+    finally:
+        carrier.shutdown()
+        carrier.server_close()
+        server.conn.close()
 
 
 def test_confirmed_send_is_not_retried_after_local_receipt_failure(tmp_path, monkeypatch):

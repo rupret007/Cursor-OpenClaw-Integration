@@ -9,6 +9,7 @@ that appears only in a merge result is still a finding.
 """
 
 import argparse
+from ipaddress import IPv6Address, IPv6Network
 import os
 from pathlib import Path
 import re
@@ -42,9 +43,14 @@ BEARER = re.compile(r"(?<![A-Za-z0-9])Bearer ([A-Za-z0-9._~+/-]{16,})")
 NANP = re.compile(r"(?<!\d)(?:\+?1[\s.-]?)?(?:\(\d{3}\)[\s.-]?|\d{3}[\s.-])\d{3}[\s.-]\d{4}(?!\d)")
 E164 = re.compile(r"(?<![A-Za-z0-9])\+[1-9]\d{10,14}(?!\d)")
 ADDRESS = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+IPV6 = re.compile(r"(?<![\w:.])(?:[0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F:.]*(?![\w:])")
 EMAIL = re.compile(r"(?<![A-Za-z0-9._%+\-])[A-Za-z0-9._%+\-]{1,64}@[A-Za-z0-9.\-]+\.[A-Za-z]{2,24}\b")
 PRIVATE_KEY = re.compile(r"-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----")
 DOC_NETS = {(192, 0, 2), (198, 51, 100), (203, 0, 113)}
+IPV6_DOC_NET = IPv6Network("2001:db8::/32")
+# The existing fetch-policy tests use a public resolver and a synthetic ULA.
+IPV6_FIXTURE_PATH = "tests/first_officer/test_guard.py"
+IPV6_FIXTURES = frozenset({0x20014860486000000000000000008888, (0xFD00 << 112) | 1})
 EXAMPLE_ADDRESSES = {(8, 8, 8, 8), (1, 1, 1, 1), (1, 2, 3, 4)}
 EMAIL_HOSTS = {"example.com", "example.org", "example.net", "example.invalid", "github.com", "localhost"}
 SHA = re.compile(r"[0-9a-f]{40}")
@@ -114,12 +120,25 @@ def personal_address(raw):
     return True
 
 
+def personal_ipv6(raw, path):
+    try:
+        address = IPv6Address(raw.rstrip("."))
+    except ValueError:
+        return False
+    if address.ipv4_mapped is not None:
+        return personal_address(str(address.ipv4_mapped))
+    if path == IPV6_FIXTURE_PATH and int(address) in IPV6_FIXTURES:
+        return False
+    return not (address.is_unspecified or address.is_loopback or address.is_link_local
+                or address.is_multicast or address in IPV6_DOC_NET)
+
+
 def personal_email(raw):
     host = raw.rsplit("@", 1)[-1].lower()
     return host not in EMAIL_HOSTS and not host.endswith(".example.com")
 
 
-def findings_in_text(text):
+def findings_in_text(text, *, path=None):
     """Return rule and line only. The matched characters are not retained."""
     found = []
     seen = set()
@@ -140,10 +159,9 @@ def findings_in_text(text):
             if not fictional_phone(match.group()):
                 rules.append("phone")
                 break
-        for match in ADDRESS.finditer(line):
-            if personal_address(match.group()):
-                rules.append("address")
-                break
+        if (any(personal_address(match.group()) for match in ADDRESS.finditer(line))
+                or any(personal_ipv6(match.group(), path) for match in IPV6.finditer(line))):
+            rules.append("address")
         for match in EMAIL.finditer(line):
             if personal_email(match.group()):
                 rules.append("email")
@@ -220,7 +238,7 @@ def _file_findings(root, path):
     text = payload.decode("utf-8", "replace")
     located = [{"rule": item["rule"], "path": "[redacted]", "line": 0}
                for item in findings_in_text(relative.as_posix())]
-    for finding in findings_in_text(text):
+    for finding in findings_in_text(text, path=relative.as_posix()):
         located.append({"rule": finding["rule"], "path": shown, "line": finding["line"]})
     return located
 
@@ -377,7 +395,7 @@ def scan_history(root):
             continue
         if not commit or not path or not raw.startswith(("+", "-")) or raw.startswith(("+++", "---")):
             continue
-        for finding in findings_in_text(raw[1:]):
+        for finding in findings_in_text(raw[1:], path=path):
             key = (finding["rule"], commit, path)
             if key not in seen:
                 seen.add(key)

@@ -1,4 +1,5 @@
 import importlib.util
+from ipaddress import IPv6Address
 from pathlib import Path
 import subprocess
 
@@ -46,6 +47,21 @@ def test_a_planted_secret_fails_and_is_not_printed(tmp_path, capsys):
     hidden = scan.report({"files": 1, "commits": 1, "logs": 0,
                           "findings": scan._file_findings(tmp_path, named)})[0]
     assert CREDENTIAL not in hidden and "[redacted]" in hidden
+
+
+def test_scan_catches_private_and_public_ipv6_addresses_without_printing_them(tmp_path, capsys):
+    private = IPv6Address((0xFD << 120) | (42 << 64) | 9)
+    public = IPv6Address((0x2004 << 112) | (0xA1 << 80) | 9)
+    mapped = "::ffff:" + ADDRESS
+    note = tmp_path / "route.txt"
+    note.write_text(f"private {private}%route\npublic [{public.exploded}]:443\nmapped {mapped}\n", encoding="utf-8")
+    findings, _ = scan.scan_files(tmp_path)
+    rendered, code = scan.report({"files": 1, "commits": 0, "logs": 0, "findings": findings})
+    assert code == 1
+    assert rendered.splitlines()[1:] == [f"address route.txt:{line}" for line in (1, 2, 3)]
+    assert all(value not in rendered for value in (str(private), public.exploded, mapped))
+    assert scan.findings_in_text("unspecified :: loopback ::1 documentation 2001:db8::9 at 08:30:00") == []
+    assert scan.findings_in_text(str(IPv6Address((0xFD00 << 112) | 1))) == [{"rule": "address", "line": 1}]
 
 
 def test_history_and_logs_keep_a_removed_secret_and_a_log_line(tmp_path, capsys):

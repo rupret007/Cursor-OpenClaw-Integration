@@ -12,7 +12,7 @@ Follow `RESEARCH-SETUP.md`. Leave Phoenix, Restate and Hatchet uninstalled until
 
 ## Open failures
 
-None in the local gates. The four pull-request jobs are the CI check for the head that contains this handoff. Gateway activation, timed Telegram checks, the live authority pilot and a live rollback still wait for Jeff. The gateway tar still needs the private prior bundle.
+None in the local gates. The four pull-request jobs passed on `20479e500b3511b675b20f02989ce1503b62230f`. Gateway activation, timed Telegram checks, the live authority pilot and a live rollback still wait for Jeff. The gateway tar still needs the private prior bundle.
 
 ## Do not
 

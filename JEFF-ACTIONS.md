@@ -23,7 +23,7 @@ python3 -B first-officer/release.py rollback "$backup"
 
 What changes when this is active: the `@andrea` prefix in your private owner chat routes to the existing restricted Mac reader, and the gateway's routed model traffic uses its own budgeted LiteLLM lane key instead of the shared credential.
 
-The checkout does not contain the installed verifier `/opt/openclaw-fo/verify-install.py`. Activation calls it with the same three arguments as the service pin: the config path, the release digest, and the rollback slot. It does not pass the unpacked directory. `verify-candidate` runs that command after the candidate files are at the store path and before the directory is made read-only. A non-zero exit removes the store directory and does not stop or switch the gateway. You can run the same read-only check yourself before the switch. It must exit 0:
+The checkout does not contain the installed verifier `/opt/openclaw-fo/verify-install.py`. Activation calls it with the same three arguments as the service pin: the config path, the release digest, and the rollback slot. It does not pass the unpacked directory. `verify-candidate` runs that command after the candidate files are in place with their installed read-only permissions and before the gateway is switched. A non-zero exit removes the store directory and does not stop or switch the gateway. You can run the same read-only check yourself before the switch. It must exit 0:
 
 ```bash
 python3 -I -B /opt/openclaw-fo/verify-install.py "$backup/candidate-openclaw.json" "$release" 4759047e8a16d1691499d55c4b6656882e67bc2275a3297d2283aa9b01538753

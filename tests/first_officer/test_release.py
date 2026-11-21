@@ -1,4 +1,6 @@
 import importlib.util
+import json
+import os
 from pathlib import Path
 import sys
 
@@ -84,11 +86,12 @@ def test_activate_checks_the_digest_and_writes_rollback_before_publish(tmp_path)
     assert release.main(["activate", CANDIDATE, str(tmp_path / "a.tar"), str(tmp_path)], recorder) == 0
     order = [what for what, _ in recorder.calls]
     assert "Compare the manifest digest with the approved release" in order
-    publish_at = order.index("Publish the staged release under its digest")
+    publish_at = order.index("Place the candidate at its store path")
     assert order.index("Compare the manifest digest with the approved release") < publish_at
     assert order.index("Check the candidate inventory against the reviewed digest") < publish_at
     assert order.index("Prepare the switch and record the private rollback") < publish_at
-    assert order.index("Verify the candidate with the installed verifier before publish") < publish_at
+    assert publish_at < order.index("Verify the candidate with the installed verifier before publish") < order.index(
+        "Switch the gateway to the reviewed release")
     prepare = dict(recorder.calls)["Prepare the switch and record the private rollback"]
     assert "--candidate" in prepare
     assert CANDIDATE in " ".join(prepare)
@@ -121,8 +124,9 @@ def test_one_activate_command_preflights_publishes_and_switches_in_order(tmp_pat
         "Reserve a private staging directory under the release store",
         "Copy the candidate into the staging directory",
         "Place the candidate at its store path",
+        "Confirm the move installed this copy",
+        "Set the installed read-only permissions for verification",
         "Verify the candidate with the installed verifier before publish",
-        "Publish the staged release under its digest",
         "Switch the gateway to the reviewed release",
         "Confirm the gateway is active after the switch",
     ]
@@ -133,7 +137,7 @@ def test_one_activate_command_preflights_publishes_and_switches_in_order(tmp_pat
     verify = calls["Verify the candidate with the installed verifier before publish"]
     assert verify[0].endswith("python3") or verify[0].endswith(sys.executable)
     assert "verify-candidate" in verify
-    assert calls["Publish the staged release under its digest"] == [
+    assert calls["Set the installed read-only permissions for verification"] == [
         "sudo", "chmod", "-R", "a-w,a+rX", f"/opt/openclaw-fo/first-officer-{CANDIDATE}"]
     prepare = calls["Prepare the switch and record the private rollback"]
     assert prepare[-6:] == ["--release", CANDIDATE, "--from-release", ACTIVE, "--candidate", prepare[-1]]
@@ -141,6 +145,74 @@ def test_one_activate_command_preflights_publishes_and_switches_in_order(tmp_pat
     printed = capsys.readouterr().out
     assert f"Keep this private rollback directory: {tmp_path / 'switch'}" in printed
     assert f"rollback {tmp_path / 'switch'}" in printed
+
+
+def test_activation_copy_is_readable_by_the_operator_at_verification(tmp_path, monkeypatch):
+    installer = importlib.import_module("install")
+    store = tmp_path / "store"
+    store.mkdir()
+    monkeypatch.setattr(release, "STORE", store)
+    monkeypatch.setattr(installer, "STORE", store)
+    monkeypatch.setattr(installer.Path, "home", lambda: tmp_path)
+    (tmp_path / ".openclaw").mkdir()
+
+    # Run the filesystem commands without elevation. The verifier checks the
+    # mode bits a non-owner would use as well as reading the file itself.
+    sudo = tmp_path / "sudo"
+    sudo.write_text('#!/bin/sh\nexec "$@"\n', encoding="utf-8")
+    sudo.chmod(0o700)
+    monkeypatch.setenv("PATH", f"{tmp_path}:{os.environ['PATH']}")
+    monkeypatch.setattr(installer.os, "umask", lambda *_: 0o077)
+    extract = tmp_path / "extract"
+    unpacked = extract / f"first-officer-{CANDIDATE}"
+    unpacked.mkdir(parents=True, mode=0o700)
+    (unpacked / "plugin.mjs").write_text("candidate\n", encoding="utf-8")
+    (unpacked / "plugin.mjs").chmod(0o600)
+    published = store / unpacked.name
+    verifier = store / "verify-install.py"
+    verifier.write_text(
+        "import json, stat, sys\n"
+        "from pathlib import Path\n"
+        "config, digest, rollback = sys.argv[1:]\n"
+        "plugin = Path(json.loads(Path(config).read_text())['plugins']['load']['paths'][0])\n"
+        "assert plugin.parent.name == f'first-officer-{digest}'\n"
+        "assert plugin.parent.stat().st_mode & stat.S_IXOTH\n"
+        "assert plugin.stat().st_mode & stat.S_IROTH\n"
+        "assert plugin.read_text() == 'candidate\\n'\n",
+        encoding="utf-8",
+    )
+    launcher = tmp_path / "openclaw"
+    launcher.write_text("#!/bin/sh\necho '{\"valid\": true}'\n", encoding="utf-8")
+    launcher.chmod(0o700)
+    monkeypatch.setattr(installer, "systemctl", lambda *args, **kwargs: f"argv[]={launcher} gateway ;")
+
+    backup = tmp_path / "switch"
+    backup.mkdir(mode=0o700)
+    for name, payload in {
+        "plan.json": {"release": CANDIDATE},
+        "candidate-openclaw.json": {"plugins": {"load": {"paths": [str(published / "plugin.mjs")]}}},
+    }.items():
+        member = backup / name
+        member.write_text(json.dumps(payload), encoding="utf-8")
+        member.chmod(0o600)
+
+    def execute(entry, substitutions):
+        argv = entry["argv"]
+        if "verify-candidate" in argv:
+            with monkeypatch.context() as context:
+                context.setattr(sys, "argv", argv[2:])
+                assert installer.main() == 0
+            return ""
+        return release.execute(entry, substitutions)
+
+    plan = release.activate_plan(ROOT, CANDIDATE, tmp_path / "archive", extract, backup)
+    actions = [entry["what"] for entry in plan]
+    release.run(plan[actions.index("Reserve a private staging directory under the release store"):
+                     actions.index("Switch the gateway to the reviewed release")], {}, execute)
+    assert (published / "plugin.mjs").read_text(encoding="utf-8") == "candidate\n"
+    assert unpacked.stat().st_mode & 0o777 == 0o700
+    assert published.stat().st_mode & 0o777 == 0o555
+    assert (published / "plugin.mjs").stat().st_mode & 0o777 == 0o444
 
 
 def test_activate_stops_at_the_first_failure_and_points_at_the_rollback(tmp_path, capsys):

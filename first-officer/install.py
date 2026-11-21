@@ -137,9 +137,8 @@ def installed_verifier(path, release):
     The pin runs `verify-install.py` with the config, the release digest, and the
     rollback slot. The unpacked candidate directory is not an argument. That
     program is not in this checkout. Preparation checks the unpacked plugins
-    itself. This command runs once those files are at the store path and before
-    they are made read-only. A rejection removes that store directory and does
-    not stop the gateway.
+    itself. This command runs once those files are readable at the store path,
+    before the gateway is switched.
     """
     pinned = shlex.split(pin_line(release).partition("=")[2])
     if (len(pinned) != 7 or pinned[:3] != ["/usr/bin/python3", "-I", "-B"]
@@ -384,8 +383,8 @@ def _discard_unverified_candidate(release):
 def verify_installed_candidate(backup):
     """Verify the candidate at its store path. A rejection removes that directory.
 
-    The gateway is not stopped. The directory is not read-only yet, so this is
-    before publish. The installed verifier is not given the unpacked path.
+    The gateway is still running. The installed verifier receives the config
+    containing the candidate's store paths.
     """
     info = backup.lstat()
     if not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o077 or info.st_uid != os.getuid():

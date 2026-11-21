@@ -47,6 +47,28 @@ def lane_parameters(lane, policy):
             "max_budget": maximum, "budget_duration": duration, "allowed_routes": ALLOWED_ROUTES}
 
 
+def _charge(row, field):
+    found = []
+    for key in ("litellm_params", "model_info"):
+        source = row.get(key)
+        if source is None:
+            continue
+        if not isinstance(source, dict):
+            raise ValueError("A routed model has pricing that bypasses budget enforcement")
+        if field not in source:
+            continue
+        value = source[field]
+        if found and value != found[0]:
+            raise ValueError("A routed model has pricing that bypasses budget enforcement")
+        found.append(value)
+    if not found:
+        raise ValueError("A routed model has pricing that bypasses budget enforcement")
+    value = found[0]
+    if type(value) not in (int, float) or value != value or value < 0 or value == float("inf"):
+        raise ValueError("A routed model has pricing that bypasses budget enforcement")
+    return value
+
+
 def candidate_config(original, plan):
     if not isinstance(original, dict) or not isinstance(plan, dict) or set(plan) != {"fallbacks", "lanes"}:
         raise ValueError("Expected a proxy configuration and fallback and lane policy")
@@ -73,10 +95,10 @@ def candidate_config(original, plan):
     for row in deployments:
         if row.get("model_name") not in metered:
             continue
-        params, info = row.get("litellm_params") or {}, row.get("model_info") or {}
-        for source in (params, info):
-            if source.get("input_cost_per_token") == source.get("output_cost_per_token") == 0:
-                raise ValueError("A routed model has pricing that bypasses budget enforcement")
+        incoming = _charge(row, "input_cost_per_token")
+        outgoing = _charge(row, "output_cost_per_token")
+        if incoming <= 0 and outgoing <= 0:
+            raise ValueError("A routed model has pricing that bypasses budget enforcement")
 
     general = cfg.setdefault("general_settings", {})
     for field, variable in (("master_key", "LITELLM_MASTER_KEY"), ("database_url", "DATABASE_URL")):

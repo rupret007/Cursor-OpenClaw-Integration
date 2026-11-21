@@ -128,7 +128,7 @@ Lane policy JSON shape, already enforced by `candidate_config`:
 
 `budget_duration` accepts `30s`, `30m`, `30h`, `30d`. As of 1.110.0, spellings like `1month` follow the short form, and the admin UI labels reset times in UTC. A daily extra-spend cap is a UTC day. It is not midnight Central. Say that in the status page so the two clocks are not compared as if they were one.
 
-`configure.py` refuses a routed model whose input and output prices are both exactly zero, and it refuses a lane that omits a fallback target. Keep both checks. A model with a missing price is the job of `block_requests_for_models_without_pricing`.
+`configure.py` refuses a routed model unless both token prices are finite numbers of at least zero, with at least one greater than zero, and it refuses a lane that omits a fallback target. Keep both checks. `block_requests_for_models_without_pricing` stays on as well.
 
 Provision with the command already in `INSTALL.md`. The management URL is `http://127.0.0.1:4000`. Keys land in a private file through a `*.pending` rename. The info lookup uses the SHA-256 of the key, so the live key is not placed in the request URL.
 
@@ -179,7 +179,7 @@ The design is the right one, and the acceptance test is a real proxy rather than
 
 - Dollar budgets and subscription percents are easy to confuse. The status page has to show both, with the reset timezone on each.
 - `num_retries` is unset. Put `0` in the reviewed YAML.
-- The zero-price check only fires when both prices are exactly zero. The “block models without pricing” flag covers the missing-price case. Leave both on.
+- A routed model with a negative, non-finite, nonnumeric, missing, or all-zero price is refused before the candidate is written. Leave `block_requests_for_models_without_pricing` on as well.
 - `provision_file` will not rotate a key. Operators need a documented retire step. Deleting the file and re-running is a new key, which is what the pending-file path does. Say so in the runbook so nobody edits the database by hand.
 - `proxy_request` allows any HTTPS hostname. On this deployment the only URL passed to it is `http://127.0.0.1:4000`.
 - Official Compose publishes port 4000 on every interface. The unit above publishes localhost only.

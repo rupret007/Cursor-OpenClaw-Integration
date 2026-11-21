@@ -54,4 +54,13 @@ The installed gateway add-on diagnostic found 49 skills and ten inactive routine
 
 The backlog references the bobserver lanes `infra-20261118`, `consolidate-20261119` and `arch-research-20261118`.
 
+## Queued after step 8
+
+These additional acceptance items follow the eight ordered integration steps. Each requires the same local and CI gates and exact evidence before it can be marked done.
+
+- Scan the repository, reachable Git history and relevant logs for secrets and personal data. Add an automated test that keeps the scan enforced.
+- Produce one combined release bundle with a single activation command and rollback procedure, so Jeff reviews and approves the release once.
+- Update `CAPTAIN.md`, `INSTALL.md` and `LIVE-TEST.md` to reflect implemented and proven behavior, removing stale claims.
+- Keep Cursor fallback within plan usage and ensure paid extras remain disabled. Prove the limit and disabled billing configuration with tests and evidence.
+
 BLOCKED: The `@andrea` and LiteLLM routing update is staged. Gateway activation, timed Telegram acceptance and the supervised authority pilot remain pending.

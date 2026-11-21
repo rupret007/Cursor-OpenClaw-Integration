@@ -16,3 +16,4 @@ The subscription readings came from Codex `app-server` over stdio via `account/r
 - Open acceptance gaps are provider failover, per-lane budget enforcement and the remaining API client routes. No implementation changes or gate runs were made. There is no finish-branch CI result or stacked draft PR yet.
 - After Step 1 passes locally, record exact evidence in `STATUS.md`, commit, push and open one draft PR targeting `codex/first-officer-segment-1`. Verify CI before proceeding to Step 2.
 - `STATUS.md`, `CAPTAIN.md`, `INSTALL.md` and `LIVE-TEST.md` were read in full. Gateway activation, Telegram checks and the supervised production pilot await Jeff's approval.
+- Jeff added four post-step-8 acceptance items to `STATUS.md`: enforced repository/history/log secrets and PII scanning, a single combined activation and rollback bundle, documentation reconciliation, and proof that Cursor fallback stays within plan usage with paid extras disabled.

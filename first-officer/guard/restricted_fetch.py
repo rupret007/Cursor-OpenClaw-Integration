@@ -209,4 +209,7 @@ def fetch(url, allowlist, resolve=system_resolve, token=None):
             raise ValueError("The fetch URL is not allowed")
     if page is None:
         raise ValueError("The page was not read")
-    return fence("fetch", visible_text(page), TEXT_LIMIT, token)
+    text = visible_text(page)
+    if not text:
+        raise ValueError("The page was not read")
+    return fence("fetch", text, TEXT_LIMIT, token)

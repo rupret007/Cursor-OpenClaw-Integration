@@ -233,6 +233,7 @@ def run_lookup(route, prompt, *, allowlist=None, resolve=None, fetcher=None):
                            summary=DISABLED[route], blocked="lookup_disabled")
         invoked = []
         fenced_pages = []
+        saw_empty = False
         for url in targets:
             try:
                 admit(route, "fetch", url)
@@ -250,13 +251,22 @@ def run_lookup(route, prompt, *, allowlist=None, resolve=None, fetcher=None):
                     refused.append("fetch")
                 continue
             # The page is data. Do not admit it, and do not fetch any URL it names.
+            visible = _visible(page)
+            if not visible.strip():
+                saw_empty = True
+                if "fetch" not in refused:
+                    refused.append("fetch")
+                continue
             fenced_pages.append(page)
             invoked.append("fetch")
-            _extend_refused(refused, _refused_outbound(route, _visible(page)))
+            _extend_refused(refused, _refused_outbound(route, visible))
         if not fenced_pages:
             return _finish(allowed, refused, [], [], status="refused",
-                           summary="", blocked="lookup_tools_restricted")
-        summary = " ".join(_visible(page) for page in fenced_pages)
+                           summary="", blocked="lookup_empty" if saw_empty else "lookup_tools_restricted")
+        summary = " ".join(_visible(page) for page in fenced_pages).strip()
+        if not summary:
+            return _finish(allowed, refused, [], [], status="refused",
+                           summary="", blocked="lookup_empty")
         return _finish(allowed, refused, invoked, fenced_pages, status="completed",
                        summary=summary, blocked="")
     if "read_messages" in allowed:

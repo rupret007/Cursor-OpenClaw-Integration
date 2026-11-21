@@ -193,3 +193,7 @@ BLOCKED: The `@andrea` and LiteLLM routing update is staged. Gateway activation,
 | HIGH 1. Installed verifier cannot read the candidate | `a09dcfb` | The activation plan copies a private tree and runs the installed-verifier contract with non-owner read and traversal checks. |
 | HIGH 2. Ambiguous carrier response clears the no-retry marker | `0185f6c` | Repeated server confirmations after HTTP failure, oversized, mismatched, or incomplete replies make one carrier request and keep the digest pending. |
 | HIGH 3. Failed validation can delete the active release | `ebff0bb` | Both validation entry points preserve releases referenced by the config, pin, or an interrupted switch journal. |
+| MEDIUM. A new event hides a complete audit reset | `0719bda` | Routine, proposal, refusal, and confirmation writes all reject missing audit state. An explicit `init` establishes a new checkpoint. |
+| MEDIUM. Release build does not bind or privacy-scan the overlay | `072f596` | The real staging and packing path rejects a dirty checkout, a different commit, and an approved overlay that fails the candidate scan. |
+| MEDIUM. Identity trailers conceal history findings | `c718888` | Git history scanning detects credentials in bare trailers, suffixes, display names, and mailboxes. |
+| MEDIUM. Address rule misses IPv6 | `a42c85b` | The file scan reports private, public, and mapped IPv6 forms without printing the values. |

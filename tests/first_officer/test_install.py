@@ -320,10 +320,24 @@ def test_prepare_verifies_the_unpacked_candidate_and_rollback_restores_the_prior
     shutil.copytree(unpacked, published)
     (published / "first-officer-exec-guard.mjs").unlink()
     with pytest.raises(ValueError, match="rejected"):
-        installer.switch(backup, config, restore=False)
+        installer.verify_installed_candidate(backup)
+    assert not published.exists()
     assert stops == []
     assert config.read_bytes() == original[0]
-    (published / "first-officer-exec-guard.mjs").write_bytes(b"candidate-guard\n")
+    shutil.copytree(unpacked, published)
+    (published / "first-officer-exec-guard.mjs").unlink()
+    with pytest.raises(ValueError, match="rejected"):
+        installer.switch(backup, config, restore=False)
+    assert stops == []
+    assert not published.exists()
+    assert config.read_bytes() == original[0]
+    shutil.copytree(unpacked, published)
+    before_verify = len(recorded)
+    installer.verify_installed_candidate(backup)
+    verified = verifier_calls(recorded[before_verify:])
+    assert verified == [installer.installed_verifier(backup / "candidate-openclaw.json", release)]
+    assert str(unpacked) not in " ".join(verified[0])
+    assert published.is_dir()
     before_switch = len(recorded)
     installer.switch(backup, config, restore=False)
     switched = verifier_calls(recorded[before_switch:stops[0]])

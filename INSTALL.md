@@ -228,19 +228,20 @@ published="/opt/openclaw-fo/first-officer-$release"
 sudo test ! -e "$published"
 publish_dir="$(sudo mktemp -d /opt/openclaw-fo/.segment1-publish.XXXXXXXX)"
 sudo cp -a --no-preserve=ownership "$candidate/." "$publish_dir/"
-sudo chmod -R a-w,a+rX "$publish_dir"
 sudo mv -nT "$publish_dir" "$published"
+nice -n 10 python3 -B first-officer/install.py verify-candidate "$backup"
+sudo chmod -R a-w,a+rX "$published"
 nice -n 10 python3 -B first-officer/install.py activate "$backup"
 systemctl --user is-active --quiet openclaw-gateway.service
 ```
 
-The manifest digest is compared with the approved release, and the private rollback directory is written, before the candidate is published. Preparation checks that the unpacked candidate contains the plugin files the new config names. It does not pass that directory to the installed verifier. The installed verifier is the program named by the service pin, `/opt/openclaw-fo/verify-install.py`, called with the config path, the release digest, and the rollback slot, and with no further argument. Preparation runs that command for the prior config. The candidate command runs when the plugin files are at the store path, before the gateway is stopped. After the publish `mv` and before `install.py activate`, this check must exit 0:
+The manifest digest is compared with the approved release, and the private rollback directory is written, before the candidate is published. Preparation checks that the unpacked candidate contains the plugin files the new config names. It does not pass that directory to the installed verifier. The installed verifier is the program named by the service pin, `/opt/openclaw-fo/verify-install.py`, called with the config path, the release digest, and the rollback slot, and with no further argument. Preparation runs that command for the prior config. `verify-candidate` runs the same command for the candidate once the plugin files are at the store path and before that directory is made read-only. A non-zero exit removes the store directory and does not stop the gateway. The same check runs again inside activation, before the gateway is stopped. This read-only command must exit 0:
 
 ```bash
 python3 -I -B /opt/openclaw-fo/verify-install.py "$backup/candidate-openclaw.json" "$release" 4759047e8a16d1691499d55c4b6656882e67bc2275a3297d2283aa9b01538753
 ```
 
-A non-zero exit means the installed verifier rejected the published candidate. Do not run the switch. Preparation also validates both configs with the OpenClaw launcher used by the running service. Rollback restores the prior bundle's config and pin; the prior bundle files stay in place. With a root-owned pin, activation obtains sudo authorization before shutdown and preserves the pin’s owner, group and mode. Activation waits up to 120 seconds for local readiness and attempts to restore the prior config and pin if the switch fails. The pin write and the config write are separate replacements. Re-running activation finishes whichever of those two saved files is still the prior one. Re-running rollback puts both files back when either one has already changed, including when the service stopped between the two writes. A file that matches neither saved copy is left unchanged. The rollback restores that config, pin, and service. It does not delete the published candidate directory or undo a separately provisioned reader or proxy. Run [the Telegram acceptance checks](LIVE-TEST.md) once the service is ready.
+A non-zero exit means the installed verifier rejected the candidate. Do not make the directory read-only and do not run the switch. `verify-candidate` already removes the store directory on that failure. Preparation also validates both configs with the OpenClaw launcher used by the running service. Rollback restores the prior bundle's config and pin; the prior bundle files stay in place. With a root-owned pin, activation obtains sudo authorization before shutdown and preserves the pin’s owner, group and mode. Activation waits up to 120 seconds for local readiness and attempts to restore the prior config and pin if the switch fails. The pin write and the config write are separate replacements. Re-running activation finishes whichever of those two saved files is still the prior one. Re-running rollback puts both files back when either one has already changed, including when the service stopped between the two writes. A file that matches neither saved copy is left unchanged. The rollback restores that config, pin, and service. It does not delete the published candidate directory or undo a separately provisioned reader or proxy. Run [the Telegram acceptance checks](LIVE-TEST.md) once the service is ready.
 
 ## Roll back to the exact prior config and pin
 

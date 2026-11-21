@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -135,8 +136,10 @@ def installed_verifier(path, release):
 
     The pin runs `verify-install.py` with the config, the release digest, and the
     rollback slot. The unpacked candidate directory is not an argument. That
-    program is not in this checkout; preparation checks the unpacked plugins
-    itself, and this command runs once those files are at the store path.
+    program is not in this checkout. Preparation checks the unpacked plugins
+    itself. This command runs once those files are at the store path and before
+    they are made read-only. A rejection removes that store directory and does
+    not stop the gateway.
     """
     pinned = shlex.split(pin_line(release).partition("=")[2])
     if (len(pinned) != 7 or pinned[:3] != ["/usr/bin/python3", "-I", "-B"]
@@ -149,6 +152,8 @@ def installed_verifier(path, release):
 
 def verify_config(path, release, candidate=None):
     if candidate is not None:
+        # The installed verifier reads the store path. Those files are not there
+        # during preparation, so this checks the unpacked copies instead.
         _require_unpacked_plugins(path, release, candidate)
     else:
         try:
@@ -356,6 +361,49 @@ def start(config):
     wait_ready(config)
 
 
+def _discard_unverified_candidate(release):
+    """Remove a candidate the installed verifier rejected before it is published."""
+    if not DIGEST.fullmatch(str(release)) or release in (*SUPPORTED_BASES, ROLLBACK_SLOT):
+        raise ValueError("The installed release verifier rejected the config and pin")
+    published = STORE / f"first-officer-{release}"
+    if published.is_symlink():
+        raise ValueError("The installed release verifier rejected the config and pin")
+    if not published.exists():
+        return
+    if not published.is_dir() or published.parent != STORE:
+        raise ValueError("The installed release verifier rejected the config and pin")
+    if published.stat().st_uid == os.getuid():
+        shutil.rmtree(published)
+        return
+    subprocess.run(
+        ["sudo", "-n", "rm", "-rf", "--", str(published)],
+        check=True, timeout=60, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+
+def verify_installed_candidate(backup):
+    """Verify the candidate at its store path. A rejection removes that directory.
+
+    The gateway is not stopped. The directory is not read-only yet, so this is
+    before publish. The installed verifier is not given the unpacked path.
+    """
+    info = backup.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o077 or info.st_uid != os.getuid():
+        raise ValueError("The installation backup must be a private operator directory")
+    plan = json.loads(owner_file(backup / "plan.json", 4096, private=True))
+    release = plan["release"]
+    if not DIGEST.fullmatch(release) or release in (*SUPPORTED_BASES, ROLLBACK_SLOT):
+        raise ValueError("Expected a distinct, full candidate digest")
+    published = STORE / f"first-officer-{release}"
+    if published.is_symlink() or not published.is_dir():
+        raise ValueError("The installed release verifier rejected the config and pin")
+    try:
+        verify_config(backup / "candidate-openclaw.json", release)
+    except ValueError:
+        _discard_unverified_candidate(release)
+        raise
+
+
 def switch(backup, config, restore):
     info = backup.lstat()
     if not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o077 or info.st_uid != os.getuid():
@@ -387,8 +435,13 @@ def switch(backup, config, restore):
     current_config = owner_file(config, 512 * 1024, private=True)
     if live_identity != identity or not _known_pair(current_config, live_pin, original, candidate):
         raise ValueError("Gateway config or pin changed since preparation. Switch aborted.")
-    verify_config(backup / ("original-openclaw.json" if restore else "candidate-openclaw.json"),
-                  previous if restore else release)
+    try:
+        verify_config(backup / ("original-openclaw.json" if restore else "candidate-openclaw.json"),
+                      previous if restore else release)
+    except ValueError:
+        if not restore:
+            _discard_unverified_candidate(release)
+        raise
     _write_journal(backup, "original" if restore else "candidate")
     if live_identity[0] != os.getuid():
         authorize_root_pin()
@@ -424,7 +477,7 @@ def switch(backup, config, restore):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("prepare", "activate", "rollback"))
+    parser.add_argument("action", choices=("prepare", "verify-candidate", "activate", "rollback"))
     parser.add_argument("backup", type=Path)
     parser.add_argument("--release")
     parser.add_argument("--from-release", choices=SUPPORTED_BASES, default=BASELINE)
@@ -438,6 +491,8 @@ def main():
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             if args.action == "prepare":
                 prepare(args.release or "", args.backup, config, args.from_release, args.candidate)
+            elif args.action == "verify-candidate":
+                verify_installed_candidate(args.backup)
             else:
                 switch(args.backup, config, restore=args.action == "rollback")
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:

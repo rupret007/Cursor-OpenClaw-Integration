@@ -88,6 +88,7 @@ def test_activate_checks_the_digest_and_writes_rollback_before_publish(tmp_path)
     assert order.index("Compare the manifest digest with the approved release") < publish_at
     assert order.index("Check the candidate inventory against the reviewed digest") < publish_at
     assert order.index("Prepare the switch and record the private rollback") < publish_at
+    assert order.index("Verify the candidate with the installed verifier before publish") < publish_at
     prepare = dict(recorder.calls)["Prepare the switch and record the private rollback"]
     assert "--candidate" in prepare
     assert CANDIDATE in " ".join(prepare)
@@ -119,15 +120,21 @@ def test_one_activate_command_preflights_publishes_and_switches_in_order(tmp_pat
         "Refuse to republish an existing release directory",
         "Reserve a private staging directory under the release store",
         "Copy the candidate into the staging directory",
-        "Remove write access from the staged release",
+        "Place the candidate at its store path",
+        "Verify the candidate with the installed verifier before publish",
         "Publish the staged release under its digest",
         "Switch the gateway to the reviewed release",
         "Confirm the gateway is active after the switch",
     ]
     calls = dict(recorder.calls)
     assert calls["Copy the candidate into the staging directory"][-1] == f"{PUBLISH}/"
-    assert calls["Publish the staged release under its digest"][-2:] == [
+    assert calls["Place the candidate at its store path"][-2:] == [
         PUBLISH, f"/opt/openclaw-fo/first-officer-{CANDIDATE}"]
+    verify = calls["Verify the candidate with the installed verifier before publish"]
+    assert verify[0].endswith("python3") or verify[0].endswith(sys.executable)
+    assert "verify-candidate" in verify
+    assert calls["Publish the staged release under its digest"] == [
+        "sudo", "chmod", "-R", "a-w,a+rX", f"/opt/openclaw-fo/first-officer-{CANDIDATE}"]
     prepare = calls["Prepare the switch and record the private rollback"]
     assert prepare[-6:] == ["--release", CANDIDATE, "--from-release", ACTIVE, "--candidate", prepare[-1]]
     assert prepare[-1].endswith(f"/first-officer-{CANDIDATE}")

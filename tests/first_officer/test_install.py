@@ -134,6 +134,49 @@ def test_gateway_start_failure_restores_prior_bytes_and_reports_failure(controll
     assert calls.count("ready") == 2
 
 
+def test_readiness_failure_keeps_the_complete_pair_observed_at_entry(controller, monkeypatch):
+    """A repeated rollback must not start the candidate when the original pair is already live."""
+    installer, _, config, pin, backup, calls = controller
+    original = (
+        (backup / "original-openclaw.json").read_bytes(),
+        (backup / "original-pin.conf").read_bytes(),
+    )
+    candidate = (
+        (backup / "candidate-openclaw.json").read_bytes(),
+        (backup / "candidate-pin.conf").read_bytes(),
+    )
+    pairs = {"original": original, "candidate": candidate}
+    installer.switch(backup, config, restore=False)
+    installer.switch(backup, config, restore=True)
+    assert (config.read_bytes(), pin.read_bytes()) == original
+    attempts = {"n": 0}
+
+    def wait(_payload):
+        attempts["n"] += 1
+        calls.append("ready")
+        if attempts["n"] % 2 == 1:
+            raise ValueError("synthetic readiness failure")
+
+    monkeypatch.setattr(installer, "wait_ready", wait)
+    with pytest.raises(ValueError, match="prior configuration and service were restored"):
+        installer.switch(backup, config, restore=True)
+    assert (config.read_bytes(), pin.read_bytes()) == original
+    assert (config.read_bytes(), pin.read_bytes()) != candidate
+
+    for restore in (True, False):
+        directional = candidate if restore else original
+        for config_state in ("original", "candidate"):
+            for pin_state in ("original", "candidate"):
+                observed = (pairs[config_state][0], pairs[pin_state][1])
+                expected = observed if observed in (original, candidate) else directional
+                config.write_bytes(observed[0])
+                pin.write_bytes(observed[1])
+                attempts["n"] = 0
+                with pytest.raises(ValueError, match="prior configuration and service were restored"):
+                    installer.switch(backup, config, restore=restore)
+                assert (config.read_bytes(), pin.read_bytes()) == expected
+
+
 def test_switch_refuses_a_changed_config_without_stopping_the_service(controller):
     installer, _, config, _, backup, calls = controller
     config.write_bytes(config.read_bytes() + b"\n")

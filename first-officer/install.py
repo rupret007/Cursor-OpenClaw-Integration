@@ -486,6 +486,10 @@ def switch(backup, config, restore):
     if live_identity != identity or not _known_pair(current_config, live_pin, original, candidate):
         systemctl("start", SERVICE)
         raise ValueError("Gateway config or pin changed during shutdown. Switch aborted.")
+    observed = (current_config, live_pin)
+    # A complete pair already on disk is the recovery target. Rollback must not
+    # treat the candidate as that pair when the original files are already live.
+    recovery = observed if observed in (original, candidate) else before
     try:
         if live_pin != after[1]:
             replace_pin(pin, after[1], identity)
@@ -496,10 +500,10 @@ def switch(backup, config, restore):
     except (Exception, KeyboardInterrupt):
         try:
             systemctl("stop", SERVICE)
-            replace_file(config, before[0])
-            if pin_file(pin) != (before[1], identity):
-                replace_pin(pin, before[1], identity)
-            start(before[0])
+            replace_file(config, recovery[0])
+            if pin_file(pin) != (recovery[1], identity):
+                replace_pin(pin, recovery[1], identity)
+            start(recovery[0])
             _clear_journal(backup)
         except (Exception, KeyboardInterrupt):
             raise ValueError("Switch failed and automatic recovery failed. Use the private backup to recover.") from None

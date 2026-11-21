@@ -101,6 +101,26 @@ def test_expired_secret_and_live_routine_do_not_save_or_send(tmp_path):
     assert not (tmp_path / "untouched").exists()
 
 
+def test_deleting_every_owner_writable_audit_copy_is_not_a_silent_pass(tmp_path):
+    """Deleting the root and both owner-writable copies must not verify as a fresh chain."""
+    root = tmp_path / "cycle"
+    cycle.run_routine(root, NOW)
+    trust = cycle.trust_dir(root)
+    witness = cycle.witness_dir(root)
+    assert (trust / "audit.head").is_file()
+    assert (witness / "audit.head").is_file()
+    shutil.rmtree(root)
+    shutil.rmtree(trust)
+    shutil.rmtree(witness)
+    with pytest.raises(ValueError, match="owner cannot delete"):
+        cycle.verify(root)
+    fresh = tmp_path / "unused-after-reset"
+    with pytest.raises(ValueError, match="owner cannot delete"):
+        cycle.verify(fresh)
+    assert not cycle.trust_dir(fresh).exists()
+    assert not cycle.witness_dir(fresh).exists()
+
+
 def test_deleting_the_acceptance_root_and_its_trust_anchor_does_not_verify(tmp_path):
     """Removing the acceptance root and the real trust directory must not verify as fresh."""
     root = tmp_path / "cycle"
@@ -124,7 +144,8 @@ def test_deleting_the_acceptance_root_and_its_trust_anchor_does_not_verify(tmp_p
     with pytest.raises(ValueError, match="checkpoint|truncated"):
         cycle.verify(kept)
     fresh = tmp_path / "unused"
-    assert cycle.verify(fresh) == 0
+    with pytest.raises(ValueError, match="owner cannot delete"):
+        cycle.verify(fresh)
     assert not cycle.witness_dir(fresh).exists()
 
 
@@ -156,7 +177,8 @@ def test_resetting_the_acceptance_directory_does_not_erase_the_trust_anchor(tmp_
     assert root.resolve() not in anchor.resolve().parents
     assert root.parent.resolve() not in anchor.resolve().parents
     fresh = tmp_path / "fresh"
-    assert cycle.verify(fresh) == 0
+    with pytest.raises(ValueError, match="owner cannot delete"):
+        cycle.verify(fresh)
     assert not cycle.trust_dir(fresh).exists()
     assert not (fresh.parent / f".{fresh.name}.fo-audit-trust").exists()
 

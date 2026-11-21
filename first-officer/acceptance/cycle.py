@@ -539,6 +539,11 @@ def verify(root):
     for nonce in facts:
         if nonce not in seen:
             raise ValueError("A saved fact has no accepted audit line")
+    if not rows and pending is None and not facts and not (root / "receipt-lane-review.json").exists():
+        raise ValueError(
+            "The audit chain has no trust anchor the owner cannot delete. "
+            "An empty directory cannot be distinguished from a reset."
+        )
     return len(rows)
 
 

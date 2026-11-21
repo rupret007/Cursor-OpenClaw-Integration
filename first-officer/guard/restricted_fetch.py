@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+"""Fetch one allowlisted page and return it inside a fence.
+
+An empty allowlist refuses every fetch. Hosts must match exactly after IDNA
+normalization. Public pages are HTTPS on port 443 and must resolve to public
+unicast addresses. The only loopback form is an explicit fixture origin,
+`http://127.0.0.1:<port>`. One redirect is checked again. A second redirect, a
+private address, or a page that cannot be fenced is refused, and the body is
+not returned.
+"""
+
+import importlib.util
+import ipaddress
+from pathlib import Path
+import re
+import socket
+from urllib import error, parse, request
+
+
+def _fence():
+    path = Path(__file__).resolve().parent / "sanitize.py"
+    spec = importlib.util.spec_from_file_location("fo_guard_sanitize", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.fence
+
+
+fence = _fence()
+
+
+LIMIT = 256 * 1024
+TEXT_LIMIT = 8 * 1024
+KINDS = ("text/html", "text/plain")
+REDIRECTS = {301, 302, 303, 307, 308}
+HOST = re.compile(
+    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+"
+)
+
+
+def normalize_host(host):
+    if not isinstance(host, str) or not host or "/" in host:
+        raise ValueError("The fetch URL is not allowed")
+    try:
+        return host.encode("idna").decode("ascii").rstrip(".").lower()
+    except UnicodeError:
+        raise ValueError("The fetch URL is not allowed") from None
+
+
+def load_allowlist(document):
+    if not isinstance(document, dict) or document.get("version") != 1:
+        raise ValueError("The fetch allowlist is unreadable")
+    hosts = document.get("hosts", [])
+    fixtures = document.get("fixtures", [])
+    extra = set(document) - {"version", "hosts", "fixtures"}
+    if extra or not isinstance(hosts, list) or not isinstance(fixtures, list):
+        raise ValueError("The fetch allowlist is unreadable")
+    clean_hosts = []
+    for host in hosts:
+        if not isinstance(host, str) or ":" in host or host.startswith("."):
+            raise ValueError("The fetch allowlist is unreadable")
+        normalized = normalize_host(host)
+        if not HOST.fullmatch(normalized):
+            raise ValueError("The fetch allowlist is unreadable")
+        if normalized in clean_hosts:
+            raise ValueError("The fetch allowlist repeats a host")
+        clean_hosts.append(normalized)
+    clean_fixtures = []
+    for item in fixtures:
+        parts = parse.urlsplit(item if isinstance(item, str) else "")
+        if (parts.scheme != "http" or parts.hostname != "127.0.0.1" or parts.port is None
+                or parts.path not in ("", "/") or parts.query or parts.fragment or parts.username):
+            raise ValueError("A fetch fixture must be loopback HTTP")
+        origin = f"http://127.0.0.1:{parts.port}"
+        if origin in clean_fixtures:
+            raise ValueError("The fetch allowlist repeats a fixture")
+        clean_fixtures.append(origin)
+    return {"hosts": tuple(clean_hosts), "fixtures": tuple(clean_fixtures)}
+
+
+def public_unicast(raw):
+    try:
+        address = ipaddress.ip_address(raw)
+    except ValueError:
+        return False
+    return isinstance(address, ipaddress.IPv4Address) and address.is_global
+
+
+def system_resolve(host):
+    try:
+        found = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        raise ValueError("The fetch URL is not allowed") from None
+    return [item[4][0] for item in found]
+
+
+def check_target(url, allowlist, resolve):
+    parts = parse.urlsplit(url if isinstance(url, str) else "")
+    if (parts.username or parts.password or parts.query or parts.fragment
+            or not parts.hostname or parts.scheme not in ("http", "https")):
+        raise ValueError("The fetch URL is not allowed")
+    host = normalize_host(parts.hostname)
+    if parts.scheme == "http":
+        origin = f"http://127.0.0.1:{parts.port}"
+        if host != "127.0.0.1" or parts.port is None or origin not in allowlist["fixtures"]:
+            raise ValueError("The fetch URL is not allowed")
+        return
+    if parts.port not in (None, 443) or host not in allowlist["hosts"]:
+        raise ValueError("The fetch URL is not allowed")
+    addresses = resolve(host)
+    if not isinstance(addresses, list) or not addresses or any(not public_unicast(item) for item in addresses):
+        raise ValueError("The fetch URL is not allowed")
+
+
+def visible_text(page):
+    if "<<END " in page or "<<UNTRUSTED " in page:
+        raise ValueError("The untrusted text closed its fence")
+    text = re.sub(r"(?is)<!--.*?-->", " ", page)
+    text = re.sub(r"(?is)<script\b[^>]*>.*?</script>", " ", text)
+    text = re.sub(r"(?is)<style\b[^>]*>.*?</style>", " ", text)
+    text = re.sub(r"(?is)<script\b[^>]*>.*", " ", text)
+    text = re.sub(r"(?is)<style\b[^>]*>.*", " ", text)
+    text = re.sub(r"(?is)<[^>]+>", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+class _StopRedirect(request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _open(url):
+    opener = request.build_opener(request.ProxyHandler({}), _StopRedirect)
+    try:
+        response = opener.open(request.Request(url, headers={"Accept": "text/plain, text/html"}), timeout=5)
+    except error.HTTPError as failure:
+        if failure.code in REDIRECTS:
+            location = failure.headers.get("Location")
+            failure.close()
+            if not location:
+                raise ValueError("The page was not read") from None
+            return None, parse.urljoin(url, location)
+        failure.close()
+        raise ValueError("The page was not read") from None
+    except error.URLError:
+        raise ValueError("The page was not read") from None
+    with response:
+        if response.status != 200:
+            raise ValueError("The page was not read")
+        kind = (response.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+        if kind not in KINDS:
+            raise ValueError("The page was not read")
+        length = response.headers.get("Content-Length")
+        if length is not None and (not length.isdigit() or int(length) > LIMIT):
+            raise ValueError("The page is too large")
+        chunks = []
+        total = 0
+        while True:
+            block = response.read(65536)
+            if not block:
+                break
+            total += len(block)
+            if total > LIMIT:
+                raise ValueError("The page is too large")
+            chunks.append(block)
+    try:
+        return b"".join(chunks).decode("utf-8"), None
+    except UnicodeError:
+        raise ValueError("The page was not read") from None
+
+
+def fetch(url, allowlist, resolve=system_resolve, token=None):
+    check_target(url, allowlist, resolve)
+    page, redirect = _open(url)
+    if redirect is not None:
+        check_target(redirect, allowlist, resolve)
+        page, again = _open(redirect)
+        if again is not None:
+            raise ValueError("The fetch URL is not allowed")
+    if page is None:
+        raise ValueError("The page was not read")
+    return fence("fetch", visible_text(page), TEXT_LIMIT, token)

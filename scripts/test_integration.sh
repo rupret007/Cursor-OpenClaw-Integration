@@ -57,7 +57,9 @@ for f in "${BASE_DIR}/first-officer/litellm/configure.py" "${BASE_DIR}/first-off
          "${BASE_DIR}/first-officer/pilot/rehearse.py" \
          "${BASE_DIR}/first-officer/pilot/rollback_drill.py" \
          "${BASE_DIR}/first-officer/privacy/scan.py" \
-         "${BASE_DIR}/first-officer/archive.py"; do
+         "${BASE_DIR}/first-officer/archive.py" \
+         "${BASE_DIR}/first-officer/guard/sanitize.py" \
+         "${BASE_DIR}/first-officer/guard/restricted_fetch.py"; do
   [[ -f "$f" ]] || { echo "Missing file: $f" >&2; exit 1; }
   python3 -m py_compile "$f"
 done

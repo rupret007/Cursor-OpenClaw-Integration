@@ -134,7 +134,13 @@ On November 21, 2026 the command printed `Secret scan clean. Files 288. History 
 
 `first-officer/archive.py pack` writes one mode-0600 tar of this lane outside the checkout and a `SHA256SUMS` manifest. `verify` checks every member against that manifest. A file the secret scan rejects stops the pack and leaves no archive. The command does not read the private prior bundle and does not call the gateway.
 
-On November 21, 2026 pack and verify agreed on digest `1782ce0bdc84b2f969a86d12beaafba64c21968452e30f5cf322130b83836d11`. That tar is the offline copy. The gateway tar still requires the private prior bundle and `first-officer/release.py build`.
+On November 21, 2026 pack and verify agreed on digest `1782ce0bdc84b2f969a86d12beaafba64c21968452e30f5cf322130b83836d11`. After the fetch guard was added, pack and verify agreed on digest `d8f777a6f46812defffb3c1d277b558f35cd48e58136bcb6625e8c401e94d6bd`. That tar is the offline copy. The gateway tar still requires the private prior bundle and `first-officer/release.py build`.
+
+## Prompt-injection guard
+
+`first-officer/guard/restricted_fetch.py` fetches a page only from an exact allowlist entry. Public entries are HTTPS on port 443 and must resolve to public unicast addresses. The only loopback form is an explicit `http://127.0.0.1:<port>` fixture. One redirect is checked again. A private redirect is refused before that address is contacted. Scripts and tags are removed. `first-officer/guard/sanitize.py` wraps the text in a random fence, refuses a closer or a hidden character, and treats fenced text as data rather than a tool call. The gateway `before_tool_call` block in the packaged canary is unchanged. Memory notes are not fenced yet. Llama Prompt Guard is not installed. LLM Guard is not a dependency.
+
+On November 21, 2026 the four tests in `tests/first_officer/test_guard.py` passed. A fixture page returned fenced text with the script removed. A redirect to a second loopback listener made no request there. An empty allowlist, a suffix host, a 300 KiB body and a fence closer were refused. The offline gate passed 952 Python tests.
 
 ## Operator docs
 

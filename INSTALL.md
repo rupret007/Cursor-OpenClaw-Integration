@@ -157,6 +157,10 @@ python3 first-officer/privacy/scan.py
 
 The clean line is `Secret scan clean. Files <n>. History commits <n>. Logs 0.` The counts move when the branch moves. A line that names `credential`, `phone`, `address`, `email`, or `private-key` is a failure.
 
+## Fetch one allowlisted page
+
+`first-officer/guard/restricted_fetch.py` reads a page only when the host is an exact allowlist entry. Public entries are HTTPS on port 443 and must resolve to public unicast addresses. `http://127.0.0.1:<port>` is accepted only as a named fixture. One redirect is checked with the same rules. The visible text is returned inside a random fence from `first-officer/guard/sanitize.py`. A fence closer, a hidden character, or a page over 8 KiB after scripts are removed is refused, and the body is not returned. Fenced text is not a tool call. The gateway's existing `before_tool_call` block is unchanged.
+
 ## Pack the review archive
 
 `pack` writes a checksummed tar of this lane outside the checkout. `verify` reads that tar and checks every file against `SHA256SUMS`. The archive is mode 0600. It does not read the private prior bundle and it does not call the gateway. A file the secret scan rejects stops the pack and leaves no archive.

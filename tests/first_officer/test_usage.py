@@ -196,6 +196,35 @@ def test_handoff_refuses_a_protected_branch_a_moved_head_and_a_leaked_credential
     assert not (lane / "HANDOFF.md").exists()
 
 
+def test_handoff_refuses_scanner_credential_shapes(tmp_path, capsys):
+    """A failure field cannot carry a scanner credential into HANDOFF.md or the command output."""
+    report = track.assess(track.codex_windows(codex_result(session=93), "fixture", NOW))
+    lane, branch, head = repo(tmp_path / "lane")
+    shapes = (
+        "github" + "_pat_" + "A" * 22,
+        "Bearer " + "a" * 24,
+        "BEARER " + "C" * 20,
+        "AS" + "IA" + "E" * 16,
+    )
+    for secret in shapes:
+        with pytest.raises(ValueError, match="credential or address") as caught:
+            track.commit_handoff(lane, report, branch, head, "Step 2", "Next", [f"saw {secret}"])
+        assert secret not in str(caught.value)
+        assert not (lane / "HANDOFF.md").exists()
+
+    path, _branch, _head = repo(tmp_path / "cli")
+    ahead = int(time.time()) + 3600
+    codex = tmp_path / "codex.json"
+    codex.write_text(json.dumps(codex_result(session=93, session_reset=ahead, weekly_reset=ahead)))
+    leaked = "github" + "_pat_" + "b" * 22
+    assert track.main(["--codex", str(codex), "--codex-account", "fixture", "--repo", str(path),
+                       "--failure", f"saw {leaked}"]) == 1
+    captured = capsys.readouterr()
+    assert leaked not in captured.err + captured.out
+    assert "credential or address" in captured.err
+    assert not (path / "HANDOFF.md").exists()
+
+
 def test_command_line_reports_quietly_and_hands_off_once_a_window_warns(tmp_path, capsys):
     path, branch, head = repo(tmp_path)
     codex = tmp_path / "codex.json"

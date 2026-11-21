@@ -18,6 +18,7 @@ import errno
 import fcntl
 import hashlib
 import hmac
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -33,7 +34,17 @@ TTL = 600
 ZONE = ZoneInfo("America/Chicago")
 ROUTINE = "lane-review"
 ROUTINE_HOUR = 7
-SECRET = re.compile(r"sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9]{8,}|\b(?:\d{1,3}\.){3}\d{1,3}\b")
+
+
+def _enforced_secret():
+    path = Path(__file__).resolve().parents[1] / "privacy" / "scan.py"
+    spec = importlib.util.spec_from_file_location("fo_enforced_secret", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.enforced_secret
+
+
+SECRET = _enforced_secret()
 TEXT = re.compile(r"[\x20-\x7e]{1,200}")
 NONCE = re.compile(r"mem-[0-9a-f]{16}")
 DIGEST = re.compile(r"[0-9a-f]{64}")

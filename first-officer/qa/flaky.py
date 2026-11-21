@@ -13,6 +13,7 @@ import argparse
 import copy
 from datetime import date, datetime, timezone
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -23,7 +24,17 @@ import sys
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 ISSUE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{1,40}")
 FILE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./-]{0,159}")
-SECRET = re.compile(r"sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9]{8,}|\b(?:\d{1,3}\.){3}\d{1,3}\b")
+
+
+def _enforced_secret():
+    path = Path(__file__).resolve().parents[1] / "privacy" / "scan.py"
+    spec = importlib.util.spec_from_file_location("fo_enforced_secret_flaky", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.enforced_secret
+
+
+SECRET = _enforced_secret()
 ATTEMPT = {"passed", "failed", "timedOut", "skipped", "interrupted"}
 RANK = {"expected": 0, "skipped": 1, "flaky": 2, "unexpected": 3, "interrupted": 3, "unreadable": 4}
 MAX_DAYS = 14

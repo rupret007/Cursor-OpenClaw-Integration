@@ -24,7 +24,17 @@ PROTECTED = ("main", "master")
 CLAUDE_HEADER = "anthropic-ratelimit-unified-{}-{}"
 CLAUDE_WINDOWS = (("session", "5h"), ("weekly", "7d"))
 CODEX_WINDOWS = (("5h", "session"), ("weekly", "weekly"))
-SECRET = re.compile(r"sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9]{16,}|\b(?:\d{1,3}\.){3}\d{1,3}\b")
+
+
+def _enforced_secret():
+    path = Path(__file__).resolve().parents[1] / "privacy" / "scan.py"
+    spec = importlib.util.spec_from_file_location("fo_enforced_secret_usage", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.enforced_secret
+
+
+SECRET = _enforced_secret()
 BRANCH = re.compile(r"[0-9A-Za-z][0-9A-Za-z._/-]{0,199}")
 SHA = re.compile(r"[0-9a-f]{40}")
 

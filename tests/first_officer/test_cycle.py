@@ -129,9 +129,121 @@ def test_reinitializing_after_deleting_the_log_and_heads_does_not_verify(tmp_pat
     with pytest.raises(ValueError, match="reset|owner cannot delete|truncated"):
         cycle.verify(root)
     shutil.rmtree(identity)
+    anchor = cycle.durable_anchor_path(root)
+    anchor.unlink()
     cycle.initialize(root)
-    # Residual, not a fix: once the owner deletes root.id too, a new empty chain verifies.
+    # Residual, not a fix: this file is owner-writable. Deleting it too lets a new empty chain verify.
     assert cycle.verify(root) == 0
+
+
+def test_total_reset_of_the_four_directories_does_not_verify_empty(tmp_path, monkeypatch):
+    """A silent initialize after deleting every owner-writable copy must not verify as empty."""
+    monkeypatch.delenv("FO_AUDIT_ANCHOR", raising=False)
+    root = tmp_path / "cycle"
+    cycle.initialize(root)
+    cycle.run_routine(root, NOW)
+    assert cycle.verify(root) == 1
+    anchor = cycle.durable_anchor_path(root)
+    trust = cycle.trust_dir(root)
+    witness = cycle.witness_dir(root)
+    identity = cycle.identity_dir(root)
+    assert anchor.is_file()
+    for place in (root, trust, witness, identity):
+        assert anchor.resolve() != place.resolve()
+        assert place.resolve() not in anchor.resolve().parents
+        assert anchor.resolve() not in place.resolve().parents
+        shutil.rmtree(place)
+    assert anchor.is_file()
+    total_reset_verifies_empty = False
+    try:
+        cycle.initialize(root)
+        total_reset_verifies_empty = cycle.verify(root) == 0
+    except ValueError:
+        total_reset_verifies_empty = False
+    assert total_reset_verifies_empty is False
+    with pytest.raises(ValueError, match="reset|owner cannot delete"):
+        cycle.verify(root)
+
+
+def _operator_anchor(tmp_path):
+    directory = tmp_path.parent / f".fo-operator-anchor-{tmp_path.name}"
+    directory.mkdir(mode=0o700, exist_ok=True)
+    directory.chmod(0o700)
+    return directory / "anchor.json"
+
+
+def test_configured_audit_anchor_fails_closed_when_missing_or_mismatched(tmp_path, monkeypatch):
+    """A configured anchor outside the copies fails closed when it is missing or wrong."""
+    anchor = _operator_anchor(tmp_path)
+    monkeypatch.setenv("FO_AUDIT_ANCHOR", str(anchor))
+    root = tmp_path / "cycle"
+    with pytest.raises(ValueError, match="missing"):
+        cycle.initialize(root)
+    with pytest.raises(ValueError, match="missing"):
+        cycle.verify(root)
+    anchor.write_text("", encoding="utf-8")
+    anchor.chmod(0o600)
+    cycle.initialize(root)
+    cycle.run_routine(root, NOW)
+    assert cycle.verify(root) == 1
+    saved = anchor.read_bytes()
+    document = json.loads(saved)
+    document["digest"] = ("0" if document["digest"][:1] != "0" else "1") + document["digest"][1:]
+    anchor.write_text(json.dumps(document), encoding="utf-8")
+    anchor.chmod(0o600)
+    with pytest.raises(ValueError, match="match"):
+        cycle.verify(root)
+    anchor.write_bytes(saved)
+    anchor.chmod(0o600)
+    assert cycle.verify(root) == 1
+    for place in (root, cycle.trust_dir(root), cycle.witness_dir(root), cycle.identity_dir(root)):
+        assert anchor.resolve() != place.resolve()
+        assert place.resolve() not in anchor.resolve().parents
+        shutil.rmtree(place)
+    total_reset_verifies_empty = False
+    try:
+        cycle.initialize(root)
+        total_reset_verifies_empty = cycle.verify(root) == 0
+    except ValueError:
+        total_reset_verifies_empty = False
+    assert total_reset_verifies_empty is False
+    anchor.unlink()
+    with pytest.raises(ValueError, match="missing"):
+        cycle.initialize(root)
+    with pytest.raises(ValueError, match="missing"):
+        cycle.verify(root)
+    anchor.write_text("", encoding="utf-8")
+    anchor.chmod(0o600)
+    cycle.initialize(root)
+    # Residual, not a fix: the owner can replace the configured file with a new empty one.
+    assert cycle.verify(root) == 0
+    shutil.rmtree(anchor.parent)
+
+
+def test_a_configured_anchor_inside_an_owner_copy_is_refused(tmp_path, monkeypatch):
+    root = tmp_path / "cycle"
+    root.mkdir(mode=0o700)
+    places = (
+        root / "anchor.json",
+        tmp_path / "anchor.json",
+        cycle.trust_dir(root) / "anchor.json",
+        cycle.witness_dir(root) / "anchor.json",
+        cycle.identity_dir(root) / "anchor.json",
+    )
+    for path in places:
+        monkeypatch.setenv("FO_AUDIT_ANCHOR", str(path))
+        with pytest.raises(ValueError, match="outside"):
+            cycle.initialize(root)
+
+
+def test_a_missing_default_anchor_does_not_verify_a_live_chain(tmp_path, monkeypatch):
+    monkeypatch.delenv("FO_AUDIT_ANCHOR", raising=False)
+    root = tmp_path / "cycle"
+    cycle.initialize(root)
+    cycle.run_routine(root, NOW)
+    cycle.durable_anchor_path(root).unlink()
+    with pytest.raises(ValueError, match="missing|match"):
+        cycle.verify(root)
 
 
 def test_deleting_every_owner_writable_audit_copy_is_not_a_silent_pass(tmp_path):

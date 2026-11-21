@@ -239,6 +239,46 @@ def identity_dir(root):
     return identity_base / trust.name
 
 
+def _anchor_configured():
+    return bool(os.environ.get("FO_AUDIT_ANCHOR", "").strip())
+
+
+def _overlaps(path, place):
+    path = path.resolve()
+    place = place.resolve()
+    return path == place or place in path.parents or path in place.parents
+
+
+def durable_anchor_path(root):
+    """Return the anchor file outside the root and the three owner-writable copies.
+
+    FO_AUDIT_ANCHOR names that file. Otherwise it sits beside the trust base.
+    The owner can delete either path, so neither one is a trust anchor. A
+    configured file is required before init, and init and verify fail closed
+    when it is missing or the binding does not match.
+    """
+    root = Path(root).resolve()
+    trust = trust_dir(root)
+    witness = witness_dir(root)
+    identity = identity_dir(root)
+    configured = os.environ.get("FO_AUDIT_ANCHOR", "").strip()
+    if configured:
+        raw = Path(configured).expanduser()
+        if raw.is_symlink():
+            raise ValueError("The acceptance file must be a private owner file")
+        path = raw.resolve()
+    else:
+        base = trust.parent
+        path = (base.parent / f"{base.name}-anchor" / trust.name / "anchor.json").resolve()
+    places = (
+        root, root.parent, trust, trust.parent, witness, witness.parent, identity, identity.parent,
+    )
+    for place in places:
+        if _overlaps(path, place):
+            raise ValueError("The audit anchor must stay outside the acceptance copies")
+    return path
+
+
 def _write_anchor(directory, document):
     if directory.is_symlink() or directory.parent.is_symlink():
         raise ValueError("The acceptance file must be a private owner file")
@@ -302,6 +342,91 @@ RESET_AUDIT = (
     "The audit root was reset. A new empty chain is not a verified history. "
     "The audit chain has no trust anchor the owner cannot delete."
 )
+ANCHOR_MISSING = (
+    "The configured audit anchor is missing. "
+    "A new empty chain is not a verified history."
+)
+ANCHOR_MISMATCH = (
+    "The audit anchor is missing or does not match. "
+    "A new empty chain is not a verified history."
+)
+ANCHOR_FIELDS = {"digest", "key", "mac", "root", "seq"}
+
+
+def _require_private_dir(directory):
+    info = directory.lstat()
+    if info.st_uid != os.getuid() or not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o077:
+        raise ValueError("The acceptance file must be a private owner file")
+
+
+def _read_durable_anchor(root):
+    path = durable_anchor_path(root)
+    if path.is_symlink():
+        raise ValueError("The acceptance file must be a private owner file")
+    if not path.exists():
+        return None
+    if not path.is_file():
+        raise ValueError("The acceptance file must be a private owner file")
+    handle = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(handle, "r", encoding="utf-8") as file:
+        _check_private(os.fstat(file.fileno()))
+        payload = file.read()
+    if payload.strip() == "":
+        if _anchor_configured():
+            return {"provision": True}
+        raise ValueError("The audit anchor was altered")
+    try:
+        document = json.loads(payload)
+    except json.JSONDecodeError:
+        raise ValueError("The acceptance file is unreadable") from None
+    if not isinstance(document, dict) or set(document) != ANCHOR_FIELDS:
+        raise ValueError("The acceptance file is unreadable")
+    return document
+
+
+def _bound_anchor(anchor):
+    return isinstance(anchor, dict) and not anchor.get("provision") and set(anchor) == ANCHOR_FIELDS
+
+
+def _same_durable(anchor, root, key, head):
+    if not _bound_anchor(anchor) or key is None or head is None or type(anchor.get("seq")) is not int:
+        return False
+    expected_root = _identity_root(root)
+    presented_root = str(anchor.get("root", ""))
+    presented_key = str(anchor.get("key", ""))
+    if (len(presented_root) != len(expected_root) or len(presented_key) != len(str(key))
+            or not DIGEST.fullmatch(presented_key) or not DIGEST.fullmatch(presented_root)):
+        return False
+    if not (hmac.compare_digest(presented_root, expected_root)
+            and hmac.compare_digest(presented_key, str(key))):
+        return False
+    presented = {"digest": anchor.get("digest"), "mac": anchor.get("mac"), "seq": anchor.get("seq")}
+    return _same_head(presented, head)
+
+
+def _install_anchor_directory(path):
+    directory = path.parent
+    if path.is_symlink() or directory.is_symlink() or directory.parent.is_symlink():
+        raise ValueError("The acceptance file must be a private owner file")
+    if _anchor_configured():
+        if not directory.is_dir():
+            raise ValueError(ANCHOR_MISSING)
+        _require_private_dir(directory)
+        return
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(directory, 0o700)
+    os.chmod(directory.parent, 0o700)
+    _require_private_dir(directory)
+    _require_private_dir(directory.parent)
+
+
+def _write_durable_anchor(root, key, head):
+    path = durable_anchor_path(root)
+    _install_anchor_directory(path)
+    _write_json(path, {
+        "digest": head["digest"], "key": key, "mac": head["mac"],
+        "root": _identity_root(root), "seq": head["seq"],
+    })
 
 
 def _checkpoint(root, seq, digest):
@@ -310,6 +435,7 @@ def _checkpoint(root, seq, digest):
     _write_json(root / "audit.head", document)
     _write_anchor(trust_dir(root), document)
     _write_anchor(witness_dir(root), document)
+    _write_durable_anchor(root, key, document)
 
 
 def _same_head(left, right):
@@ -416,13 +542,19 @@ def initialize(root):
     with _locked(root / "audit.log") as audit:
         rows, previous = _rows(audit)
         identity = _read_identity(root)
+        anchor = _read_durable_anchor(root)
         if _check_head(root, rows, previous):
             key = _read_key(root)
+            head = _read_json(root / "audit.head", {"digest", "mac", "seq"})
             if identity is None or key is None or not _same_identity(identity, root, key):
                 raise ValueError(RESET_AUDIT)
+            if not _same_durable(anchor, root, key, head):
+                raise ValueError(ANCHOR_MISMATCH)
             raise ValueError("The audit chain is already initialized")
-        if identity is not None:
+        if identity is not None or _bound_anchor(anchor):
             raise ValueError(RESET_AUDIT)
+        if anchor is None and _anchor_configured():
+            raise ValueError(ANCHOR_MISSING)
         if any(os.path.lexists(root / name) for name in ("memory.json", "receipt-lane-review.json")):
             raise ValueError("Acceptance records already exist without an audit checkpoint")
         pending = _read_json(root / "pending.json", {"digest", "expires_at", "nonce", "text"})
@@ -637,14 +769,20 @@ def verify(root):
     for nonce in facts:
         if nonce not in seen:
             raise ValueError("A saved fact has no accepted audit line")
+    anchor = _read_durable_anchor(root)
     if not initialized:
-        if _read_identity(root) is not None:
+        if _read_identity(root) is not None or _bound_anchor(anchor):
             raise ValueError(RESET_AUDIT)
+        if anchor is None and _anchor_configured():
+            raise ValueError(ANCHOR_MISSING)
         raise ValueError(MISSING_AUDIT)
     key = _read_key(root)
     identity = _read_identity(root)
+    head = _read_json(root / "audit.head", {"digest", "mac", "seq"})
     if key is None or identity is None or not _same_identity(identity, root, key):
         raise ValueError(RESET_AUDIT)
+    if not _same_durable(anchor, root, key, head):
+        raise ValueError(ANCHOR_MISMATCH)
     return len(rows)
 
 

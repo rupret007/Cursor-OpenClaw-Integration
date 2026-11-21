@@ -63,3 +63,9 @@ The staged file restore already ran. On November 20, 2026 it printed `Restored t
 ```bash
 python3 -B first-officer/release.py rollback "$backup"
 ```
+
+## 5. Decide where the audit anchor lives
+
+The acceptance audit refuses a new empty chain after the acceptance root, the trust directory, the witness directory, and `root.id` are deleted, as long as its anchor file is still there. That file is mode 0600 and this user can delete it. It is not a trust anchor. Offline checks do not put it on another machine or under another user.
+
+With `FO_AUDIT_ANCHOR` unset, the file is `anchor.json` beside the trust base. Deleting that file as well lets `init` create a new empty chain that `verify` accepts. Set `FO_AUDIT_ANCHOR` to a file outside the acceptance root, its parent, and those three directories if a missing file should fail closed. Create the empty file, mode 0600, in a mode 0700 directory you own, before the first `init`. A missing or mismatched file does not verify as an empty continuation. Replacing it with a new empty file still lets `init` start a new chain. The path only preserves history if this user cannot create or delete it. That placement is your decision.

@@ -76,6 +76,26 @@ def test_history_and_logs_keep_a_removed_secret_and_a_log_line(tmp_path, capsys)
     assert "credential" in captured.err and "phone" in captured.err
 
 
+def test_history_flags_a_sensitive_pathname_and_a_rename(tmp_path):
+    root = tmp_path / "checkout"
+    root.mkdir()
+    run = lambda *args: subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
+    run("init", "-q", "-b", "demo")
+    run("config", "user.email", "lane@example.invalid")
+    run("config", "user.name", "First Officer lane")
+    secret = root / EMAIL
+    secret.write_text("benign\n", encoding="utf-8")
+    run("add", EMAIL)
+    run("commit", "-q", "-m", "fixture")
+    run("mv", EMAIL, "note.txt")
+    run("commit", "-q", "-m", "rename fixture")
+    findings, count = scan.scan_history(root)
+    assert count == 2
+    assert any(item["rule"] == "email" and item["path"] == "[redacted]" for item in findings)
+    rendered, code = scan.report({"files": 0, "commits": count, "logs": 0, "findings": findings})
+    assert code == 1 and EMAIL not in rendered and "[redacted]" in rendered
+
+
 def test_the_repository_history_and_logs_stay_clean(capsys):
     result = scan.survey(ROOT)
     assert result["findings"] == []

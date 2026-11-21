@@ -222,6 +222,17 @@ def _git(root, *args):
     return result.stdout
 
 
+def _note_sensitive_path(findings, seen, commit, text):
+    """A secret in a path is a finding. The report never keeps the path text."""
+    if len(text) >= 2 and text[0] == '"' and text[-1] == '"':
+        text = text[1:-1]
+    for finding in findings_in_text(text):
+        key = (finding["rule"], commit, "pathname")
+        if key not in seen:
+            seen.add(key)
+            findings.append({"rule": finding["rule"], "path": "[redacted]", "commit": commit})
+
+
 def scan_history(root):
     git_dir = root / ".git"
     if git_dir.is_file():
@@ -258,10 +269,22 @@ def scan_history(root):
             path = ""
             continue
         if raw.startswith("diff --git "):
-            path = raw.split(" b/", 1)[-1]
-            if len(path) >= 2 and path[0] == '"' and path[-1] == '"':
-                path = path[1:-1]
-            path = public_name(path)
+            body = raw[len("diff --git "):]
+            left, separator, right = body.partition(" b/")
+            names = []
+            if left.startswith("a/"):
+                names.append(left[2:])
+            if separator:
+                names.append(right)
+            for name in names:
+                _note_sensitive_path(findings, seen, commit, name)
+            shown = names[-1] if names else ""
+            if len(shown) >= 2 and shown[0] == '"' and shown[-1] == '"':
+                shown = shown[1:-1]
+            path = public_name(shown)
+            continue
+        if raw.startswith(("rename from ", "rename to ", "copy from ", "copy to ")):
+            _note_sensitive_path(findings, seen, commit, raw.split(" ", 2)[-1])
             continue
         if raw.startswith(("Binary files ", "GIT binary patch")):
             key = ("binary", commit, path)

@@ -30,6 +30,8 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 
 
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+HOST = re.compile(
+    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*")
 SHA = re.compile(r"[0-9a-f]{40}")
 TENANT = re.compile(r"[0-9a-fA-F-]{8,64}")
 ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
@@ -73,20 +75,62 @@ def idempotency_key(request):
     return "fo-lane-" + hashlib.sha256(canonical(request).encode()).hexdigest()[:32]
 
 
-def endpoint(base_url):
-    opener = build_opener(ProxyHandler({}), NoRedirect())
-    url = urlsplit(base_url)
-    literal_address = False
-    if url.hostname:
+def queue_hosts():
+    hosts = []
+    for item in os.environ.get("FO_QUEUE_HOSTS", "").split(","):
+        host = item.strip().lower().rstrip(".")
+        if not host:
+            continue
         try:
-            literal_address = not ipaddress.ip_address(url.hostname).is_loopback
+            ipaddress.ip_address(host)
         except ValueError:
-            literal_address = False
-    if (url.scheme not in ("http", "https") or not url.hostname or url.username is not None or
-            url.password is not None or url.path not in ("", "/") or url.query or url.fragment or
-            (url.scheme == "http" and url.hostname not in LOOPBACK) or
-            (url.scheme == "https" and literal_address)):
+            if not HOST.fullmatch(host) or len(host) > 253:
+                raise ValueError("Use a loopback queue URL or a private HTTPS root")
+        hosts.append(host)
+    return hosts
+
+
+def _usable_private(address):
+    return (address.is_loopback or address.is_private) and not address.is_multicast and not address.is_unspecified
+
+
+def _private_named_host(hostname, resolve=None):
+    """A named HTTPS queue host must be allowlisted and resolve only to private addresses."""
+    host = hostname.lower().rstrip(".")
+    if host not in queue_hosts():
         raise ValueError("Use a loopback queue URL or a private HTTPS root")
+    resolver = resolve or socket.getaddrinfo
+    try:
+        answers = resolver(host, None)
+    except OSError:
+        raise ValueError("Use a loopback queue URL or a private HTTPS root") from None
+    addresses = []
+    for answer in answers:
+        try:
+            addresses.append(ipaddress.ip_address(answer[4][0]))
+        except (TypeError, ValueError, IndexError):
+            raise ValueError("Use a loopback queue URL or a private HTTPS root") from None
+    if not addresses or any(not _usable_private(address) for address in addresses):
+        raise ValueError("Use a loopback queue URL or a private HTTPS root")
+
+
+def endpoint(base_url, resolve=None):
+    url = urlsplit(base_url)
+    if (url.scheme not in ("http", "https") or not url.hostname or url.username is not None or
+            url.password is not None or url.path not in ("", "/") or url.query or url.fragment):
+        raise ValueError("Use a loopback queue URL or a private HTTPS root")
+    try:
+        address = ipaddress.ip_address(url.hostname)
+    except ValueError:
+        address = None
+    if url.scheme == "http":
+        if url.hostname not in LOOPBACK:
+            raise ValueError("Use a loopback queue URL or a private HTTPS root")
+    elif address is None:
+        _private_named_host(url.hostname, resolve)
+    elif not _usable_private(address):
+        raise ValueError("Use a loopback queue URL or a private HTTPS root")
+    opener = build_opener(ProxyHandler({}), NoRedirect())
     return base_url.rstrip("/"), opener
 
 

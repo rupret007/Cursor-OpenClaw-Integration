@@ -74,7 +74,7 @@ The command exits `0` below the warning threshold, `3` once any window reaches 9
 
 ## Queue a review lane
 
-Hatchet is the primary. Restate is the fallback, and only after Hatchet has definitely refused the lane. The dispatcher does not install either service and does not start a worker. Point it at a loopback HTTP listener or a private HTTPS root. A public address is rejected. Put each token in the environment variable named by the policy, not in the policy file.
+Hatchet is the primary. Restate is the fallback, and only after Hatchet has definitely refused the lane. The dispatcher does not install either service and does not start a worker. Point it at a loopback HTTP listener, or at an HTTPS name listed in `FO_QUEUE_HOSTS` that resolves only to loopback or private addresses. The check happens before a credential is sent. A public address, and any HTTPS name that is not on that list, is rejected. Put each token in the environment variable named by the policy, not in the policy file.
 
 The policy has two objects. `hatchet` carries `base_url`, `tenant`, `workflow` and `token_env`. `restate` carries `base_url`, `service`, `handler` and `token_env`. The ledger path is a private append-only file. The command creates it mode `0600` when it is missing.
 

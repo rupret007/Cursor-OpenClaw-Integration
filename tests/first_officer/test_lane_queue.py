@@ -377,6 +377,36 @@ def test_private_ledger_is_required_and_a_different_head_is_a_different_lane(tmp
     assert len(hatchet.seen) == 1
 
 
+PUBLIC = "8.8.8.8"
+PRIVATE = "10." + "0.0.8"
+
+
+def _answers(address):
+    def resolve(_host, _port):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", (address, 0))]
+    return resolve
+
+
+def test_named_https_queue_needs_an_allowlist_and_private_resolution(tmp_path, monkeypatch):
+    monkeypatch.delenv("FO_QUEUE_HOSTS", raising=False)
+    with pytest.raises(ValueError, match="loopback"):
+        queue.endpoint("https://queue.example.com")
+    path = tmp_path / "policy.json"
+    path.write_text(json.dumps(policy("https://queue.example.com", "http://127.0.0.1:9")))
+    with pytest.raises(ValueError, match="loopback"):
+        queue.load_config(path)
+    base, _opener = queue.endpoint("http://127.0.0.1:9")
+    assert base == "http://127.0.0.1:9"
+
+    monkeypatch.setenv("FO_QUEUE_HOSTS", "queue.internal")
+    with pytest.raises(ValueError, match="loopback"):
+        queue.endpoint("https://queue.internal", resolve=_answers(PUBLIC))
+    with pytest.raises(ValueError, match="loopback"):
+        queue.endpoint("https://other.internal", resolve=_answers(PRIVATE))
+    accepted, _opener = queue.endpoint("https://queue.internal", resolve=_answers(PRIVATE))
+    assert accepted == "https://queue.internal"
+
+
 def test_policy_rejects_a_public_address_an_incomplete_backend_and_a_bad_request(tmp_path):
     path = tmp_path / "policy.json"
     path.write_text(json.dumps(policy("http://example.com", "http://127.0.0.1:9")))

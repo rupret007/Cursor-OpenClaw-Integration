@@ -266,6 +266,20 @@ def _known_pair(config_bytes, pin_bytes, original, candidate):
     return (config_bytes in (original[0], candidate[0]) and pin_bytes in (original[1], candidate[1]))
 
 
+def _saved_pair(backup, name):
+    return (
+        owner_file(backup / f"{name}-openclaw.json", 512 * 1024, private=True),
+        owner_file(backup / f"{name}-pin.conf", 65_536, private=True),
+    )
+
+
+def _expected_candidate(original, release, previous, plan):
+    return (
+        candidate_config(original[0], release, previous, budgeted_litellm=plan.get("budgeted_litellm") is True),
+        patch_pin(original[1], release, previous),
+    )
+
+
 def _write_journal(backup, target):
     temporary = backup / ".switch-journal.json.tmp"
     payload = (json.dumps({"target": target}) + "\n").encode()
@@ -380,8 +394,35 @@ def _discard_unverified_candidate(release):
     )
 
 
-def verify_installed_candidate(backup):
-    """Verify the candidate at its store path. A rejection removes that directory.
+def _discard_inactive_candidate(backup, config, plan):
+    """Only clean up if the complete prior pair is live and no switch is in progress."""
+    journal = backup / "switch-journal.json"
+    try:
+        try:
+            journal.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            return
+        release = plan["release"]
+        previous = plan.get("previous", BASELINE)
+        pin = Path(plan["pin"])
+        dropins = shlex.split(systemctl("show", "-p", "DropInPaths", "--value", SERVICE, capture=True))
+        if previous not in SUPPORTED_BASES or str(pin) not in dropins:
+            return
+        original = _saved_pair(backup, "original")
+        live_pin, identity = pin_file(pin)
+        if identity != plan["pin_identity"] or (owner_file(config, 512 * 1024, private=True), live_pin) != original:
+            return
+        if _saved_pair(backup, "candidate") != _expected_candidate(original, release, previous, plan):
+            return
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        return
+    _discard_unverified_candidate(release)
+
+
+def verify_installed_candidate(backup, config):
+    """Verify the candidate at its store path and clean it up on rejection if inactive.
 
     The gateway is still running. The installed verifier receives the config
     containing the candidate's store paths.
@@ -399,7 +440,7 @@ def verify_installed_candidate(backup):
     try:
         verify_config(backup / "candidate-openclaw.json", release)
     except ValueError:
-        _discard_unverified_candidate(release)
+        _discard_inactive_candidate(backup, config, plan)
         raise
 
 
@@ -416,18 +457,9 @@ def switch(backup, config, restore):
         systemctl("show", "-p", "DropInPaths", "--value", SERVICE, capture=True)
     ):
         raise ValueError("The current service or release does not match the saved installation plan")
-    original = (
-        owner_file(backup / "original-openclaw.json", 512 * 1024, private=True),
-        owner_file(backup / "original-pin.conf", 65_536, private=True),
-    )
-    candidate = (
-        owner_file(backup / "candidate-openclaw.json", 512 * 1024, private=True),
-        owner_file(backup / "candidate-pin.conf", 65_536, private=True),
-    )
-    if candidate != (
-        candidate_config(original[0], release, previous, budgeted_litellm=plan.get("budgeted_litellm") is True),
-        patch_pin(original[1], release, previous),
-    ):
+    original = _saved_pair(backup, "original")
+    candidate = _saved_pair(backup, "candidate")
+    if candidate != _expected_candidate(original, release, previous, plan):
         raise ValueError("The saved config and pin pair changed")
     before, after = (candidate, original) if restore else (original, candidate)
     live_pin, live_identity = pin_file(pin)
@@ -439,7 +471,7 @@ def switch(backup, config, restore):
                       previous if restore else release)
     except ValueError:
         if not restore:
-            _discard_unverified_candidate(release)
+            _discard_inactive_candidate(backup, config, plan)
         raise
     _write_journal(backup, "original" if restore else "candidate")
     if live_identity[0] != os.getuid():
@@ -491,7 +523,7 @@ def main():
             if args.action == "prepare":
                 prepare(args.release or "", args.backup, config, args.from_release, args.candidate)
             elif args.action == "verify-candidate":
-                verify_installed_candidate(args.backup)
+                verify_installed_candidate(args.backup, config)
             else:
                 switch(args.backup, config, restore=args.action == "rollback")
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:

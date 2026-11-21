@@ -215,7 +215,10 @@ def _write_release(root, files):
     return hashlib.sha256(payload).hexdigest()
 
 
-def test_prepare_verifies_the_unpacked_candidate_and_rollback_restores_the_prior_bundle(tmp_path, monkeypatch):
+@pytest.mark.parametrize("recheck", ["switch", "verify-candidate"])
+@pytest.mark.parametrize("live_pair", ["candidate", "candidate-config", "candidate-pin", "journal"])
+def test_prepare_verifies_the_unpacked_candidate_and_rollback_restores_the_prior_bundle(
+        tmp_path, monkeypatch, recheck, live_pair):
     """Prepare checks the unpacked tree before it is published, and rollback puts the prior bytes back."""
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "first-officer"))
     installer = importlib.import_module("install")
@@ -320,7 +323,7 @@ def test_prepare_verifies_the_unpacked_candidate_and_rollback_restores_the_prior
     shutil.copytree(unpacked, published)
     (published / "first-officer-exec-guard.mjs").unlink()
     with pytest.raises(ValueError, match="rejected"):
-        installer.verify_installed_candidate(backup)
+        installer.verify_installed_candidate(backup, config)
     assert not published.exists()
     assert stops == []
     assert config.read_bytes() == original[0]
@@ -333,7 +336,7 @@ def test_prepare_verifies_the_unpacked_candidate_and_rollback_restores_the_prior
     assert config.read_bytes() == original[0]
     shutil.copytree(unpacked, published)
     before_verify = len(recorded)
-    installer.verify_installed_candidate(backup)
+    installer.verify_installed_candidate(backup, config)
     verified = verifier_calls(recorded[before_verify:])
     assert verified == [installer.installed_verifier(backup / "candidate-openclaw.json", release)]
     assert str(unpacked) not in " ".join(verified[0])
@@ -345,6 +348,29 @@ def test_prepare_verifies_the_unpacked_candidate_and_rollback_restores_the_prior
     assert str(unpacked) not in " ".join(switched[0])
     activated = json.loads(config.read_bytes())
     assert str(published) in activated["plugins"]["load"]["paths"][0]
+
+    if live_pair in ("candidate-config", "journal"):
+        pin.write_bytes(original[1])
+    if live_pair in ("candidate-pin", "journal"):
+        config.write_bytes(original[0])
+    if live_pair == "journal":
+        installer._write_journal(backup, "original")
+    live = config.read_bytes(), pin.read_bytes()
+    stops_before_recheck = stops[:]
+    plugin = published / "first-officer-exec-guard.mjs"
+    plugin_bytes = plugin.read_bytes()
+    plugin.unlink()
+    with pytest.raises(ValueError, match="rejected"):
+        if recheck == "switch":
+            installer.switch(backup, config, restore=False)
+        else:
+            installer.verify_installed_candidate(backup, config)
+    assert published.is_dir()
+    assert (published / "round6/runtime/first-officer-conductor.mjs").is_file()
+    assert stops == stops_before_recheck
+    assert (config.read_bytes(), pin.read_bytes()) == live
+    plugin.write_bytes(plugin_bytes)
+
     installer.switch(backup, config, restore=True)
     assert (config.read_bytes(), pin.read_bytes()) == original
     assert {name: (prior / name).read_bytes() for name in prior_files} == prior_bytes

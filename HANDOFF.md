@@ -4,15 +4,15 @@ Resume on branch `codex-candace/fo-finish-20261120`. The commit that contains th
 
 ## Done in this checkout
 
-Steps 1 through 4 are proven in `STATUS.md`. Step 4 sends one OpenLLMetry span to Phoenix's loopback OTLP path `/v1/traces`. `tests/first_officer/tracing-acceptance.py` proved a trace arrives and that an HTTP 500 is not recorded as delivery. The offline gate passed 921 Python tests. The Node gate passed 22. No hosted collector was contacted.
+Steps 1 through 5 are proven in `STATUS.md`. Step 5 reads a Playwright JSON report, keeps every attempt, and treats quarantine as non-passing. The offline gate passed 928 Python tests. The four pull-request jobs were green on the Step 4 head `3256157`. This commit adds the flaky-report gate and needs those jobs green again.
 
 ## Next
 
-Step 5. Add the Playwright flaky-report producer and the quarantine workflow. Quarantine is reported and never hides a failure.
+Step 6. Finish the shared status view and the read-only admin console, bound to loopback or the tailnet.
 
 ## Open failures
 
-None in the local gates at this commit. Confirm the pull-request jobs, including `first-officer-tracing`, are green on this head before treating CI as finished. Gateway activation, timed Telegram checks and the supervised authority pilot still wait for Jeff.
+None in the local gates at this commit. Confirm the pull-request jobs are green on this head. Gateway activation, timed Telegram checks and the supervised authority pilot still wait for Jeff.
 
 ## Do not
 

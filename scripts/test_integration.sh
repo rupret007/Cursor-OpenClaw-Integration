@@ -51,7 +51,7 @@ while IFS= read -r _py; do
 done < <(find "${BASE_DIR}/services" -name "*.py" 2>/dev/null | sort)
 for f in "${BASE_DIR}/first-officer/litellm/configure.py" "${BASE_DIR}/first-officer/usage/track.py" \
          "${BASE_DIR}/first-officer/release.py" "${BASE_DIR}/first-officer/lanes/queue.py" \
-         "${BASE_DIR}/first-officer/tracing/deliver.py"; do
+         "${BASE_DIR}/first-officer/tracing/deliver.py" "${BASE_DIR}/first-officer/qa/flaky.py"; do
   [[ -f "$f" ]] || { echo "Missing file: $f" >&2; exit 1; }
   python3 -m py_compile "$f"
 done

@@ -93,6 +93,19 @@ python3 first-officer/tracing/deliver.py "http://127.0.0.1:6006" "$span_attribut
 
 Exit `0` prints `Phoenix accepted span first-officer.lane for lane <name>.` Exit `1` means the collector did not accept it, or the attributes were refused. The command does not start Phoenix and does not send the span anywhere but the URL you passed.
 
+## Read a Playwright report and apply quarantine
+
+`produce` reads Playwright's JSON report and writes one record per test, including every attempt. `evaluate` compares that record with a quarantine file and writes a summary. Exit `0` means every test passed on its first attempt and the quarantine list is empty of applicable, expired and orphaned entries. Exit `1` means the gate is red. A quarantined test is listed and counted as non-passing even when the test itself passed. Exit `2` means the report or the quarantine file could not be read.
+
+A quarantine entry names `project`, `file`, `title`, `owner`, `issue`, `reason`, `addedOn` and `expiresOn`. The dates are UTC calendar dates and the window is at most 14 days.
+
+```bash
+python3 first-officer/qa/flaky.py produce "$playwright_json" "$flaky_events"
+python3 first-officer/qa/flaky.py evaluate "$flaky_events" "$quarantine_json" "$summary_json"
+```
+
+The summary line is `Passing <n>. Non-passing <n>. Quarantined <n>.`
+
 ## Check prerequisites on bobserver
 
 Run from the PR checkout as the account that owns `openclaw-gateway.service`. The GitHub CLI must authenticate as the configured owner account. The existing Andrea read-only bridge must answer from the service account using its private reader configuration.

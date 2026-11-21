@@ -19,7 +19,7 @@ This is the same gate CI runs. It takes about two minutes.
 bash scripts/test_integration.sh
 ```
 
-Expect `921 passed` from the Python suite and a final line `All integration checks passed.`. The `Handoff failed.` lines inside the exhaustive check are expected: that check deliberately feeds bad arguments and requires each one to be refused.
+Expect `928 passed` from the Python suite and a final line `All integration checks passed.`. The `Handoff failed.` lines inside the exhaustive check are expected: that check deliberately feeds bad arguments and requires each one to be refused.
 
 ## 2. The Segment 1 and captain gate
 
@@ -154,6 +154,38 @@ An ambient collector, proxy and API key were ignored, and a prompt was not expor
 
 OpenLLMetry also prints that it is exporting to a custom exporter and that no automatic instruments are set. That is this command's configuration: one explicit span, no provider instrumentation, and no cloud endpoint.
 
+## 8. Step 5: a flake stays visible, and so does quarantine
+
+This uses a Playwright JSON report. It does not launch a browser. The test failed once and passed on the retry.
+
+```bash
+mkdir -p /tmp/fo-flaky
+python3 - <<'PY'
+import json
+from pathlib import Path
+report = {"suites": [{"title": "", "file": "tests/lane.spec.js", "specs": [{
+    "title": "blinks", "ok": True, "tests": [{"projectName": "chromium", "status": "flaky",
+    "results": [
+        {"status": "failed", "retry": 0, "errors": [{"message": "first try"}], "attachments": []},
+        {"status": "passed", "retry": 1, "errors": [], "attachments": []}]}]}]}]}
+Path("/tmp/fo-flaky/results.json").write_text(json.dumps(report))
+Path("/tmp/fo-flaky/quarantine.json").write_text(json.dumps({"entries": []}))
+PY
+python3 first-officer/qa/flaky.py produce /tmp/fo-flaky/results.json /tmp/fo-flaky/events.json
+python3 first-officer/qa/flaky.py evaluate /tmp/fo-flaky/events.json /tmp/fo-flaky/quarantine.json /tmp/fo-flaky/summary.json
+echo "exit $?"
+```
+
+Expect:
+
+```
+Recorded 1 Playwright tests, including every attempt.
+Passing 0. Non-passing 1. Quarantined 0.
+exit 1
+```
+
+`/tmp/fo-flaky/summary.json` names the test under `flakes` with attempts `failed` then `passed`. Exit 1 is the point: a retry did not make the gate green. Add the same test to `quarantine.json` with an owner, an issue, a reason and a UTC window of at most 14 days, then evaluate again. The summary moves the test to `quarantined` and the exit stays 1.
+
 ## What is not provable here yet
 
-Steps 5 through 8 in [STATUS.md](STATUS.md) are still in progress, and the timed Telegram checks and the supervised authority pilot still need a live gateway and your approval. Hatchet, Restate and the Phoenix UI are not installed. The queue and trace commands are ready to point at them when you approve a host.
+Steps 6 through 8 in [STATUS.md](STATUS.md) are still in progress, and the timed Telegram checks and the supervised authority pilot still need a live gateway and your approval. Hatchet, Restate and the Phoenix UI are not installed. The queue and trace commands are ready to point at them when you approve a host.

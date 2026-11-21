@@ -461,7 +461,7 @@ def switch(backup, config, restore):
     candidate = _saved_pair(backup, "candidate")
     if candidate != _expected_candidate(original, release, previous, plan):
         raise ValueError("The saved config and pin pair changed")
-    before, after = (candidate, original) if restore else (original, candidate)
+    after = original if restore else candidate
     live_pin, live_identity = pin_file(pin)
     current_config = owner_file(config, 512 * 1024, private=True)
     if live_identity != identity or not _known_pair(current_config, live_pin, original, candidate):
@@ -487,9 +487,13 @@ def switch(backup, config, restore):
         systemctl("start", SERVICE)
         raise ValueError("Gateway config or pin changed during shutdown. Switch aborted.")
     observed = (current_config, live_pin)
-    # A complete pair already on disk is the recovery target. Rollback must not
-    # treat the candidate as that pair when the original files are already live.
-    recovery = observed if observed in (original, candidate) else before
+    # Rollback recovery is always the saved prior pair. A mixed live config and
+    # pin, or a complete candidate, must not be started again when the restored
+    # original fails readiness. Activation may restart a complete pair that was
+    # already live, and otherwise returns to that same prior pair.
+    recovery = original
+    if not restore and observed in (original, candidate):
+        recovery = observed
     try:
         if live_pin != after[1]:
             replace_pin(pin, after[1], identity)

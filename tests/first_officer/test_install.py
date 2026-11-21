@@ -135,7 +135,13 @@ def test_gateway_start_failure_restores_prior_bytes_and_reports_failure(controll
 
 
 def test_readiness_failure_keeps_the_complete_pair_observed_at_entry(controller, monkeypatch):
-    """A repeated rollback must not start the candidate when the original pair is already live."""
+    """A failed readiness check must not start the candidate while rolling back.
+
+    A repeated rollback that already has the complete original pair stays on
+    that pair. An interrupted mixed pair, and a complete candidate pair, also
+    recover the saved prior pair. Activation still restarts a complete pair
+    that was already live.
+    """
     installer, _, config, pin, backup, calls = controller
     original = (
         (backup / "original-openclaw.json").read_bytes(),
@@ -163,18 +169,31 @@ def test_readiness_failure_keeps_the_complete_pair_observed_at_entry(controller,
     assert (config.read_bytes(), pin.read_bytes()) == original
     assert (config.read_bytes(), pin.read_bytes()) != candidate
 
+    config.write_bytes(original[0])
+    pin.write_bytes(candidate[1])
+    attempts["n"] = 0
+    with pytest.raises(ValueError, match="prior configuration and service were restored"):
+        installer.switch(backup, config, restore=True)
+    failed_mixed_rollback_reactivated_candidate = (config.read_bytes(), pin.read_bytes()) == candidate
+    assert failed_mixed_rollback_reactivated_candidate is False
+    assert (config.read_bytes(), pin.read_bytes()) == original
+
     for restore in (True, False):
-        directional = candidate if restore else original
         for config_state in ("original", "candidate"):
             for pin_state in ("original", "candidate"):
                 observed = (pairs[config_state][0], pairs[pin_state][1])
-                expected = observed if observed in (original, candidate) else directional
+                if not restore and observed in (original, candidate):
+                    expected = observed
+                else:
+                    expected = original
                 config.write_bytes(observed[0])
                 pin.write_bytes(observed[1])
                 attempts["n"] = 0
                 with pytest.raises(ValueError, match="prior configuration and service were restored"):
                     installer.switch(backup, config, restore=restore)
                 assert (config.read_bytes(), pin.read_bytes()) == expected
+                if restore:
+                    assert (config.read_bytes(), pin.read_bytes()) != candidate
 
 
 def test_switch_refuses_a_changed_config_without_stopping_the_service(controller):

@@ -181,11 +181,11 @@ def _root(path):
     return root.resolve()
 
 
-def _descend(root, directory, names, findings):
+def _descend(root, directory, names, findings, skip=SKIP):
     """Skip named tooling trees. A directory symlink is a finding and is not followed."""
     kept = []
     for name in names:
-        if name in SKIP:
+        if name in skip:
             continue
         path = Path(directory) / name
         if path.is_symlink():
@@ -195,29 +195,29 @@ def _descend(root, directory, names, findings):
     return kept
 
 
-def scan_files(root):
+def scan_files(root, *, artifact=False):
     findings = []
     count = 0
     for directory, names, files in os.walk(root):
-        names[:] = _descend(root, directory, names, findings)
+        names[:] = _descend(root, directory, names, findings, skip=() if artifact else SKIP)
         for name in files:
             path = Path(directory) / name
             if path.is_symlink():
                 findings.append({"rule": "symlink", "path": public_name(path.relative_to(root)), "line": 0})
                 continue
             count += 1
-            findings.extend(_file_findings(root, path))
+            findings.extend(_file_findings(root, path, artifact=artifact))
     return findings, count
 
 
-def _file_findings(root, path):
+def _file_findings(root, path, *, artifact=False):
     relative = path.relative_to(root)
     shown = public_name(relative)
     try:
         info = path.stat()
     except OSError:
         return [{"rule": "unreadable", "path": shown, "line": 0}]
-    if relative in LOCAL_DATABASE:
+    if not artifact and relative in LOCAL_DATABASE:
         if info.st_size > LOCAL_DATABASE_CAP:
             return [{"rule": "oversized", "path": shown, "line": 0}]
         try:
@@ -238,7 +238,7 @@ def _file_findings(root, path):
     text = payload.decode("utf-8", "replace")
     located = [{"rule": item["rule"], "path": "[redacted]", "line": 0}
                for item in findings_in_text(relative.as_posix())]
-    for finding in findings_in_text(text, path=relative.as_posix()):
+    for finding in findings_in_text(text, path=None if artifact else relative.as_posix()):
         located.append({"rule": finding["rule"], "path": shown, "line": finding["line"]})
     return located
 
@@ -474,9 +474,17 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--logs", type=Path)
+    parser.add_argument("--files-only", action="store_true", help="Scan a staged artifact with no Git history")
     args = parser.parse_args(argv)
     try:
-        text, code = report(survey(args.root, args.logs))
+        if args.files_only:
+            if args.logs is not None:
+                raise ValueError("Pass either a staged artifact or a checkout with optional logs")
+            findings, files = scan_files(_root(args.root), artifact=True)
+            result = {"findings": findings, "files": files, "commits": 0, "logs": 0}
+        else:
+            result = survey(args.root, args.logs)
+        text, code = report(result)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         text = str(error) if type(error) is ValueError else "The secret scan failed"
         code = 1

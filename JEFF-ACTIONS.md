@@ -9,7 +9,7 @@ Before any of it, you can verify the finished work yourself with [TEST-NOW.md](T
 One digest and one activation command. The rollback restores the prior config, pin, and service. It does not delete the published candidate or undo a separately provisioned reader or proxy. Build the candidate on the Nuc from the private prior bundle, read the digest, then activate on bobserver. The review archive from `first-officer/archive.py` is the offline copy of this lane. It is not this activation.
 
 ```bash
-python3 -B first-officer/release.py build "$PRIOR_BUNDLE" "$staging"
+python3 -B first-officer/release.py build "$PRIOR_BUNDLE" "$staging" --reviewed-head "$REVIEWED_HEAD"
 python3 -B first-officer/release.py activate "$release" "$archive" "$backup_parent"
 ```
 

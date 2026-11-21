@@ -4,22 +4,13 @@ Jeff approves activation and runs the activation and rollback commands on bobser
 
 ## Stage on the Nuc
 
-From the reviewed PR checkout in a Linux shell, set `PRIOR_BUNDLE` to the private, extracted release bundle. The staging helper checks its inventory against the supported release pins. `python3 -B first-officer/release.py build` runs this sequence and packs the candidate. Use Node 24.16 or newer and Python 3.12 or newer. The private prior bundle is not in this repository, so the gateway tar is not built here.
+In a clean checkout of the reviewed PR, set `REVIEWED_HEAD` to the full commit approved in review and `PRIOR_BUNDLE` to the private, extracted release bundle. The build checks the prior inventory, copies the overlay from that Git commit, runs the packaged canary and Node tests, and scans the candidate for secrets and personal data before packing it. Use Node 24.16 or newer and Python 3.12 or newer. The private prior bundle is required to build the gateway tar.
 
 ```bash
 set -euo pipefail
 umask 077
 stage_dir="$(mktemp -d)"
-release="$(nice -n 10 python3 -B first-officer/stage.py "$PRIOR_BUNDLE" "$stage_dir")"
-candidate="$stage_dir/first-officer-$release"
-test_home="$(mktemp -d)"
-env HOME="$test_home" FO_CANARY_HOME="$test_home" FO_RELEASE_ROOT="$candidate" \
-  nice -n 10 node tests/first_officer/round13-canary.mjs
-nice -n 10 node --test tests/first_officer/segment1.test.mjs tests/first_officer/captain.test.mjs
-archive="$stage_dir/first-officer-$release.tar"
-test ! -e "$archive"
-nice -n 10 tar -C "$stage_dir" -cf "$archive" "first-officer-$release"
-printf 'Release %s\nPrivate bundle %s\n' "$release" "$stage_dir/first-officer-$release.tar"
+python3 -B first-officer/release.py build "$PRIOR_BUNDLE" "$stage_dir" --reviewed-head "$REVIEWED_HEAD"
 ```
 
 Pass the digest and the tar file to Jeff through a private channel. Put the tar file under `~/.openclaw/segment1-staged/` on bobserver and use the same PR checkout for the operator commands.

@@ -2,6 +2,8 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
+import subprocess
 import sys
 
 import pytest
@@ -15,6 +17,7 @@ spec.loader.exec_module(release)
 
 ACTIVE = "61ff4565dd5638a886effefbd720c92a17b7388acbc6eeaffb7779f78d3f1b36"
 CANDIDATE = "a" * 64
+REVIEWED = "b" * 40
 PUBLISH = "/opt/openclaw-fo/.segment1-publish.Ab3dEf7h"
 
 
@@ -41,7 +44,8 @@ def activate_replies():
 
 def test_dry_run_prints_the_ordered_plan_and_runs_nothing(tmp_path, capsys):
     recorder = Recorder()
-    assert release.main(["--dry-run", "build", str(tmp_path / "prior"), str(tmp_path)], recorder) == 0
+    assert release.main(["--dry-run", "build", str(tmp_path / "prior"), str(tmp_path),
+                         "--reviewed-head", REVIEWED], recorder) == 0
     printed = capsys.readouterr().out
     assert recorder.calls == []
     assert printed.splitlines()[0] == "1. Stage the candidate from the verified prior bundle"
@@ -58,15 +62,18 @@ def test_dry_run_prints_the_ordered_plan_and_runs_nothing(tmp_path, capsys):
 def test_one_build_command_stages_gates_and_packs_in_order(tmp_path, capsys):
     staging = tmp_path / "staging"
     recorder = Recorder({"Stage the candidate from the verified prior bundle": CANDIDATE})
-    assert release.main(["build", str(tmp_path / "prior"), str(staging)], recorder) == 0
+    assert release.main(["build", str(tmp_path / "prior"), str(staging), "--reviewed-head", REVIEWED], recorder) == 0
 
     assert [what for what, _ in recorder.calls] == [
         "Stage the candidate from the verified prior bundle",
         "Run the packaged Round 13 canary against the candidate",
         "Run the Segment 1 and captain gate",
+        "Scan the staged candidate for secrets and personal data",
         "Refuse to replace an existing candidate archive",
         "Pack the candidate for the operator",
     ]
+    assert recorder.calls[0][1][-2:] == ["--reviewed-head", REVIEWED]
+    assert recorder.calls[-3][1][-3:] == ["--root", str(staging / f"first-officer-{CANDIDATE}"), "--files-only"]
     assert recorder.calls[-1][1][-1] == f"first-officer-{CANDIDATE}"
     assert str(staging / f"first-officer-{CANDIDATE}.tar") in recorder.calls[-1][1]
     printed = capsys.readouterr().out
@@ -76,9 +83,71 @@ def test_one_build_command_stages_gates_and_packs_in_order(tmp_path, capsys):
 
 def test_build_refuses_a_staging_result_that_is_not_a_release_digest(tmp_path, capsys):
     recorder = Recorder({"Stage the candidate from the verified prior bundle": "not-a-digest"})
-    assert release.main(["build", str(tmp_path / "prior"), str(tmp_path)], recorder) == 1
+    assert release.main(["build", str(tmp_path / "prior"), str(tmp_path), "--reviewed-head", REVIEWED], recorder) == 1
     assert "unusable result" in capsys.readouterr().err
     assert [what for what, _ in recorder.calls] == ["Stage the candidate from the verified prior bundle"]
+
+
+@pytest.mark.parametrize("variant", ["clean", "dirty", "wrong-head", "sensitive-overlay"])
+def test_release_build_only_packs_a_clean_reviewed_overlay(tmp_path, monkeypatch, variant):
+    stage = importlib.import_module("stage")
+    repo = tmp_path / "checkout"
+    overlay = repo / "first-officer/segment1"
+    overlay.mkdir(parents=True)
+    privacy = repo / "first-officer/privacy"
+    privacy.mkdir()
+    shutil.copyfile(ROOT / "first-officer/privacy/scan.py", privacy / "scan.py")
+    injected = "// sk-" + "reviewfixtureunsafe\n"
+    for module in stage.MODULES:
+        (overlay / module).write_text("// reviewed overlay\n", encoding="utf-8")
+    changed = overlay / stage.MODULES[0]
+    if variant == "sensitive-overlay":
+        changed.write_text(injected, encoding="utf-8")
+
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(repo), *args], text=True).strip()
+
+    git("init", "-q", "-b", "demo")
+    git("add", ".")
+    git("-c", "user.name=Fixture", "-c", "user.email=lane@example.invalid", "commit", "-qm", "Review overlay")
+    head = git("rev-parse", "HEAD")
+    if variant == "dirty":
+        changed.write_text(injected, encoding="utf-8")
+    elif variant == "wrong-head":
+        head = "b" * 40
+
+    baseline = tmp_path / "prior"
+    (baseline / stage.RUNTIME).mkdir(parents=True)
+    prior_source = baseline / "first-officer-conductor.mjs"
+    prior_source.write_text(
+        "import { ownerFallbacks } from './round6/runtime/model-failover.mjs';\n"
+        "const selection = await routeOwnerModel(event, api.config, routeFor, ownerFallbacks);\n",
+        encoding="utf-8",
+    )
+    manifest = f"{stage.digest(prior_source.read_bytes())}  {prior_source.name}\n".encode()
+    (baseline / stage.INVENTORY).write_bytes(manifest)
+    monkeypatch.setattr(stage, "SUPPORTED_BASES", (stage.digest(manifest),))
+    monkeypatch.setattr(stage, "OVERLAY", overlay)
+    staging = tmp_path / "staging"
+    staging.mkdir()
+
+    def execute(entry, substitutions):
+        argv = entry["argv"]
+        if any(part.endswith("/stage.py") for part in argv):
+            return stage.stage_release(baseline, staging, reviewed_head=argv[-1])
+        if "node" in argv:
+            return ""
+        return release.execute(entry, substitutions)
+
+    if variant == "clean":
+        assert release.build(repo, baseline, staging, execute, False, head) == 0
+        assert len(list(staging.glob("*.tar"))) == 1
+    else:
+        failure = {"dirty": "must be clean", "wrong-head": "does not match the reviewed head",
+                   "sensitive-overlay": "Scan the staged candidate"}[variant]
+        with pytest.raises(ValueError, match=failure):
+            release.build(repo, baseline, staging, execute, False, head)
+        assert list(staging.glob("*.tar")) == []
 
 
 def test_activate_checks_the_digest_and_writes_rollback_before_publish(tmp_path):
@@ -100,7 +169,8 @@ def test_activate_checks_the_digest_and_writes_rollback_before_publish(tmp_path)
     assert any(part.endswith("SHA256SUMS") for part in digest_step)
 
     recorder = Recorder({"Stage the candidate from the verified prior bundle": CANDIDATE})
-    assert release.main(["build", str(tmp_path / "prior"), str(tmp_path / "staging")], recorder) == 0
+    assert release.main(["build", str(tmp_path / "prior"), str(tmp_path / "staging"),
+                         "--reviewed-head", REVIEWED], recorder) == 0
     built = [what for what, _ in recorder.calls]
     pack_at = built.index("Pack the candidate for the operator")
     assert built[pack_at - 1] == "Refuse to replace an existing candidate archive"
@@ -266,7 +336,7 @@ def test_rollback_restores_the_prior_release_and_confirms_the_service(tmp_path, 
 def test_no_release_step_pushes_merges_or_sends_telegram_traffic():
     # Neutral fixed paths, so a temporary directory name cannot mask or fake a match.
     private = Path("/private")
-    plans = [release.build_plan(ROOT, private / "prior", private / "staging", private / "home"),
+    plans = [release.build_plan(ROOT, private / "prior", private / "staging", private / "home", REVIEWED),
              release.activate_plan(ROOT, CANDIDATE, private / "a.tar", private / "extract",
                                    private / "switch"),
              release.rollback_plan(ROOT, private / "switch")]

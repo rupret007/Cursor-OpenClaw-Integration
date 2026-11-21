@@ -34,13 +34,14 @@ def step(what, argv, env=None, cwd=None, stdin=None, store=None, expect=None):
             "expect": expect, "capture": store is not None or expect is not None}
 
 
-def build_plan(repo, bundle, staging, test_home):
+def build_plan(repo, bundle, staging, test_home, reviewed_head):
     """Stage the candidate on the Nuc, gate it, and pack it. Nothing here touches the gateway."""
     candidate = staging / f"first-officer-{RELEASE}"
     archive = staging / f"first-officer-{RELEASE}.tar"
     return [
         step("Stage the candidate from the verified prior bundle",
-             [sys.executable, "-B", repo / "first-officer/stage.py", bundle, staging],
+             [sys.executable, "-B", repo / "first-officer/stage.py", bundle, staging,
+              "--reviewed-head", reviewed_head],
              store="release", expect=DIGEST),
         step("Run the packaged Round 13 canary against the candidate",
              ["nice", "-n", "10", "node", repo / "tests/first_officer/round13-canary.mjs"],
@@ -49,6 +50,8 @@ def build_plan(repo, bundle, staging, test_home):
         step("Run the Segment 1 and captain gate",
              ["nice", "-n", "10", "node", "--test", repo / "tests/first_officer/segment1.test.mjs",
               repo / "tests/first_officer/captain.test.mjs"], cwd=repo),
+        step("Scan the staged candidate for secrets and personal data",
+             [sys.executable, "-B", repo / "first-officer/privacy/scan.py", "--root", candidate, "--files-only"]),
         step("Refuse to replace an existing candidate archive",
              ["test", "!", "-e", archive]),
         step("Pack the candidate for the operator",
@@ -154,9 +157,9 @@ def run(plan, substitutions, runner=execute):
             substitutions[entry["store"]] = output
 
 
-def build(repo, bundle, staging, runner, dry_run):
+def build(repo, bundle, staging, runner, dry_run, reviewed_head):
     with tempfile.TemporaryDirectory(prefix="fo-canary-home-") as home:
-        plan = build_plan(repo, bundle, staging, Path(home))
+        plan = build_plan(repo, bundle, staging, Path(home), reviewed_head)
         if dry_run:
             print(describe(plan))
             return 0
@@ -205,6 +208,7 @@ def main(argv=None, runner=execute):
     staged = commands.add_parser("build", help="Stage, gate and pack a candidate on the Nuc")
     staged.add_argument("prior_bundle", type=Path)
     staged.add_argument("staging_directory", type=Path)
+    staged.add_argument("--reviewed-head", required=True, help="Full approved Git commit for the overlay")
     switch = commands.add_parser("activate", help="Publish and switch the gateway in one operation")
     switch.add_argument("release")
     switch.add_argument("archive", type=Path)
@@ -216,7 +220,7 @@ def main(argv=None, runner=execute):
     os.umask(0o077)
     try:
         if args.command == "build":
-            return build(repo, args.prior_bundle, args.staging_directory, runner, args.dry_run)
+            return build(repo, args.prior_bundle, args.staging_directory, runner, args.dry_run, args.reviewed_head)
         if args.command == "activate":
             return activate(repo, args.release, args.archive, args.backup_parent, runner,
                             args.dry_run, args.from_release)

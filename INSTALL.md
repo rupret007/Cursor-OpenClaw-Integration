@@ -1,10 +1,10 @@
 # Install First Officer
 
-Jeff approves activation and runs the activation and rollback commands on bobserver. The Andrea summary upgrade starts from the verified Captain bundle currently pinned by the gateway. Keep the bundle and config backup in private storage.
+Jeff approves activation and runs the activation and rollback commands on bobserver. Start from the verified release currently pinned by the gateway. Keep the bundle and config backup in private storage.
 
 ## Stage on the Nuc
 
-From the reviewed PR checkout in a Linux shell, set `PRIOR_BUNDLE` to the private, extracted Captain bundle. The staging helper accepts the verified Captain, Segment 1 and Round 13 inventories. Use Node 24.16 or newer and Python 3.12 or newer.
+From the reviewed PR checkout in a Linux shell, set `PRIOR_BUNDLE` to the private, extracted release bundle. The staging helper checks its inventory against the supported release pins. Use Node 24.16 or newer and Python 3.12 or newer.
 
 ```bash
 set -euo pipefail
@@ -47,7 +47,7 @@ umask 077
 systemctl --user is-active --quiet openclaw-gateway.service
 test "$(gh api user --hostname github.com --jq .login 2>/dev/null)" = rupret007
 test -x /usr/bin/gh
-baseline=2df63b9d08cb2a6741c626db5469d5fd71add93a31ed87abed9fdfbc061ac802
+baseline=61ff4565dd5638a886effefbd720c92a17b7388acbc6eeaffb7779f78d3f1b36
 if ! node --input-type=module - "/opt/openclaw-fo/first-officer-$baseline" >/dev/null 2>&1 <<'JS'
 import { pathToFileURL } from 'node:url';
 import { join } from 'node:path';

@@ -1,6 +1,8 @@
 const textLimit = 1800;
 const device = /\b(?:bobserver|mac[ -]?mini|nuc[ -]?box|mac[ -]?book(?: pro)?)\b/;
 const readQuestion = /^(?:(?:please|first officer)[ ,]+)?(?:what|which|is|are|how|any|show|check|list|give|tell|do i|can you)\b/;
+// Preserve the read-only route with common vowel and repeated-letter misspellings.
+const textSummaryRequest = /^(?:(?:can|could) you )?sum{1,3}[ae]ri[sz]e (?:my )?(?:recent )?(?:texts?|text messages|imessages?|sms)$/;
 
 export const nodeIds = ['bobserver', 'mac-mini', 'nucbox', 'macbook-pro'];
 
@@ -44,7 +46,7 @@ export function classifyRequest(input, { legacyStatus, legacyRequest, isControl,
     return memoryRequest(raw, ask);
   }
   if (isControl(raw) || /^local ci status$/.test(ask)) return;
-  if (/^(?:(?:can|could) you )?summari[sz]e (?:my )?(?:recent )?(?:texts?|text messages|imessages?|sms)$/.test(ask)) {
+  if (textSummaryRequest.test(ask)) {
     return { kind: 'texts' };
   }
   const legacy = raw.length <= textLimit ? legacyRequest(raw) : undefined;

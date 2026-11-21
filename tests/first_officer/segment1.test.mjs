@@ -20,6 +20,9 @@ const fixtures = [
   ['What did I tell you about test marker?', 'recall'],
   ['summarize my texts', 'texts'],
   ['Summarize my recent text messages.', 'texts'],
+  ['Could you summerize my recent texts?', 'texts'],
+  ['Sumarise my iMessages', 'texts'],
+  ['Summmarize my SMS', 'texts'],
 ];
 
 const short = (prompt) => ({ model: fastModelRef.split('/')[1], reason: 'short-chat', bytes: prompt.length, fallbacks: [] });
@@ -40,6 +43,7 @@ test('natural requests identify the live route and map memory to a stable topic'
   assert.equal(classifyRequest('show latest GitHub checks', intentHooks).kind, 'github-help');
   assert.equal(classifyRequest('what is a pull request?', intentHooks).kind, 'simple');
   assert.equal(classifyRequest('what is the gate status', intentHooks).kind, 'gate');
+  assert.notEqual(classifyRequest('summerize my texts and send a message', intentHooks)?.kind, 'texts');
 });
 
 test('dispatch starts progress and the tool concurrently and stays inside its work budgets', async () => {
@@ -145,9 +149,10 @@ test('all Segment 1 handlers are registered on the private inbound hook', async 
   assert.match((await dispatchOwner('remember marker: synthetic')).text, /Memory check received/);
   assert.match((await dispatchOwner('what did I tell you about marker?')).text, /Saved fact verified/);
   assert.match((await dispatchOwner('summarize my texts')).text, /Andrea.*synced/);
+  assert.match((await dispatchOwner('Could you summerize my recent texts?')).text, /Andrea.*synced/);
   assert.match((await dispatchOwner('define an algorithm')).text, /fast model.*failed/i);
-  assert.equal(events.filter((event) => event === 'ack').length, 7);
-  assert.equal(events.filter((event) => event === 'typing').length, 7);
+  assert.equal(events.filter((event) => event === 'ack').length, 8);
+  assert.equal(events.filter((event) => event === 'typing').length, 8);
   assert.equal(events.some((event) => event.includes('synthetic transport detail')), false);
 });
 

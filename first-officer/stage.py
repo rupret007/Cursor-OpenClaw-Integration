@@ -15,7 +15,8 @@ import tempfile
 BASELINE = "daf8df40c3b03440d69db6b61a271362b4b442551c7d3648b0b87c6f8b046ecf"
 SEGMENT1 = "ed545847333ee1691824cd8e3b0a528882b2b11c7f2479c1f63af9a0e8def456"
 CAPTAIN = "2df63b9d08cb2a6741c626db5469d5fd71add93a31ed87abed9fdfbc061ac802"
-SUPPORTED_BASES = (BASELINE, SEGMENT1, CAPTAIN)
+ANDREA_SUMMARY = "61ff4565dd5638a886effefbd720c92a17b7388acbc6eeaffb7779f78d3f1b36"
+SUPPORTED_BASES = (BASELINE, SEGMENT1, CAPTAIN, ANDREA_SUMMARY)
 ROLLBACK_SLOT = "4759047e8a16d1691499d55c4b6656882e67bc2275a3297d2283aa9b01538753"
 RUNTIME = Path("round6/runtime")
 MODULES = ("andrea-ssh.mjs", "captain.mjs", "captain-state.py", "dispatch.mjs",
@@ -149,7 +150,7 @@ def stage_release(baseline, destination):
         raise ValueError("Choose a staging directory outside the release")
     pin = digest((baseline / INVENTORY).read_bytes())
     if pin not in SUPPORTED_BASES:
-        raise ValueError("Choose a verified Round 13, Segment 1, or Captain bundle")
+        raise ValueError("Choose a verified First Officer bundle from a supported release")
     verify_inventory(baseline, pin)
     with tempfile.TemporaryDirectory(prefix=".fo-stage-", dir=destination) as temp:
         working = Path(temp) / "bundle"
@@ -186,7 +187,7 @@ def stage_release(baseline, destination):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("baseline", type=Path, help="Verified Round 13, Segment 1, or Captain release directory")
+    parser.add_argument("baseline", type=Path, help="Verified First Officer release directory")
     parser.add_argument("staging_directory", type=Path, help="Private directory for the candidate")
     args = parser.parse_args()
     os.umask(0o077)

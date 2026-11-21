@@ -30,6 +30,8 @@ Jeff shared the live Andrea reply from Bob the Bot. It confirms delivery and a l
 
 Jeff approved the summary upgrade. The Mac reader refresh succeeded on retry, and Bobserver read recent activity with qualitative findings in about 3 seconds. That measurement covers only the reader call. Bobserver now runs release `61ff4565dd5638a886effefbd720c92a17b7388acbc6eeaffb7779f78d3f1b36` from reviewed commit `3dd2b84`. Both plugin paths, the verifier pin, the service state and `/readyz` were independently verified. The most recent private rollback directory restores the prior Captain release.
 
+During the Telegram check, a spelling variant bypassed Andrea and reached a rate-limited model. The follow-up routes common spelling variants of the text-summary command to the same read-only tool. A regression test reproduced the bypass before the fix and verifies the corrected dispatch. The installed release uses the exact command in [the Telegram check](LIVE-TEST.md).
+
 ## Later segments
 
 - LiteLLM for all API calls with per-lane budgets and provider fallback.

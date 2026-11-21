@@ -19,7 +19,7 @@ This is the same gate CI runs. It takes about two minutes.
 bash scripts/test_integration.sh
 ```
 
-Expect `931 passed` from the Python suite and a final line `All integration checks passed.`. The `Handoff failed.` lines inside the exhaustive check are expected: that check deliberately feeds bad arguments and requires each one to be refused.
+Expect `935 passed` from the Python suite and a final line `All integration checks passed.`. The `Handoff failed.` lines inside the exhaustive check are expected: that check deliberately feeds bad arguments and requires each one to be refused.
 
 ## 2. The Segment 1 and captain gate
 
@@ -229,6 +229,49 @@ mac-mini load 1.25
 
 The Node gate in section 2 includes the check that `readFleetSnapshot` accepts this publisher's file and that the fleet view leaves the stale NucBox load off the page. `python3 first-officer/status/publish.py serve /tmp/fo-status/STATUS.json --port 8765` serves that file on `127.0.0.1` until you stop it. The automated test checks that POST is refused and that a credential in the file is not shown.
 
+## 10. Step 7: one verified fact, then a routine that sends nothing
+
+This uses a private directory. It does not send a message, call a model, or install a timer. The nonce for this sentence is stable. The digest changes with the clock because the approval includes its expiry.
+
+```bash
+rm -rf /tmp/fo-cycle
+python3 first-officer/acceptance/cycle.py --root /tmp/fo-cycle propose "The lane review is weekly."
+python3 - <<'PY'
+import json, subprocess
+from pathlib import Path
+pending = json.loads(Path("/tmp/fo-cycle/pending.json").read_text())
+subprocess.run(["python3", "first-officer/acceptance/cycle.py", "--root", "/tmp/fo-cycle", "confirm", pending["nonce"], pending["digest"]], check=True)
+subprocess.run(["python3", "first-officer/acceptance/cycle.py", "--root", "/tmp/fo-cycle", "routine"], check=True)
+subprocess.run(["python3", "first-officer/acceptance/cycle.py", "--root", "/tmp/fo-cycle", "verify"], check=True)
+refused = subprocess.run(["python3", "first-officer/acceptance/cycle.py", "--root", "/tmp/fo-cycle", "confirm", pending["nonce"], pending["digest"]], check=True, capture_output=True, text=True)
+print(refused.stdout, end="")
+receipt = json.loads(Path("/tmp/fo-cycle/receipt-lane-review.json").read_text())
+assert receipt["sent"] is False and receipt["called_model"] is False and receipt["changed_repo"] is False
+print("receipt sent", receipt["sent"])
+PY
+```
+
+Expect the propose command to print:
+
+```
+Pending save mem-b1562a220b03ce99 digest <64 hex> expires <unix>.
+No verified saved fact.
+```
+
+Then expect:
+
+```
+Saved verified fact mem-b1562a220b03ce99.
+Verified fact: The lane review is weekly. Approval <first 12 hex of that digest>.
+Dry run lane-review at <unix> next <unix>. Sent no message.
+Audit chain verified: 2 lines.
+Refused save mem-b1562a220b03ce99: not-pending.
+Verified fact: The lane review is weekly. Approval <same 12 hex>.
+receipt sent False
+```
+
+The refusal is the second confirm. The fact stays one line, and the receipt says nothing was sent.
+
 ## What is not provable here yet
 
-Steps 7 and 8 in [STATUS.md](STATUS.md) are still in progress, and the timed Telegram checks and the supervised authority pilot still need a live gateway and your approval. Hatchet, Restate and the Phoenix UI are not installed. The queue and trace commands are ready to point at them when you approve a host. No status collector is running on the machines.
+Step 8 in [STATUS.md](STATUS.md) is still in progress, and the timed Telegram checks and the supervised authority pilot still need a live gateway and your approval. Hatchet, Restate and the Phoenix UI are not installed. The queue and trace commands are ready to point at them when you approve a host. No status collector is running on the machines. The ten gateway routine declarations stay inactive.

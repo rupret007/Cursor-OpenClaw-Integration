@@ -117,6 +117,19 @@ python3 first-officer/status/publish.py serve "$status_json" --port 8765
 
 The publish line is `Published status <timestamp> (<bytes> bytes).` The page line is `Status page on http://127.0.0.1:<port>/`. Exit `1` means the evidence or the file was refused.
 
+## Save one verified fact and dry-run the lane review
+
+`propose` records one plain sentence and prints its nonce and approval digest. The fact is not verified yet. `confirm` saves it only when you pass that nonce and that digest within ten minutes. `recall` prints verified facts. `routine` writes the lane-review dry-run receipt for the next 07:00 America/Chicago and sends nothing. `verify` checks the hash chain, the saved fact and the receipt. Exit `1` means the sentence was refused or the chain did not verify.
+
+```bash
+python3 first-officer/acceptance/cycle.py --root "$root" propose "The lane review is weekly."
+python3 first-officer/acceptance/cycle.py --root "$root" confirm "$nonce" "$digest"
+python3 first-officer/acceptance/cycle.py --root "$root" routine
+python3 first-officer/acceptance/cycle.py --root "$root" verify
+```
+
+For that sentence the nonce is `mem-b1562a220b03ce99`. The digest changes because it includes the expiry. A verified recall contains `Verified fact: The lane review is weekly.` A second confirm prints `Refused save`. The routine line ends with `Sent no message.`
+
 ## Check prerequisites on bobserver
 
 Run from the PR checkout as the account that owns `openclaw-gateway.service`. The GitHub CLI must authenticate as the configured owner account. The existing Andrea read-only bridge must answer from the service account using its private reader configuration.

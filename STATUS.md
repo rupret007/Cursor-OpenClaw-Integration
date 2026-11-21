@@ -58,6 +58,14 @@ The warning threshold is 90 percent and the stop threshold is 97 percent, verifi
 
 The gated run passed 889 Python tests in the offline integration gate, which now also compiles the First Officer LiteLLM and usage modules, and 22 Node tests. `INSTALL.md` documents the lane command.
 
+## One combined release and a page Jeff can test from
+
+`first-officer/release.py` turns the whole release into one reviewed operation with one rollback. `build` stages the candidate from the verified prior bundle, runs the packaged Round 13 canary and the Segment 1 and captain gate against it, and packs it. `activate` confirms the running gateway, the owner's GitHub login and the existing Andrea read-only bridge before it changes anything, publishes the candidate read-only under its digest through a private staging directory, prepares the private rollback, switches with the existing installer and confirms readiness. `rollback` restores the exact prior config and pin. Every command accepts `--dry-run`, which prints the exact ordered commands and runs none of them.
+
+The release is a plan of reviewed commands, so the whole sequence is tested without a gateway. Tests drive each command through a recorder and assert the exact order, that the build refuses a staging result that is not a release digest, that activation refuses a digest matching a supported release or malformed in five ways, that it refuses a foreign GitHub login and a staging directory outside the release store, that it stops at the first failure without running later steps, and that no step in any plan pushes, merges or sends Telegram traffic. Building the real archive still needs the private prior bundle, which is not in this repository.
+
+`TEST-NOW.md` gives Jeff the exact commands and expected output for everything finished so far, with nothing live involved. `JEFF-ACTIONS.md` lists the live activations and canaries that wait for him.
+
 ## Remaining integration and acceptance
 
 - Finish the timed Telegram checks and supervised authority pilot before expanding production scope.
@@ -78,7 +86,7 @@ These additional acceptance items follow the eight ordered integration steps. Ea
 
 - Rehearse restoring the exact prior gateway release and pin on a staged copy and record the timing.
 - Scan the repository, reachable Git history and relevant logs for secrets and personal data. Add an automated test that keeps the scan enforced.
-- Produce one combined release bundle with a single activation command and rollback procedure, so Jeff reviews and approves the release once.
+- DONE for the command and its gates. One combined release with a single activation command and rollback is proven above. The archive itself is built once the ordered steps land.
 - Update `CAPTAIN.md`, `INSTALL.md` and `LIVE-TEST.md` to reflect implemented and proven behavior, removing stale claims.
 - Keep Cursor fallback within plan usage and ensure paid extras remain disabled. Prove the limit and disabled billing configuration with tests and evidence.
 

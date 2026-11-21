@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 
 
 def _load(name, filename):
@@ -80,6 +81,19 @@ def load_allowlist(path=None):
     return fetch.load_allowlist(document)
 
 
+DISABLED = {
+    "structured_live_news": "Live news lookup is off until an allowlisted source is configured.",
+    "structured_grounded_research": "Grounded research lookup is off until an allowlisted source is configured.",
+    "structured_recent_text_messages": (
+        "Recent-message lookup is off until a local message source is configured. "
+        "It does not contact a messaging service."
+    ),
+    "structured_personal_assistant_synthesis": (
+        "Personal-assistant synthesis is off until assistant-state lines are supplied."
+    ),
+}
+
+
 def _refused_outbound(route, text):
     refused = []
     seen = set()
@@ -97,61 +111,37 @@ def _refused_outbound(route, text):
     return refused
 
 
-def run_lookup(route, prompt, *, allowlist=None, resolve=None, fetcher=None):
-    """Run one lookup. The only network read is an allowlisted fetch. Nothing is sent."""
-    allowed = tools_for(route)
-    prompt = prompt if isinstance(prompt, str) else ""
-    refused = _refused_outbound(route, prompt)
-    invoked = []
-    fenced_pages = []
-    document = allowlist if allowlist is not None else load_allowlist()
-    if "fetch" in allowed:
-        for url in URL.findall(prompt):
-            try:
-                admit(route, "fetch", url)
-            except ValueError:
-                refused.append("fetch")
-                continue
-            try:
-                if fetcher is not None:
-                    page = fetcher(url, document)
-                else:
-                    page = fetch.fetch(url, document, resolve=resolve or fetch.system_resolve)
-            except (OSError, ValueError):
-                refused.append("fetch")
-                continue
-            if not sanitize.fenced(page) or sanitize.visible_to_tools(page):
-                raise ValueError("Fetched text was not fenced")
-            # Names inside the fence are not tool calls. Do not admit them.
-            if sanitize.visible_to_tools(page):
-                admit(route, "send_message", page)
-            fenced_pages.append(page)
-            invoked.append("fetch")
-    visible = []
+def _visible(page):
+    match = sanitize.FENCE.fullmatch(page)
+    if match is None or sanitize.visible_to_tools(page):
+        raise ValueError("Fetched text was not fenced")
+    return match.group(3)
+
+
+def _finish(allowed, refused, invoked, fenced_pages, *, status, summary, blocked):
+    """Return one lookup. Fenced pages are data and are not admitted as tool calls."""
     for page in fenced_pages:
-        match = sanitize.FENCE.fullmatch(page)
-        if match:
-            visible.append(match.group(3))
-    summary = " ".join(visible).strip()
+        _visible(page)
+    text = summary.strip()
     return {
-        "ok": bool(fenced_pages),
+        "ok": status == "completed",
         "backend": "restricted_lookup",
         "execution_lane": "restricted_lookup",
         "delegated_to_cursor": False,
-        "summary": summary[:2000],
-        "user_summary": summary[:500],
+        "summary": text[:2000],
+        "user_summary": text[:500],
         "collaboration_trace": [],
         "machine_collaboration_trace": [],
         "phase_outputs": {},
-        "blocked_reason": "" if fenced_pages else "lookup_tools_restricted",
+        "blocked_reason": blocked,
         "internal_trace": "",
-        "raw_text": summary[:4000],
+        "raw_text": text[:4000],
         "tools_invoked": invoked,
         "tools_refused": refused,
         "allowed_tools": list(allowed),
-        "fenced": fenced_pages[0] if len(fenced_pages) == 1 else "",
+        "fenced": fenced_pages[0] if fenced_pages else "",
         "fenced_pages": fenced_pages,
-        "status": "completed" if fenced_pages else "refused",
+        "status": status,
         "stop_reason": "",
         "openclaw_run_id": "",
         "openclaw_session_id": "",
@@ -165,6 +155,140 @@ def run_lookup(route, prompt, *, allowlist=None, resolve=None, fetcher=None):
         "preferred_model_label": "",
         "requested_session_id": "",
     }
+
+
+def _state_lines(prompt):
+    marker = "Assistant-state lines:"
+    if marker not in prompt:
+        return []
+    lines = []
+    for raw in prompt.split(marker, 1)[1].splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if not line.startswith("- "):
+            break
+        text = line[2:].strip()
+        if text:
+            lines.append(text)
+    return lines
+
+
+def read_messages(path):
+    """Read one local message file. Nothing is sent to a messaging service."""
+    source = Path(path)
+    if source.is_symlink():
+        raise ValueError("The message source must be a private file")
+    try:
+        info = source.stat()
+    except OSError:
+        raise ValueError("The message source must be a private file") from None
+    if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= 64 * 1024:
+        raise ValueError("The message source must be a private file")
+    try:
+        document = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        raise ValueError("The message source is unreadable") from None
+    if (not isinstance(document, dict) or set(document) != {"version", "messages"}
+            or document.get("version") != 1):
+        raise ValueError("The message source is unreadable")
+    messages = document["messages"]
+    if not isinstance(messages, list) or not 0 < len(messages) <= 20:
+        raise ValueError("The message source is unreadable")
+    fenced = []
+    for item in messages:
+        if not isinstance(item, str) or not item.strip() or item != item.strip():
+            raise ValueError("The message source is unreadable")
+        try:
+            page = sanitize.fence("message", item, 2000)
+        except ValueError:
+            raise ValueError("The message source is unreadable") from None
+        fenced.append(page)
+        _visible(page)
+    return fenced
+
+
+def _extend_refused(refused, extra):
+    for name in extra:
+        if name not in refused:
+            refused.append(name)
+
+
+def run_lookup(route, prompt, *, allowlist=None, resolve=None, fetcher=None):
+    """Run one lookup. The only network read is an allowlisted fetch. Nothing is sent."""
+    allowed = tools_for(route)
+    prompt = prompt if isinstance(prompt, str) else ""
+    refused = _refused_outbound(route, prompt)
+    document = allowlist if allowlist is not None else load_allowlist()
+    if "fetch" in allowed:
+        targets = []
+        for url in document.get("sources", {}).get(route, ()):
+            if url not in targets:
+                targets.append(url)
+        for url in URL.findall(prompt):
+            if url not in targets:
+                targets.append(url)
+        if not targets:
+            return _finish(allowed, refused, [], [], status="disabled",
+                           summary=DISABLED[route], blocked="lookup_disabled")
+        invoked = []
+        fenced_pages = []
+        for url in targets:
+            try:
+                admit(route, "fetch", url)
+            except ValueError:
+                if "fetch" not in refused:
+                    refused.append("fetch")
+                continue
+            try:
+                if fetcher is not None:
+                    page = fetcher(url, document)
+                else:
+                    page = fetch.fetch(url, document, resolve=resolve or fetch.system_resolve)
+            except (OSError, ValueError):
+                if "fetch" not in refused:
+                    refused.append("fetch")
+                continue
+            # The page is data. Do not admit it, and do not fetch any URL it names.
+            fenced_pages.append(page)
+            invoked.append("fetch")
+            _extend_refused(refused, _refused_outbound(route, _visible(page)))
+        if not fenced_pages:
+            return _finish(allowed, refused, [], [], status="refused",
+                           summary="", blocked="lookup_tools_restricted")
+        summary = " ".join(_visible(page) for page in fenced_pages)
+        return _finish(allowed, refused, invoked, fenced_pages, status="completed",
+                       summary=summary, blocked="")
+    if "read_messages" in allowed:
+        source = os.environ.get("FO_MESSAGE_SOURCE", "")
+        if not source:
+            return _finish(allowed, refused, [], [], status="disabled",
+                           summary=DISABLED[route], blocked="lookup_disabled")
+        try:
+            admit(route, "read_messages", source)
+            fenced_pages = read_messages(source)
+        except (OSError, ValueError):
+            return _finish(allowed, refused, [], [], status="refused",
+                           summary="", blocked="lookup_tools_restricted")
+        for page in fenced_pages:
+            _extend_refused(refused, _refused_outbound(route, _visible(page)))
+        summary = " ".join(_visible(page) for page in fenced_pages)
+        return _finish(allowed, refused, ["read_messages"], fenced_pages, status="completed",
+                       summary=summary, blocked="")
+    kept = []
+    for line in _state_lines(prompt):
+        try:
+            page = sanitize.fence("state", line, 2000)
+        except ValueError:
+            continue
+        kept.append(page)
+        _extend_refused(refused, _refused_outbound(route, line))
+    if not kept:
+        return _finish(allowed, refused, [], [], status="disabled",
+                       summary=DISABLED[route], blocked="lookup_disabled")
+    summary = " ".join(_visible(page) for page in kept)
+    return _finish(allowed, refused, [], kept, status="completed",
+                   summary=summary, blocked="")
 
 
 def lookup_result(route, prompt, *, session_id="", collaboration_mode="", preferred_model_family="",

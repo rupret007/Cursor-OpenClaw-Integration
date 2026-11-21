@@ -730,7 +730,9 @@ def main() -> int:
         print(json.dumps({"ok": False, "error": _clip(exc, 2000)}))
         return 1
     print(json.dumps(result))
-    return 0 if result.get("ok") else 1
+    if result.get("ok") or result.get("status") == "disabled":
+        return 0
+    return 1
 
 
 if __name__ == "__main__":

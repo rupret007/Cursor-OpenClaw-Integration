@@ -3959,6 +3959,9 @@ class SyncServer:
                 break
         if summary and is_stale_openclaw_narrative(summary):
             return failure_reply, contaminated_reason
+        if str(result.get("status") or "") == "disabled":
+            disabled = failure_reason[:-7] if failure_reason.endswith("_failed") else failure_reason
+            return summary or failure_reply, f"{disabled}_disabled"
         if result.get("ok"):
             return summary or success_fallback, success_reason
         if summary:

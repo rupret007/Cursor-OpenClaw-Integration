@@ -51,8 +51,10 @@ def load_allowlist(document):
         raise ValueError("The fetch allowlist is unreadable")
     hosts = document.get("hosts", [])
     fixtures = document.get("fixtures", [])
-    extra = set(document) - {"version", "hosts", "fixtures"}
-    if extra or not isinstance(hosts, list) or not isinstance(fixtures, list):
+    sources = document.get("sources", {})
+    extra = set(document) - {"version", "hosts", "fixtures", "sources"}
+    if (extra or not isinstance(hosts, list) or not isinstance(fixtures, list)
+            or not isinstance(sources, dict)):
         raise ValueError("The fetch allowlist is unreadable")
     clean_hosts = []
     for host in hosts:
@@ -74,7 +76,36 @@ def load_allowlist(document):
         if origin in clean_fixtures:
             raise ValueError("The fetch allowlist repeats a fixture")
         clean_fixtures.append(origin)
-    return {"hosts": tuple(clean_hosts), "fixtures": tuple(clean_fixtures)}
+    clean_sources = {}
+    for route, urls in sources.items():
+        if route not in ("structured_live_news", "structured_grounded_research") or not isinstance(urls, list):
+            raise ValueError("The fetch allowlist is unreadable")
+        clean_urls = []
+        for url in urls:
+            clean_urls.append(_source_url(url, clean_hosts, clean_fixtures))
+        if len(clean_urls) != len(set(clean_urls)):
+            raise ValueError("The fetch allowlist repeats a source")
+        clean_sources[route] = tuple(clean_urls)
+    return {"hosts": tuple(clean_hosts), "fixtures": tuple(clean_fixtures), "sources": clean_sources}
+
+
+def _source_url(url, hosts, fixtures):
+    """A route source is an exact allowlisted page. The query does not choose it."""
+    parts = parse.urlsplit(url if isinstance(url, str) else "")
+    if (parts.username or parts.password or parts.query or parts.fragment
+            or not parts.hostname or parts.scheme not in ("http", "https")):
+        raise ValueError("The fetch allowlist is unreadable")
+    if parts.scheme == "http":
+        origin = f"http://127.0.0.1:{parts.port}"
+        if parts.hostname != "127.0.0.1" or parts.port is None or origin not in fixtures:
+            raise ValueError("The fetch allowlist is unreadable")
+        if parts.path in ("",) or not parts.path.startswith("/"):
+            raise ValueError("The fetch allowlist is unreadable")
+        return url
+    host = normalize_host(parts.hostname)
+    if parts.port not in (None, 443) or host not in hosts or not parts.path.startswith("/"):
+        raise ValueError("The fetch allowlist is unreadable")
+    return url
 
 
 def public_unicast(raw):

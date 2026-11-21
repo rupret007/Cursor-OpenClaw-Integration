@@ -107,6 +107,33 @@ def test_expired_secret_and_live_routine_do_not_save_or_send(tmp_path):
     assert not (tmp_path / "untouched").exists()
 
 
+def test_reinitializing_after_deleting_the_log_and_heads_does_not_verify(tmp_path):
+    """Deleting the log, key, and heads must not leave a new empty chain that verifies."""
+    root = tmp_path / "cycle"
+    cycle.initialize(root)
+    cycle.run_routine(root, NOW)
+    assert cycle.verify(root) == 1
+    trust = cycle.trust_dir(root)
+    witness = cycle.witness_dir(root)
+    identity = cycle.identity_dir(root)
+    assert (identity / "root.id").is_file()
+    for place in (root, root.parent, trust, witness):
+        assert place.resolve() != identity.resolve()
+        assert place.resolve() not in identity.resolve().parents
+        assert identity.resolve() not in place.resolve().parents
+    shutil.rmtree(root)
+    shutil.rmtree(trust)
+    shutil.rmtree(witness)
+    with pytest.raises(ValueError, match="reset|owner cannot delete"):
+        cycle.initialize(root)
+    with pytest.raises(ValueError, match="reset|owner cannot delete|truncated"):
+        cycle.verify(root)
+    shutil.rmtree(identity)
+    cycle.initialize(root)
+    # Residual, not a fix: once the owner deletes root.id too, a new empty chain verifies.
+    assert cycle.verify(root) == 0
+
+
 def test_deleting_every_owner_writable_audit_copy_is_not_a_silent_pass(tmp_path):
     """Deleting the root and both owner-writable copies must not verify as a fresh chain."""
     root = tmp_path / "cycle"

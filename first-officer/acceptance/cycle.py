@@ -220,6 +220,25 @@ def witness_dir(root):
     return witness_base / trust.name
 
 
+def identity_dir(root):
+    """Remember that this root was initialized, outside the log and both heads.
+
+    The owner can still delete this directory. It is not an anchor the owner
+    cannot remove. It only stops a reset that leaves this one file behind.
+    """
+    root = Path(root).resolve()
+    trust = trust_dir(root)
+    base = trust.parent
+    identity_base = base.parent / f"{base.name}-identity"
+    witness = witness_dir(root)
+    if (identity_base == base or _contained(identity_base, root) or _contained(identity_base, root.parent)
+            or _contained(identity_base, base) or _contained(identity_base, trust)
+            or _contained(identity_base, witness) or _contained(trust, identity_base)
+            or _contained(base, identity_base) or _contained(witness, identity_base)):
+        raise ValueError("The audit trust anchor must stay outside the acceptance parent")
+    return identity_base / trust.name
+
+
 def _write_anchor(directory, document):
     if directory.is_symlink() or directory.parent.is_symlink():
         raise ValueError("The acceptance file must be a private owner file")
@@ -239,6 +258,50 @@ def _read_anchor(directory):
     if not path.exists():
         return None
     return _read_json(path, {"digest", "mac", "seq"})
+
+
+def _identity_root(root):
+    return hashlib.sha256(str(Path(root).resolve()).encode()).hexdigest()
+
+
+def _read_identity(root):
+    directory = identity_dir(root)
+    path = directory / "root.id"
+    if directory.is_symlink() or path.is_symlink():
+        raise ValueError("The acceptance file must be a private owner file")
+    if not path.exists():
+        return None
+    return _read_json(path, {"key", "root"})
+
+
+def _same_identity(document, root, key):
+    expected_root = _identity_root(root)
+    presented_root = str(document.get("root", ""))
+    presented_key = str(document.get("key", ""))
+    if (len(presented_root) != len(expected_root) or len(presented_key) != len(str(key))
+            or not DIGEST.fullmatch(presented_key) or not DIGEST.fullmatch(presented_root)):
+        return False
+    return (hmac.compare_digest(presented_root, expected_root)
+            and hmac.compare_digest(presented_key, str(key)))
+
+
+def _write_identity(root, key):
+    directory = identity_dir(root)
+    if directory.is_symlink() or directory.parent.is_symlink():
+        raise ValueError("The acceptance file must be a private owner file")
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(directory, 0o700)
+    os.chmod(directory.parent, 0o700)
+    info = directory.lstat()
+    if info.st_uid != os.getuid() or not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o077:
+        raise ValueError("The acceptance file must be a private owner file")
+    _write_json(directory / "root.id", {"key": key, "root": _identity_root(root)})
+
+
+RESET_AUDIT = (
+    "The audit root was reset. A new empty chain is not a verified history. "
+    "The audit chain has no trust anchor the owner cannot delete."
+)
 
 
 def _checkpoint(root, seq, digest):
@@ -352,14 +415,21 @@ def initialize(root):
     root = _root(root)
     with _locked(root / "audit.log") as audit:
         rows, previous = _rows(audit)
+        identity = _read_identity(root)
         if _check_head(root, rows, previous):
+            key = _read_key(root)
+            if identity is None or key is None or not _same_identity(identity, root, key):
+                raise ValueError(RESET_AUDIT)
             raise ValueError("The audit chain is already initialized")
+        if identity is not None:
+            raise ValueError(RESET_AUDIT)
         if any(os.path.lexists(root / name) for name in ("memory.json", "receipt-lane-review.json")):
             raise ValueError("Acceptance records already exist without an audit checkpoint")
         pending = _read_json(root / "pending.json", {"digest", "expires_at", "nonce", "text"})
         if pending is not None:
             _pending_binding(pending)
         _checkpoint(root, -1, GENESIS)
+        _write_identity(root, _read_key(root))
 
 
 def propose(root, text, now):
@@ -568,7 +638,13 @@ def verify(root):
         if nonce not in seen:
             raise ValueError("A saved fact has no accepted audit line")
     if not initialized:
+        if _read_identity(root) is not None:
+            raise ValueError(RESET_AUDIT)
         raise ValueError(MISSING_AUDIT)
+    key = _read_key(root)
+    identity = _read_identity(root)
+    if key is None or identity is None or not _same_identity(identity, root, key):
+        raise ValueError(RESET_AUDIT)
     return len(rows)
 
 

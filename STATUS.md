@@ -94,7 +94,7 @@ On November 20, 2026 the four tests in `tests/first_officer/test_cycle.py` passe
 
 On November 21, 2026 `verify` also rejects an empty audit log when a checkpoint remains, a routine receipt with no audit line, and a pending file whose text no longer matches its digest. The checkpoint now lives outside the acceptance directory and outside its parent. A second copy is written beside that trust directory. Deleting the acceptance directory, a sibling, and the trust directory itself leaves the second copy, and `verify` fails. `tests/first_officer/test_cycle.py` covers that reset.
 
-Deleting the acceptance directory and both of those owner-writable copies still leaves no trust anchor the owner cannot delete. An empty directory cannot be distinguished from that reset, and this checkout cannot create an anchor the owner cannot remove. `verify` reports that limitation and does not pass. A directory that only holds a pending approval still verifies that approval. This is an accepted residual risk for Jeff to decide. Provisioning an anchor outside the owner's writable state is not done here.
+Deleting the acceptance directory and both of those owner-writable copies leaves a root identity, `root.id`, beside the trust base. `init` refuses to mint a replacement chain while that file remains, and `verify` does not accept one. Deleting `root.id` as well still lets `init` mint a new empty chain that `verify` accepts with zero lines. This checkout cannot create an anchor the owner cannot remove. That full reset is not detected and is not fixed. A directory that only holds a pending approval still verifies that approval. Provisioning an anchor outside the owner's writable state is not done here.
 
 ## Step 8: supervised authority pilot and staged failover
 

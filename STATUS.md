@@ -92,7 +92,7 @@ On November 20, 2026 the three tests in `tests/first_officer/test_status.py` pas
 
 On November 20, 2026 the four tests in `tests/first_officer/test_cycle.py` passed. One test saved a fact only after the matching digest, refused the second confirm, checked the receipt, and rejected three tampered chains. One test accepted a confirm at the last second of the ten minutes, refused the next second, refused an edited pending sentence, replaced an expired pending fact, and kept a credential out of the files. Two confirms in parallel saved one fact. The schedule test pinned 06:30, 08:00 and 07:00 Central on November 20, 2026 to the next 07:00. The command path printed the verified fact, the dry-run line and `Audit chain verified: 2 lines.` The offline gate passed 935 Python tests and compiles the module. `INSTALL.md` documents the commands.
 
-On November 21, 2026 `verify` also rejects an empty audit log when a checkpoint remains, a routine receipt with no audit line, and a pending file whose text no longer matches its digest. A fresh directory with no log, checkpoint, or receipt still verifies. `tests/first_officer/test_cycle.py` now has five tests.
+On November 21, 2026 `verify` also rejects an empty audit log when a checkpoint remains, a routine receipt with no audit line, and a pending file whose text no longer matches its digest. A fresh directory with no log, checkpoint, or receipt still verifies. The checkpoint is copied to a sibling directory, `.{root}.fo-audit-trust`, outside the acceptance directory. Wiping `audit.log`, `audit.head`, `audit.key` and the receipt leaves that copy, and `verify` fails. `tests/first_officer/test_cycle.py` covers that reset.
 
 ## Step 8: supervised authority pilot and staged failover
 

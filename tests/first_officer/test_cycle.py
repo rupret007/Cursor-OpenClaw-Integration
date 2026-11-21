@@ -100,6 +100,21 @@ def test_expired_secret_and_live_routine_do_not_save_or_send(tmp_path):
     assert not (tmp_path / "untouched").exists()
 
 
+def test_resetting_the_acceptance_directory_does_not_erase_the_trust_anchor(tmp_path):
+    root = tmp_path / "cycle"
+    cycle.run_routine(root, NOW)
+    for name in ("audit.log", "audit.head", "audit.key", "receipt-lane-review.json"):
+        (root / name).unlink()
+    with pytest.raises(ValueError, match="truncated"):
+        cycle.verify(root)
+    anchor = root.parent / f".{root.name}.fo-audit-trust" / "audit.head"
+    assert anchor.is_file()
+    assert root not in anchor.resolve().parents
+    fresh = tmp_path / "fresh"
+    assert cycle.verify(fresh) == 0
+    assert not (fresh.parent / f".{fresh.name}.fo-audit-trust").exists()
+
+
 def test_a_truncated_chain_or_an_orphan_receipt_does_not_verify(tmp_path):
     root = tmp_path / "cycle"
     cycle.run_routine(root, NOW)
@@ -111,8 +126,15 @@ def test_a_truncated_chain_or_an_orphan_receipt_does_not_verify(tmp_path):
         leftover = root / name
         if leftover.exists():
             leftover.unlink()
-    with pytest.raises(ValueError, match="receipt"):
+    with pytest.raises(ValueError, match="truncated"):
         cycle.verify(root)
+    orphan = tmp_path / "orphan"
+    orphan.mkdir(mode=0o700)
+    receipt = orphan / "receipt-lane-review.json"
+    receipt.write_text("{}\n", encoding="utf-8")
+    receipt.chmod(0o600)
+    with pytest.raises(ValueError, match="receipt"):
+        cycle.verify(orphan)
 
     pending = tmp_path / "pending"
     cycle.propose(pending, FACT, NOW)

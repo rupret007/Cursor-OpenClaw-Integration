@@ -169,19 +169,56 @@ def _key(root):
     return _read_key(root)
 
 
+def trust_dir(root):
+    """The checkpoint copy lives beside the acceptance directory, not inside it."""
+    root = Path(root)
+    return root.parent / f".{root.name}.fo-audit-trust"
+
+
 def _checkpoint(root, seq, digest):
     key = _key(root)
-    _write_json(root / "audit.head", {"digest": digest, "mac": _mac(key, seq, digest), "seq": seq})
+    document = {"digest": digest, "mac": _mac(key, seq, digest), "seq": seq}
+    _write_json(root / "audit.head", document)
+    trust = trust_dir(root)
+    if trust.is_symlink():
+        raise ValueError("The acceptance file must be a private owner file")
+    trust.mkdir(mode=0o700, exist_ok=True)
+    os.chmod(trust, 0o700)
+    info = trust.lstat()
+    if info.st_uid != os.getuid() or not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o077:
+        raise ValueError("The acceptance file must be a private owner file")
+    _write_json(trust / "audit.head", document)
+
+
+def _trusted_head(root):
+    trust = trust_dir(root)
+    path = trust / "audit.head"
+    if trust.is_symlink() or path.is_symlink():
+        raise ValueError("The acceptance file must be a private owner file")
+    if not path.exists():
+        return None
+    return _read_json(path, {"digest", "mac", "seq"})
+
+
+def _same_head(left, right):
+    if left.get("digest") != right.get("digest") or left.get("seq") != right.get("seq"):
+        return False
+    presented = left.get("mac")
+    expected = right.get("mac")
+    if not isinstance(presented, str) or not isinstance(expected, str) or len(presented) != len(expected):
+        return False
+    return hmac.compare_digest(presented, expected)
 
 
 def _check_head(root, rows, previous):
     head = _read_json(root / "audit.head", {"digest", "mac", "seq"})
     key = _read_key(root)
+    trusted = _trusted_head(root)
     if not rows:
-        if head is not None or key is not None:
+        if head is not None or key is not None or trusted is not None:
             raise ValueError("The audit chain was truncated")
         return
-    if head is None or key is None:
+    if head is None or key is None or trusted is None or not _same_head(trusted, head):
         raise ValueError("The audit chain has no checkpoint")
     presented = str(head.get("mac", ""))
     expected = _mac(key, head["seq"], head["digest"]) if type(head.get("seq")) is int else ""

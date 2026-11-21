@@ -83,6 +83,16 @@ python3 first-officer/lanes/queue.py "$queue_policy" "$lane_ledger" \
 
 Exit `0` means the lane is queued. The line is `Lane review is queued on hatchet as <run>.` or `Lane review is queued on restate as <invocation>.` The same command again prints `was already queued` and does not send a second time. Exit `1` means it was not queued. A timeout, a dropped connection, a redirect or any answer other than a connection refusal or HTTP 408, 425, 429, 500, 502, 503 or 504 stays unknown and is not failed over. An unknown or pending ledger row blocks a later send until the backend has been checked. A definite refusal from both backends can be retried. The command never pushes, merges or sends a message.
 
+## Send one trace to local Phoenix
+
+The exporter is OpenLLMetry, and the receiver path is Phoenix's OTLP/HTTP endpoint. Give it the collector's base URL, not the `/v1/traces` path. The URL has to be loopback HTTP. A public host, an HTTPS URL, a credential in the URL, or a path is rejected. The attributes file is a JSON object. It must include `fo.lane` and `fo.head`. It may include `fo.backend` (`hatchet`, `restate` or `none`) and `fo.outcome` (`queued`, `refused` or `unknown`). Any other field, including a prompt, is refused before a request is sent. Ambient collector settings and API keys are ignored for the export.
+
+```bash
+python3 first-officer/tracing/deliver.py "http://127.0.0.1:6006" "$span_attributes"
+```
+
+Exit `0` prints `Phoenix accepted span first-officer.lane for lane <name>.` Exit `1` means the collector did not accept it, or the attributes were refused. The command does not start Phoenix and does not send the span anywhere but the URL you passed.
+
 ## Check prerequisites on bobserver
 
 Run from the PR checkout as the account that owns `openclaw-gateway.service`. The GitHub CLI must authenticate as the configured owner account. The existing Andrea read-only bridge must answer from the service account using its private reader configuration.

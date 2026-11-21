@@ -19,7 +19,7 @@ This is the same gate CI runs. It takes about two minutes.
 bash scripts/test_integration.sh
 ```
 
-Expect `918 passed` from the Python suite and a final line `All integration checks passed.`. The `Handoff failed.` lines inside the exhaustive check are expected: that check deliberately feeds bad arguments and requires each one to be refused.
+Expect `921 passed` from the Python suite and a final line `All integration checks passed.`. The `Handoff failed.` lines inside the exhaustive check are expected: that check deliberately feeds bad arguments and requires each one to be refused.
 
 ## 2. The Segment 1 and captain gate
 
@@ -133,6 +133,27 @@ python3 -m pytest -q tests/first_officer/test_lane_queue.py
 
 Expect `16 passed`. One of those tests is the failover: the primary is called once, Restate is called once with the same lane and an idempotency key, and a second dispatch sends nothing. The other tests keep a timeout, a redirect and an authentication failure from failing over, and they keep two concurrent dispatchers to a single run. No token is written to the ledger.
 
+## 7. Step 4: one trace arrives at a local collector
+
+This installs the pinned OpenLLMetry and Phoenix exporter packages and sends one span to a loopback collector that the test starts. It does not start Phoenix's UI and it does not contact a hosted collector.
+
+```bash
+python3 -m venv /tmp/fo-trace
+/tmp/fo-trace/bin/pip install --requirement requirements-tracing-test.txt
+/tmp/fo-trace/bin/python tests/first_officer/tracing-acceptance.py
+```
+
+The line `Failed to export spans batch code: 500, reason: Internal Server Error` is the refusal drill. Expect it, then these lines:
+
+```
+Phoenix refusal was not recorded as delivery.
+Phoenix accepted one first-officer.lane trace at the loopback collector.
+It carried lane review, the head, backend restate and outcome queued.
+An ambient collector, proxy and API key were ignored, and a prompt was not exported.
+```
+
+OpenLLMetry also prints that it is exporting to a custom exporter and that no automatic instruments are set. That is this command's configuration: one explicit span, no provider instrumentation, and no cloud endpoint.
+
 ## What is not provable here yet
 
-Steps 4 through 8 in [STATUS.md](STATUS.md) are still in progress, and the timed Telegram checks and the supervised authority pilot still need a live gateway and your approval. Hatchet and Restate themselves are not installed. The queue command is ready to point at them when you approve a host.
+Steps 5 through 8 in [STATUS.md](STATUS.md) are still in progress, and the timed Telegram checks and the supervised authority pilot still need a live gateway and your approval. Hatchet, Restate and the Phoenix UI are not installed. The queue and trace commands are ready to point at them when you approve a host.

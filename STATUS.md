@@ -66,6 +66,12 @@ The gated run passed 889 Python tests in the offline integration gate, which now
 
 The offline gate on this tree passed 918 Python tests, including those 16, and 22 Node tests. The gate compiles `first-officer/lanes/queue.py`. `INSTALL.md` documents the command.
 
+## Step 4: Phoenix and OpenLLMetry
+
+`first-officer/tracing/deliver.py` sends one span, `first-officer.lane`, through OpenLLMetry into Phoenix's OTLP/HTTP path `/v1/traces`. The span may carry only a lane name, a full head, and the optional backend and outcome. Prompts and any value that looks like a credential are refused before a request is made. The collector has to be loopback HTTP with no path, user, query or fragment. Ambient collector URLs, API keys and proxies are removed for the export and the HTTP client ignores the proxy environment, so a trace cannot follow a cloud default or an authorization header that happened to be set.
+
+`tests/first_officer/tracing-acceptance.py` proves delivery against a loopback collector that speaks that path. Phoenix's own UI process is not started, and nothing is sent off the machine. On November 20, 2026, with Python 3.12.15, OpenLLMetry `traceloop-sdk` 0.63.1, `openinference-instrumentation-openllmetry` 0.1.4 and `arize-phoenix-otel` 0.17.3, a collector that returned HTTP 500 received one trace and the exporter refused to treat it as delivered. A prompt attribute made no request. A collector that returned HTTP 200 then received one protobuf span containing `first-officer.lane`, lane `review`, the head, backend `restate` and outcome `queued`. An ambient API key was not attached. The offline gate, which covers the allowlist and the loopback checks, passed 921 Python tests. The tracing job runs the delivery proof. `INSTALL.md` documents the command.
+
 ## One combined release and a page Jeff can test from
 
 `first-officer/release.py` turns the whole release into one reviewed operation with one rollback. `build` stages the candidate from the verified prior bundle, runs the packaged Round 13 canary and the Segment 1 and captain gate against it, and packs it. `activate` confirms the running gateway, the owner's GitHub login and the existing Andrea read-only bridge before it changes anything, publishes the candidate read-only under its digest through a private staging directory, prepares the private rollback, switches with the existing installer and confirms readiness. `rollback` restores the exact prior config and pin. Every command accepts `--dry-run`, which prints the exact ordered commands and runs none of them.
@@ -80,7 +86,7 @@ The release is a plan of reviewed commands, so the whole sequence is tested with
 - DONE. LiteLLM provider failover and per-lane budgets are proven above. Applying the gateway route to the remaining API clients follows as each lane moves over.
 - DONE. Codex and Claude usage tracking, Central Time reset reporting, the 90 percent warning and the committed `HANDOFF.md` are proven above.
 - DONE. The Hatchet lane queue and the Restate fallback are proven above. Live Hatchet and Restate processes stay uninstalled until Jeff approves a host.
-- The runtime records local traces. Integrate Phoenix and OpenLLMetry and verify trace delivery.
+- DONE. Phoenix and OpenLLMetry delivery to a loopback collector is proven above. A Phoenix UI process is not running.
 - The installed bundle reads flaky reports. Add the Playwright report producer and quarantine workflow.
 - The fleet reader consumes shared status. Finish the shared status view and admin console.
 - Verify grounded memory, scheduled routines, approval binding and the audit log end to end. The gateway add-on diagnostic covers guarded fetch, redaction and the skill catalog.

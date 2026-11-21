@@ -4,15 +4,15 @@ Resume on branch `codex-candace/fo-finish-20261120`. The commit that contains th
 
 ## Done in this checkout
 
-Steps 1 through 8 have local evidence in `STATUS.md`. Step 8 rehearses the authority pilot on a staged lease, including a missed-check-in failover, and prints the live checklist without running it. The offline gate passed 938 Python tests. The Node gate passed 23 tests. The four pull-request jobs were green on `3cd946c`. Later commits, including this one, need those jobs green again. The live lease was not touched.
+Steps 1 through 8 have local evidence in `STATUS.md`. The staged rollback drill is also done: the prior pin was restored on a private copy in 114 us, and the gateway was not touched. The offline gate passed 940 Python tests. The Node gate passed 23 tests. The four pull-request jobs were green on `3cd946c`. Later commits, including this one, need those jobs green again. The live lease was not touched.
 
 ## Next
 
-The eight ordered steps are evidenced locally. Next is the rollback drill on a staged copy, with the timing recorded. Then the secrets and PII scan, the release archive, the doc refresh, and the Cursor plan-usage check. Do not activate the live pilot.
+Scan the repository, reachable Git history and relevant logs for secrets and personal data, and add a test that keeps the scan enforced. Then build the release archive, refresh `CAPTAIN.md`, `INSTALL.md` and `LIVE-TEST.md`, and check that Cursor fallback stays inside plan usage. Do not activate the live pilot or roll back the live gateway.
 
 ## Open failures
 
-None in the local gates at this commit. Confirm the pull-request jobs are green on this head. Gateway activation, timed Telegram checks and the live authority pilot still wait for Jeff.
+None in the local gates at this commit. Confirm the pull-request jobs are green on this head. Gateway activation, timed Telegram checks, the live authority pilot and a live rollback still wait for Jeff.
 
 ## Do not
 

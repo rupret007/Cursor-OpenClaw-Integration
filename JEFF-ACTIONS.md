@@ -48,6 +48,10 @@ Run the staged command in [TEST-NOW.md](TEST-NOW.md), then the live checklist. S
 
 The operator commands for steps 3 through 9 are in [CAPTAIN.md](CAPTAIN.md). Keep the first live pilot to one review lane on one pull request head.
 
-## 4. Confirm the rollback drill window
+## 4. Confirm a live rollback window
 
-Before the pilot, the prior release and pin should be restored once on a staged copy and timed, so the real rollback has a measured duration rather than an estimate. This needs a staged copy of the current bundle and a few minutes when nobody is relying on the gateway. Tell us when that window is and we will script it to run unattended against the copy only.
+The staged file restore already ran. On November 20, 2026 it printed `Restored the prior pin in 114 us. The gateway was not touched.` That number is the copy on disk, not a gateway restart. A live rollback still stops and starts `openclaw-gateway.service`, and that has not been run. Use the private backup from an activation when you want that window.
+
+```bash
+python3 -B first-officer/release.py rollback "$backup"
+```

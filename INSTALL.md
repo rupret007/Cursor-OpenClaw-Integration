@@ -139,6 +139,14 @@ python3 first-officer/pilot/rehearse.py rehearse --root "$root" --epoch 12 --now
 python3 first-officer/pilot/rehearse.py checklist
 ```
 
+## Time a staged rollback of the prior pin
+
+The drill writes a private copy, restores the prior config and pin, and prints the elapsed microseconds. It does not stop the gateway. The live rollback command remains `python3 -B first-officer/release.py rollback` and waits for Jeff.
+
+```bash
+python3 first-officer/pilot/rollback_drill.py --root "$root"
+```
+
 ## Check prerequisites on bobserver
 
 Run from the PR checkout as the account that owns `openclaw-gateway.service`. The GitHub CLI must authenticate as the configured owner account. The existing Andrea read-only bridge must answer from the service account using its private reader configuration.

@@ -96,6 +96,12 @@ On November 20, 2026 the four tests in `tests/first_officer/test_cycle.py` passe
 
 On November 20, 2026 the three tests in `tests/first_officer/test_pilot.py` passed, including the missed-check-in failover, the handback path, the single epoch advance, the live-path refusal and the checklist text. The offline gate passed 938 Python tests and compiles the module. The live lease was not read or written. Production authority stays with captain until Jeff runs the checklist on bobserver. `JEFF-ACTIONS.md` lists those steps.
 
+## Rollback drill on a staged copy
+
+`first-officer/pilot/rollback_drill.py` builds a private copy of the prior config and pin, switches that copy to a candidate with the installer's own `candidate_config` and `patch_pin`, then writes the prior bytes back and reads them again. The timer covers that restore and the read-back. The command refuses `/opt/openclaw-fo`, `~/.openclaw`, the conductor state directory and the installed runner tree. It does not call `systemctl` and it does not read the live gateway config. A staged pin that is not the prepared candidate is left unchanged.
+
+On November 20, 2026 the two tests in `tests/first_officer/test_rollback_drill.py` passed. The prior pin bytes were back in place, the candidate digest was gone, and `systemctl` was not called. The command printed `Restored the prior pin in 114 us. The gateway was not touched.` That figure is the file restore on this Nuc, not the time a live gateway stop and start would take. The offline gate passed 940 Python tests and compiles the module.
+
 ## One combined release and a page Jeff can test from
 
 `first-officer/release.py` turns the whole release into one reviewed operation with one rollback. `build` stages the candidate from the verified prior bundle, runs the packaged Round 13 canary and the Segment 1 and captain gate against it, and packs it. `activate` confirms the running gateway, the owner's GitHub login and the existing Andrea read-only bridge before it changes anything, publishes the candidate read-only under its digest through a private staging directory, prepares the private rollback, switches with the existing installer and confirms readiness. `rollback` restores the exact prior config and pin. Every command accepts `--dry-run`, which prints the exact ordered commands and runs none of them.
@@ -122,7 +128,7 @@ The backlog references the bobserver lanes `infra-20261118`, `consolidate-202611
 
 These additional acceptance items follow the eight ordered integration steps. Each requires the same local and CI gates and exact evidence before it can be marked done.
 
-- Rehearse restoring the exact prior gateway release and pin on a staged copy and record the timing.
+- DONE for the staged file restore. The prior pin was written back and the read-back matched. The measured file restore was 114 us and did not touch the gateway. A live stop and start remains Jeff's.
 - Scan the repository, reachable Git history and relevant logs for secrets and personal data. Add an automated test that keeps the scan enforced.
 - DONE for the command and its gates. One combined release with a single activation command and rollback is proven above. The archive itself is built once the ordered steps land.
 - Update `CAPTAIN.md`, `INSTALL.md` and `LIVE-TEST.md` to reflect implemented and proven behavior, removing stale claims.

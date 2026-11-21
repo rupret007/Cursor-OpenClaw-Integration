@@ -19,7 +19,7 @@ This is the same gate CI runs. It takes about two minutes.
 bash scripts/test_integration.sh
 ```
 
-Expect `938 passed` from the Python suite and a final line `All integration checks passed.`. The `Handoff failed.` lines inside the exhaustive check are expected: that check deliberately feeds bad arguments and requires each one to be refused.
+Expect `940 passed` from the Python suite and a final line `All integration checks passed.`. The `Handoff failed.` lines inside the exhaustive check are expected: that check deliberately feeds bad arguments and requires each one to be refused.
 
 ## 2. The Segment 1 and captain gate
 
@@ -295,6 +295,23 @@ An old-epoch submit was rejected.
 ```
 
 `python3 first-officer/pilot/rehearse.py checklist` prints the ten live steps. Those steps are not run by the command.
+
+## 12. Rollback drill: restore the prior pin on a staged copy
+
+This times the file restore only. It does not stop the gateway. The microsecond count will differ from the 114 us measured on November 20, 2026. The sentence shape will not.
+
+```bash
+rm -rf /tmp/fo-rollback
+python3 first-officer/pilot/rollback_drill.py --root /tmp/fo-rollback
+```
+
+Expect one line:
+
+```
+Restored the prior pin in <microseconds> us. The gateway was not touched.
+```
+
+`/tmp/fo-rollback/pin.conf` contains the prior release pin, and `/tmp/fo-rollback/receipt.json` has `"gateway_touched": false` and `"restored": true`.
 
 ## What is not provable here yet
 

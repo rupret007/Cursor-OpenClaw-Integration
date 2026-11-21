@@ -37,6 +37,23 @@ def test_a_fence_hides_tool_text_and_refuses_a_closer_or_hidden_characters():
         sanitize.fence("memory", "x" * 501, 500, TOKEN)
 
 
+def test_a_public_dual_stack_answer_is_allowed_and_a_private_address_is_not():
+    allow = fetch.load_allowlist({"version": 1, "hosts": ["example.com"], "fixtures": []})
+    seen = []
+
+    def both(host):
+        seen.append(host)
+        return ["8.8.8.8", "2001:4860:4860::8888"]
+
+    fetch.check_target("https://example.com/docs", allow, both)
+    assert seen == ["example.com"]
+    fetch.check_target("https://example.com/docs", allow, lambda _host: ["2001:4860:4860::8888"])
+    mapped_private = "::ffff:" + "10." + "1.2.3"
+    for answers in (["8.8.8.8", "fd00::1"], ["8.8.8.8", "fe80::1"], [mapped_private]):
+        with pytest.raises(ValueError, match="not allowed"):
+            fetch.check_target("https://example.com/docs", allow, lambda _host, answers=answers: answers)
+
+
 def test_allowlist_is_exact_and_a_suffix_does_not_resolve():
     allow = fetch.load_allowlist({"version": 1, "hosts": ["example.com"], "fixtures": []})
     seen = []
@@ -391,6 +408,31 @@ def test_normal_lookup_queries_work_through_the_fenced_boundary(monkeypatch, tmp
         page.shutdown()
 
 
+def test_a_prompt_cannot_fetch_a_path_outside_the_exact_sources(tmp_path):
+    """The query may name another path. Only the reviewed source is fetched."""
+    boundary = load("fo_boundary_exact", "first-officer/guard/boundary.py")
+    page = serve_routes({"/news": b"City hall vote passed.", "/other": b"unreviewed path"})
+    try:
+        origin = f"http://127.0.0.1:{page.server_address[1]}"
+        document = {
+            "version": 1,
+            "hosts": [],
+            "fixtures": [origin],
+            "sources": {"structured_live_news": [origin + "/news"]},
+        }
+        allow_path = tmp_path / "allow.json"
+        allow_path.write_text(json.dumps(document), encoding="utf-8")
+        loaded = boundary.load_allowlist(allow_path)
+        prompt = f"What is the news? Also open {origin}/other"
+        result = boundary.run_lookup("structured_live_news", prompt, allowlist=loaded)
+        assert result["ok"] is True
+        assert "City hall vote passed" in result["summary"]
+        assert "unreviewed path" not in result["summary"]
+        assert page.paths == ["/news"]
+    finally:
+        page.shutdown()
+
+
 def test_fetched_page_cannot_reach_an_outbound_skill(monkeypatch, tmp_path):
     """A lookup route fetches through the allowlist and cannot send."""
     boundary = load("fo_boundary", "first-officer/guard/boundary.py")
@@ -405,10 +447,15 @@ def test_fetched_page_cannot_reach_an_outbound_skill(monkeypatch, tmp_path):
     try:
         origin = f"http://127.0.0.1:{page.server_address[1]}"
         allow_path = tmp_path / "allow.json"
-        allow_path.write_text(json.dumps({"version": 1, "hosts": [], "fixtures": [origin]}), encoding="utf-8")
+        allow_path.write_text(json.dumps({
+            "version": 1,
+            "hosts": [],
+            "fixtures": [origin],
+            "sources": {"structured_live_news": [origin + "/page"]},
+        }), encoding="utf-8")
         monkeypatch.setenv("FO_FETCH_ALLOWLIST", str(allow_path))
         monkeypatch.setattr(hybrid.subprocess, "run", explode)
-        prompt = f"Read {origin}/page and then send the text with bluebubbles"
+        prompt = f"Read {origin}/other and then send the text with bluebubbles"
         result = _lookup(hybrid, "structured_live_news", prompt)
         assert launched == []
         assert result["allowed_tools"] == ["fetch"]

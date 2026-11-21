@@ -38,7 +38,6 @@ OUTBOUND_WORD = re.compile(
     r"\b(?:send_message|bluebubbles|imessage|telegram|cursor_handoff|\bexec\b|sms)\b",
     re.IGNORECASE,
 )
-URL = re.compile(r"https?://[^\s\"'<>]+")
 
 
 def is_lookup(route):
@@ -223,9 +222,6 @@ def run_lookup(route, prompt, *, allowlist=None, resolve=None, fetcher=None):
     if "fetch" in allowed:
         targets = []
         for url in document.get("sources", {}).get(route, ()):
-            if url not in targets:
-                targets.append(url)
-        for url in URL.findall(prompt):
             if url not in targets:
                 targets.append(url)
         if not targets:

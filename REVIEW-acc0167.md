@@ -250,3 +250,19 @@ The green gates do not cover the blockers above:
   were not exercised. Those limits do not explain the self-certified delivery
   or interrupted-rollback failures, both of which are established in the
   in-repository production code.
+
+## FIXES
+
+Each finding was reproduced with a failing test, then fixed. The original FAIL above is unchanged. Local gates after these commits: secret scan clean (`Files 352`, `History commits 306`, `Logs 0`, before the commit that records this section; the file count includes the local gitignored `data/` tree), `bash scripts/test_integration.sh` passed 986 Python tests, and the Segment 1 and captain Node gate passed 23 tests. No live gateway, bobserver, Telegram, or production action was used. Phoenix, Restate and Hatchet were not installed.
+
+| Finding | Commit | Test |
+| --- | --- | --- |
+| HIGH — the production delivery tool invents delivery | `74e85debbba402e6f3621663d8386537548cf79f` Record outbound delivery only when the carrier confirms it. | `tests/test_outbound_carrier.py::test_unconfirmed_delivery_is_not_recorded`, `tests/test_outbound_carrier.py::test_exact_confirmation_records_the_carrier_result_once`, and `tests/test_andrea_sync.py::TestAndreaSync::test_exact_confirmation_delivers_once_and_binds_the_receipt` |
+| HIGH — rollback refuses the half-switched state | `248b7847a3f14d6f31434dc448110f168cf8e773` Recover a half-switched config and pin from either command. | `tests/first_officer/test_install.py::test_activation_and_rollback_recover_every_intermediate_pair` |
+| HIGH — an empty fetched page is reported as a grounded success | `cabafab18f3609a65c788efd5d2f37de9db6c637` Refuse an empty fetched page instead of reporting a grounded success. `961cd0909f3468485fd4f82caccab500e414f618` keeps a generic completion on the route fallback and does not treat that completion as an empty page. | `tests/first_officer/test_guard.py::test_an_empty_fetched_page_is_not_a_grounded_success` and `tests/test_andrea_sync.py::TestAndreaSync::test_server_recent_text_messages_fall_back_when_openclaw_summary_is_generic` |
+| MEDIUM — common dual-stack HTTPS sources are refused | `e59dab80a46f927e6a59af971fc7dfd99a13dc00` Allow a public IPv4 and IPv6 answer for an allowlisted fetch. | `tests/first_officer/test_guard.py::test_a_public_dual_stack_answer_is_allowed_and_a_private_address_is_not` |
+| MEDIUM — a prompt can expand an exact-page allowlist | `f5ce135e0be85e2e1d8654645c7a4850d5fb4cdd` Fetch only the exact allowlisted pages for a lookup. | `tests/first_officer/test_guard.py::test_a_prompt_cannot_fetch_a_path_outside_the_exact_sources` |
+| MEDIUM — the audit chain accepts deletion of owner-writable trust state | `790f60149a304f64ecc7e6c260ab125facc26a2c` Keep the audit anchor outside the acceptance parent. | `tests/first_officer/test_cycle.py::test_deleting_the_acceptance_directory_and_its_sibling_does_not_verify` |
+| MEDIUM — quoted Git paths hide deleted historical credentials | `f47649751e6e29d082010d775d148b85b9966a4b` Scan credentials hidden by Git's quoted history paths. | `tests/first_officer/test_privacy.py::test_history_scans_a_quoted_path_and_the_deleted_credential` |
+| MEDIUM — private-endpoint checks are not bound to the connection | `de5c846d17f3c07f919b0dcb5b0a44d941ab66b0` Connect to the addresses that passed the endpoint check. | `tests/first_officer/test_lane_queue.py::test_named_https_queue_connects_to_the_checked_address`, `tests/first_officer/test_litellm_policy.py::test_litellm_connects_to_the_checked_address`, and `tests/first_officer/test_guard.py::test_fetch_connects_to_the_checked_address_and_not_a_later_lookup` |
+| MEDIUM — queue HTTPS literals bypass `FO_QUEUE_HOSTS` | `dc0fd1b01f3e3cb43393ac1485932f2a54f0bc39` Require the queue allowlist for a private HTTPS address. | `tests/first_officer/test_lane_queue.py::test_a_private_https_literal_needs_the_queue_allowlist` |

@@ -1,19 +1,11 @@
 # First Officer handoff
 
-The 97% quota stop triggered on November 20, 2026 at 10:30 p.m. Central Time, before Step 1 began.
-
-| Account | 5-hour usage and reset | Weekly usage and reset |
-| --- | --- | --- |
-| Candace | 3%, Nov 21 at 3:30 a.m. CST | 89%, Nov 26 at 8:33 a.m. CST |
-| Travis | 0%, Nov 21 at 3:30 a.m. CST | **100%**, Nov 21 at 9:24 p.m. CST |
-
-The subscription readings came from Codex `app-server` over stdio via `account/rateLimits/read`. Both accounts reported no available paid credits.
+Candace crossed the 90% weekly warning during Step 1. The quota read at 10:37:42 p.m. Central Time on November 20, 2026 showed 42% of the five-hour window and 95% of the weekly window. They reset November 21 at 3:30:30 a.m. CST and November 26 at 8:33:31 a.m. CST, respectively. The active `CODEX_HOME` provided the subscription snapshot via Codex `account/rateLimits/read`. Paid credits were unavailable.
 
 ## Resume point
 
-- Branch `codex-candace/fo-finish-20261120` starts from `3d350baac7636fe068d5be6299991f5e776259b5`, the implementation HEAD before this handoff commit and the verified head of draft PR #33. Use `git rev-parse HEAD` on the branch for the handoff commit SHA.
-- Step 1 of 8 is next. Recheck both accounts against the 97% stop rule, then use a local LiteLLM instance with synthetic providers. Force the primary to fail, assert the fallback succeeds, and verify both provider calls. Exhaust one lane's budget, assert its next request is rejected, and verify a second lane still works. Route the repository's API inference clients through the proxy and verify their request paths.
-- Open acceptance gaps are provider failover, per-lane budget enforcement and the remaining API client routes. No implementation changes or gate runs were made. There is no finish-branch CI result or stacked draft PR yet.
-- After Step 1 passes locally, record exact evidence in `STATUS.md`, commit, push and open one draft PR targeting `codex/first-officer-segment-1`. Verify CI before proceeding to Step 2.
-- `STATUS.md`, `CAPTAIN.md`, `INSTALL.md` and `LIVE-TEST.md` were read in full. Gateway activation, Telegram checks and the supervised production pilot await Jeff's approval.
-- Jeff added four post-step-8 acceptance items to `STATUS.md`: enforced repository/history/log secrets and PII scanning, a single combined activation and rollback bundle, documentation reconciliation, and proof that Cursor fallback stays within plan usage with paid extras disabled.
+- Branch `codex-candace/fo-finish-20261120` is stacked on `3d350baac7636fe068d5be6299991f5e776259b5`, the head of draft PR #33. The Andrea client routing commit is `73e8b9dbefe1f8d12b0f3adedd6514fe7b585618`.
+- Step 1 of 8 is in progress. No finish-branch draft PR exists. `bash scripts/test_integration.sh` passed with synthetic settings, Python 3.12.15 and Node 24.16.0 for the Andrea routing changes (877 tests and 133 subtests). The 15 focused Andrea tests passed. The local fixture exercised four chat completion paths and checked lane-key use and fail-closed behavior with a legacy provider key. The corrected baseline passed all offline stages with 876 tests and 133 subtests. The baseline Node gate passed 22 tests.
+- The new acceptance fixture starts a temporary PostgreSQL instance and LiteLLM with two synthetic providers. Its first run hit a missing generated Prisma client at startup. The CI workflow now generates that client after installing `requirements-litellm-test.txt`. Complete the rerun and capture both provider calls, cumulative budget exhaustion, blocked upstream calls and the unaffected second lane. The command is `python tests/first_officer/litellm-acceptance.py` with private local test dependencies and `FO_TEST_POSTGRES_BIN` pointing at the PostgreSQL binaries when needed.
+- Finish validation of the reviewed LiteLLM policy and separate gateway lane credential. Rerun the full gates, record exact Step 1 evidence in `STATUS.md`, push and open one draft PR targeting `codex/first-officer-segment-1`. Wait for its CI before beginning Step 2. Recheck quota on the active account only and stop at 97% of either window.
+- `STATUS.md`, `CAPTAIN.md`, `INSTALL.md` and `LIVE-TEST.md` were read in full. Gateway activation, Telegram checks and the supervised production pilot await Jeff's approval. The rollback drill and the other four post-pilot tasks are listed in `STATUS.md`.

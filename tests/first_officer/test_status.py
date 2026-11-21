@@ -80,3 +80,65 @@ def test_status_page_is_loopback_get_only_and_escapes_the_snapshot(tmp_path):
     finally:
         server.shutdown()
         server.server_close()
+
+
+def _fetch(url):
+    try:
+        with urlopen(url, timeout=2) as response:
+            return response.status, response.read()
+    except HTTPError as error:
+        return error.code, error.read()
+
+
+def test_status_refuses_scanner_credential_shapes(tmp_path):
+    """build sets a redacted alert and serve returns 503 without the snapshot body."""
+    shapes = (
+        ("github_pat", "github" + "_pat_" + "A" * 16),
+        ("asia", "AS" + "IA" + "B" * 16),
+        ("akia", "AK" + "IA" + "C" * 16),
+        ("slack", "xox" + "b-" + "d" * 10),
+        ("bearer_alpha", "Bearer " + "e" * 16),
+        ("bearer_alnum", "bearer " + ("F" * 12 + "8" * 6)),
+        ("bearer_same_shape", "BEARER " + ("ANDREA_SYNC_INTERNAL_TOKEN"[:-1] + "M")),
+        ("bearer_longer_shape", "Bearer " + ("ANDREA_SYNC_INTERNAL_TOKEN" + "S")),
+        ("bearer_mixed", "bearer " + "ab-cd.ef_ghijklm"),
+        ("bearer_symbols", "Bearer " + ("aa_bb" + "-cc.dd/ee+ff~gg")),
+    )
+    for label, secret in shapes:
+        document = status.build({"heavy_jobs": 1, "note": secret}, NOW)
+        present = secret in json.dumps(document)
+        alert = document["alerts"] == ["redacted"]
+        print(label, "build", alert, present)
+        assert alert is True
+        assert present is False
+        assert document["host"] == {"heavy_jobs": 1}
+
+    fixture = "Bearer " + "ANDREA_SYNC_INTERNAL_TOKEN"
+    exempt = status.build({"heavy_jobs": 1, "note": fixture}, NOW)
+    print("fixture", "build", "redacted" in exempt["alerts"])
+    assert exempt["alerts"] == []
+    assert exempt["host"] == {"heavy_jobs": 1}
+
+    path = tmp_path / "STATUS.json"
+    path.write_text('{"v":1,"host":{}}\n', encoding="utf-8")
+    server = status.serve(path)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        for label, secret in shapes:
+            path.write_text(json.dumps({"v": 1, "host": {}, "note": secret}) + "\n", encoding="utf-8")
+            for route in ("/", "/status.json"):
+                code, payload = _fetch(base + route)
+                hidden = code == 503 and payload == b"Status unavailable\n"
+                print(label, route, code, hidden)
+                assert code == 503
+                assert hidden is True
+        path.write_text(json.dumps({"v": 1, "host": {}, "note": fixture}) + "\n", encoding="utf-8")
+        for route in ("/", "/status.json"):
+            code, _payload = _fetch(base + route)
+            print("fixture", route, code)
+            assert code == 200
+    finally:
+        server.shutdown()
+        server.server_close()

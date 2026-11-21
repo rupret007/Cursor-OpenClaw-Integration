@@ -122,6 +122,10 @@ def test_memory_refuses_scanner_credential_shapes(tmp_path):
         "Bearer " + ("D" * 12 + "8" * 8),
         "AS" + "IA" + "E" * 16,
         "AK" + "IA" + "F" * 16,
+        "Bearer " + ("ANDREA_SYNC_INTERNAL_TOKEN"[:-1] + "M"),
+        "bearer " + ("ANDREA_SYNC_INTERNAL_TOKEN" + "S"),
+        "Bearer " + "ab-cd.ef_ghijklm",
+        "BEARER " + ("aa_bb" + "-cc.dd/ee+ff~gg"),
     )
     for index, secret in enumerate(shapes):
         root = tmp_path / f"cycle-{index}"
@@ -132,6 +136,12 @@ def test_memory_refuses_scanner_credential_shapes(tmp_path):
         assert cycle.recall(root) == "No verified saved fact."
         assert not (root / "pending.json").exists()
         assert not (root / "memory.json").exists()
+    allowed = tmp_path / "exact-fixture"
+    cycle.initialize(allowed)
+    fact = "Remember Bearer " + "ANDREA_SYNC_INTERNAL_TOKEN" + " today."
+    card = cycle.propose(allowed, fact, NOW)
+    assert card["text"] == fact
+    assert cycle.recall(allowed) == "No verified saved fact."
 
 
 def test_reinitializing_after_deleting_the_log_and_heads_does_not_verify(tmp_path):

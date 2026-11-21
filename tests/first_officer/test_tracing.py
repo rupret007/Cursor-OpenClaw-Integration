@@ -52,3 +52,59 @@ def test_collector_must_be_loopback_http_with_no_path_or_credential():
     ):
         with pytest.raises(ValueError, match="loopback HTTP collector"):
             deliver.collector_url(url)
+
+
+def test_attributes_refuse_scanner_credential_shapes():
+    """github_pat, ASIA, AKIA, and xoxb values are refused before a request would be made."""
+    shapes = (
+        ("github_pat", "github" + "_pat_" + "A" * 16),
+        ("asia", "AS" + "IA" + "B" * 16),
+        ("akia", "AK" + "IA" + "C" * 16),
+        ("slack", "xox" + "b-" + "d" * 10),
+    )
+    results = []
+    for label, secret in shapes:
+        fits = deliver.NAME.fullmatch(secret) is not None
+        shared = deliver.SECRET.search(secret) is True
+        legacy = deliver._EXTRA.search(secret) is not None
+        refused = False
+        try:
+            deliver.clean_attributes({**GOOD, "fo.lane": secret})
+        except ValueError as error:
+            refused = str(error) == "A trace attribute is not usable"
+        results.append((label, fits, shared, legacy, refused))
+    print(results)
+    assert results == [
+        ("github_pat", True, True, False, True),
+        ("asia", True, True, False, True),
+        ("akia", True, True, False, True),
+        ("slack", True, True, False, True),
+    ]
+
+
+def test_attributes_still_refuse_shapes_outside_the_shared_rule():
+    """A short classic prefix, an api-key word, and a case-insensitive sk- prefix stay refused."""
+    shapes = (
+        ("short_classic", "ghp_" + "abcdefg"),
+        ("api_key", "api_key"),
+        ("api_key_hyphen", "api-key"),
+        ("upper_sk", "SK-" + "a" * 8),
+    )
+    results = []
+    for label, secret in shapes:
+        fits = deliver.NAME.fullmatch(secret) is not None
+        shared = deliver.SECRET.search(secret) is True
+        legacy = deliver._EXTRA.search(secret) is not None
+        refused = False
+        try:
+            deliver.clean_attributes({**GOOD, "fo.lane": secret})
+        except ValueError as error:
+            refused = str(error) == "A trace attribute is not usable"
+        results.append((label, fits, shared, legacy, refused))
+    print(results)
+    assert results == [
+        ("short_classic", True, False, True, True),
+        ("api_key", True, False, True, True),
+        ("api_key_hyphen", True, False, True, True),
+        ("upper_sk", True, False, True, True),
+    ]

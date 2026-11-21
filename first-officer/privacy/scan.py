@@ -2,8 +2,9 @@
 """Scan the checkout, its reachable history and its logs for secrets and personal data.
 
 A finding names the rule and the location. It never includes the matched text.
-Known synthetic fixtures are ignored, as is the exact bearer fixture
-ANDREA_SYNC_INTERNAL_TOKEN. A different string of the same shape is a failure.
+Known synthetic fixtures are ignored. Bearer exemptions are exact strings only:
+ANDREA_SYNC_INTERNAL_TOKEN and three hyphenated test fixtures already in the
+tree. A different string of the same shape is a failure.
 The command exits 1 when any finding remains. History includes one patch per
 parent of a merge, so a value that appears only in a merge result is still a
 finding.
@@ -23,6 +24,14 @@ FIXTURES = frozenset({
     "sk-abcd1234efgh5678",
 })
 BEARER_FIXTURE = "ANDREA_SYNC_INTERNAL_TOKEN"
+# Exact strings already committed as synthetic fixtures. A different string of
+# the same shape is still a credential. Do not replace this set with a pattern.
+BEARER_FIXTURES = frozenset({
+    BEARER_FIXTURE,
+    "experience-internal-token",
+    "fixture-lane-key",
+    "internal-test-token",
+})
 SKIP = {".git", "__pycache__", ".pytest_cache", "node_modules", ".venv", "venv"}
 LOCAL_DATABASE = {
     Path("data/andrea_sync.db"),
@@ -142,11 +151,10 @@ def personal_email(raw):
 
 
 def bearer_token_is_credential(token):
-    """A long alphabetic or digit-bearing bearer value. Only the exact fixture is exempt."""
-    if token == BEARER_FIXTURE:
+    """Any bearer token in the enforced alphabet. Only exact fixtures are exempt."""
+    if token in BEARER_FIXTURES:
         return False
-    alphabetic = re.fullmatch(r"[A-Za-z]{16,}", token) is not None
-    return any(character.isdigit() for character in token) or alphabetic
+    return BEARER.fullmatch("Bearer " + str(token)) is not None
 
 
 # Production guards keep every shape the checkout scanner enforces, including the

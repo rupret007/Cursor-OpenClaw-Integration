@@ -23,6 +23,15 @@ def test_fixture_set_is_frozen_and_only_those_strings_are_ignored():
     assert scan.findings_in_text("ask-location task-YYYYMMDD-HHMMSS") == []
     assert scan.findings_in_text("note sk-" + "live-secretvalue") == []
     assert scan.findings_in_text("Bearer ANDREA_SYNC_INTERNAL_TOKEN") == []
+    assert scan.BEARER_FIXTURES == frozenset({
+        "ANDREA_SYNC_INTERNAL_TOKEN",
+        "experience-internal-token",
+        "fixture-lane-key",
+        "internal-test-token",
+    })
+    for exact in ("experience-internal-token", "fixture-lane-key", "internal-test-token"):
+        assert scan.findings_in_text("Bearer " + exact) == []
+        assert [item["rule"] for item in scan.findings_in_text("Bearer " + exact + "s")] == ["credential"]
     assert scan.findings_in_text("see 8" + ".8.8.8 and 203.0.113.9 and 127.0.0.1") == []
     assert scan.findings_in_text("lane@example.invalid") == []
     assert scan.findings_in_text("+1" + "5555550123") == []
@@ -369,6 +378,96 @@ def test_uppercase_bearer_credentials_fail_closed(tmp_path, capsys):
     for line in (1, 2, 3, 4, 5, 6, 7):
         assert f"credential note.txt:{line}" in captured.err
     assert "credential note.txt:8" not in captured.err
+
+
+def test_punctuated_bearer_tokens_fail_closed(tmp_path, capsys):
+    """A non-digit bearer with punctuation is a credential. Only exact fixtures are exempt."""
+    fixture = "ANDREA_SYNC_INTERNAL_TOKEN"
+    same_shape = fixture[:-1] + "M"
+    longer_shape = fixture + "S"
+    lower_fixture = fixture.lower()
+    mixed = "ab-cd.ef_ghijklm"
+    symbols = "aa_bb" + "-cc.dd/ee+ff~gg"
+    pure = "a" * 16
+    alnum = "A" * 12 + "7" * 8
+    listed = "internal-test-token"
+    near = listed + "s"
+    short = "a-b.c" * 3
+    bearers = {
+        "same_shape": "Bearer " + same_shape,
+        "longer_shape": "bearer " + longer_shape,
+        "lower_fixture": "Bearer " + lower_fixture,
+        "mixed": "Bearer " + mixed,
+        "symbols": "BEARER " + symbols,
+        "pure": "bearer " + pure,
+        "alnum": "Bearer " + alnum,
+        "near": "bearer " + near,
+        "fixture": "Bearer " + fixture,
+        "listed": "bearer " + listed,
+        "short": "Bearer " + short,
+    }
+    for name in ("same_shape", "longer_shape", "lower_fixture", "mixed", "symbols", "pure", "alnum", "near"):
+        assert [item["rule"] for item in scan.findings_in_text(bearers[name])] == ["credential"]
+        assert scan.enforced_secret.search(bearers[name]) is True
+    for name in ("fixture", "listed", "short"):
+        assert scan.findings_in_text(bearers[name]) == []
+        assert scan.enforced_secret.search(bearers[name]) is None
+    assert scan.enforced_secret.sub("[redacted]", bearers["same_shape"]) == "[redacted]"
+    assert scan.enforced_secret.sub("[redacted]", bearers["mixed"]) == "[redacted]"
+    assert scan.enforced_secret.sub("[redacted]", bearers["fixture"]) == bearers["fixture"]
+
+    lines = [
+        bearers["same_shape"],
+        bearers["longer_shape"],
+        bearers["lower_fixture"],
+        bearers["mixed"],
+        bearers["symbols"],
+        bearers["pure"],
+        bearers["alnum"],
+        bearers["near"],
+        bearers["fixture"],
+        bearers["listed"],
+        bearers["short"],
+    ]
+    secrets = (same_shape, longer_shape, lower_fixture, mixed, symbols, pure, alnum, near)
+    root = tmp_path / "checkout"
+    root.mkdir()
+    note = root / "note.txt"
+    note.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    findings, _count = scan.scan_files(root)
+    rendered, code = scan.report({"files": 1, "commits": 0, "logs": 0, "findings": findings})
+    assert code == 1
+    for secret in secrets:
+        assert secret not in rendered
+    for line in (1, 2, 3, 4, 5, 6, 7, 8):
+        assert f"credential note.txt:{line}" in rendered
+    for line in (9, 10, 11):
+        assert f"credential note.txt:{line}" not in rendered
+
+    def git(*args):
+        return subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
+
+    git("init", "-q", "-b", "demo")
+    git("config", "user.email", "lane@example.invalid")
+    git("config", "user.name", "First Officer lane")
+    git("add", "note.txt")
+    git("commit", "-q", "-m", "fixture")
+    history, commits = scan.scan_history(root)
+    assert commits == 1
+    assert any(item["rule"] == "credential" and item["path"] == "note.txt" for item in history)
+    history_report, history_code = scan.report({"files": 0, "commits": commits, "logs": 0, "findings": history})
+    assert history_code == 1
+    for secret in secrets:
+        assert secret not in history_report
+
+    assert scan.main(["--root", str(root), "--files-only"]) == 1
+    captured = capsys.readouterr()
+    for secret in secrets:
+        assert secret not in captured.err and secret not in captured.out
+    for line in (1, 2, 3, 4, 5, 6, 7, 8):
+        assert f"credential note.txt:{line}" in captured.err
+    for line in (9, 10, 11):
+        assert f"credential note.txt:{line}" not in captured.err
 
 
 def test_the_repository_history_and_logs_stay_clean(capsys):

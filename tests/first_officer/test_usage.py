@@ -205,12 +205,23 @@ def test_handoff_refuses_scanner_credential_shapes(tmp_path, capsys):
         "Bearer " + "a" * 24,
         "BEARER " + "C" * 20,
         "AS" + "IA" + "E" * 16,
+        "Bearer " + ("ANDREA_SYNC_INTERNAL_TOKEN"[:-1] + "M"),
+        "bearer " + ("ANDREA_SYNC_INTERNAL_TOKEN" + "S"),
+        "Bearer " + "ab-cd.ef_ghijklm",
+        "BEARER " + ("aa_bb" + "-cc.dd/ee+ff~gg"),
     )
     for secret in shapes:
         with pytest.raises(ValueError, match="credential or address") as caught:
             track.commit_handoff(lane, report, branch, head, "Step 2", "Next", [f"saw {secret}"])
         assert secret not in str(caught.value)
         assert not (lane / "HANDOFF.md").exists()
+
+    allowed, allowed_branch, allowed_head = repo(tmp_path / "fixture-ok")
+    fixture_failure = "saw Bearer " + "ANDREA_SYNC_INTERNAL_TOKEN"
+    track.commit_handoff(allowed, report, allowed_branch, allowed_head, "Step 2", "Next",
+                         [fixture_failure])
+    assert "ANDREA_SYNC_INTERNAL_TOKEN" in (allowed / "HANDOFF.md").read_text()
+    assert ("ANDREA_SYNC_INTERNAL_TOKEN"[:-1] + "M") not in (allowed / "HANDOFF.md").read_text()
 
     path, _branch, _head = repo(tmp_path / "cli")
     ahead = int(time.time()) + 3600
@@ -267,6 +278,16 @@ def test_command_line_redacts_a_credential_from_its_failure_text(tmp_path, capsy
     assert "sk-abcd1234efgh5678" not in captured.err + captured.out
     assert "credential or address" in captured.err
     assert not (path / "HANDOFF.md").exists()
+
+    same_shape = "Bearer " + ("ANDREA_SYNC_INTERNAL_TOKEN"[:-1] + "M")
+    mixed = "bearer " + "ab-cd.ef_ghijklm"
+    for failure in (same_shape, mixed):
+        assert track.main(["--codex", str(codex), "--codex-account", "fixture", "--repo", str(path),
+                           "--failure", "saw " + failure]) == 1
+        captured = capsys.readouterr()
+        assert failure not in captured.err + captured.out
+        assert "credential or address" in captured.err
+        assert not (path / "HANDOFF.md").exists()
 
     assert track.main(["--codex", str(tmp_path / "sk-abcd1234efgh5678/absent.json")]) == 1
     captured = capsys.readouterr().err

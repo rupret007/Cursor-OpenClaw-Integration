@@ -292,6 +292,85 @@ def test_fine_grained_pats_and_lowercase_bearers_fail_closed(tmp_path, capsys):
         assert f"credential note.txt:{line}" in captured.err
 
 
+def test_uppercase_bearer_credentials_fail_closed(tmp_path, capsys):
+    """Source, history, and a files-only scan catch uppercase bearer tokens and do not print them."""
+    upper_alpha = "A" * 24
+    upper_alnum = "A" * 12 + "7" * 8
+    upper_shape = "ABCD_EFGH_IJKL_1234"
+    lower_alpha = "a" * 16
+    mixed_token = "c" * 16
+    pat = "github" + "_pat_" + "A" * 22
+    access_key = "AS" + "IA" + "B" * 16
+    fixture = "ANDREA_SYNC_INTERNAL_TOKEN"
+    bearers = {
+        "upper_alpha": "BEARER " + upper_alpha,
+        "upper_alnum": "Bearer " + upper_alnum,
+        "upper_shape": "bearer " + upper_shape,
+        "lower_alpha": "bearer " + lower_alpha,
+        "mixed_scheme": "BeArEr " + mixed_token,
+        "upper_scheme_lower_token": "BEARER " + lower_alpha,
+    }
+    assert [item["rule"] for item in scan.findings_in_text(bearers["upper_alpha"])] == ["credential"]
+    assert [item["rule"] for item in scan.findings_in_text(bearers["upper_alnum"])] == ["credential"]
+    assert [item["rule"] for item in scan.findings_in_text(bearers["upper_shape"])] == ["credential"]
+    assert [item["rule"] for item in scan.findings_in_text(bearers["lower_alpha"])] == ["credential"]
+    assert [item["rule"] for item in scan.findings_in_text(bearers["mixed_scheme"])] == ["credential"]
+    assert [item["rule"] for item in scan.findings_in_text(bearers["upper_scheme_lower_token"])] == ["credential"]
+    assert [item["rule"] for item in scan.findings_in_text(pat)] == ["credential"]
+    assert [item["rule"] for item in scan.findings_in_text(access_key)] == ["credential"]
+    assert scan.findings_in_text("Bearer " + fixture) == []
+    assert scan.findings_in_text("bearer " + fixture) == []
+    assert [item["rule"] for item in scan.findings_in_text("Bearer " + fixture + "9")] == ["credential"]
+
+    lines = [
+        bearers["upper_alpha"],
+        bearers["upper_alnum"],
+        bearers["upper_shape"],
+        bearers["lower_alpha"],
+        pat,
+        access_key,
+        bearers["mixed_scheme"],
+        "Bearer " + fixture,
+    ]
+    secrets = (upper_alpha, upper_alnum, upper_shape, lower_alpha, mixed_token, pat, access_key)
+    root = tmp_path / "checkout"
+    root.mkdir()
+    note = root / "note.txt"
+    note.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    findings, _count = scan.scan_files(root)
+    rendered, code = scan.report({"files": 1, "commits": 0, "logs": 0, "findings": findings})
+    assert code == 1
+    for secret in secrets:
+        assert secret not in rendered
+    for line in (1, 2, 3, 4, 5, 6, 7):
+        assert f"credential note.txt:{line}" in rendered
+    assert "credential note.txt:8" not in rendered
+
+    def git(*args):
+        return subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
+
+    git("init", "-q", "-b", "demo")
+    git("config", "user.email", "lane@example.invalid")
+    git("config", "user.name", "First Officer lane")
+    git("add", "note.txt")
+    git("commit", "-q", "-m", "fixture")
+    history, commits = scan.scan_history(root)
+    assert commits == 1
+    assert any(item["rule"] == "credential" and item["path"] == "note.txt" for item in history)
+    history_report, history_code = scan.report({"files": 0, "commits": commits, "logs": 0, "findings": history})
+    assert history_code == 1
+    for secret in secrets:
+        assert secret not in history_report
+
+    assert scan.main(["--root", str(root), "--files-only"]) == 1
+    captured = capsys.readouterr()
+    for secret in secrets:
+        assert secret not in captured.err and secret not in captured.out
+    for line in (1, 2, 3, 4, 5, 6, 7):
+        assert f"credential note.txt:{line}" in captured.err
+    assert "credential note.txt:8" not in captured.err
+
+
 def test_the_repository_history_and_logs_stay_clean(capsys):
     result = scan.survey(ROOT)
     assert result["findings"] == []

@@ -2,10 +2,11 @@
 """Scan the checkout, its reachable history and its logs for secrets and personal data.
 
 A finding names the rule and the location. It never includes the matched text.
-Known synthetic fixtures are the only credential strings that are ignored, and a
-different string of the same shape is a failure. The command exits 1 when any
-finding remains. History includes one patch per parent of a merge, so a value
-that appears only in a merge result is still a finding.
+Known synthetic fixtures are ignored, as is the exact bearer fixture
+ANDREA_SYNC_INTERNAL_TOKEN. A different string of the same shape is a failure.
+The command exits 1 when any finding remains. History includes one patch per
+parent of a merge, so a value that appears only in a merge result is still a
+finding.
 """
 
 import argparse
@@ -21,6 +22,7 @@ FIXTURES = frozenset({
     "sk-live-secretvalue",
     "sk-abcd1234efgh5678",
 })
+BEARER_FIXTURE = "ANDREA_SYNC_INTERNAL_TOKEN"
 SKIP = {".git", "__pycache__", ".pytest_cache", "node_modules", ".venv", "venv"}
 LOCAL_DATABASE = {
     Path("data/andrea_sync.db"),
@@ -139,6 +141,14 @@ def personal_email(raw):
     return host not in EMAIL_HOSTS and not host.endswith(".example.com")
 
 
+def bearer_token_is_credential(token):
+    """A long alphabetic or digit-bearing bearer value. Only the exact fixture is exempt."""
+    if token == BEARER_FIXTURE:
+        return False
+    alphabetic = re.fullmatch(r"[A-Za-z]{16,}", token) is not None
+    return any(character.isdigit() for character in token) or alphabetic
+
+
 def findings_in_text(text, *, path=None):
     """Return rule and line only. The matched characters are not retained."""
     found = []
@@ -152,10 +162,7 @@ def findings_in_text(text, *, path=None):
                 rules.append("credential")
                 break
         for match in BEARER.finditer(line):
-            token = match.group(1)
-            alphabetic = re.fullmatch(r"[A-Za-z]{16,}", token) is not None
-            if ((any(character.isdigit() for character in token) or alphabetic)
-                    and not re.fullmatch(r"[A-Z0-9_]+", token)):
+            if bearer_token_is_credential(match.group(1)):
                 rules.append("credential")
                 break
         for match in list(E164.finditer(line)) + list(NANP.finditer(line)):

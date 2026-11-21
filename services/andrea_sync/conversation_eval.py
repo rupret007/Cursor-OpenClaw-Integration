@@ -12,8 +12,6 @@ import time
 import re
 from datetime import datetime, timezone
 from collections import Counter
-import urllib.error
-import urllib.request
 from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Sequence
@@ -32,6 +30,7 @@ from .assistant_answer_composer import (
 )
 from .backends.cursor_control import CursorControlResult
 from .bus import handle_command
+from .litellm_api import litellm_chat, litellm_configured
 from .experience_assurance import (
     HarnessInfraError,
     _render_telegram_final_message,
@@ -1609,9 +1608,6 @@ def _openai_json_chat(
     model: str,
     timeout_seconds: int = 45,
 ) -> Dict[str, Any]:
-    api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
-    if not api_key:
-        raise RuntimeError("openai_missing_key")
     payload: Dict[str, Any] = {
         "model": model,
         "temperature": 0.2,
@@ -1622,23 +1618,9 @@ def _openai_json_chat(
             {"role": "user", "content": user},
         ],
     }
-    req = urllib.request.Request(
-        "https://api.openai.com/v1/chat/completions",
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        method="POST",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
+    data = litellm_chat(
+        payload, timeout_seconds=timeout_seconds, error_prefix="openai"
     )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as err:
-        raw = err.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"openai_http_{err.code}:{raw[:240]}") from err
-    except urllib.error.URLError as err:
-        raise RuntimeError(f"openai_transport:{err}") from err
     choices = data.get("choices") if isinstance(data, dict) else None
     if not isinstance(choices, list) or not choices:
         raise RuntimeError("openai_no_choices")
@@ -1646,8 +1628,8 @@ def _openai_json_chat(
     content = str(message.get("content") or "").strip()
     try:
         parsed = json.loads(content)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"openai_json_decode:{_clip(content, 200)}") from exc
+    except json.JSONDecodeError:
+        raise RuntimeError("openai_json_decode") from None
     if not isinstance(parsed, dict):
         raise RuntimeError("openai_json_not_object")
     return parsed
@@ -1666,7 +1648,7 @@ def run_llm_evaluator(
         and not weak_or_failed
     ):
         return None
-    if not (os.environ.get("OPENAI_API_KEY") or "").strip():
+    if not litellm_configured():
         return None
     model = model_for_role("verifier")
     system = (
@@ -1705,7 +1687,7 @@ def run_semantic_adjudicator(
     history_tail: Sequence[Mapping[str, str]] | None = None,
 ) -> Dict[str, Any] | None:
     """Narrow routing adjudication JSON; router-class slot."""
-    if not (os.environ.get("OPENAI_API_KEY") or "").strip():
+    if not litellm_configured():
         return None
     model = model_for_role("router")
     hist = [

@@ -25,7 +25,9 @@ def model_for_role(role: ModelRole) -> str:
         "persona": "ANDREA_MODEL_PERSONA",
     }
     key = env_map.get(role, "ANDREA_MODEL_WORKER")
-    default = (os.environ.get("ANDREA_DIRECT_OPENAI_MODEL") or "gpt-4o-mini").strip()
+    default = (
+        os.environ.get("ANDREA_LITELLM_MODEL") or os.environ.get("ANDREA_DIRECT_OPENAI_MODEL") or "gpt-4o-mini"
+    ).strip()
     return (os.environ.get(key) or default).strip()
 
 

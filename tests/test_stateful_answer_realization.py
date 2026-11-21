@@ -33,7 +33,9 @@ class StatefulAnswerRealizationTests(unittest.TestCase):
             {
                 "ANDREA_STATEFUL_REALIZATION_ENABLED": "0",
                 "OPENAI_API_ENABLED": "1",
-                "OPENAI_API_KEY": "x",
+                "ANDREA_LITELLM_API_KEY": "x",
+                "ANDREA_LITELLM_BASE_URL": "http://localhost:4000",
+                "ANDREA_LITELLM_MODEL": "test-andrea-model",
             },
             clear=False,
         ):
@@ -64,7 +66,9 @@ class StatefulAnswerRealizationTests(unittest.TestCase):
                 "ANDREA_STATEFUL_REALIZATION_ENABLED": "1",
                 "ANDREA_GROUNDED_RESEARCH_REALIZATION_ENABLED": "1",
                 "OPENAI_API_ENABLED": "1",
-                "OPENAI_API_KEY": "x",
+                "ANDREA_LITELLM_API_KEY": "x",
+                "ANDREA_LITELLM_BASE_URL": "http://localhost:4000",
+                "ANDREA_LITELLM_MODEL": "test-andrea-model",
             },
             clear=False,
         ):
@@ -112,7 +116,9 @@ class StatefulAnswerRealizationTests(unittest.TestCase):
             {
                 "ANDREA_STATEFUL_REALIZATION_ENABLED": "1",
                 "OPENAI_API_ENABLED": "1",
-                "OPENAI_API_KEY": "x",
+                "ANDREA_LITELLM_API_KEY": "x",
+                "ANDREA_LITELLM_BASE_URL": "http://localhost:4000",
+                "ANDREA_LITELLM_MODEL": "test-andrea-model",
             },
             clear=False,
         ):
@@ -147,7 +153,9 @@ class StatefulAnswerRealizationTests(unittest.TestCase):
             {
                 "ANDREA_STATEFUL_REALIZATION_ENABLED": "1",
                 "OPENAI_API_ENABLED": "1",
-                "OPENAI_API_KEY": "x",
+                "ANDREA_LITELLM_API_KEY": "x",
+                "ANDREA_LITELLM_BASE_URL": "http://localhost:4000",
+                "ANDREA_LITELLM_MODEL": "test-andrea-model",
             },
             clear=False,
         ):
@@ -187,7 +195,9 @@ class StatefulAnswerRealizationTests(unittest.TestCase):
             {
                 "ANDREA_STATEFUL_REALIZATION_ENABLED": "1",
                 "OPENAI_API_ENABLED": "1",
-                "OPENAI_API_KEY": "x",
+                "ANDREA_LITELLM_API_KEY": "x",
+                "ANDREA_LITELLM_BASE_URL": "http://localhost:4000",
+                "ANDREA_LITELLM_MODEL": "test-andrea-model",
             },
             clear=False,
         ):
@@ -233,7 +243,9 @@ class StatefulAnswerRealizationTests(unittest.TestCase):
             {
                 "ANDREA_STATEFUL_REALIZATION_ENABLED": "1",
                 "OPENAI_API_ENABLED": "1",
-                "OPENAI_API_KEY": "x",
+                "ANDREA_LITELLM_API_KEY": "x",
+                "ANDREA_LITELLM_BASE_URL": "http://localhost:4000",
+                "ANDREA_LITELLM_MODEL": "test-andrea-model",
             },
             clear=False,
         ):
@@ -280,7 +292,9 @@ class StatefulAnswerRealizationTests(unittest.TestCase):
             {
                 "ANDREA_STATEFUL_REALIZATION_ENABLED": "1",
                 "OPENAI_API_ENABLED": "1",
-                "OPENAI_API_KEY": "x",
+                "ANDREA_LITELLM_API_KEY": "x",
+                "ANDREA_LITELLM_BASE_URL": "http://localhost:4000",
+                "ANDREA_LITELLM_MODEL": "test-andrea-model",
             },
             clear=False,
         ):
@@ -323,7 +337,9 @@ class StatefulAnswerRealizationTests(unittest.TestCase):
             {
                 "ANDREA_STATEFUL_REALIZATION_ENABLED": "1",
                 "OPENAI_API_ENABLED": "1",
-                "OPENAI_API_KEY": "x",
+                "ANDREA_LITELLM_API_KEY": "x",
+                "ANDREA_LITELLM_BASE_URL": "http://localhost:4000",
+                "ANDREA_LITELLM_MODEL": "test-andrea-model",
             },
             clear=False,
         ):
@@ -381,7 +397,9 @@ class StatefulAnswerRealizationTests(unittest.TestCase):
             {
                 "ANDREA_STATEFUL_REALIZATION_ENABLED": "1",
                 "OPENAI_API_ENABLED": "1",
-                "OPENAI_API_KEY": "x",
+                "ANDREA_LITELLM_API_KEY": "x",
+                "ANDREA_LITELLM_BASE_URL": "http://localhost:4000",
+                "ANDREA_LITELLM_MODEL": "test-andrea-model",
             },
             clear=False,
         ):
@@ -439,7 +457,9 @@ class StatefulAnswerRealizationTests(unittest.TestCase):
                 "ANDREA_STATEFUL_REALIZATION_ENABLED": "1",
                 "ANDREA_GROUNDED_RESEARCH_REALIZATION_ENABLED": "1",
                 "OPENAI_API_ENABLED": "1",
-                "OPENAI_API_KEY": "x",
+                "ANDREA_LITELLM_API_KEY": "x",
+                "ANDREA_LITELLM_BASE_URL": "http://localhost:4000",
+                "ANDREA_LITELLM_MODEL": "test-andrea-model",
             },
             clear=False,
         ):
@@ -491,9 +511,10 @@ class StatefulAnswerRealizationTests(unittest.TestCase):
                 "ANDREA_GROUNDED_RESEARCH_REALIZATION_ENABLED": "1",
                 "ANDREA_TECHNICAL_UNCERTAINTY_ASSIST_ENABLED": "1",
                 "OPENAI_API_ENABLED": "1",
-                "OPENAI_API_KEY": "x",
+                "ANDREA_LITELLM_API_KEY": "x",
+                "ANDREA_LITELLM_BASE_URL": "http://localhost:4000",
+                "ANDREA_LITELLM_MODEL": "direct-model",
                 "ANDREA_MODEL_WORKER": "worker-model",
-                "ANDREA_DIRECT_OPENAI_MODEL": "direct-model",
             },
             clear=False,
         ):

@@ -392,7 +392,7 @@ class ExperienceHarness:
             env_patch["ANDREA_ROUTING_EVAL_EXPORT"] = str(routing_eval_export).strip()
         if not self._preserve_openai_for_eval:
             env_patch["OPENAI_API_ENABLED"] = "0"
-            env_patch["OPENAI_API_KEY"] = ""
+            env_patch["ANDREA_LITELLM_API_KEY"] = ""
         self._stack.enter_context(mock.patch.dict(os.environ, env_patch, clear=False))
         self.server = SyncServer()
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.server))

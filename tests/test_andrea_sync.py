@@ -5610,18 +5610,24 @@ class TestAndreaSync(unittest.TestCase):
 
         with mock.patch.dict(
             os.environ,
-            {"OPENAI_API_KEY": "test-key", "OPENAI_API_ENABLED": "1"},
+            {
+                "OPENAI_API_ENABLED": "1",
+                "ANDREA_LITELLM_API_KEY": "test-key",
+                "ANDREA_LITELLM_BASE_URL": "http://localhost:4000",
+                "ANDREA_LITELLM_MODEL": "test-andrea-model",
+            },
             clear=False,
         ):
             with mock.patch(
-                "services.andrea_sync.andrea_router.urllib.request.urlopen",
+                "services.andrea_sync.litellm_api._opener.open",
                 return_value=mock_resp,
-            ):
+            ) as proxy_request:
                 reply = build_direct_reply(
                     "What should I know about the timeline for the kitchen project?",
                     history=[],
                     memory_notes=[],
                 )
+        proxy_request.assert_called_once()
         self.assertNotIn("sessions_spawn", reply.lower())
         self.assertNotIn("attachments.enabled", reply.lower())
 

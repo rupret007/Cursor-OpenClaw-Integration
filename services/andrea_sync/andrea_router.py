@@ -1,14 +1,12 @@
 """Andrea-first routing: direct assistant reply vs Cursor delegation."""
 from __future__ import annotations
 
-import json
 import os
 import re
 import ast
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 
+from .litellm_api import litellm_chat, litellm_configured
 from .orchestration_boundary import should_answer_before_delegate
 from .turn_intelligence import (
     _BARE_DIALOGUE_CLARIFICATION_RE,
@@ -728,7 +726,7 @@ def _lightweight_conversational_reply(text: str) -> str:
 
 
 def _scrub_history_for_direct(history: list[dict[str, str]] | None) -> list[dict[str, str]]:
-    """Drop poisoned assistant turns and strip internal lines before OpenAI direct."""
+    """Drop poisoned assistant turns and strip internal lines before the model call."""
     if not history:
         return []
     out: list[dict[str, str]] = []
@@ -759,10 +757,9 @@ def _openai_direct_reply(
     inject_durable_memory: bool = True,
     style_extra: str = "",
 ) -> str:
-    api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
-    if not api_key or not _env_truthy("OPENAI_API_ENABLED", False):
+    if not _env_truthy("OPENAI_API_ENABLED", False) or not litellm_configured():
         raise RuntimeError("openai_direct_disabled")
-    model = (os.environ.get("ANDREA_DIRECT_OPENAI_MODEL") or "gpt-4o-mini").strip()
+    model = os.environ["ANDREA_LITELLM_MODEL"].strip()
     history_turns = _env_int("ANDREA_DIRECT_HISTORY_TURNS", 6)
     timeout_seconds = max(
         5,
@@ -852,23 +849,9 @@ def _openai_direct_reply(
         "max_tokens": 220,
         "messages": [*messages, {"role": "user", "content": str(text).strip()}],
     }
-    req = urllib.request.Request(
-        "https://api.openai.com/v1/chat/completions",
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        method="POST",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
+    data = litellm_chat(
+        payload, timeout_seconds=timeout_seconds, error_prefix="openai_direct"
     )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as err:
-        raw = err.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"openai_direct_http_{err.code}:{raw[:300]}") from err
-    except urllib.error.URLError as err:
-        raise RuntimeError(f"openai_direct_transport:{err}") from err
     choices = data.get("choices") if isinstance(data, dict) else None
     if not isinstance(choices, list) or not choices:
         raise RuntimeError("openai_direct_no_choices")

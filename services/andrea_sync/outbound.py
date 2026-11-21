@@ -147,6 +147,13 @@ def _tool_name(draft: Mapping[str, Any]) -> str:
     return tool
 
 
+def _unique_carrier_fields(fields: list[tuple[str, Any]]) -> dict[str, Any]:
+    payload = dict(fields)
+    if len(payload) != len(fields):
+        raise ValueError("The carrier repeated a response field")
+    return payload
+
+
 def _ask_carrier(draft: Mapping[str, Any]) -> dict[str, Any]:
     """Return the carrier's confirmation. This function does not decide delivered."""
     port, path = _carrier_target()
@@ -165,15 +172,16 @@ def _ask_carrier(draft: Mapping[str, Any]) -> dict[str, Any]:
         response = connection.getresponse()
         raw = response.read(4097)
         status = response.status
+        complete = response.length in (None, 0)
     except (OSError, http.client.HTTPException, TimeoutError):
         raise DeliveryUncertain(UNCERTAIN) from None
     finally:
         connection.close()
-    if status != 200 or len(raw) > 4096:
+    if status != 200 or not complete or len(raw) > 4096:
         raise DeliveryUncertain(UNCERTAIN)
     try:
-        payload = json.loads(raw)
-    except (UnicodeError, json.JSONDecodeError):
+        payload = json.loads(raw, object_pairs_hook=_unique_carrier_fields)
+    except (ValueError, RecursionError):
         raise DeliveryUncertain(UNCERTAIN) from None
     if not isinstance(payload, dict) or type(payload.get("delivered")) is not bool:
         raise DeliveryUncertain(UNCERTAIN)

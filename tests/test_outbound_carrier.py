@@ -31,7 +31,7 @@ class Carrier(BaseHTTPRequestHandler):
             request = json.loads(raw)
         except json.JSONDecodeError:
             request = {}
-        delivered = self.server.mode != "deny"
+        delivered = self.server.mode not in {"deny", "truncated", "contradictory"}
         payload = {
             "body": request.get("body"),
             "carrier": self.server.carrier_id,
@@ -47,9 +47,15 @@ class Carrier(BaseHTTPRequestHandler):
         elif self.server.mode == "oversize":
             payload["padding"] = "x" * 4096
         data = json.dumps(payload).encode()
+        if self.server.mode == "contradictory":
+            data = b'{"delivered": true, ' + data[1:]
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
+        if self.server.mode == "truncated":
+            self.send_header("Content-Length", str(len(data) + 1))
+            self.send_header("Connection", "close")
+        else:
+            self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
 
@@ -210,7 +216,7 @@ def _bound_draft():
     )
 
 
-@pytest.mark.parametrize("mode", ["down", "oversize", "inexact", "incomplete"])
+@pytest.mark.parametrize("mode", ["down", "oversize", "inexact", "incomplete", "truncated", "contradictory"])
 def test_ambiguous_carrier_reply_keeps_confirmation_in_manual_check(tmp_path, monkeypatch, mode):
     server = _server(tmp_path / "sync.db", monkeypatch)
     carrier = serve(mode)

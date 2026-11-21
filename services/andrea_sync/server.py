@@ -72,6 +72,7 @@ from .dashboard import (
 )
 from .kill_switch import is_kill_switch_engaged, kill_switch_status
 from .observability import metric_log, structured_log
+from .outbound import bind_draft, draft_binding_ok, new_nonce, receipt_matches
 from .orchestration_boundary import build_decision_profile
 from .policy_learning import record_routing_alignment
 from .resource_router import rank_execution_lanes
@@ -2947,12 +2948,12 @@ class SyncServer:
         )
 
     def _outbound_draft_owner_key(self, task_id: str) -> str:
-        principal_id = self._task_principal_id(task_id)
-        if principal_id:
-            return f"principal:{principal_id}"
         payload = self._latest_user_message_payload(task_id)
         channel = str(payload.get("channel") or "telegram").strip() or "telegram"
         chat_id = str(payload.get("chat_id") or payload.get("user_id") or "").strip()
+        principal_id = self._task_principal_id(task_id)
+        if principal_id and chat_id:
+            return f"principal:{principal_id}:{channel}:{chat_id}"
         if chat_id:
             return f"{channel}:{chat_id}"
         return f"task:{task_id}"
@@ -2973,7 +2974,7 @@ class SyncServer:
             except json.JSONDecodeError:
                 delete_meta(c, key)
                 return {}
-            if not isinstance(payload, dict):
+            if not isinstance(payload, dict) or not draft_binding_ok(payload):
                 delete_meta(c, key)
                 return {}
             expires_at = payload.get("expires_at")
@@ -4010,39 +4011,54 @@ class SyncServer:
             failure_reply="I couldn't retrieve your recent text messages cleanly just now.",
         )
 
+    def _outbound_context_matches(self, task_id: str, draft: Dict[str, Any]) -> bool:
+        if not draft_binding_ok(draft):
+            return False
+        payload = self._latest_user_message_payload(task_id)
+        origin = draft.get("origin") if isinstance(draft.get("origin"), dict) else {}
+        channel = str(payload.get("channel") or "telegram").strip() or "telegram"
+        chat_id = str(payload.get("chat_id") or payload.get("user_id") or "").strip()
+        if origin.get("channel") != channel or str(origin.get("chat_id") or "") != chat_id:
+            return False
+        if str(draft.get("principal") or "") != self._task_principal_id(task_id):
+            return False
+        try:
+            if int(draft.get("expires_at")) <= int(time.time()):
+                return False
+        except (TypeError, ValueError):
+            return False
+        return True
+
+    def _outbound_tool_receipt(self, draft: Dict[str, Any]) -> Dict[str, Any] | None:
+        """A delivery tool returns the receipt. The model status is not consulted."""
+        tool = getattr(self, "outbound_delivery_tool", None)
+        if tool is None:
+            return None
+        try:
+            receipt = tool(draft)
+        except Exception:  # noqa: BLE001
+            return None
+        if not receipt_matches(draft, receipt):
+            return None
+        return receipt
+
     def _send_pending_outbound_message(
         self,
         task_id: str,
         draft: Dict[str, Any],
     ) -> tuple[str, str]:
-        try:
-            result = self._create_openclaw_job(
-                task_id,
-                self._build_outbound_message_prompt(draft),
-                "verified_outbound_message",
-                "andrea_primary",
-                "",
-                "",
-                session_id=self._openclaw_session_id(task_id, attempt=0),
-            )
-        except Exception as exc:  # noqa: BLE001
-            return (
-                "I could not send that message cleanly just now. The draft is still ready if you want me to revise it or try again.",
-                "outbound_message_send_failed",
-            )
-        if result.get("ok"):
-            self._clear_pending_outbound_draft(task_id)
-            summary = str(result.get("user_summary") or result.get("summary") or "").strip()
-            if summary:
-                return summary, "outbound_message_sent"
-            return (
-                f"I sent it to {str(draft.get('target') or 'them').strip()}.",
-                "outbound_message_sent",
-            )
-        return (
+        failure = (
             "I could not send that message cleanly just now. The draft is still ready if you want me to revise it or try again.",
             "outbound_message_send_failed",
         )
+        if not self._outbound_context_matches(task_id, draft):
+            return failure
+        receipt = self._outbound_tool_receipt(draft)
+        if receipt is None:
+            return failure
+        self._clear_pending_outbound_draft(task_id)
+        target = str(draft.get("target") or "them").strip() or "them"
+        return (f"I sent it to {target}.", "outbound_message_sent")
 
     def _parse_memory_note_request(self, text: str) -> str:
         clean = str(text or "").strip()
@@ -4334,14 +4350,22 @@ class SyncServer:
                     self._messaging_capability_reply(resolved, text),
                     "outbound_message_capability_unavailable",
                 )
-            draft = {
-                "target": str(outbound_request.get("target") or "").strip(),
-                "message": str(outbound_request.get("message") or "").strip(),
-                "skill_key": str(resolved.get("skill_key") or "bluebubbles"),
-                "label": str(resolved.get("label") or "text messaging"),
-                "created_at": time.time(),
-                "expires_at": time.time() + PENDING_OUTBOUND_DRAFT_TTL_SECONDS,
-            }
+            source = self._latest_user_message_payload(task_id)
+            draft = bind_draft(
+                target=str(outbound_request.get("target") or "").strip(),
+                body=str(outbound_request.get("message") or "").strip(),
+                principal=self._task_principal_id(task_id),
+                origin={
+                    "channel": str(source.get("channel") or channel).strip() or "telegram",
+                    "chat_id": str(source.get("chat_id") or source.get("user_id") or "").strip(),
+                    "message_id": str(source.get("message_id") or "").strip(),
+                },
+                expires_at=int(time.time()) + int(PENDING_OUTBOUND_DRAFT_TTL_SECONDS),
+                nonce=new_nonce(),
+                skill_key=str(resolved.get("skill_key") or "bluebubbles"),
+                label=str(resolved.get("label") or "text messaging"),
+                created_at=time.time(),
+            )
             self._save_pending_outbound_draft(task_id, draft)
             return (self._outbound_draft_reply(draft), "outbound_message_drafted")
 

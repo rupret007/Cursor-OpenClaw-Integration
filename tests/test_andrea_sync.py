@@ -3938,6 +3938,105 @@ class TestAndreaSync(unittest.TestCase):
             projection["meta"]["assistant"]["last_reply"].lower(),
         )
 
+    def test_model_ok_does_not_send_and_another_chat_cannot_take_the_draft(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+
+        def submit(external_id: str, text: str, chat_id: int, message_id: int) -> str:
+            result = handle_command(
+                server.conn,
+                {
+                    "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                    "channel": "telegram",
+                    "external_id": external_id,
+                    "payload": {
+                        "text": text,
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                        "from_user": 77,
+                    },
+                },
+            )
+            return str(result["task_id"])
+
+        drafted = submit("tg-exact-draft", "Tell Candace hi from you", 9101, 701)
+        with mock.patch.object(
+            server,
+            "_resolve_messaging_capability",
+            return_value={
+                "skill_key": "bluebubbles",
+                "label": "text messaging",
+                "truth": {"status": "verified_available"},
+            },
+        ):
+            server._handle_task_followups(drafted)
+        pending = server._load_pending_outbound_draft(drafted)
+        self.assertEqual(pending.get("target"), "Candace")
+        self.assertEqual(pending.get("message"), "hi from you")
+        self.assertEqual(len(str(pending.get("digest") or "")), 64)
+        self.assertEqual(pending.get("origin", {}).get("chat_id"), "9101")
+
+        other = submit("tg-exact-other", "send it", 9102, 702)
+        with mock.patch.object(
+            server,
+            "_create_openclaw_job",
+            return_value={"ok": True, "user_summary": "Synthetic success claim."},
+        ) as job:
+            server._handle_task_followups(other)
+            self.assertFalse(job.called)
+        other_proj = project_task_dict(server.conn, other, "telegram")
+        self.assertNotIn(
+            other_proj["meta"]["assistant"]["reason"],
+            {"outbound_message_sent", "outbound_message_send_failed", "outbound_message_pending"},
+        )
+        self.assertEqual(server._load_pending_outbound_draft(drafted).get("message"), "hi from you")
+
+        with mock.patch.object(
+            server,
+            "_create_openclaw_job",
+            return_value={"ok": True, "user_summary": "Synthetic success claim."},
+        ) as job:
+            reply, reason = server._send_pending_outbound_message(drafted, pending)
+            self.assertFalse(job.called)
+        self.assertNotEqual(reason, "outbound_message_sent")
+        self.assertNotIn("Synthetic success", reply)
+        self.assertEqual(server._load_pending_outbound_draft(drafted).get("digest"), pending["digest"])
+
+        def wrong_receipt(draft: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "source": "tool",
+                "tool": "bluebubbles",
+                "delivered": True,
+                "target": draft["target"],
+                "body": "a different sentence",
+                "digest": draft["digest"],
+            }
+
+        server.outbound_delivery_tool = wrong_receipt
+        _reply, reason = server._send_pending_outbound_message(drafted, pending)
+        self.assertNotEqual(reason, "outbound_message_sent")
+        self.assertTrue(server._load_pending_outbound_draft(drafted))
+
+        def matching_receipt(draft: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "source": "tool",
+                "tool": "bluebubbles",
+                "delivered": True,
+                "target": draft["target"],
+                "body": draft["message"],
+                "digest": draft["digest"],
+            }
+
+        server.outbound_delivery_tool = matching_receipt
+        reply, reason = server._send_pending_outbound_message(drafted, pending)
+        self.assertEqual(reason, "outbound_message_sent")
+        self.assertIn("Candace", reply)
+        self.assertFalse(server._load_pending_outbound_draft(drafted))
+        self.assertNotIn("Synthetic success", reply)
+
     def test_server_confirmation_sends_pending_outbound_message(self) -> None:
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
         os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"

@@ -170,9 +170,13 @@ report = {"suites": [{"title": "", "file": "tests/lane.spec.js", "specs": [{
         {"status": "passed", "retry": 1, "errors": [], "attachments": []}]}]}]}]}
 Path("/tmp/fo-flaky/results.json").write_text(json.dumps(report))
 Path("/tmp/fo-flaky/quarantine.json").write_text(json.dumps({"entries": []}))
+Path("/tmp/fo-flaky/inventory.json").write_text(json.dumps({
+    "projects": ["chromium"],
+    "tests": ["chromium::tests/lane.spec.js::blinks"],
+}))
 PY
 python3 first-officer/qa/flaky.py produce /tmp/fo-flaky/results.json /tmp/fo-flaky/events.json
-python3 first-officer/qa/flaky.py evaluate /tmp/fo-flaky/events.json /tmp/fo-flaky/quarantine.json /tmp/fo-flaky/summary.json
+python3 first-officer/qa/flaky.py evaluate /tmp/fo-flaky/events.json /tmp/fo-flaky/quarantine.json /tmp/fo-flaky/inventory.json /tmp/fo-flaky/summary.json
 echo "exit $?"
 ```
 

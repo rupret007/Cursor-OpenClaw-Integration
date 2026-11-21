@@ -2,9 +2,11 @@
 """Turn a Playwright JSON report into a flaky report and a gate that quarantine cannot turn green.
 
 Every test is kept, with every attempt. A clean first attempt outside quarantine is the only
-passing result. A quarantine entry stays visible and counts as non-passing even when the test
-itself passed. Expired, malformed and orphaned entries do the same. The command exits 0 only
-when every collected test passed on its first attempt and the quarantine list adds nothing.
+passing result, and only when the report lists no top-level error and matches the expected
+project and test inventory. A quarantine entry stays visible and counts as non-passing even
+when the test itself passed. Expired, malformed and orphaned entries do the same. The command
+exits 0 only when every expected test passed on its first attempt, the report has no fatal
+error, and the quarantine list adds nothing.
 """
 
 import argparse
@@ -117,7 +119,19 @@ def produce(report):
                       "outcome": outcome, "attempts": attempts})
     if not tests:
         raise ValueError("A Playwright report collected no tests")
-    return {"tests": tests}
+    raw_errors = report.get("errors") or []
+    if not isinstance(raw_errors, list):
+        raise ValueError("A Playwright report has an unreadable error")
+    errors = []
+    for item in raw_errors:
+        if isinstance(item, str) and item.strip():
+            errors.append(redact(item))
+        elif isinstance(item, dict):
+            errors.append(redact(item.get("message") or item.get("error") or "report error"))
+        else:
+            errors.append("report error")
+    projects = sorted({test["project"] for test in tests})
+    return {"errors": errors, "projects": projects, "tests": tests}
 
 
 def _day(value, label):
@@ -168,10 +182,27 @@ def _clean(test):
             attempts[0]["retry"] == 0)
 
 
-def evaluate(events, entries, today):
-    """Count quarantine as non-passing. A green gate has no quarantine and no failed attempt."""
+def load_expected(document):
+    """The gate is green only for this exact project and test inventory."""
+    if not isinstance(document, dict) or set(document) != {"projects", "tests"}:
+        raise ValueError("The gate needs the expected projects and tests")
+    projects, tests = document["projects"], document["tests"]
+    if (not isinstance(projects, list) or not projects or not isinstance(tests, list) or not tests or
+            any(not isinstance(name, str) or not NAME.fullmatch(name) for name in projects) or
+            any(not isinstance(item, str) or not item or len(item) > 400 for item in tests) or
+            len(projects) != len(set(projects)) or len(tests) != len(set(tests))):
+        raise ValueError("The gate needs the expected projects and tests")
+    return {"projects": list(projects), "tests": list(tests)}
+
+
+def evaluate(events, entries, today, expected):
+    """Count quarantine, report errors, and a short inventory as non-passing."""
     if not isinstance(today, date):
         raise ValueError("The gate needs today's UTC date")
+    expected = load_expected(expected)
+    report_errors = events.get("errors")
+    if not isinstance(report_errors, list) or any(not isinstance(item, str) for item in report_errors):
+        raise ValueError("The flaky report has unreadable errors")
     by_id = {test["id"]: test for test in events["tests"]}
     active, expired, orphaned = [], [], []
     claimed = set()
@@ -206,13 +237,22 @@ def evaluate(events, entries, today):
         else:
             failures.append({"id": test["id"], "outcome": test["outcome"],
                              "attempts": [item["status"] for item in test["attempts"]]})
+    actual_ids = [test["id"] for test in events["tests"]]
+    actual_projects = {test["project"] for test in events["tests"]}
+    inventory_mismatch = (
+        sorted(actual_ids) != sorted(expected["tests"]) or len(actual_ids) != len(expected["tests"]) or
+        sorted(actual_projects) != sorted(expected["projects"])
+    )
     nonpassing = (len(failures) + len(flakes) + len(skipped) + len(interrupted) +
-                  len(quarantined) + len(expired) + len(orphaned))
-    ok = nonpassing == 0 and len(passing) == len(events["tests"]) and bool(events["tests"])
+                  len(quarantined) + len(expired) + len(orphaned) + len(report_errors) +
+                  (1 if inventory_mismatch else 0))
+    ok = (nonpassing == 0 and len(passing) == len(events["tests"]) and bool(events["tests"]) and
+          not report_errors and not inventory_mismatch)
     return {"ok": ok, "passing": len(passing), "nonpassing": nonpassing,
             "quarantined": quarantined, "failures": failures, "flakes": flakes,
             "skipped": skipped, "interrupted": interrupted, "expired": expired,
-            "orphaned": orphaned}
+            "orphaned": orphaned, "errors": report_errors,
+            "inventory_mismatch": inventory_mismatch}
 
 
 def _read(path):
@@ -235,6 +275,7 @@ def main(argv=None):
     evaluate_command = commands.add_parser("evaluate")
     evaluate_command.add_argument("events", type=Path)
     evaluate_command.add_argument("quarantine", type=Path)
+    evaluate_command.add_argument("inventory", type=Path)
     evaluate_command.add_argument("summary", type=Path)
     args = parser.parse_args(argv)
     try:
@@ -245,7 +286,7 @@ def main(argv=None):
             return 0
         events = produce_events(_read(args.events))
         result = evaluate(events, load_quarantine(_read(args.quarantine)),
-                          datetime.now(timezone.utc).date())
+                          datetime.now(timezone.utc).date(), load_expected(_read(args.inventory)))
         _write(args.summary, result)
         print(f"Passing {result['passing']}. Non-passing {result['nonpassing']}. "
               f"Quarantined {len(result['quarantined'])}.")
@@ -257,9 +298,14 @@ def main(argv=None):
 
 
 def produce_events(document):
-    """Accept only the producer output, so a hand-edited pass cannot erase an attempt."""
-    if not isinstance(document, dict) or set(document) != {"tests"} or not isinstance(document["tests"], list):
+    """Accept only the producer output, so a hand-edited pass cannot erase an attempt or a report error."""
+    fields = {"errors", "projects", "tests"}
+    if not isinstance(document, dict) or set(document) != fields or not isinstance(document["tests"], list):
         raise ValueError("The flaky report needs its tests")
+    if not isinstance(document["errors"], list) or any(not isinstance(item, str) for item in document["errors"]):
+        raise ValueError("The flaky report has unreadable errors")
+    if not isinstance(document["projects"], list):
+        raise ValueError("The flaky report needs its projects")
     checked = []
     for test in document["tests"]:
         fields = {"attempts", "file", "id", "outcome", "project", "title"}
@@ -277,7 +323,10 @@ def produce_events(document):
         checked.append({**test, "outcome": outcome})
     if not checked:
         raise ValueError("The flaky report collected no tests")
-    return {"tests": checked}
+    projects = sorted({test["project"] for test in checked})
+    if sorted(str(name) for name in document["projects"]) != projects:
+        raise ValueError("The flaky report needs its projects")
+    return {"errors": list(document["errors"]), "projects": projects, "tests": checked}
 
 
 if __name__ == "__main__":

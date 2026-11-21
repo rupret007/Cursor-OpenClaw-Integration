@@ -107,8 +107,35 @@ def gateway_launcher():
     raise ValueError("The running gateway does not use a supported OpenClaw launcher")
 
 
-def verify_config(path, release):
+def _require_unpacked_plugins(config_path, release, candidate):
+    """Map unpublished store paths onto files that exist in the unpacked candidate."""
+    try:
+        paths = json.loads(Path(config_path).read_text(encoding="utf-8"))["plugins"]["load"]["paths"]
+    except (OSError, ValueError, KeyError, TypeError):
+        raise ValueError("The candidate config does not name the unpacked release") from None
+    root = Path(candidate)
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError("The candidate release must be a directory")
+    prefix = str(STORE / f"first-officer-{release}") + "/"
+    if not isinstance(paths, list) or not paths:
+        raise ValueError("The candidate config does not name the unpacked release")
+    for raw in paths:
+        if not isinstance(raw, str) or not raw.startswith(prefix):
+            raise ValueError("The candidate config does not name the unpacked release")
+        relative = Path(raw[len(prefix):])
+        if relative.is_absolute() or ".." in relative.parts or relative.as_posix() != raw[len(prefix):]:
+            raise ValueError("The candidate config does not name the unpacked release")
+        plugin = root / relative
+        if plugin.is_symlink() or not plugin.is_file():
+            raise ValueError("The unpacked candidate is missing a plugin file")
+
+
+def verify_config(path, release, candidate=None):
+    if candidate is not None:
+        _require_unpacked_plugins(path, release, candidate)
     verifier = ["/usr/bin/python3", "-I", "-B", str(STORE / "verify-install.py"), str(path), release, ROLLBACK_SLOT]
+    if candidate is not None:
+        verifier.append(str(Path(candidate)))
     try:
         subprocess.run(verifier, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
     except (OSError, subprocess.SubprocessError):
@@ -194,7 +221,7 @@ def prepare(release, backup, config, previous=BASELINE, candidate=None):
     for name, content in files.items():
         (backup / name).write_bytes(content)
     verify_config(backup / "original-openclaw.json", previous)
-    verify_config(backup / "candidate-openclaw.json", release)
+    verify_config(backup / "candidate-openclaw.json", release, root)
     (backup / "plan.json").write_text(
         json.dumps({"release": release, "previous": previous, "pin": str(path), "pin_identity": identity,
                     "budgeted_litellm": True}) + "\n",

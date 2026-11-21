@@ -3,6 +3,8 @@ import importlib
 import json
 import os
 from pathlib import Path
+import shutil
+import stat
 from types import SimpleNamespace
 
 import pytest
@@ -165,6 +167,108 @@ def test_root_owned_pin_is_prepared_and_preserved_through_switch_and_rollback(co
     assert (config.read_bytes(), pin.read_bytes()) == original
     assert installer.pin_file(pin)[1] == [0, root_group, 0o644]
     assert actions == ["mktemp", "install", "mv"] * 2
+
+
+def _write_release(root, files):
+    entries = []
+    for name, content in files.items():
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+        entries.append(f"{hashlib.sha256(content).hexdigest()}  {name}")
+    payload = ("\n".join(entries) + "\n").encode()
+    (root / "SHA256SUMS").write_bytes(payload)
+    return hashlib.sha256(payload).hexdigest()
+
+
+def test_prepare_verifies_the_unpacked_candidate_and_rollback_restores_the_prior_bundle(tmp_path, monkeypatch):
+    """Prepare checks the unpacked tree before it is published, and rollback puts the prior bytes back."""
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "first-officer"))
+    installer = importlib.import_module("install")
+    store = tmp_path / "releases"
+    store.mkdir()
+    monkeypatch.setattr(installer, "STORE", store)
+    prior_files = {
+        "first-officer-exec-guard.mjs": b"prior-guard\n",
+        "round6/runtime/first-officer-conductor.mjs": b"prior-conductor\n",
+    }
+    prior = store / f"first-officer-{installer.BASELINE}"
+    _write_release(prior, prior_files)
+    prior_bytes = {name: (prior / name).read_bytes() for name in prior_files}
+    unpacked = tmp_path / "unpacked"
+    release = _write_release(unpacked, {
+        "first-officer-exec-guard.mjs": b"candidate-guard\n",
+        "round6/runtime/first-officer-conductor.mjs": b"candidate-conductor\n",
+    })
+    assert release not in installer.SUPPORTED_BASES
+    config = tmp_path / "openclaw.json"
+    base = store / f"first-officer-{installer.BASELINE}"
+    config.write_text(json.dumps({
+        "gateway": {"port": 18101},
+        "plugins": {
+            "load": {"paths": [str(base / "first-officer-exec-guard.mjs"),
+                               str(base / "round6/runtime/first-officer-conductor.mjs")]},
+            "entries": {installer.PLUGIN: {"enabled": True}},
+        },
+        "models": {"providers": {"litellm": {"models": [{"id": installer.FAST_MODEL.split("/")[1]}]}}},
+    }), encoding="utf-8")
+    config.chmod(0o600)
+    pin = tmp_path / "pin.conf"
+    pin.write_text("[Service]\n" + installer.pin_line(installer.BASELINE) + "\n", encoding="utf-8")
+    launcher = tmp_path / "openclaw"
+    launcher.write_text("#!/usr/bin/env python3\nimport json\nprint(json.dumps({'valid': True}))\n", encoding="utf-8")
+    launcher.chmod(0o755)
+    verifier = store / "verify-install.py"
+    verifier.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "log = Path(__file__).with_name('verifier-args.log')\n"
+        "with log.open('a', encoding='utf-8') as handle:\n"
+        "    handle.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+        "config, release, _rollback, *rest = sys.argv[1:]\n"
+        "paths = json.loads(Path(config).read_text(encoding='utf-8'))['plugins']['load']['paths']\n"
+        "marker = f'/first-officer-{release}/'\n"
+        "if all(Path(raw).is_file() for raw in paths):\n"
+        "    raise SystemExit(0)\n"
+        "if len(rest) != 1:\n"
+        "    raise SystemExit(1)\n"
+        "candidate = Path(rest[0])\n"
+        "for raw in paths:\n"
+        "    if marker not in raw or Path(raw).exists() or not (candidate / raw.split(marker, 1)[1]).is_file():\n"
+        "        raise SystemExit(1)\n"
+        "raise SystemExit(0)\n",
+        encoding="utf-8",
+    )
+    verifier.chmod(0o755)
+
+    def service(*args, capture=False):
+        if args[:3] == ("show", "-p", "ExecStart"):
+            return "{ argv[]=" + str(launcher) + " gateway ; }"
+        if capture:
+            return str(pin)
+        return None
+
+    monkeypatch.setattr(installer, "systemctl", service)
+    monkeypatch.setattr(installer, "wait_ready", lambda *_args: None)
+    original = config.read_bytes(), pin.read_bytes()
+    backup = tmp_path / "switch"
+    installer.prepare(release, backup, config, installer.BASELINE, unpacked)
+    for member in backup.iterdir():
+        member.chmod(0o600)
+    published = store / f"first-officer-{release}"
+    assert not published.exists()
+    logged = (store / "verifier-args.log").read_text(encoding="utf-8")
+    assert str(unpacked) in logged
+    shutil.copytree(unpacked, published)
+    installer.switch(backup, config, restore=False)
+    activated = json.loads(config.read_bytes())
+    assert str(published) in activated["plugins"]["load"]["paths"][0]
+    installer.switch(backup, config, restore=True)
+    assert (config.read_bytes(), pin.read_bytes()) == original
+    assert {name: (prior / name).read_bytes() for name in prior_files} == prior_bytes
+    assert (prior / "first-officer-exec-guard.mjs").read_bytes() == b"prior-guard\n"
+    assert stat.S_ISREG((prior / "SHA256SUMS").stat().st_mode)
 
 
 def test_schema_validation_uses_the_node_launcher_from_systemd(tmp_path, monkeypatch):

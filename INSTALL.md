@@ -88,13 +88,13 @@ Exit `0` prints `Phoenix accepted span first-officer.lane for lane <name>.` Exit
 
 ## Read a Playwright report and apply quarantine
 
-`produce` reads Playwright's JSON report and writes one record per test, including every attempt, plus any top-level report errors. `evaluate` compares that record with a quarantine file and the expected project and test inventory, then writes a summary. Exit `0` means every expected test passed on its first attempt, the report has no top-level error, and the quarantine list is empty of applicable, expired and orphaned entries. Exit `1` means the gate is red. A quarantined test is listed and counted as non-passing even when the test itself passed. A fatal report error or a report that does not match the inventory is red as well. Exit `2` means the report, the quarantine file, or the inventory could not be read.
+`produce` reads Playwright's JSON report and writes one record per test, including every attempt, plus any top-level report errors. It also stores a digest of that report. `evaluate` reads the report again in the same command and uses that result, not a hand-edited attempts list. It then compares the record with a quarantine file and the expected project and test inventory, and writes a summary. Exit `0` means every expected test passed on its first attempt, the report has no top-level error, and the quarantine list is empty of applicable, expired and orphaned entries. Exit `1` means the gate is red. A quarantined test is listed and counted as non-passing even when the test itself passed. A fatal report error or a report that does not match the inventory is red as well. Exit `2` means the report, the quarantine file, or the inventory could not be read.
 
 A quarantine entry names `project`, `file`, `title`, `owner`, `issue`, `reason`, `addedOn` and `expiresOn`. The dates are UTC calendar dates and the window is at most 14 days.
 
 ```bash
 python3 first-officer/qa/flaky.py produce "$playwright_json" "$flaky_events"
-python3 first-officer/qa/flaky.py evaluate "$flaky_events" "$quarantine_json" "$inventory_json" "$summary_json"
+python3 first-officer/qa/flaky.py evaluate "$playwright_json" "$flaky_events" "$quarantine_json" "$inventory_json" "$summary_json"
 ```
 
 The inventory file names the expected `projects` and `tests`. A report-level `errors` entry, a missing test, or an unexpected project keeps the gate red. Exit `0` requires the collected tests to match that inventory exactly.

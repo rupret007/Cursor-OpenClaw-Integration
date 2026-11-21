@@ -78,7 +78,7 @@ The offline gate on this tree passed 918 Python tests, including those 16, and 2
 
 On November 20, 2026 the seven tests in `tests/first_officer/test_flaky.py` passed. A fail-then-pass test stayed `flaky` with both attempts. Putting that failure on an active quarantine list left the gate red, with the test named under `quarantined` and absent from the passing count. The same was true of a quarantined test that had passed cleanly. An expired entry and an orphaned entry also kept the gate red. Rewriting a saved outcome from `flaky` to `expected` did not erase the failed attempt. The offline gate passed 928 Python tests and compiles the module. `INSTALL.md` documents the commands.
 
-On November 21, 2026 a report-level Playwright error, or an inventory that is not exactly the report's projects and tests, also keeps the gate red. An active, expired, or orphaned quarantine entry still does. `tests/first_officer/test_flaky.py` now has eight tests.
+On November 21, 2026 a report-level Playwright error, or an inventory that is not exactly the report's projects and tests, also keeps the gate red. An active, expired, or orphaned quarantine entry still does. `evaluate` reads the Playwright report again and will not treat a hand-edited attempts list as that report. `tests/first_officer/test_flaky.py` covers that edit.
 
 ## Step 6: shared status view and read-only admin console
 

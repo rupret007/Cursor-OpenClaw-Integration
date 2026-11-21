@@ -176,7 +176,7 @@ Path("/tmp/fo-flaky/inventory.json").write_text(json.dumps({
 }))
 PY
 python3 first-officer/qa/flaky.py produce /tmp/fo-flaky/results.json /tmp/fo-flaky/events.json
-python3 first-officer/qa/flaky.py evaluate /tmp/fo-flaky/events.json /tmp/fo-flaky/quarantine.json /tmp/fo-flaky/inventory.json /tmp/fo-flaky/summary.json
+python3 first-officer/qa/flaky.py evaluate /tmp/fo-flaky/results.json /tmp/fo-flaky/events.json /tmp/fo-flaky/quarantine.json /tmp/fo-flaky/inventory.json /tmp/fo-flaky/summary.json
 echo "exit $?"
 ```
 

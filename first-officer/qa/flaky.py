@@ -10,7 +10,9 @@ error, and the quarantine list adds nothing.
 """
 
 import argparse
+import copy
 from datetime import date, datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -131,7 +133,11 @@ def produce(report):
         else:
             errors.append("report error")
     projects = sorted({test["project"] for test in tests})
-    return {"errors": errors, "projects": projects, "tests": tests}
+    digest = hashlib.sha256(
+        json.dumps(report, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return {"bound": copy.deepcopy(tests), "errors": errors, "projects": projects,
+            "source_digest": digest, "tests": tests}
 
 
 def _day(value, label):
@@ -273,6 +279,7 @@ def main(argv=None):
     produce_command.add_argument("report", type=Path)
     produce_command.add_argument("events", type=Path)
     evaluate_command = commands.add_parser("evaluate")
+    evaluate_command.add_argument("report", type=Path)
     evaluate_command.add_argument("events", type=Path)
     evaluate_command.add_argument("quarantine", type=Path)
     evaluate_command.add_argument("inventory", type=Path)
@@ -284,7 +291,7 @@ def main(argv=None):
             _write(args.events, events)
             print(f"Recorded {len(events['tests'])} Playwright tests, including every attempt.")
             return 0
-        events = produce_events(_read(args.events))
+        events = produce_events(_read(args.events), _read(args.report))
         result = evaluate(events, load_quarantine(_read(args.quarantine)),
                           datetime.now(timezone.utc).date(), load_expected(_read(args.inventory)))
         _write(args.summary, result)
@@ -297,11 +304,26 @@ def main(argv=None):
         return 2
 
 
-def produce_events(document):
-    """Accept only the producer output, so a hand-edited pass cannot erase an attempt or a report error."""
-    fields = {"errors", "projects", "tests"}
+def produce_events(document, report=None):
+    """Accept only the producer output, so a hand-edited pass cannot erase an attempt or a report error.
+
+    When the Playwright report is supplied, it is the source of truth. The events
+    file's attempts and outcome are not.
+    """
+    fields = {"bound", "errors", "projects", "source_digest", "tests"}
     if not isinstance(document, dict) or set(document) != fields or not isinstance(document["tests"], list):
         raise ValueError("The flaky report needs its tests")
+    digest = document.get("source_digest")
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError("The flaky report is not bound to its source")
+    if report is not None:
+        derived = produce(report)
+        if derived["source_digest"] != digest:
+            raise ValueError("The flaky report does not match its source")
+        return derived
+    if not isinstance(document["bound"], list):
+        raise ValueError("The flaky report is not bound to its source")
+    document = {**document, "tests": copy.deepcopy(document["bound"])}
     if not isinstance(document["errors"], list) or any(not isinstance(item, str) for item in document["errors"]):
         raise ValueError("The flaky report has unreadable errors")
     if not isinstance(document["projects"], list):

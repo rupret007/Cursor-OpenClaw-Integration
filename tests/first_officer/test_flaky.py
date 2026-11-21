@@ -129,6 +129,44 @@ def test_a_hand_edited_pass_cannot_erase_a_failed_attempt():
     assert flaky.evaluate(reread, [], TODAY, inventory(reread))["ok"] is False
 
 
+def test_a_hand_edited_attempt_cannot_turn_the_gate_green(tmp_path):
+    """Editing the events artifact must not pass the original report's inventory."""
+    raw = report(("blinks", "chromium",
+                  [attempt("failed"), attempt("passed", retry=1)], "flaky"))
+    events = flaky.produce(raw)
+    events["tests"][0]["attempts"] = [{
+        "retry": 0, "status": "passed", "error": "", "trace": False,
+    }]
+    events["tests"][0]["outcome"] = "expected"
+    checked = flaky.produce_events(events)
+    assert flaky.evaluate(checked, [], TODAY, inventory(events))["ok"] is False
+
+    report_path = tmp_path / "results.json"
+    events_path = tmp_path / "flaky-events.json"
+    report_path.write_text(json.dumps(raw), encoding="utf-8")
+    forged = json.loads(json.dumps(events))
+    clean = [{
+        "retry": 0, "status": "passed", "error": "", "trace": False,
+    }]
+    forged["tests"][0]["attempts"] = clean
+    forged["tests"][0]["outcome"] = "expected"
+    forged["bound"] = json.loads(json.dumps(forged["tests"]))
+    events_path.write_text(json.dumps(forged), encoding="utf-8")
+    quarantine_path = tmp_path / "quarantine.json"
+    inventory_path = tmp_path / "inventory.json"
+    summary_path = tmp_path / "summary.json"
+    quarantine_path.write_text(json.dumps({"entries": []}), encoding="utf-8")
+    inventory_path.write_text(json.dumps(inventory(flaky.produce(raw))), encoding="utf-8")
+    command = [
+        "evaluate", str(report_path), str(events_path), str(quarantine_path),
+        str(inventory_path), str(summary_path),
+    ]
+    assert flaky.main(command) == 1
+    forged["source_digest"] = "0" * 64
+    events_path.write_text(json.dumps(forged), encoding="utf-8")
+    assert flaky.main(command) == 2
+
+
 def test_a_report_level_error_or_a_short_inventory_fails_the_gate():
     raw = report(("stays green", "chromium", [attempt("passed")], "expected"))
     raw["errors"] = [{"message": "worker crashed during collection"}]
@@ -165,13 +203,13 @@ def test_cli_exits_green_only_when_nothing_is_quarantined_or_failing(tmp_path, c
     inventory_path = tmp_path / "inventory.json"
     assert flaky.main(["produce", str(report_path), str(events_path)]) == 0
     inventory_path.write_text(json.dumps(inventory(json.loads(events_path.read_text(encoding="utf-8")))))
-    assert flaky.main(["evaluate", str(events_path), str(quarantine_path), str(inventory_path),
-                       str(summary_path)]) == 0
+    assert flaky.main(["evaluate", str(report_path), str(events_path), str(quarantine_path),
+                       str(inventory_path), str(summary_path)]) == 0
     assert json.loads(summary_path.read_text())["ok"] is True
 
     quarantine_path.write_text(json.dumps({"entries": [entry("stays green")]}))
-    assert flaky.main(["evaluate", str(events_path), str(quarantine_path), str(inventory_path),
-                       str(summary_path)]) == 1
+    assert flaky.main(["evaluate", str(report_path), str(events_path), str(quarantine_path),
+                       str(inventory_path), str(summary_path)]) == 1
     summary = json.loads(summary_path.read_text())
     assert summary["ok"] is False and summary["quarantined"]
     assert "Quarantined 1." in capsys.readouterr().out

@@ -13,6 +13,12 @@ Jeff runs these in the private owner chat after activation. Use a stopwatch from
 
 Also send `define a branch` to check a simple model answer in **<15 seconds**, and `quota status` to check current quota receipts in **<30 seconds**. The same acknowledgment target applies.
 
+Send `summarize my texts` and `summarise my texts` with no mention. Both use the same read-only reader as case 5. A spelling variant that reaches a model instead of that reader fails the case.
+
 Send `@andrea` on its own to check the add-on help, then send `gate status` to confirm OpenClaw still handles an ordinary request in the same chat.
 
+The candidate's acknowledgment budget is 1.5 seconds. The 2 second stopwatch above includes Telegram delivery.
+
 A timeout, unavailable source, stale sample or missing reply is a failed live case even when the bot reports it correctly. For a past-due check, record whether typing appeared, whether the acknowledgment arrived, whether a final reply arrived and which source was unavailable. Avoid copying replies, contacts or activity details into the report.
+
+The loopback status page, the local trace collector, the lane queue and the review archive stay off this check. Do not open a public port, use Tailscale Funnel, or roll the gateway back from here. A live rollback uses the private backup printed by activation and is a separate approval.

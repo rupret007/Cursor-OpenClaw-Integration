@@ -2,6 +2,8 @@
 
 OpenClaw can captain exact-head CI reviews for open PRs in Cursor-OpenClaw-Integration. The pilot scope is `integration-ci`. Each review uses one isolated lane on the existing subscription runner. OpenClaw checks the live fleet, gate, runner quota and required GitHub checks before dispatch. It follows a pending CI head for up to 20 minutes and verifies the current head again after the worker exits.
 
+The staged pilot and the staged pin restore are proven on a private copy. They do not read the live lease and they do not stop the gateway. Production authority stays with the current holder until the live checklist on this page is run. Gateway activation is one command, `python3 -B first-officer/release.py`, with one rollback. `python3 first-officer/archive.py pack` writes a checksummed copy of this lane for offline testing. That copy is not the gateway release.
+
 ## Daily commands
 
 | Send in the private owner chat | What OpenClaw does |
@@ -57,7 +59,7 @@ After it reports `Andrea reader verified from bobserver.` and Jeff approves, act
 
 ## Activate and run the supervised pilot
 
-1. Review the PR and its current CI, then use the [gateway activation commands](INSTALL.md). Leave the lease with Grok Bot while running the [timed Telegram checks](LIVE-TEST.md). Privately compare the Andrea summary with the recent thread.
+1. Review the PR and its current CI, then use the [single activation command](INSTALL.md#publish-and-activate-the-reviewed-candidate). Leave the lease with Grok Bot while running the [timed Telegram checks](LIVE-TEST.md). Privately compare the Andrea summary with the recent thread. The staged checklist, `python3 first-officer/pilot/rehearse.py checklist`, prints the live sequence and runs none of it.
 2. In an SSH shell on Bobserver, verify the existing shared lease using the operator CLI.
 
    ```bash

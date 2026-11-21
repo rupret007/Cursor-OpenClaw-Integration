@@ -4,6 +4,7 @@ from __future__ import annotations
 import datetime as dt
 from dataclasses import replace
 import errno
+import importlib.util
 import json
 import os
 import re
@@ -71,6 +72,7 @@ from .dashboard import (
 )
 from .kill_switch import is_kill_switch_engaged, kill_switch_status
 from .observability import metric_log, structured_log
+from .outbound import DeliveryUncertain, bind_draft, deliver, draft_binding_ok, new_nonce, receipt_matches
 from .orchestration_boundary import build_decision_profile
 from .policy_learning import record_routing_alignment
 from .resource_router import rank_execution_lanes
@@ -200,6 +202,31 @@ def _env_float(name: str, default: float) -> float:
 
 def _clip(value: Any, limit: int) -> str:
     return str(value or "")[:limit]
+
+
+_LOOKUP_INNER = None
+
+
+def _lookup_visible_text(value: Any) -> str:
+    """Unwrap one lookup fence for the person reading the reply.
+
+    The stored summary, user_summary, and raw_text stay fenced so a tool parser
+    cannot treat fetched text as a tool call. This display step is the only place
+    those fields become a sentence.
+    """
+    global _LOOKUP_INNER
+    text = str(value or "").strip()
+    if not text.startswith("<<UNTRUSTED "):
+        return text
+    if _LOOKUP_INNER is None:
+        path = _repo_root() / "first-officer" / "guard" / "sanitize.py"
+        spec = importlib.util.spec_from_file_location("fo_lookup_sanitize", path)
+        module = importlib.util.module_from_spec(spec)
+        if spec.loader is None:
+            return text
+        spec.loader.exec_module(module)
+        _LOOKUP_INNER = module.inner_text
+    return str(_LOOKUP_INNER(text) or "").strip()
 
 
 def _sanitize_user_surface_text(text: Any, *, fallback: str = "") -> str:
@@ -374,6 +401,13 @@ class SyncServer:
     def __init__(self) -> None:
         self.repo_root = _repo_root()
         self.db_path = default_db_path()
+        configured_outbox = os.environ.get("ANDREA_OUTBOUND_OUTBOX", "").strip()
+        self.outbound_outbox = (
+            Path(configured_outbox).expanduser()
+            if configured_outbox
+            else self.db_path.with_name(self.db_path.name + ".outbound.jsonl")
+        )
+        self.outbound_delivery_tool = self._deliver_outbound
         self.conn = connect(self.db_path)
         migrate(self.conn)
         ensure_system_task(self.conn)
@@ -2946,12 +2980,12 @@ class SyncServer:
         )
 
     def _outbound_draft_owner_key(self, task_id: str) -> str:
-        principal_id = self._task_principal_id(task_id)
-        if principal_id:
-            return f"principal:{principal_id}"
         payload = self._latest_user_message_payload(task_id)
         channel = str(payload.get("channel") or "telegram").strip() or "telegram"
         chat_id = str(payload.get("chat_id") or payload.get("user_id") or "").strip()
+        principal_id = self._task_principal_id(task_id)
+        if principal_id and chat_id:
+            return f"principal:{principal_id}:{channel}:{chat_id}"
         if chat_id:
             return f"{channel}:{chat_id}"
         return f"task:{task_id}"
@@ -2972,7 +3006,7 @@ class SyncServer:
             except json.JSONDecodeError:
                 delete_meta(c, key)
                 return {}
-            if not isinstance(payload, dict):
+            if not isinstance(payload, dict) or not draft_binding_ok(payload):
                 delete_meta(c, key)
                 return {}
             expires_at = payload.get("expires_at")
@@ -3937,6 +3971,7 @@ class SyncServer:
         except Exception:  # noqa: BLE001
             return failure_reply, failure_reason
         summary = ""
+        saw_generic = False
         for candidate in (
             result.get("user_summary"),
             result.get("summary"),
@@ -3944,21 +3979,32 @@ class SyncServer:
             result.get("blocked_reason"),
             result.get("error"),
         ):
-            raw_preview = str(candidate or "").strip()
+            raw_preview = _lookup_visible_text(candidate)
             if raw_preview and is_stale_openclaw_narrative(raw_preview):
                 return failure_reply, contaminated_reason
             sanitized = shared_sanitize_user_surface_text(
-                candidate,
+                raw_preview,
                 fallback="",
                 limit=500,
             ).strip()
-            if sanitized and not _is_generic_openclaw_summary(sanitized):
+            if sanitized and _is_generic_openclaw_summary(sanitized):
+                saw_generic = True
+                continue
+            if sanitized:
                 summary = sanitized
                 break
         if summary and is_stale_openclaw_narrative(summary):
             return failure_reply, contaminated_reason
+        if str(result.get("status") or "") == "disabled":
+            disabled = failure_reason[:-7] if failure_reason.endswith("_failed") else failure_reason
+            return summary or failure_reply, f"{disabled}_disabled"
         if result.get("ok"):
-            return summary or success_fallback, success_reason
+            if summary:
+                return summary, success_reason
+            # A generic completion still uses the route fallback. An empty result does not.
+            if saw_generic:
+                return success_fallback, success_reason
+            return failure_reply, failure_reason
         if summary:
             return summary, failure_reason
         return failure_reply, failure_reason
@@ -4009,39 +4055,67 @@ class SyncServer:
             failure_reply="I couldn't retrieve your recent text messages cleanly just now.",
         )
 
+    def _outbound_context_matches(self, task_id: str, draft: Dict[str, Any]) -> bool:
+        if not draft_binding_ok(draft):
+            return False
+        payload = self._latest_user_message_payload(task_id)
+        origin = draft.get("origin") if isinstance(draft.get("origin"), dict) else {}
+        channel = str(payload.get("channel") or "telegram").strip() or "telegram"
+        chat_id = str(payload.get("chat_id") or payload.get("user_id") or "").strip()
+        if origin.get("channel") != channel or str(origin.get("chat_id") or "") != chat_id:
+            return False
+        if str(draft.get("principal") or "") != self._task_principal_id(task_id):
+            return False
+        try:
+            if int(draft.get("expires_at")) <= int(time.time()):
+                return False
+        except (TypeError, ValueError):
+            return False
+        return True
+
+    def _deliver_outbound(self, draft: Dict[str, Any]) -> Dict[str, Any]:
+        """The production delivery tool. The receipt is the carrier's confirmation."""
+        return deliver(draft, self.outbound_outbox)
+
+    def _outbound_tool_receipt(self, draft: Dict[str, Any]) -> Dict[str, Any] | None:
+        """A delivery tool returns the receipt. The model status is not consulted."""
+        tool = getattr(self, "outbound_delivery_tool", None)
+        if tool is None:
+            return None
+        try:
+            receipt = tool(draft)
+        except DeliveryUncertain:
+            raise
+        except Exception:  # noqa: BLE001
+            return None
+        if not receipt_matches(draft, receipt):
+            return None
+        return receipt
+
     def _send_pending_outbound_message(
         self,
         task_id: str,
         draft: Dict[str, Any],
     ) -> tuple[str, str]:
-        try:
-            result = self._create_openclaw_job(
-                task_id,
-                self._build_outbound_message_prompt(draft),
-                "verified_outbound_message",
-                "andrea_primary",
-                "",
-                "",
-                session_id=self._openclaw_session_id(task_id, attempt=0),
-            )
-        except Exception as exc:  # noqa: BLE001
-            return (
-                "I could not send that message cleanly just now. The draft is still ready if you want me to revise it or try again.",
-                "outbound_message_send_failed",
-            )
-        if result.get("ok"):
-            self._clear_pending_outbound_draft(task_id)
-            summary = str(result.get("user_summary") or result.get("summary") or "").strip()
-            if summary:
-                return summary, "outbound_message_sent"
-            return (
-                f"I sent it to {str(draft.get('target') or 'them').strip()}.",
-                "outbound_message_sent",
-            )
-        return (
+        failure = (
             "I could not send that message cleanly just now. The draft is still ready if you want me to revise it or try again.",
             "outbound_message_send_failed",
         )
+        uncertain = (
+            "I could not record whether that message was sent. It needs a manual check before it is tried again.",
+            "outbound_message_needs_check",
+        )
+        if not self._outbound_context_matches(task_id, draft):
+            return failure
+        try:
+            receipt = self._outbound_tool_receipt(draft)
+        except DeliveryUncertain:
+            return uncertain
+        if receipt is None:
+            return failure
+        self._clear_pending_outbound_draft(task_id)
+        target = str(draft.get("target") or "them").strip() or "them"
+        return (f"I sent it to {target}.", "outbound_message_sent")
 
     def _parse_memory_note_request(self, text: str) -> str:
         clean = str(text or "").strip()
@@ -4333,14 +4407,22 @@ class SyncServer:
                     self._messaging_capability_reply(resolved, text),
                     "outbound_message_capability_unavailable",
                 )
-            draft = {
-                "target": str(outbound_request.get("target") or "").strip(),
-                "message": str(outbound_request.get("message") or "").strip(),
-                "skill_key": str(resolved.get("skill_key") or "bluebubbles"),
-                "label": str(resolved.get("label") or "text messaging"),
-                "created_at": time.time(),
-                "expires_at": time.time() + PENDING_OUTBOUND_DRAFT_TTL_SECONDS,
-            }
+            source = self._latest_user_message_payload(task_id)
+            draft = bind_draft(
+                target=str(outbound_request.get("target") or "").strip(),
+                body=str(outbound_request.get("message") or "").strip(),
+                principal=self._task_principal_id(task_id),
+                origin={
+                    "channel": str(source.get("channel") or channel).strip() or "telegram",
+                    "chat_id": str(source.get("chat_id") or source.get("user_id") or "").strip(),
+                    "message_id": str(source.get("message_id") or "").strip(),
+                },
+                expires_at=int(time.time()) + int(PENDING_OUTBOUND_DRAFT_TTL_SECONDS),
+                nonce=new_nonce(),
+                skill_key=str(resolved.get("skill_key") or "bluebubbles"),
+                label=str(resolved.get("label") or "text messaging"),
+                created_at=time.time(),
+            )
             self._save_pending_outbound_draft(task_id, draft)
             return (self._outbound_draft_reply(draft), "outbound_message_drafted")
 
@@ -4448,6 +4530,15 @@ class SyncServer:
                 )
         return None
 
+    def _lookup_boundary(self):
+        path = self.repo_root / "first-officer" / "guard" / "boundary.py"
+        spec = importlib.util.spec_from_file_location("fo_guard_boundary_server", path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError("The lookup boundary is unavailable")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
     def _create_openclaw_job(
         self,
         task_id: str,
@@ -4459,8 +4550,7 @@ class SyncServer:
         *,
         session_id: str,
     ) -> Dict[str, Any]:
-        return self._run_json_subprocess(
-            [
+        command = [
                 sys.executable,
                 str(self.repo_root / "scripts" / "andrea_sync_openclaw_hybrid.py"),
                 "--task-id",
@@ -4485,7 +4575,15 @@ class SyncServer:
                 str(self.openclaw_timeout_seconds),
                 "--thinking",
                 self.openclaw_thinking,
-            ],
+            ]
+        boundary = self._lookup_boundary()
+        if boundary.is_lookup(str(route_reason or "").strip()):
+            command.extend([
+                "--allowed-tools",
+                ",".join(boundary.tools_for(str(route_reason or "").strip())),
+            ])
+        return self._run_json_subprocess(
+            command,
             timeout_seconds=self.openclaw_timeout_seconds + 10,
         )
 

@@ -41,7 +41,7 @@ def main() -> int:
         "--llm-eval",
         action="store_true",
         default=False,
-        help="When running conversation_core or routing_matrix, call verifier-slot LLM on weak/failed turns (needs OPENAI_API_KEY).",
+        help="When running conversation_core or routing_matrix, call the verifier model on weak/failed turns (needs Andrea's LiteLLM lane configuration).",
     )
     parser.add_argument(
         "--adjudicate-ambiguous",

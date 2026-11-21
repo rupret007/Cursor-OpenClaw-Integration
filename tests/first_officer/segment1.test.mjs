@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -7,7 +8,7 @@ import { test } from 'node:test';
 import { budgets, classifyRequest, createDispatch } from '../../first-officer/segment1/dispatch.mjs';
 import { answerSimple, fastModelRef, routeOwnerModel, standaloneSimple } from '../../first-officer/segment1/model-router.mjs';
 import { registerSegmentOne } from '../../first-officer/segment1/register.mjs';
-import { fleetStatus, openPullRequests, summarizeAndrea } from '../../first-officer/segment1/tools.mjs';
+import { fleetStatus, openPullRequests, readFleetSnapshot, summarizeAndrea } from '../../first-officer/segment1/tools.mjs';
 import { andreaCommand, parseAndreaSummary } from '../../first-officer/segment1/andrea-ssh.mjs';
 import { runMacAndrea } from '../../first-officer/segment1/andrea-mac.mjs';
 
@@ -441,4 +442,38 @@ test('Andrea rejects arbitrary activity details and preserves validated legacy s
   }
   assert.throws(() => parse({ ...legacy, summary: summary + '\n' + marker, activity: unclassified }),
     /response was invalid/);
+});
+
+test('the shared status publisher is accepted by the fleet reader', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'fo-status-'));
+  const evidence = join(dir, 'evidence.json');
+  const snapshot = join(dir, 'STATUS.json');
+  await writeFile(evidence, JSON.stringify({
+    heavy_jobs: 1,
+    lane_counts: { running: 2, queued: 1 },
+    nodes: {
+      'mac-mini': { load1: 1.25, load5: 1, load15: 0.5, codex_jobs: 1, test_jobs: 0, age_s: 1 },
+      nucbox: { load1: 99, load5: 99, load15: 99, codex_jobs: 4, test_jobs: 4, age_s: 900 },
+    },
+  }));
+  const child = spawnSync('python3', ['first-officer/status/publish.py', 'publish', evidence, snapshot],
+    { encoding: 'utf8' });
+  try {
+    assert.equal(child.status, 0, child.stderr);
+    const read = await readFleetSnapshot(snapshot);
+    assert.equal(read.v, 1);
+    assert.equal(read.host.heavy_jobs, 1);
+    assert.equal(read.lane_counts.running, 2);
+    assert.equal(read.nodes['mac-mini'].codex_jobs, 1);
+    assert.deepEqual(read.nodes.nucbox, { missing: true, stale: true });
+    assert.ok(Math.abs(Date.parse(read.generated_at) - read.ts * 1000) < 1000);
+    const text = await fleetStatus({}, {
+      read: async () => read, load: () => [0.1, 0.1, 0.1], now: () => read.ts * 1000,
+    });
+    assert.match(text, /Mac Mini · 1\.25 \/ 1\.00 \/ 0\.50/);
+    assert.match(text, /NucBox · current load and tracked jobs unavailable/);
+    assert.doesNotMatch(text, /99\.00/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

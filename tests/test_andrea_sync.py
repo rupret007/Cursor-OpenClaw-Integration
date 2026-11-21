@@ -3938,6 +3938,238 @@ class TestAndreaSync(unittest.TestCase):
             projection["meta"]["assistant"]["last_reply"].lower(),
         )
 
+    def test_model_ok_does_not_send_and_another_chat_cannot_take_the_draft(self) -> None:
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        server = SyncServer()
+
+        def submit(external_id: str, text: str, chat_id: int, message_id: int) -> str:
+            result = handle_command(
+                server.conn,
+                {
+                    "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                    "channel": "telegram",
+                    "external_id": external_id,
+                    "payload": {
+                        "text": text,
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                        "from_user": 77,
+                    },
+                },
+            )
+            return str(result["task_id"])
+
+        drafted = submit("tg-exact-draft", "Tell Candace hi from you", 9101, 701)
+        with mock.patch.object(
+            server,
+            "_resolve_messaging_capability",
+            return_value={
+                "skill_key": "bluebubbles",
+                "label": "text messaging",
+                "truth": {"status": "verified_available"},
+            },
+        ):
+            server._handle_task_followups(drafted)
+        pending = server._load_pending_outbound_draft(drafted)
+        self.assertEqual(pending.get("target"), "Candace")
+        self.assertEqual(pending.get("message"), "hi from you")
+        self.assertEqual(len(str(pending.get("digest") or "")), 64)
+        self.assertEqual(pending.get("origin", {}).get("chat_id"), "9101")
+
+        other = submit("tg-exact-other", "send it", 9102, 702)
+        with mock.patch.object(
+            server,
+            "_create_openclaw_job",
+            return_value={"ok": True, "user_summary": "Synthetic success claim."},
+        ) as job:
+            server._handle_task_followups(other)
+            self.assertFalse(job.called)
+        other_proj = project_task_dict(server.conn, other, "telegram")
+        self.assertNotIn(
+            other_proj["meta"]["assistant"]["reason"],
+            {"outbound_message_sent", "outbound_message_send_failed", "outbound_message_pending"},
+        )
+        self.assertEqual(server._load_pending_outbound_draft(drafted).get("message"), "hi from you")
+
+        # This case is the missing tool. The installed tool is covered separately.
+        server.outbound_delivery_tool = None
+        with mock.patch.object(
+            server,
+            "_create_openclaw_job",
+            return_value={"ok": True, "user_summary": "Synthetic success claim."},
+        ) as job:
+            reply, reason = server._send_pending_outbound_message(drafted, pending)
+            self.assertFalse(job.called)
+        self.assertNotEqual(reason, "outbound_message_sent")
+        self.assertNotIn("Synthetic success", reply)
+        self.assertEqual(server._load_pending_outbound_draft(drafted).get("digest"), pending["digest"])
+
+        def wrong_receipt(draft: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "source": "tool",
+                "tool": "bluebubbles",
+                "delivered": True,
+                "target": draft["target"],
+                "body": "a different sentence",
+                "digest": draft["digest"],
+            }
+
+        server.outbound_delivery_tool = wrong_receipt
+        _reply, reason = server._send_pending_outbound_message(drafted, pending)
+        self.assertNotEqual(reason, "outbound_message_sent")
+        self.assertTrue(server._load_pending_outbound_draft(drafted))
+
+        def matching_receipt(draft: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "source": "tool",
+                "tool": "bluebubbles",
+                "delivered": True,
+                "target": draft["target"],
+                "body": draft["message"],
+                "digest": draft["digest"],
+            }
+
+        server.outbound_delivery_tool = matching_receipt
+        reply, reason = server._send_pending_outbound_message(drafted, pending)
+        self.assertEqual(reason, "outbound_message_sent")
+        self.assertIn("Candace", reply)
+        self.assertFalse(server._load_pending_outbound_draft(drafted))
+        self.assertNotIn("Synthetic success", reply)
+
+    def test_exact_confirmation_delivers_once_and_binds_the_receipt(self) -> None:
+        """A plain server delivers the confirmed draft once through its own tool."""
+        os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
+        os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        import threading
+
+        from services.andrea_sync.outbound import receipt_matches
+        from services.andrea_sync.server import SyncServer  # noqa: E402
+
+        class _Carrier(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_POST(self) -> None:
+                length = int(self.headers.get("Content-Length", "0") or "0")
+                raw = self.rfile.read(length) if length else b""
+                self.server.seen.append(raw)
+                request = json.loads(raw)
+                payload = {
+                    "body": request.get("body"),
+                    "carrier": self.server.carrier_id,
+                    "delivered": True,
+                    "digest": request.get("digest"),
+                    "target": request.get("target"),
+                    "tool": request.get("tool"),
+                }
+                data = json.dumps(payload).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, fmt: str, *args: Any) -> None:
+                return
+
+        carrier = ThreadingHTTPServer(("127.0.0.1", 0), _Carrier)
+        carrier.seen = []
+        carrier.carrier_id = "carrier-" + "b1c2d3e4"
+        thread = threading.Thread(target=carrier.serve_forever, daemon=True)
+        thread.start()
+        previous = os.environ.get("ANDREA_OUTBOUND_CARRIER")
+        os.environ["ANDREA_OUTBOUND_CARRIER"] = (
+            f"http://127.0.0.1:{carrier.server_address[1]}/deliver"
+        )
+
+        def _restore_carrier() -> None:
+            carrier.shutdown()
+            if previous is None:
+                os.environ.pop("ANDREA_OUTBOUND_CARRIER", None)
+            else:
+                os.environ["ANDREA_OUTBOUND_CARRIER"] = previous
+
+        self.addCleanup(_restore_carrier)
+        server = SyncServer()
+        self.assertIs(server.outbound_delivery_tool.__func__, SyncServer._deliver_outbound)
+        self.assertEqual(
+            server.outbound_outbox,
+            self.db_path.with_name(self.db_path.name + ".outbound.jsonl"),
+        )
+
+        def submit(external_id: str, text: str, message_id: int) -> str:
+            result = handle_command(
+                server.conn,
+                {
+                    "command_type": CommandType.SUBMIT_USER_MESSAGE.value,
+                    "channel": "telegram",
+                    "external_id": external_id,
+                    "payload": {
+                        "text": text,
+                        "chat_id": 9104,
+                        "message_id": message_id,
+                        "from_user": 77,
+                    },
+                },
+            )
+            return str(result["task_id"])
+
+        drafted = submit("tg-deliver-once-draft", "Tell Candace hi from you", 801)
+        with mock.patch.object(
+            server,
+            "_resolve_messaging_capability",
+            return_value={
+                "skill_key": "bluebubbles",
+                "label": "text messaging",
+                "truth": {"status": "verified_available"},
+            },
+        ):
+            server._handle_task_followups(drafted)
+        pending = server._load_pending_outbound_draft(drafted)
+        self.assertEqual(pending.get("target"), "Candace")
+        self.assertEqual(pending.get("message"), "hi from you")
+        confirmed = submit("tg-deliver-once-confirm", "send it", 802)
+        server._handle_task_followups(confirmed)
+        projection = project_task_dict(server.conn, confirmed, "telegram")
+        self.assertEqual(
+            projection["meta"]["assistant"]["reason"],
+            "outbound_message_sent",
+        )
+        self.assertIn("Candace", projection["meta"]["assistant"]["last_reply"])
+        self.assertFalse(server._load_pending_outbound_draft(confirmed))
+        stored = [
+            json.loads(line)
+            for line in server.outbound_outbox.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        self.assertEqual(len(stored), 1)
+        self.assertTrue(receipt_matches(pending, stored[0]))
+        self.assertEqual(stored[0]["target"], "Candace")
+        self.assertEqual(stored[0]["body"], "hi from you")
+        self.assertEqual(stored[0]["digest"], pending["digest"])
+        self.assertEqual(stored[0]["carrier"], carrier.carrier_id)
+        self.assertEqual(len(carrier.seen), 1)
+        self.assertNotIn("delivered", json.loads(carrier.seen[0]))
+        again = server.outbound_delivery_tool(pending)
+        self.assertEqual(again["digest"], pending["digest"])
+        repeated = [
+            json.loads(line)
+            for line in server.outbound_outbox.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        self.assertEqual(repeated, stored)
+        second = submit("tg-deliver-once-again", "send it", 803)
+        server._handle_task_followups(second)
+        final = [
+            json.loads(line)
+            for line in server.outbound_outbox.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        self.assertEqual(final, stored)
+
     def test_server_confirmation_sends_pending_outbound_message(self) -> None:
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
         os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
@@ -5597,31 +5829,53 @@ class TestAndreaSync(unittest.TestCase):
     def test_build_direct_reply_rejects_openai_sessions_spawn_leak(self) -> None:
         from services.andrea_sync.andrea_router import build_direct_reply
 
-        mock_resp = mock.Mock()
-        mock_resp.__enter__ = mock.Mock(return_value=mock_resp)
-        mock_resp.__exit__ = mock.Mock(return_value=False)
-        mock_resp.read.return_value = json.dumps(
-            {
-                "choices": [
-                    {"message": {"content": "sessions_spawn.attachments.enabled is true"}}
-                ],
-            }
-        ).encode()
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        import threading
 
-        with mock.patch.dict(
-            os.environ,
-            {"OPENAI_API_KEY": "test-key", "OPENAI_API_ENABLED": "1"},
-            clear=False,
-        ):
-            with mock.patch(
-                "services.andrea_sync.andrea_router.urllib.request.urlopen",
-                return_value=mock_resp,
+        seen = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length") or "0")
+                self.rfile.read(length)
+                seen.append((self.path, self.headers.get("Authorization")))
+                body = json.dumps(
+                    {"choices": [{"message": {"content": "sessions_spawn.attachments.enabled is true"}}]}
+                ).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_args):
+                return
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        port = server.server_address[1]
+        try:
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "OPENAI_API_ENABLED": "1",
+                    "ANDREA_LITELLM_API_KEY": "test-key",
+                    "ANDREA_LITELLM_BASE_URL": f"http://127.0.0.1:{port}/v1",
+                    "ANDREA_LITELLM_MODEL": "test-andrea-model",
+                },
+                clear=False,
             ):
                 reply = build_direct_reply(
                     "What should I know about the timeline for the kitchen project?",
                     history=[],
                     memory_notes=[],
                 )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+        self.assertEqual(seen, [("/v1/chat/completions", "Bearer test-key")])
         self.assertNotIn("sessions_spawn", reply.lower())
         self.assertNotIn("attachments.enabled", reply.lower())
 

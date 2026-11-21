@@ -224,3 +224,17 @@ manual rather than a PR job.
 - Remaining external risks: the installed production verifier and loopback
   carrier implementation are absent from the checkout. No live gateway,
   carrier, private-message service, or production rollback was validated.
+
+## FIXES
+
+Each finding was reproduced with a failing test, then fixed. The original FAIL above is unchanged. Local gates after these commits: secret scan clean (`Files 364`, `History commits 320`, `Logs 0`, before the commit that records this section; the file count includes the local gitignored `data/` tree), `bash scripts/test_integration.sh` passed 994 Python tests, and the Segment 1 and captain Node gate passed 23 tests. No live gateway, bobserver, Telegram, or production action was used. Phoenix, Restate and Hatchet were not installed.
+
+The server file fence moved in `ba35b9bfc680aa9bb232a572f29772859fa599b1` so the gate still pins `services/andrea_sync/server.py` after the pending-send change. The confirm phrases in that test are unchanged.
+
+| Finding | Commit | Test |
+| --- | --- | --- |
+| HIGH — a confirmed carrier send can be repeated after local receipt failure | `d845dff936b2a693f5bd1856b7c08aab09b8f569` Do not call the carrier again when a pending send has no receipt. | `tests/test_outbound_carrier.py::test_confirmed_send_is_not_retried_after_local_receipt_failure` and `tests/test_outbound_carrier.py::test_the_server_surfaces_an_unrecorded_confirmation_for_manual_check` |
+| MEDIUM — deleting all owner-writable audit anchors still resets the chain | `80b2b54beffa7b3d9b6fababe13f3e8c75e7d41b` Report an empty audit chain when no undeletable trust anchor exists. | `tests/first_officer/test_cycle.py::test_deleting_every_owner_writable_audit_copy_is_not_a_silent_pass` |
+| MEDIUM — redirect authorization is not scoped to the active lookup route | `004c7517132aa6ae417e1ff8a459ab8974dfc282` Scope a redirect to the active route's source list. | `tests/first_officer/test_guard.py::test_a_redirect_stays_on_the_active_route_source_list` |
+| MEDIUM — the production candidate verifier still runs only after publication | `6af6c7ba7fc24a6dd954430bb1100342adbc3383` Verify the candidate before the release is made read-only. | `tests/first_officer/test_install.py::test_prepare_verifies_the_unpacked_candidate_and_rollback_restores_the_prior_bundle` and `tests/first_officer/test_release.py::test_activate_checks_the_digest_and_writes_rollback_before_publish` |
+| MEDIUM — the secret/PII history gate skips merge-resolution-only content | `747e727fff796000f3fa00697dd233c85280596f` Scan merge results for secrets that never appear in a normal patch. | `tests/first_officer/test_privacy.py::test_history_scans_a_credential_that_exists_only_in_a_merge` |

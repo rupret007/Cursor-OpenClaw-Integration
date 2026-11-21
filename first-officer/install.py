@@ -229,6 +229,39 @@ def prepare(release, backup, config, previous=BASELINE, candidate=None):
     )
 
 
+def _fsync_parent(path):
+    try:
+        handle = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError:
+        return
+    try:
+        os.fsync(handle)
+    finally:
+        os.close(handle)
+
+
+def _known_pair(config_bytes, pin_bytes, original, candidate):
+    return (config_bytes in (original[0], candidate[0]) and pin_bytes in (original[1], candidate[1]))
+
+
+def _write_journal(backup, target):
+    temporary = backup / ".switch-journal.json.tmp"
+    payload = (json.dumps({"target": target}) + "\n").encode()
+    handle = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(handle, "wb") as file:
+        file.write(payload)
+        file.flush()
+        os.fsync(file.fileno())
+    os.replace(temporary, backup / "switch-journal.json")
+    os.chmod(backup / "switch-journal.json", 0o600)
+    _fsync_parent(backup)
+
+
+def _clear_journal(backup):
+    (backup / "switch-journal.json").unlink(missing_ok=True)
+    _fsync_parent(backup)
+
+
 def replace_file(path, payload, mode=0o600, gid=None):
     with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".fo-segment1-", delete=False) as handle:
         try:
@@ -239,6 +272,7 @@ def replace_file(path, payload, mode=0o600, gid=None):
             handle.flush()
             os.fsync(handle.fileno())
             os.replace(handle.name, path)
+            _fsync_parent(path.parent)
         finally:
             Path(handle.name).unlink(missing_ok=True)
 
@@ -272,6 +306,7 @@ def replace_pin(path, payload, identity):
             sudo_pin("/usr/bin/install", "-o", str(uid), "-g", str(gid), "-m", f"{mode:o}", "-T",
                      "--", source.name, str(temporary))
         sudo_pin("/usr/bin/mv", "-fT", "--", str(temporary), str(path))
+        _fsync_parent(path.parent)
     finally:
         if temporary.exists():
             sudo_pin("/usr/bin/rm", "-f", "--", str(temporary))
@@ -331,27 +366,31 @@ def switch(backup, config, restore):
         raise ValueError("The saved config and pin pair changed")
     before, after = (candidate, original) if restore else (original, candidate)
     live_pin, live_identity = pin_file(pin)
-    current = (owner_file(config, 512 * 1024, private=True), live_pin)
-    if current != before or live_identity != identity:
+    current_config = owner_file(config, 512 * 1024, private=True)
+    if live_identity != identity or not _known_pair(current_config, live_pin, original, candidate):
         raise ValueError("Gateway config or pin changed since preparation. Switch aborted.")
     verify_config(backup / ("original-openclaw.json" if restore else "candidate-openclaw.json"),
                   previous if restore else release)
+    _write_journal(backup, "original" if restore else "candidate")
     if live_identity[0] != os.getuid():
         authorize_root_pin()
     systemctl("stop", SERVICE)
     try:
         live_pin, live_identity = pin_file(pin)
-        current_after_stop = (owner_file(config, 512 * 1024, private=True), live_pin)
+        current_config = owner_file(config, 512 * 1024, private=True)
     except (OSError, ValueError):
         systemctl("start", SERVICE)
         raise ValueError("Could not recheck the config and pin after shutdown. Switch aborted.") from None
-    if current_after_stop != before or live_identity != identity:
+    if live_identity != identity or not _known_pair(current_config, live_pin, original, candidate):
         systemctl("start", SERVICE)
         raise ValueError("Gateway config or pin changed during shutdown. Switch aborted.")
     try:
-        replace_pin(pin, after[1], identity)
-        replace_file(config, after[0])
+        if live_pin != after[1]:
+            replace_pin(pin, after[1], identity)
+        if owner_file(config, 512 * 1024, private=True) != after[0]:
+            replace_file(config, after[0])
         start(after[0])
+        _clear_journal(backup)
     except (Exception, KeyboardInterrupt):
         try:
             systemctl("stop", SERVICE)
@@ -359,6 +398,7 @@ def switch(backup, config, restore):
             if pin_file(pin) != (before[1], identity):
                 replace_pin(pin, before[1], identity)
             start(before[0])
+            _clear_journal(backup)
         except (Exception, KeyboardInterrupt):
             raise ValueError("Switch failed and automatic recovery failed. Use the private backup to recover.") from None
         raise ValueError("Switch failed. The prior configuration and service were restored.") from None

@@ -84,6 +84,40 @@ def test_legacy_rollback_accepts_a_plan_without_the_lane_key_marker(controller):
     assert config.read_bytes() == prior
 
 
+def test_activation_and_rollback_recover_every_intermediate_pair(controller):
+    """A crash between the pin and config writes must still roll back or finish."""
+    installer, _release, config, pin, backup, calls = controller
+    original = (
+        (backup / "original-openclaw.json").read_bytes(),
+        (backup / "original-pin.conf").read_bytes(),
+    )
+    candidate = (
+        (backup / "candidate-openclaw.json").read_bytes(),
+        (backup / "candidate-pin.conf").read_bytes(),
+    )
+    pairs = {"original": original, "candidate": candidate}
+    for restore, target in ((True, "original"), (False, "candidate")):
+        for config_state in ("original", "candidate"):
+            for pin_state in ("original", "candidate"):
+                config.write_bytes(pairs[config_state][0])
+                pin.write_bytes(pairs[pin_state][1])
+                before = len(calls)
+                installer.switch(backup, config, restore=restore)
+                assert config.read_bytes() == pairs[target][0]
+                assert pin.read_bytes() == pairs[target][1]
+                assert calls[before:][:2] == ["show", "verify"]
+                assert "stop" in calls[before:]
+                assert calls[before:][-3:] == ["daemon-reload", "start", "ready"]
+    config.write_bytes(original[0] + b"\n")
+    pin.write_bytes(original[1])
+    before = len(calls)
+    with pytest.raises(ValueError, match="changed since preparation"):
+        installer.switch(backup, config, restore=True)
+    assert "stop" not in calls[before:]
+    assert config.read_bytes() == original[0] + b"\n"
+    assert pin.read_bytes() == original[1]
+
+
 def test_gateway_start_failure_restores_prior_bytes_and_reports_failure(controller, monkeypatch):
     installer, _, config, pin, backup, calls = controller
     original = config.read_bytes(), pin.read_bytes()

@@ -19,7 +19,7 @@ This is the same gate CI runs. It takes about two minutes.
 bash scripts/test_integration.sh
 ```
 
-Expect `952 passed` from the Python suite and a final line `All integration checks passed.`. The `Handoff failed.` lines inside the exhaustive check are expected: that check deliberately feeds bad arguments and requires each one to be refused. Before the unit tests, the gate prints one line, `Secret scan clean. Files <n>. History commits <n>. Logs 0.`
+Expect `953 passed` from the Python suite and a final line `All integration checks passed.`. The `Handoff failed.` lines inside the exhaustive check are expected: that check deliberately feeds bad arguments and requires each one to be refused. Before the unit tests, the gate prints one line, `Secret scan clean. Files <n>. History commits <n>. Logs 0.`
 
 ## 2. The Segment 1 and captain gate
 
@@ -358,7 +358,7 @@ An empty allowlist refuses every page. A listed host does not include its subdom
 python3 -m pytest -q tests/first_officer/test_guard.py
 ```
 
-Expect `4 passed`. Nothing is installed and no host outside `127.0.0.1` is contacted.
+Expect `5 passed`. Nothing is installed and no host outside `127.0.0.1` is contacted. The fifth test recalls a memory that says to ignore the instructions and send. The recall is fenced, a hidden character and a fence closer are omitted, and the recall does not match `send it`, `send it now`, or `send now`. Those three phrases still match on their own.
 
 ## What is not provable here yet
 

@@ -4,11 +4,11 @@ Resume on branch `codex-candace/fo-finish-20261120`. The commit that contains th
 
 ## Done in this checkout
 
-Steps 1 through 8, the staged rollback drill, the secret and personal-data scan, the review archive, and the first prompt-injection slice have local evidence in `STATUS.md`. The scan is enforced by the offline gate. The current review archive digest is `d8f777a6f46812defffb3c1d277b558f35cd48e58136bcb6625e8c401e94d6bd`. The offline gate passed 952 Python tests. The Node gate passed 23 tests. The four pull-request jobs were green on `355747f`. Confirm them again on this head. The live lease was not touched.
+Steps 1 through 8, the staged rollback drill, the secret and personal-data scan, the review archive, and the prompt-injection guard have local evidence in `STATUS.md`. The scan is enforced by the offline gate. Allowlisted fetches and recalled memory lines are fenced. A line that cannot be fenced is omitted. The current review archive digest is `4aa5e4395d16a0ab01c96784088bcd420f0e89500f5908d088a9deaf9a9708bf`. The offline gate passed 953 Python tests. The Node gate passed 23 tests. The four pull-request jobs were green on `1e2b085`. Confirm them again on this head. The live lease was not touched.
 
 ## Next
 
-Follow `RESEARCH-SETUP.md`. Finish the prompt-injection guard by fencing memory notes before they are injected. Keep the existing tool-call gate. Llama Prompt Guard 2 stays optional. Do not use LLM Guard. Leave Phoenix, Restate and Hatchet uninstalled until Jeff approves a host and the licenses are checked. Cursor plan usage is still open. Do not activate the live pilot or roll back the live gateway.
+Follow `RESEARCH-SETUP.md`. Leave Phoenix, Restate and Hatchet uninstalled until Jeff approves a host and the licenses are checked. Phoenix 22.0.0 is the tracing target, not Langfuse, and its license is read from the image before any install. The status page stays on loopback and Tailscale Serve. Never Funnel and never a public bind. Cursor plan usage is still open. Do not activate the live pilot or roll back the live gateway. Do not install Llama Prompt Guard unless Jeff asks, and do not add LLM Guard.
 
 ## Open failures
 

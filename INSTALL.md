@@ -159,7 +159,7 @@ The clean line is `Secret scan clean. Files <n>. History commits <n>. Logs 0.` T
 
 ## Fetch one allowlisted page
 
-`first-officer/guard/restricted_fetch.py` reads a page only when the host is an exact allowlist entry. Public entries are HTTPS on port 443 and must resolve to public unicast addresses. `http://127.0.0.1:<port>` is accepted only as a named fixture. One redirect is checked with the same rules. The visible text is returned inside a random fence from `first-officer/guard/sanitize.py`. A fence closer, a hidden character, or a page over 8 KiB after scripts are removed is refused, and the body is not returned. Fenced text is not a tool call. The gateway's existing `before_tool_call` block is unchanged.
+`first-officer/guard/restricted_fetch.py` reads a page only when the host is an exact allowlist entry. Public entries are HTTPS on port 443 and must resolve to public unicast addresses. `http://127.0.0.1:<port>` is accepted only as a named fixture. One redirect is checked with the same rules. The visible text is returned inside a random fence from `first-officer/guard/sanitize.py`. A fence closer, a hidden character, or a page over 8 KiB after scripts are removed is refused, and the body is not returned. Fenced text is not a tool call. The gateway's existing `before_tool_call` block is unchanged. Recalled preference, episodic, and principal memory lines are fenced the same way, at 500 characters. A line that cannot be fenced is omitted. The exact send phrases remain `send it`, `send it now`, and `send now`.
 
 ## Pack the review archive
 

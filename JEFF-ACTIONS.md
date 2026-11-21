@@ -6,14 +6,14 @@ Before any of it, you can verify the finished work yourself with [TEST-NOW.md](T
 
 ## 1. Approve and activate the combined release
 
-One digest, one command, one rollback. Build the candidate on the Nuc from the private prior bundle, read the digest, then activate on bobserver. The review archive from `first-officer/archive.py` is the offline copy of this lane. It is not this activation.
+One digest and one activation command. The rollback restores the prior config, pin, and service. It does not delete the published candidate or undo a separately provisioned reader or proxy. Build the candidate on the Nuc from the private prior bundle, read the digest, then activate on bobserver. The review archive from `first-officer/archive.py` is the offline copy of this lane. It is not this activation.
 
 ```bash
 python3 -B first-officer/release.py build "$PRIOR_BUNDLE" "$staging"
 python3 -B first-officer/release.py activate "$release" "$archive" "$backup_parent"
 ```
 
-Preview either one with `--dry-run` first; it prints the exact ordered commands and runs none of them. Activation refuses to start unless the gateway is already running, the GitHub CLI is authenticated as the owner account and the existing Andrea read-only bridge answers. It publishes the candidate read-only under its digest, records a private rollback directory, switches, and waits for readiness. It stops at the first failure.
+Preview either one with `--dry-run` first; it prints the exact ordered commands and runs none of them. Activation refuses to start unless the gateway is already running, the GitHub CLI is authenticated as the owner account and the existing Andrea read-only bridge answers. It compares the manifest digest with the approved release and records the private rollback before it publishes the candidate. It then publishes the candidate read-only under its digest, switches, and waits for readiness. It stops at the first failure.
 
 The rollback is the printed private backup directory.
 

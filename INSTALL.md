@@ -16,7 +16,9 @@ test_home="$(mktemp -d)"
 env HOME="$test_home" FO_CANARY_HOME="$test_home" FO_RELEASE_ROOT="$candidate" \
   nice -n 10 node tests/first_officer/round13-canary.mjs
 nice -n 10 node --test tests/first_officer/segment1.test.mjs tests/first_officer/captain.test.mjs
-nice -n 10 tar -C "$stage_dir" -cf "$stage_dir/first-officer-$release.tar" "first-officer-$release"
+archive="$stage_dir/first-officer-$release.tar"
+test ! -e "$archive"
+nice -n 10 tar -C "$stage_dir" -cf "$archive" "first-officer-$release"
 printf 'Release %s\nPrivate bundle %s\n' "$release" "$stage_dir/first-officer-$release.tar"
 ```
 
@@ -216,24 +218,23 @@ archive="$HOME/.openclaw/segment1-staged/first-officer-$release.tar"
 extract_dir="$(mktemp -d)"
 tar -xf "$archive" -C "$extract_dir" --no-same-owner
 candidate="$extract_dir/first-officer-$release"
-test "$(sha256sum "$candidate/SHA256SUMS" | cut -d' ' -f1)" = "$release"
+python3 -B -c 'import hashlib, pathlib, sys; digest = hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest(); sys.exit(0 if digest == sys.argv[2] else 1)' "$candidate/SHA256SUMS" "$release"
 (cd "$candidate" && sha256sum --quiet --strict --check SHA256SUMS >/dev/null 2>&1)
+backup_parent="$(mktemp -d "$HOME/.openclaw/backups/fo-segment1.XXXXXXXX")"
+backup="$backup_parent/switch"
+nice -n 10 python3 -B first-officer/install.py prepare "$backup" --release "$release" --from-release "$baseline" --candidate "$candidate"
+printf 'Keep this private rollback directory: %s\n' "$backup"
 published="/opt/openclaw-fo/first-officer-$release"
 sudo test ! -e "$published"
 publish_dir="$(sudo mktemp -d /opt/openclaw-fo/.segment1-publish.XXXXXXXX)"
 sudo cp -a --no-preserve=ownership "$candidate/." "$publish_dir/"
 sudo chmod -R a-w,a+rX "$publish_dir"
 sudo mv -nT "$publish_dir" "$published"
-
-backup_parent="$(mktemp -d "$HOME/.openclaw/backups/fo-segment1.XXXXXXXX")"
-backup="$backup_parent/switch"
-nice -n 10 python3 -B first-officer/install.py prepare "$backup" --release "$release" --from-release "$baseline"
-printf 'Keep this private rollback directory: %s\n' "$backup"
 nice -n 10 python3 -B first-officer/install.py activate "$backup"
 systemctl --user is-active --quiet openclaw-gateway.service
 ```
 
-Preparation validates the candidate with the existing verifier and the OpenClaw launcher used by the running service before shutdown. With a root-owned pin, activation obtains sudo authorization before shutdown and preserves the pin’s owner, group and mode. Activation waits up to 120 seconds for local readiness and attempts to restore the prior config and pin if the switch fails. Run [the Telegram acceptance checks](LIVE-TEST.md) once the service is ready.
+The manifest digest is compared with the approved release, and the private rollback directory is written, before the candidate is published. Preparation validates that unpacked candidate with the existing verifier and the OpenClaw launcher used by the running service. With a root-owned pin, activation obtains sudo authorization before shutdown and preserves the pin’s owner, group and mode. Activation waits up to 120 seconds for local readiness and attempts to restore the prior config and pin if the switch fails. The rollback restores that config, pin, and service. It does not delete the published candidate directory or undo a separately provisioned reader or proxy. Run [the Telegram acceptance checks](LIVE-TEST.md) once the service is ready.
 
 ## Roll back to the exact prior config and pin
 

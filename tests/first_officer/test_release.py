@@ -62,6 +62,7 @@ def test_one_build_command_stages_gates_and_packs_in_order(tmp_path, capsys):
         "Stage the candidate from the verified prior bundle",
         "Run the packaged Round 13 canary against the candidate",
         "Run the Segment 1 and captain gate",
+        "Refuse to replace an existing candidate archive",
         "Pack the candidate for the operator",
     ]
     assert recorder.calls[-1][1][-1] == f"first-officer-{CANDIDATE}"
@@ -78,6 +79,30 @@ def test_build_refuses_a_staging_result_that_is_not_a_release_digest(tmp_path, c
     assert [what for what, _ in recorder.calls] == ["Stage the candidate from the verified prior bundle"]
 
 
+def test_activate_checks_the_digest_and_writes_rollback_before_publish(tmp_path):
+    recorder = Recorder(activate_replies())
+    assert release.main(["activate", CANDIDATE, str(tmp_path / "a.tar"), str(tmp_path)], recorder) == 0
+    order = [what for what, _ in recorder.calls]
+    assert "Compare the manifest digest with the approved release" in order
+    publish_at = order.index("Publish the staged release under its digest")
+    assert order.index("Compare the manifest digest with the approved release") < publish_at
+    assert order.index("Check the candidate inventory against the reviewed digest") < publish_at
+    assert order.index("Prepare the switch and record the private rollback") < publish_at
+    prepare = dict(recorder.calls)["Prepare the switch and record the private rollback"]
+    assert "--candidate" in prepare
+    assert CANDIDATE in " ".join(prepare)
+    digest_step = dict(recorder.calls)["Compare the manifest digest with the approved release"]
+    assert digest_step[-1] == CANDIDATE
+    assert any(part.endswith("SHA256SUMS") for part in digest_step)
+
+    recorder = Recorder({"Stage the candidate from the verified prior bundle": CANDIDATE})
+    assert release.main(["build", str(tmp_path / "prior"), str(tmp_path / "staging")], recorder) == 0
+    built = [what for what, _ in recorder.calls]
+    pack_at = built.index("Pack the candidate for the operator")
+    assert built[pack_at - 1] == "Refuse to replace an existing candidate archive"
+    assert recorder.calls[pack_at - 1][1][:3] == ["test", "!", "-e"]
+
+
 def test_one_activate_command_preflights_publishes_and_switches_in_order(tmp_path, capsys):
     recorder = Recorder(activate_replies())
     assert release.main(["activate", CANDIDATE, str(tmp_path / "a.tar"), str(tmp_path)], recorder) == 0
@@ -88,13 +113,14 @@ def test_one_activate_command_preflights_publishes_and_switches_in_order(tmp_pat
         "Confirm the GitHub CLI authenticates as the configured owner",
         "Confirm the existing Andrea read-only bridge answers",
         "Unpack the reviewed archive",
+        "Compare the manifest digest with the approved release",
         "Check the candidate inventory against the reviewed digest",
+        "Prepare the switch and record the private rollback",
         "Refuse to republish an existing release directory",
         "Reserve a private staging directory under the release store",
         "Copy the candidate into the staging directory",
         "Remove write access from the staged release",
         "Publish the staged release under its digest",
-        "Prepare the switch and record the private rollback",
         "Switch the gateway to the reviewed release",
         "Confirm the gateway is active after the switch",
     ]
@@ -102,8 +128,9 @@ def test_one_activate_command_preflights_publishes_and_switches_in_order(tmp_pat
     assert calls["Copy the candidate into the staging directory"][-1] == f"{PUBLISH}/"
     assert calls["Publish the staged release under its digest"][-2:] == [
         PUBLISH, f"/opt/openclaw-fo/first-officer-{CANDIDATE}"]
-    assert calls["Prepare the switch and record the private rollback"][-3:] == [
-        "--release", CANDIDATE, "--from-release", ACTIVE][-3:]
+    prepare = calls["Prepare the switch and record the private rollback"]
+    assert prepare[-6:] == ["--release", CANDIDATE, "--from-release", ACTIVE, "--candidate", prepare[-1]]
+    assert prepare[-1].endswith(f"/first-officer-{CANDIDATE}")
     printed = capsys.readouterr().out
     assert f"Keep this private rollback directory: {tmp_path / 'switch'}" in printed
     assert f"rollback {tmp_path / 'switch'}" in printed

@@ -162,10 +162,12 @@ def candidate_config(original, release, previous=BASELINE, *, budgeted_litellm=T
     return (json.dumps(cfg, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
 
 
-def prepare(release, backup, config, previous=BASELINE):
+def prepare(release, backup, config, previous=BASELINE, candidate=None):
     if previous not in SUPPORTED_BASES or not DIGEST.fullmatch(release) or release in (*SUPPORTED_BASES, ROLLBACK_SLOT):
         raise ValueError("Expected a distinct, full candidate digest")
-    root = STORE / f"first-officer-{release}"
+    root = Path(candidate) if candidate is not None else STORE / f"first-officer-{release}"
+    if root.is_symlink():
+        raise ValueError("The candidate release must be a directory")
     verify_inventory(root, release)
     dropins = shlex.split(systemctl("show", "-p", "DropInPaths", "--value", SERVICE, capture=True))
     pins = []
@@ -341,6 +343,8 @@ def main():
     parser.add_argument("backup", type=Path)
     parser.add_argument("--release")
     parser.add_argument("--from-release", choices=SUPPORTED_BASES, default=BASELINE)
+    parser.add_argument("--candidate", type=Path,
+                        help="Unpacked candidate to validate before it is published")
     args = parser.parse_args()
     os.umask(0o077)
     config = Path.home() / ".openclaw/openclaw.json"
@@ -348,7 +352,7 @@ def main():
         with (config.parent / ".fo-segment1-install.lock").open("ab") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             if args.action == "prepare":
-                prepare(args.release or "", args.backup, config, args.from_release)
+                prepare(args.release or "", args.backup, config, args.from_release, args.candidate)
             else:
                 switch(args.backup, config, restore=args.action == "rollback")
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:

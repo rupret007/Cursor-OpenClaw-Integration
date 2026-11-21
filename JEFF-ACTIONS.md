@@ -23,6 +23,14 @@ python3 -B first-officer/release.py rollback "$backup"
 
 What changes when this is active: the `@andrea` prefix in your private owner chat routes to the existing restricted Mac reader, and the gateway's routed model traffic uses its own budgeted LiteLLM lane key instead of the shared credential.
 
+The checkout does not contain the installed verifier `/opt/openclaw-fo/verify-install.py`. Activation calls it with the same three arguments as the service pin: the config path, the release digest, and the rollback slot. It does not pass the unpacked directory. After the candidate has been published and before `install.py activate` stops the gateway, run this check. It does not stop or switch the service. It must exit 0:
+
+```bash
+python3 -I -B /opt/openclaw-fo/verify-install.py "$backup/candidate-openclaw.json" "$release" 4759047e8a16d1691499d55c4b6656882e67bc2275a3297d2283aa9b01538753
+```
+
+A non-zero exit means that installed program rejected the published candidate. Leave the gateway on the current release and do not run the switch.
+
 ## 2. Run the timed Telegram acceptance checks
 
 After the release is active, work through [LIVE-TEST.md](LIVE-TEST.md) in the private owner chat and report which checks pass. These are the first messages that reach the live bot, so they need you at the keyboard. The check that previously failed was the Andrea text summary; the current release answers the untagged command `summarize my texts` and its common spelling variants through the read-only reader.

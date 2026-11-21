@@ -260,42 +260,75 @@ def test_prepare_verifies_the_unpacked_candidate_and_rollback_restores_the_prior
         "log = Path(__file__).with_name('verifier-args.log')\n"
         "with log.open('a', encoding='utf-8') as handle:\n"
         "    handle.write(json.dumps(sys.argv[1:]) + '\\n')\n"
-        "config, release, _rollback, *rest = sys.argv[1:]\n"
+        "if len(sys.argv) != 4:\n"
+        "    raise SystemExit(2)\n"
+        "config, release, rollback = sys.argv[1:]\n"
+        f"if rollback != {installer.ROLLBACK_SLOT!r}:\n"
+        "    raise SystemExit(3)\n"
         "paths = json.loads(Path(config).read_text(encoding='utf-8'))['plugins']['load']['paths']\n"
         "marker = f'/first-officer-{release}/'\n"
-        "if all(Path(raw).is_file() for raw in paths):\n"
-        "    raise SystemExit(0)\n"
-        "if len(rest) != 1:\n"
-        "    raise SystemExit(1)\n"
-        "candidate = Path(rest[0])\n"
         "for raw in paths:\n"
-        "    if marker not in raw or Path(raw).exists() or not (candidate / raw.split(marker, 1)[1]).is_file():\n"
-        "        raise SystemExit(1)\n"
+        "    if marker not in raw or not Path(raw).is_file():\n"
+        "        raise SystemExit(4)\n"
         "raise SystemExit(0)\n",
         encoding="utf-8",
     )
     verifier.chmod(0o755)
+    recorded = []
+    real_run = installer.subprocess.run
+
+    def wrapped(args, **kwargs):
+        recorded.append([str(part) for part in args])
+        return real_run(args, **kwargs)
+
+    stops = []
 
     def service(*args, capture=False):
+        if args and args[0] == "stop":
+            stops.append(len(recorded))
         if args[:3] == ("show", "-p", "ExecStart"):
             return "{ argv[]=" + str(launcher) + " gateway ; }"
         if capture:
             return str(pin)
         return None
 
+    def verifier_calls(calls):
+        return [args for args in calls if any(part.endswith("verify-install.py") for part in args)]
+
+    monkeypatch.setattr(installer.subprocess, "run", wrapped)
     monkeypatch.setattr(installer, "systemctl", service)
     monkeypatch.setattr(installer, "wait_ready", lambda *_args: None)
+    missing = tmp_path / "missing-plugin"
+    partial = _write_release(missing, {
+        "round6/runtime/first-officer-conductor.mjs": b"candidate-conductor\n",
+    })
+    with pytest.raises(ValueError, match="missing a plugin"):
+        installer.prepare(partial, tmp_path / "bad-switch", config, installer.BASELINE, missing)
     original = config.read_bytes(), pin.read_bytes()
     backup = tmp_path / "switch"
+    before = len(recorded)
     installer.prepare(release, backup, config, installer.BASELINE, unpacked)
     for member in backup.iterdir():
         member.chmod(0o600)
     published = store / f"first-officer-{release}"
     assert not published.exists()
+    prepared = verifier_calls(recorded[before:])
+    assert prepared == [installer.installed_verifier(backup / "original-openclaw.json", installer.BASELINE)]
     logged = (store / "verifier-args.log").read_text(encoding="utf-8")
-    assert str(unpacked) in logged
+    assert release not in logged and str(unpacked) not in logged
+    assert all(len(json.loads(line)) == 3 for line in logged.splitlines())
     shutil.copytree(unpacked, published)
+    (published / "first-officer-exec-guard.mjs").unlink()
+    with pytest.raises(ValueError, match="rejected"):
+        installer.switch(backup, config, restore=False)
+    assert stops == []
+    assert config.read_bytes() == original[0]
+    (published / "first-officer-exec-guard.mjs").write_bytes(b"candidate-guard\n")
+    before_switch = len(recorded)
     installer.switch(backup, config, restore=False)
+    switched = verifier_calls(recorded[before_switch:stops[0]])
+    assert switched == [installer.installed_verifier(backup / "candidate-openclaw.json", release)]
+    assert str(unpacked) not in " ".join(switched[0])
     activated = json.loads(config.read_bytes())
     assert str(published) in activated["plugins"]["load"]["paths"][0]
     installer.switch(backup, config, restore=True)
@@ -303,6 +336,10 @@ def test_prepare_verifies_the_unpacked_candidate_and_rollback_restores_the_prior
     assert {name: (prior / name).read_bytes() for name in prior_files} == prior_bytes
     assert (prior / "first-officer-exec-guard.mjs").read_bytes() == b"prior-guard\n"
     assert stat.S_ISREG((prior / "SHA256SUMS").stat().st_mode)
+    guide = Path(__file__).resolve().parents[2] / "JEFF-ACTIONS.md"
+    text = guide.read_text(encoding="utf-8")
+    assert "python3 -I -B /opt/openclaw-fo/verify-install.py" in text
+    assert installer.ROLLBACK_SLOT in text
 
 
 def test_schema_validation_uses_the_node_launcher_from_systemd(tmp_path, monkeypatch):
@@ -321,6 +358,7 @@ def test_schema_validation_uses_the_node_launcher_from_systemd(tmp_path, monkeyp
 
     monkeypatch.setattr(installer.subprocess, "run", run)
     installer.verify_config(config, release)
+    assert calls[0][0] == installer.installed_verifier(config, release)
     assert Path(calls[0][0][3]).name == "verify-install.py"
     assert calls[0][1]["check"] is True
     assert calls[1][0] == [*launcher, "config", "validate", "--json"]

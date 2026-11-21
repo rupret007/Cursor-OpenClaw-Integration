@@ -130,16 +130,34 @@ def _require_unpacked_plugins(config_path, release, candidate):
             raise ValueError("The unpacked candidate is missing a plugin file")
 
 
+def installed_verifier(path, release):
+    """Return the service pin's verifier command for this config.
+
+    The pin runs `verify-install.py` with the config, the release digest, and the
+    rollback slot. The unpacked candidate directory is not an argument. That
+    program is not in this checkout; preparation checks the unpacked plugins
+    itself, and this command runs once those files are at the store path.
+    """
+    pinned = shlex.split(pin_line(release).partition("=")[2])
+    if (len(pinned) != 7 or pinned[:3] != ["/usr/bin/python3", "-I", "-B"]
+            or Path(pinned[3]).name != "verify-install.py"
+            or pinned[5] != release or pinned[6] != ROLLBACK_SLOT):
+        raise ValueError("The installed release verifier rejected the config and pin")
+    return [pinned[0], pinned[1], pinned[2], str(STORE / "verify-install.py"),
+            str(Path(path)), pinned[5], pinned[6]]
+
+
 def verify_config(path, release, candidate=None):
     if candidate is not None:
         _require_unpacked_plugins(path, release, candidate)
-    verifier = ["/usr/bin/python3", "-I", "-B", str(STORE / "verify-install.py"), str(path), release, ROLLBACK_SLOT]
-    if candidate is not None:
-        verifier.append(str(Path(candidate)))
-    try:
-        subprocess.run(verifier, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
-    except (OSError, subprocess.SubprocessError):
-        raise ValueError("The installed release verifier rejected the config and pin") from None
+    else:
+        try:
+            subprocess.run(
+                installed_verifier(path, release), check=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60,
+            )
+        except (OSError, subprocess.SubprocessError):
+            raise ValueError("The installed release verifier rejected the config and pin") from None
 
     launcher = gateway_launcher()
     label = "Round 13" if release == BASELINE else "candidate"

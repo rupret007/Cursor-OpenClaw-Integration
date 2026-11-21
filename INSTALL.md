@@ -37,6 +37,8 @@ The helper creates a dedicated key on bobserver and adds a restricted authorizat
 
 For an existing restricted key, add `--refresh-reader` to the same command. The helper tests the candidate against recent history and then verifies the refreshed reader from bobserver. Wait for `Andrea reader verified from bobserver.` before publishing or activating the gateway. The gateway keeps running during the reader refresh.
 
+The `@andrea` and LiteLLM routing update can reuse the verified Mac reader. Start with the Bobserver prerequisites below for this gateway-only upgrade.
+
 ## Check prerequisites on bobserver
 
 Run from the PR checkout as the account that owns `openclaw-gateway.service`. The GitHub CLI must authenticate as the configured owner account. The existing Andrea read-only bridge must answer from the service account using its private reader configuration.

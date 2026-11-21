@@ -30,19 +30,28 @@ Jeff shared the live Andrea reply from Bob the Bot. It confirms delivery and a l
 
 Jeff approved the summary upgrade. The Mac reader refresh succeeded on retry, and Bobserver read recent activity with qualitative findings in about 3 seconds. That measurement covers only the reader call. Bobserver now runs release `61ff4565dd5638a886effefbd720c92a17b7388acbc6eeaffb7779f78d3f1b36` from reviewed commit `3dd2b84`. Both plugin paths, the verifier pin, the service state and `/readyz` were independently verified. The most recent private rollback directory restores the prior Captain release.
 
-During the Telegram check, a spelling variant bypassed Andrea and reached a rate-limited model. The follow-up routes common spelling variants of the text-summary command to the same read-only tool. A regression test reproduced the bypass before the fix and verifies the corrected dispatch. The installed release uses the exact command in [the Telegram check](LIVE-TEST.md).
+During the Telegram check, a spelling variant bypassed Andrea and reached a rate-limited model. The follow-up routes common spelling variants of the text-summary command to the same read-only tool. A regression test reproduced the bypass before the fix and verifies the corrected dispatch. The installed release accepts the exact untagged command `summarize my texts`.
 
-## Later segments
+## OpenClaw and Andrea
 
-- LiteLLM for all API calls with per-lane budgets and provider fallback.
-- Codex 5-hour and weekly usage, Claude session and weekly usage, Central Time resets, 90% warnings and `HANDOFF.md`.
+The staged release recognizes a leading `@andrea` in Bob the Bot’s private owner chat. It routes messaging summaries to the existing restricted Mac reader. Untagged messages continue through OpenClaw. The packaged canary verifies both paths, the rejected sender path and Andrea’s read-only help for requests to send a text.
+
+The active LiteLLM endpoint returned the three configured model aliases from its model catalog. Flash serves short requests. The candidate routes contextual requests and configured fallbacks through LiteLLM. The packaged canary verifies the model choices and fallback ordering without calling a model. Live completion under load and per-lane budget enforcement still need proof.
+
+The installed gateway add-on diagnostic found 49 skills and ten inactive routine declarations. It verified the skill route, fetched-page quarantine, restricted fetch, redaction and delivery outcomes using dry runs. Scheduled routine execution still needs proof.
+
+## Remaining integration and acceptance
+
+- Finish the timed Telegram checks and supervised authority pilot before expanding production scope.
+- Prove LiteLLM provider failover and add per-lane budgets. Apply the gateway route to other API clients as each lane moves over.
+- The quota readers and captain admission checks are present. Finish Codex and Claude usage tracking, Central Time reset alerts at 90% and `HANDOFF.md`.
 - Hatchet lane queue pilot with Restate as fallback.
-- Phoenix tracing and OpenLLMetry.
-- Playwright flaky reporter and quarantine.
-- Shared status view and admin console.
-- Prompt-injection guard, `sanitize.py`, `restricted_fetch.py`, grounded memory, skills and routines, approval binding and audit log.
-- Dead-man watcher and tested failover.
+- The runtime records local traces. Integrate Phoenix and OpenLLMetry and verify trace delivery.
+- The installed bundle reads flaky reports. Add the Playwright report producer and quarantine workflow.
+- The fleet reader consumes shared status. Finish the shared status view and admin console.
+- Verify grounded memory, scheduled routines, approval binding and the audit log end to end. The gateway add-on diagnostic covers guarded fetch, redaction and the skill catalog.
+- The lease and watchdog passed a local rehearsal. Complete the supervised production pilot and verify failover.
 
 The backlog references the bobserver lanes `infra-20261118`, `consolidate-20261119` and `arch-research-20261118`.
 
-BLOCKED: The Andrea upgrade is active. Timed Telegram acceptance and the supervised authority pilot remain pending.
+BLOCKED: The `@andrea` and LiteLLM routing update is staged. Gateway activation, timed Telegram acceptance and the supervised authority pilot remain pending.

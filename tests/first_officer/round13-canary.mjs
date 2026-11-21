@@ -24,6 +24,11 @@ const context = {
   accountId: 'default', agentId: 'main', channel: 'telegram', channelId: 'telegram',
   conversationId: owner, senderId: owner, messageId: '1', sessionKey: 'agent:main:main',
 };
+const flashModel = 'litellm/minimax-m3.1-flash';
+const deliberateModel = 'litellm/minimax-m3';
+const researchModel = 'litellm/gemini-3.1-pro';
+const alternateModel = 'litellm/fixture-fallback';
+const directModel = 'direct/fixture-model';
 const noop = () => {};
 const api = {
   config: {
@@ -32,6 +37,15 @@ const api = {
         dmPolicy: 'allowlist', allowFrom: [owner], execApprovals: { approvers: [owner] },
       },
     },
+    agents: { defaults: { model: {
+      fallbacks: [directModel, researchModel, flashModel, 'litellm/unregistered', alternateModel, deliberateModel],
+    } } },
+    models: { providers: {
+      litellm: { models: [flashModel, deliberateModel, researchModel, alternateModel].map((ref) => ({
+        id: ref.split('/')[1],
+      })) },
+      direct: { models: [{ id: 'fixture-model' }] },
+    } },
   },
   logger: { info: noop, warn: noop, debug: noop, error: noop },
   on(name, handler, { priority = 0 } = {}) {
@@ -56,6 +70,7 @@ const api = {
     },
     llm: { async complete(params) {
       models += 1;
+      assert.equal(params.model, flashModel);
       assert.equal(params.messages.length, 1);
       return { text: 'A branch is a movable reference to a commit.', stopReason: 'stop' };
     } },
@@ -69,6 +84,34 @@ async function dispatch(content, ctx = context) {
     const result = await handler(event, ctx);
     if (result?.handled) return result;
   }
+}
+
+const modelHook = hooks.get('before_model_resolve').at(-1).handler;
+const savedProviderFetch = globalThis.fetch;
+let providerFetches = 0;
+globalThis.fetch = async () => {
+  providerFetches += 1;
+  assert.fail('Model selection must not call a provider');
+};
+try {
+  assert.deepEqual(await modelHook({ prompt: 'Review this synthetic design' }, context), {
+    providerOverride: 'litellm',
+    modelOverride: 'minimax-m3',
+    fallbacksOverride: [researchModel, flashModel, alternateModel],
+  });
+  assert.deepEqual(await modelHook({ prompt: 'Research the sample problem' }, context), {
+    providerOverride: 'litellm',
+    modelOverride: 'gemini-3.1-pro',
+    fallbacksOverride: [deliberateModel, flashModel, alternateModel],
+  });
+  assert.deepEqual(await modelHook({ prompt: 'Define a branch' }, context), {
+    providerOverride: 'litellm',
+    modelOverride: 'minimax-m3.1-flash',
+    fallbacksOverride: [],
+  });
+  assert.equal(providerFetches, 0);
+} finally {
+  globalThis.fetch = savedProviderFetch;
 }
 
 const request = 'my open PRs and CI';
@@ -150,11 +193,24 @@ globalThis.fetch = async (url, options) => {
   }));
 };
 try {
-  const summary = await dispatch('summarize my texts');
-  assert.match(summary.text, /Andrea.*synced[\s\S]*1 incoming[\s\S]*scheduling/);
-  assert.equal(summary.text.includes(syntheticPreview), false);
-  assert.equal(summary.text.includes('fixture contact'), false);
-  assert.equal(reads.length, 2);
+  const summaries = [
+    'summarize my texts',
+    '@andrea summarize my texts',
+    '@andrea what are my recent text messages',
+  ];
+  for (const request of summaries) {
+    const summary = await dispatch(request);
+    assert.equal(summary?.handled, true, 'Andrea summaries must be claimed before a model turn');
+    assert.match(summary.text, /Andrea.*synced[\s\S]*1 incoming[\s\S]*scheduling/);
+    assert.equal(summary.text.includes(syntheticPreview), false);
+    assert.equal(summary.text.includes('fixture contact'), false);
+  }
+  const help = await dispatch('@andrea send a text to fixture contact: a fake reminder');
+  assert.match(help?.text, /@andrea summarize my texts/);
+  const progress = sent.length;
+  assert.equal(await dispatch(summaries[1], { ...context, senderId: '8', conversationId: '8' }), undefined);
+  assert.equal(sent.length, progress, 'Andrea progress is private to the owner');
+  assert.equal(reads.length, summaries.length * 2, 'Only summary requests can read Andrea');
 } finally {
   globalThis.fetch = savedFetch;
 }

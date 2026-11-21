@@ -16,12 +16,16 @@ export function standaloneSimple(text, routeFor, event) {
     );
 }
 
-export async function routeOwnerModel(event, config, routeFor, ownerFallbacks) {
+export function routeOwnerModel(event, config, routeFor) {
   const route = routeFor(event.prompt, event.attachments);
   if (route.reason === 'short-chat') return { ...route, model: fastModel, fallbacks: [] };
+  const prefix = fastProvider + '/';
+  const primary = prefix + route.model;
+  const aliases = new Set((config?.models?.providers?.[fastProvider]?.models ?? []).map((model) => model.id));
   const configured = config?.agents?.defaults?.model?.fallbacks ?? [];
-  const candidates = [...configured.filter((id) => id.startsWith('litellm/gemini-')), ...route.fallbacks, ...configured];
-  const fallbacks = await ownerFallbacks(config, fastProvider + '/' + route.model, candidates);
+  const preferred = configured.filter((id) => typeof id === 'string' && id.startsWith(prefix + 'gemini-'));
+  const fallbacks = [...new Set([...preferred, ...route.fallbacks, ...configured])].filter((id) =>
+    typeof id === 'string' && id !== primary && id.startsWith(prefix) && aliases.has(id.slice(prefix.length)));
   return { ...route, fallbacks };
 }
 

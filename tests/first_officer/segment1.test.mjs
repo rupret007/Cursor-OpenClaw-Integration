@@ -46,6 +46,29 @@ test('natural requests identify the live route and map memory to a stable topic'
   assert.notEqual(classifyRequest('summerize my texts and send a message', intentHooks)?.kind, 'texts');
 });
 
+test('the Andrea address claims only private messaging intents and keeps other prompts on their usual route', () => {
+  for (const text of [
+    '@andrea summarize my texts',
+    '@Andrea, what are my recent text messages?',
+    '@andrea: catch me up on my texts',
+    '@ANDREA Could you summerize my recent texts?',
+  ]) {
+    assert.deepEqual(classifyRequest(text, intentHooks), { kind: 'texts' });
+  }
+  for (const text of [
+    '@andrea', '@andrea help', '@andrea gate status', '@andrea send a text',
+    '@andrea draft a reply', '@andrea what is a branch?', '@andrea summarize my texts and send a message',
+    '@andrea summarize my texts\n' + ' '.repeat(1800) + 'x',
+  ]) {
+    assert.deepEqual(classifyRequest(text, intentHooks), { kind: 'andrea-help' });
+  }
+  for (const text of ['@andreas summarize my texts', '@andrea_reader summarize my texts', 'explain @andrea']) {
+    assert.ok(!['texts', 'andrea-help'].includes(classifyRequest(text, intentHooks)?.kind));
+  }
+  assert.deepEqual(classifyRequest('define an algorithm', intentHooks), { kind: 'simple', prompt: 'define an algorithm' });
+  assert.deepEqual(classifyRequest('gate status', intentHooks), { kind: 'gate' });
+});
+
 test('dispatch starts progress and the tool concurrently and stays inside its work budgets', async () => {
   assert.ok(budgets.acknowledgment < 2000);
   assert.ok(budgets.simple <= 11_000, 'Reserve time for Telegram to deliver a reply before 15 seconds');
@@ -141,6 +164,14 @@ test('all Segment 1 handlers are registered on the private inbound hook', async 
   assert.equal(await dispatch({ content: 'gate status', isGroup: true }, { senderId: owner }), undefined);
   assert.equal(await dispatch({ content: 'summarize my texts', isGroup: false }, { senderId: '8' }), undefined);
   assert.equal(await dispatch({ content: 'summarize my texts', isGroup: false }, { senderId: owner, accountId: 'other' }), undefined);
+  for (const [isGroup, ctx] of [
+    [true, { senderId: owner }],
+    [false, { senderId: '8' }],
+    [false, { senderId: owner, accountId: 'other' }],
+    [false, { senderId: owner, threadId: 1 }],
+  ]) {
+    assert.equal(await dispatch({ content: '@andrea summarize my texts', isGroup }, ctx), undefined);
+  }
   assert.equal(events.length, 0);
 
   assert.match((await dispatchOwner('gate status')).text, /live gate status check failed/);
@@ -150,16 +181,17 @@ test('all Segment 1 handlers are registered on the private inbound hook', async 
   assert.match((await dispatchOwner('what did I tell you about marker?')).text, /Saved fact verified/);
   assert.match((await dispatchOwner('summarize my texts')).text, /Andrea.*synced/);
   assert.match((await dispatchOwner('Could you summerize my recent texts?')).text, /Andrea.*synced/);
+  assert.match((await dispatchOwner('@andrea summarize my texts')).text, /Andrea.*synced/);
+  assert.match((await dispatchOwner('@andrea send a text')).text, /@andrea summarize my texts/);
   assert.match((await dispatchOwner('define an algorithm')).text, /fast model.*failed/i);
-  assert.equal(events.filter((event) => event === 'ack').length, 8);
-  assert.equal(events.filter((event) => event === 'typing').length, 8);
+  assert.equal(events.filter((event) => event === 'ack').length, 10);
+  assert.equal(events.filter((event) => event === 'typing').length, 10);
   assert.equal(events.some((event) => event.includes('synthetic transport detail')), false);
 });
 
 test('short answers use the configured flash model with bounded context and skip the slow fallback probe', async () => {
   const classify = (prompt) => short(prompt);
-  const forbidden = () => assert.fail('No quota probe on the simple route');
-  const selection = await routeOwnerModel({ prompt: 'hello' }, {}, classify, forbidden);
+  const selection = routeOwnerModel({ prompt: 'hello' }, {}, classify);
   assert.equal(selection.model, fastModelRef.split('/')[1]);
   assert.deepEqual(selection.fallbacks, []);
   const signal = new AbortController().signal;
@@ -179,6 +211,27 @@ test('short answers use the configured flash model with bounded context and skip
   assert.equal(standaloneSimple('explain a branch', classify, { replyToId: '1' }), false);
   const strong = (prompt) => ({ ...short(prompt), reason: 'deliberate-task', model: 'minimax-m3', fallbacks: [] });
   assert.equal(standaloneSimple('explain complex evidence', strong, {}), false);
+});
+
+test('contextual OpenClaw fallback stays on registered LiteLLM models', () => {
+  const flash = fastModelRef;
+  const strong = 'litellm/minimax-m3';
+  const research = 'litellm/gemini-3.1-pro';
+  const alternate = 'litellm/fixture-fallback';
+  const config = {
+    agents: { defaults: { model: { fallbacks: [
+      'minimax/MiniMax-M3', research, flash, 'litellm/unregistered', alternate, strong,
+    ] } } },
+    models: { providers: { litellm: { models: [flash, strong, research, alternate].map((ref) => ({ id: ref.split('/')[1] })) } } },
+  };
+  const route = () => ({
+    model: 'minimax-m3', reason: 'deliberate-task', fallbacks: [flash, 'direct/fixture', strong],
+  });
+  const selected = routeOwnerModel({ prompt: 'review the fixture' }, config, route,
+    () => assert.fail('The direct subscription probe must stay off the routed model path'));
+  assert.equal(selected.model, 'minimax-m3');
+  assert.deepEqual(selected.fallbacks, [research, flash, alternate]);
+  assert.deepEqual(routeOwnerModel({ prompt: 'review the fixture' }, {}, route).fallbacks, []);
 });
 
 test('fleet refuses old remote readings and keeps independent local evidence', async () => {

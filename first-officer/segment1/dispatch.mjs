@@ -3,6 +3,8 @@ const device = /\b(?:bobserver|mac[ -]?mini|nuc[ -]?box|mac[ -]?book(?: pro)?)\b
 const readQuestion = /^(?:(?:please|first officer)[ ,]+)?(?:what|which|is|are|how|any|show|check|list|give|tell|do i|can you)\b/;
 // Preserve the read-only route with common vowel and repeated-letter misspellings.
 const textSummaryRequest = /^(?:(?:can|could) you )?sum{1,3}[ae]ri[sz]e (?:my )?(?:recent )?(?:texts?|text messages|imessages?|sms)$/;
+const andreaAddress = /^@andrea(?=$|[ ,:]|[?!]+$)[,:]? */;
+const andreaRecentRequest = /^(?:what (?:are|were)|show(?: me)?|read|catch me up on|what did i miss in) (?:my )?(?:recent )?(?:texts?|text messages|imessages?|sms)$/;
 
 export const nodeIds = ['bobserver', 'mac-mini', 'nucbox', 'macbook-pro'];
 
@@ -40,6 +42,12 @@ export function classifyRequest(input, { legacyStatus, legacyRequest, isControl,
   const raw = input.trim();
   const text = raw.slice(0, textLimit).toLowerCase().replace(/[’‘]/g, "'").replace(/\s+/g, ' ');
   const ask = text.replace(/[?.!]+$/, '').replace(/^please +/, '');
+  const andrea = andreaAddress.exec(text);
+  if (andrea) {
+    const operation = ask.slice(andrea[0].length).replace(/^please +/, '');
+    return { kind: raw.length <= textLimit && (textSummaryRequest.test(operation) || andreaRecentRequest.test(operation))
+      ? 'texts' : 'andrea-help' };
+  }
   const captain = captainRequest(raw);
   if (captain) return captain;
   if (/^(?:remember|what did i tell you about|(?:what do you|do you) remember about|recall)\b/.test(ask)) {

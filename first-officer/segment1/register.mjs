@@ -138,6 +138,9 @@ function toolRegistry(api, commands, liveConfig, services) {
         await summarizeAndrea(andreaReader(signal, services))),
       failure: 'The live read through Andrea failed. Your recent text activity is unavailable.',
     },
+    'andrea-help': {
+      run: () => plain('Andrea’s messaging access here is read-only. Try “@andrea summarize my texts” for recent activity in your approved chats.'),
+    },
     simple: {
       run: async ({ prompt }, { signal }) => {
         const answer = redacted(await answerSimple(api.runtime, prompt, signal), 1250);

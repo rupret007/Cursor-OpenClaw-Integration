@@ -121,11 +121,17 @@ def wire_captain(root):
     write_source(gate, text)
 
 
-def wire_model_router(root):
+def wire_model_router(root, *, already_wired):
     conductor = root / "first-officer-conductor.mjs"
     text = conductor.read_text(encoding="utf-8")
     marker = "import { ownerFallbacks } from './round6/runtime/model-failover.mjs';"
-    text = replace_once(text, marker, marker + "\nimport { fastProvider, routeOwnerModel } from './round6/runtime/segment1/model-router.mjs';")
+    if already_wired:
+        text = replace_once(text, marker + "\n", "")
+        text = replace_once(text, "await routeOwnerModel(event, api.config, routeFor, ownerFallbacks)",
+                            "routeOwnerModel(event, api.config, routeFor)")
+        write_source(conductor, text)
+        return
+    text = replace_once(text, marker, "import { fastProvider, routeOwnerModel } from './round6/runtime/segment1/model-router.mjs';")
     original = """\
       const route = routeFor(event.prompt, event.attachments);
       const configured = api.config?.agents?.defaults?.model?.fallbacks ?? [];
@@ -137,7 +143,7 @@ def wire_model_router(root):
       traceRoute(event, ctx, selection);
       return { modelOverride: selection.model, providerOverride: 'litellm', fallbacksOverride: await ownerFallbacks(api.config, `litellm/${selection.model}`, selection.fallbacks) };"""
     updated = """\
-      const selection = await routeOwnerModel(event, api.config, routeFor, ownerFallbacks);
+      const selection = routeOwnerModel(event, api.config, routeFor);
       traceRoute(event, ctx, selection);
       return { modelOverride: selection.model, providerOverride: fastProvider, fallbacksOverride: selection.fallbacks };"""
     write_source(conductor, replace_once(text, original, updated))
@@ -168,7 +174,7 @@ def stage_release(baseline, destination):
         if pin == BASELINE:
             wire_dispatch(working)
             wire_memory(working)
-            wire_model_router(working)
+        wire_model_router(working, already_wired=pin != BASELINE)
         if pin in (BASELINE, SEGMENT1):
             wire_captain(working)
         names = sorted(file.relative_to(working).as_posix() for file in working.rglob("*")

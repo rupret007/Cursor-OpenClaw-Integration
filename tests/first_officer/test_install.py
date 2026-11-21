@@ -207,11 +207,17 @@ def test_stage_from_captain_preserves_wiring_and_refreshes_overlay(controller, t
     segment.mkdir(parents=True)
     conductor = runtime / "first-officer-conductor.mjs"
     conductor.write_bytes(b"already wired")
+    router = baseline / conductor.name
+    router.write_text(
+        "import { ownerFallbacks } from './round6/runtime/model-failover.mjs';\n"
+        "const selection = await routeOwnerModel(event, api.config, routeFor, ownerFallbacks);\n",
+        encoding="utf-8",
+    )
     old_tool = segment / "tools.mjs"
     old_tool.write_bytes(b"old overlay")
     manifest = b"".join(
         f"{stage.digest(path.read_bytes())}  {path.relative_to(baseline).as_posix()}\n".encode()
-        for path in (conductor, old_tool)
+        for path in (conductor, router, old_tool)
     )
     (baseline / stage.INVENTORY).write_bytes(manifest)
     captain = stage.digest(manifest)
@@ -224,6 +230,9 @@ def test_stage_from_captain_preserves_wiring_and_refreshes_overlay(controller, t
 
     candidate = destination / f"first-officer-{release}"
     assert (candidate / stage.RUNTIME / conductor.name).read_bytes() == b"already wired"
+    assert (candidate / router.name).read_text(encoding="utf-8") == (
+        "const selection = routeOwnerModel(event, api.config, routeFor);\n"
+    )
     assert (candidate / stage.RUNTIME / "segment1" / old_tool.name).read_text(encoding="utf-8") == (
         stage.OVERLAY / old_tool.name
     ).read_text(encoding="utf-8")

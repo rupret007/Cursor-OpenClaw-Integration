@@ -14,6 +14,18 @@ OpenClaw can captain exact-head CI reviews for open PRs in Cursor-OpenClaw-Integ
 
 The current owner’s grant applies to one lease epoch. A changed epoch requires a new grant. A grant authorizes a local CI review and its owner-chat progress messages. GitHub writes, merges, deployment, gate requests, text sending and destructive work retain their existing approval requirements. Quota admission uses the exact runner’s account. An unavailable quota reading, a reached limit or available billing credits can block dispatch.
 
+## Use Andrea in Bob the Bot
+
+Send ordinary requests to Bob the Bot to use OpenClaw. Start a message with `@andrea` to address Andrea in the same private chat.
+
+| Send | What Andrea does |
+| --- | --- |
+| `@andrea` | Shows the messaging command. |
+| `@andrea summarize my texts` | Reads recent activity from approved chats and surfaces topics, questions and changes. |
+| `@andrea what are my recent text messages?` | Runs the same live summary. |
+
+Andrea’s access in this chat is read-only. It summarizes recent approved messages on the Mac and returns fixed labels and counts. `summarize my texts` also works as a shortcut.
+
 ## Diagnose Andrea before switching
 
 From the reviewed PR checkout in WSL on the Nuc, use your existing Mac login. The diagnostic runs on the Mac and prints only bounded counts. It keeps the installed reader and gateway in service.
@@ -41,7 +53,7 @@ nice -n 10 python3 -B first-officer/provision-andrea.py \
   --mac-host "$mac_host" --mac-user "$mac_user" --refresh-reader
 ```
 
-After it reports `Andrea reader verified from bobserver.` and Jeff approves, activate the reviewed gateway release. Then send `summarize my texts` to **Bob the Bot**, the OpenClaw Telegram account. Use the [Telegram acceptance checks](LIVE-TEST.md) to compare its findings privately with a recent thread. Use the error line to diagnose a refused refresh. `no-authorized-chats` means the allowlist supplied no eligible non-self thread.
+After it reports `Andrea reader verified from bobserver.` and Jeff approves, activate the reviewed gateway release. Then send `@andrea summarize my texts` to **Bob the Bot**, the OpenClaw Telegram account. Use the [Telegram acceptance checks](LIVE-TEST.md) to compare its findings privately with a recent thread. Use the error line to diagnose a refused refresh. `no-authorized-chats` means the allowlist supplied no eligible non-self thread.
 
 ## Activate and run the supervised pilot
 

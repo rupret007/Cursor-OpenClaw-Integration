@@ -239,6 +239,7 @@ This uses a private directory. It does not send a message, call a model, or inst
 
 ```bash
 rm -rf /tmp/fo-cycle
+python3 first-officer/acceptance/cycle.py --root /tmp/fo-cycle init
 python3 first-officer/acceptance/cycle.py --root /tmp/fo-cycle propose "The lane review is weekly."
 python3 - <<'PY'
 import json, subprocess

@@ -37,6 +37,10 @@ SECRET = re.compile(r"sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9]{8,}|\b(?:\d{1,3
 TEXT = re.compile(r"[\x20-\x7e]{1,200}")
 NONCE = re.compile(r"mem-[0-9a-f]{16}")
 DIGEST = re.compile(r"[0-9a-f]{64}")
+MISSING_AUDIT = (
+    "The audit chain has no trust anchor the owner cannot delete. "
+    "An empty directory cannot be distinguished from a reset."
+)
 
 
 def canonical(payload):
@@ -260,12 +264,14 @@ def _check_head(root, rows, previous):
     key = _read_key(root)
     trusted = _read_anchor(trust_dir(root))
     witness = _read_anchor(witness_dir(root))
-    if not rows:
-        if head is not None or key is not None or trusted is not None or witness is not None:
+    missing = (head is None, key is None, trusted is None, witness is None)
+    if not rows and all(missing):
+        return False
+    if any(missing):
+        if not rows:
             raise ValueError("The audit chain was truncated")
-        return
-    if (head is None or key is None or trusted is None or witness is None
-            or not _same_head(trusted, head) or not _same_head(witness, head)):
+        raise ValueError("The audit chain has no checkpoint")
+    if not _same_head(trusted, head) or not _same_head(witness, head):
         raise ValueError("The audit chain has no checkpoint")
     presented = str(head.get("mac", ""))
     expected = _mac(key, head["seq"], head["digest"]) if type(head.get("seq")) is int else ""
@@ -275,6 +281,14 @@ def _check_head(root, rows, previous):
         if head.get("digest") != previous or head.get("seq") != len(rows) - 1:
             raise ValueError("The audit chain was truncated")
         raise ValueError("The audit checkpoint was altered")
+    return True
+
+
+def _mutation_rows(root, audit):
+    rows, previous = _rows(audit)
+    if not _check_head(root, rows, previous):
+        raise ValueError(MISSING_AUDIT)
+    return rows, previous
 
 
 def _append(root, file, previous, seq, body):
@@ -333,6 +347,21 @@ def _pending_binding(current):
         raise ValueError("The pending approval was altered")
 
 
+def initialize(root):
+    """Establish the empty audit checkpoint through an explicit operator action."""
+    root = _root(root)
+    with _locked(root / "audit.log") as audit:
+        rows, previous = _rows(audit)
+        if _check_head(root, rows, previous):
+            raise ValueError("The audit chain is already initialized")
+        if any(os.path.lexists(root / name) for name in ("memory.json", "receipt-lane-review.json")):
+            raise ValueError("Acceptance records already exist without an audit checkpoint")
+        pending = _read_json(root / "pending.json", {"digest", "expires_at", "nonce", "text"})
+        if pending is not None:
+            _pending_binding(pending)
+        _checkpoint(root, -1, GENESIS)
+
+
 def propose(root, text, now):
     """Record one fact as waiting. It is not verified, and a credential is refused."""
     moment = _clock(now)
@@ -348,7 +377,7 @@ def propose(root, text, now):
     card_digest = _digest(card)
     pending_path = root / "pending.json"
     with _locked(root / "audit.log") as audit:
-        rows, _previous = _rows(audit)
+        rows, previous = _mutation_rows(root, audit)
         if any(body["nonce"] == nonce and body["kind"] == "accepted" for _digest, body in rows):
             raise ValueError("That memory fact is already verified")
         current = _read_json(pending_path, {"digest", "expires_at", "nonce", "text"})
@@ -359,11 +388,10 @@ def propose(root, text, now):
             if current["nonce"] == nonce and current["expires_at"] >= moment:
                 return {"digest": current["digest"], "expires_at": current["expires_at"], "nonce": nonce, "text": text}
             if current["expires_at"] < moment:
-                _append(root, audit, _rows(audit)[1], len(rows), {
+                _append(root, audit, previous, len(rows), {
                     "action": "save-memory", "at": moment, "digest": current["digest"],
                     "kind": "refused", "nonce": current["nonce"], "reason": "expired",
                 })
-                rows, _previous = _rows(audit)
         _write_json(pending_path, {"digest": card_digest, "expires_at": expires_at, "nonce": nonce, "text": text})
         return {"digest": card_digest, "expires_at": expires_at, "nonce": nonce, "text": text}
 
@@ -371,7 +399,7 @@ def propose(root, text, now):
 def _audit_refusal(root, action, nonce, reason, moment):
     root = _root(root)
     with _locked(root / "audit.log") as audit:
-        rows, previous = _rows(audit)
+        rows, previous = _mutation_rows(root, audit)
         _append(root, audit, previous, len(rows), {
             "action": action, "at": moment, "digest": GENESIS, "kind": "refused", "nonce": nonce, "reason": reason,
         })
@@ -401,7 +429,7 @@ def confirm(root, nonce, presented, now):
     pending_path = root / "pending.json"
     memory_path = root / "memory.json"
     with _locked(root / "audit.log") as audit:
-        rows, previous = _rows(audit)
+        rows, previous = _mutation_rows(root, audit)
         accepted = [body for _digest, body in rows if body["nonce"] == nonce and body["kind"] == "accepted"]
         pending = _read_json(pending_path, {"digest", "expires_at", "nonce", "text"})
         if accepted or pending is None or pending["nonce"] != nonce:
@@ -474,7 +502,7 @@ def run_routine(root, now, dry_run=True):
         "ran_at": moment, "routine": ROUTINE, "sent": False,
     }
     with _locked(root / "audit.log") as audit:
-        rows, previous = _rows(audit)
+        rows, previous = _mutation_rows(root, audit)
         _append(root, audit, previous, len(rows), {
             "action": "routine-dry-run", "at": moment, "digest": _digest(payload),
             "kind": "accepted", "next_run": following, "nonce": f"routine-{moment}",
@@ -488,7 +516,7 @@ def verify(root):
     root = _root(root)
     with _locked(root / "audit.log") as audit:
         rows, previous = _rows(audit)
-        _check_head(root, rows, previous)
+        initialized = _check_head(root, rows, previous)
         pending = _read_json(root / "pending.json", {"digest", "expires_at", "nonce", "text"})
     if pending is not None:
         _pending_binding(pending)
@@ -539,11 +567,8 @@ def verify(root):
     for nonce in facts:
         if nonce not in seen:
             raise ValueError("A saved fact has no accepted audit line")
-    if not rows and pending is None and not facts and not (root / "receipt-lane-review.json").exists():
-        raise ValueError(
-            "The audit chain has no trust anchor the owner cannot delete. "
-            "An empty directory cannot be distinguished from a reset."
-        )
+    if not initialized:
+        raise ValueError(MISSING_AUDIT)
     return len(rows)
 
 
@@ -551,6 +576,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True)
     commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("init", help="Create the checkpoint for a new audit")
     propose_command = commands.add_parser("propose")
     propose_command.add_argument("text")
     commands.add_parser("recall")
@@ -562,7 +588,10 @@ def main(argv=None):
     args = parser.parse_args(argv)
     moment = int(time.time())
     try:
-        if args.command == "propose":
+        if args.command == "init":
+            initialize(args.root)
+            print("Initialized the audit checkpoint.")
+        elif args.command == "propose":
             card = propose(args.root, args.text, moment)
             print(f"Pending save {card['nonce']} digest {card['digest']} expires {card['expires_at']}.")
             print(recall(args.root))

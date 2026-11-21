@@ -25,6 +25,7 @@ def _files(root):
 
 def test_a_fact_stays_unverified_until_its_digest_is_confirmed_and_the_chain_holds(tmp_path):
     root = tmp_path / "cycle"
+    cycle.initialize(root)
     assert cycle.recall(root) == "No verified saved fact."
     card = cycle.propose(root, FACT, NOW)
     assert cycle.recall(root) == "No verified saved fact."
@@ -64,15 +65,18 @@ def test_a_fact_stays_unverified_until_its_digest_is_confirmed_and_the_chain_hol
 
 def test_expired_secret_and_live_routine_do_not_save_or_send(tmp_path):
     root = tmp_path / "cycle"
+    cycle.initialize(root)
     card = cycle.propose(root, FACT, NOW)
     assert cycle.confirm(root, card["nonce"], card["digest"], NOW + cycle.TTL)["saved"] is True
     late = tmp_path / "late"
+    cycle.initialize(late)
     late_card = cycle.propose(late, FACT, NOW)
     assert cycle.confirm(late, late_card["nonce"], late_card["digest"], NOW + cycle.TTL + 1) == {
         "saved": False, "reason": "expired",
     }
     assert cycle.recall(late) == "No verified saved fact."
     edited = tmp_path / "edited"
+    cycle.initialize(edited)
     edited_card = cycle.propose(edited, FACT, NOW)
     pending_path = edited / "pending.json"
     pending = json.loads(pending_path.read_text(encoding="utf-8"))
@@ -84,10 +88,12 @@ def test_expired_secret_and_live_routine_do_not_save_or_send(tmp_path):
     }
     assert cycle.recall(edited) == "No verified saved fact."
     secret = tmp_path / "secret"
+    cycle.initialize(secret)
     with pytest.raises(ValueError, match="plain sentence"):
         cycle.propose(secret, "note sk-live-secretvalue", NOW)
     assert "sk-live-secretvalue" not in _files(secret)
     replaced = tmp_path / "replaced"
+    cycle.initialize(replaced)
     first = cycle.propose(replaced, FACT, NOW)
     second = cycle.propose(replaced, "The lane review moved to Thursday.", NOW + cycle.TTL + 1)
     assert second["nonce"] != first["nonce"]
@@ -104,6 +110,7 @@ def test_expired_secret_and_live_routine_do_not_save_or_send(tmp_path):
 def test_deleting_every_owner_writable_audit_copy_is_not_a_silent_pass(tmp_path):
     """Deleting the root and both owner-writable copies must not verify as a fresh chain."""
     root = tmp_path / "cycle"
+    cycle.initialize(root)
     cycle.run_routine(root, NOW)
     trust = cycle.trust_dir(root)
     witness = cycle.witness_dir(root)
@@ -121,9 +128,40 @@ def test_deleting_every_owner_writable_audit_copy_is_not_a_silent_pass(tmp_path)
     assert not cycle.witness_dir(fresh).exists()
 
 
+@pytest.mark.parametrize("event", ["routine", "propose", "refusal", "confirm"])
+def test_a_new_event_cannot_hide_a_complete_audit_reset(tmp_path, event):
+    root = tmp_path / "cycle"
+    cycle.initialize(root)
+    cycle.run_routine(root, NOW)
+    trust = cycle.trust_dir(root)
+    witness = cycle.witness_dir(root)
+    shutil.rmtree(root)
+    shutil.rmtree(trust)
+    shutil.rmtree(witness)
+    moment = NOW + 1
+
+    with pytest.raises(ValueError, match="owner cannot delete"):
+        if event == "routine":
+            cycle.run_routine(root, moment)
+        elif event == "propose":
+            cycle.propose(root, FACT, moment)
+        elif event == "refusal":
+            cycle.propose(root, "", moment)
+        else:
+            cycle.confirm(root, "mem-" + "a" * 16, "a" * 64, moment)
+
+    assert not trust.exists() and not witness.exists()
+    assert (root / "audit.log").read_bytes() == b""
+    assert not (root / "pending.json").exists()
+    assert not (root / "receipt-lane-review.json").exists()
+    with pytest.raises(ValueError, match="owner cannot delete"):
+        cycle.verify(root)
+
+
 def test_deleting_the_acceptance_root_and_its_trust_anchor_does_not_verify(tmp_path):
     """Removing the acceptance root and the real trust directory must not verify as fresh."""
     root = tmp_path / "cycle"
+    cycle.initialize(root)
     cycle.run_routine(root, NOW)
     trust = cycle.trust_dir(root)
     witness = cycle.witness_dir(root)
@@ -139,6 +177,7 @@ def test_deleting_the_acceptance_root_and_its_trust_anchor_does_not_verify(tmp_p
         cycle.verify(root)
     assert (witness / "audit.head").is_file()
     kept = tmp_path / "kept"
+    cycle.initialize(kept)
     cycle.run_routine(kept, NOW)
     shutil.rmtree(cycle.witness_dir(kept))
     with pytest.raises(ValueError, match="checkpoint|truncated"):
@@ -152,6 +191,7 @@ def test_deleting_the_acceptance_root_and_its_trust_anchor_does_not_verify(tmp_p
 def test_deleting_the_acceptance_directory_and_its_sibling_does_not_verify(tmp_path):
     """Wiping the acceptance root and the sibling copy must not look like a fresh root."""
     root = tmp_path / "cycle"
+    cycle.initialize(root)
     cycle.run_routine(root, NOW)
     sibling = root.parent / f".{root.name}.fo-audit-trust"
     shutil.rmtree(root)
@@ -167,6 +207,7 @@ def test_deleting_the_acceptance_directory_and_its_sibling_does_not_verify(tmp_p
 
 def test_resetting_the_acceptance_directory_does_not_erase_the_trust_anchor(tmp_path):
     root = tmp_path / "cycle"
+    cycle.initialize(root)
     cycle.run_routine(root, NOW)
     for name in ("audit.log", "audit.head", "audit.key", "receipt-lane-review.json"):
         (root / name).unlink()
@@ -185,6 +226,7 @@ def test_resetting_the_acceptance_directory_does_not_erase_the_trust_anchor(tmp_
 
 def test_a_truncated_chain_or_an_orphan_receipt_does_not_verify(tmp_path):
     root = tmp_path / "cycle"
+    cycle.initialize(root)
     cycle.run_routine(root, NOW)
     assert cycle.verify(root) == 1
     (root / "audit.log").write_text("", encoding="utf-8")
@@ -205,6 +247,7 @@ def test_a_truncated_chain_or_an_orphan_receipt_does_not_verify(tmp_path):
         cycle.verify(orphan)
 
     pending = tmp_path / "pending"
+    cycle.initialize(pending)
     cycle.propose(pending, FACT, NOW)
     assert cycle.verify(pending) == 0
     broken = json.loads((pending / "pending.json").read_text(encoding="utf-8"))
@@ -226,6 +269,7 @@ def test_schedule_is_the_next_chicago_morning_and_two_confirms_save_once(tmp_pat
     assert cycle.next_run(int(exact.timestamp())) == int(next_day.timestamp())
 
     root = tmp_path / "cycle"
+    cycle.initialize(root)
     card = cycle.propose(root, FACT, NOW)
     results = []
 
@@ -243,8 +287,26 @@ def test_schedule_is_the_next_chicago_morning_and_two_confirms_save_once(tmp_pat
     cycle.verify(root)
 
 
+def test_initialize_preserves_an_existing_pending_only_approval(tmp_path):
+    source = tmp_path / "source"
+    cycle.initialize(source)
+    card = cycle.propose(source, FACT, NOW)
+    legacy = tmp_path / "legacy"
+    legacy.mkdir(mode=0o700)
+    shutil.copy2(source / "pending.json", legacy / "pending.json")
+
+    cycle.initialize(legacy)
+
+    assert cycle.verify(legacy) == 0
+    assert cycle.confirm(legacy, card["nonce"], card["digest"], NOW) == {"saved": True, "text": FACT}
+    assert cycle.verify(legacy) == 1
+
+
 def test_command_prints_the_verified_fact_and_the_dry_run(tmp_path):
     root = tmp_path / "cycle"
+    assert cycle.main(["--root", str(root), "init"]) == 0
+    assert cycle.verify(root) == 0
+    assert cycle.main(["--root", str(root), "init"]) == 1
     assert cycle.main(["--root", str(root), "propose", FACT]) == 0
     pending = json.loads((root / "pending.json").read_text(encoding="utf-8"))
     assert cycle.main(["--root", str(root), "confirm", pending["nonce"], pending["digest"]]) == 0

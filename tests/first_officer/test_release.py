@@ -177,6 +177,21 @@ def test_activate_checks_the_digest_and_writes_rollback_before_publish(tmp_path)
     assert recorder.calls[pack_at - 1][1][:3] == ["test", "!", "-e"]
 
 
+def test_install_doc_verifies_the_candidate_after_it_is_read_only():
+    text = (ROOT / "INSTALL.md").read_text(encoding="utf-8")
+    start = text.index('published="/opt/openclaw-fo/first-officer-$release"')
+    end = text.index("systemctl --user is-active --quiet openclaw-gateway.service", start)
+    block = text[start:end]
+    moved = block.index('sudo mv -nT "$publish_dir" "$published"')
+    confirmed = block.index('sudo test ! -e "$publish_dir"')
+    chmod_at = block.index('sudo chmod -R a-w,a+rX "$published"')
+    verify_at = block.index('first-officer/install.py verify-candidate "$backup"')
+    activate_at = block.index('first-officer/install.py activate "$backup"')
+    assert moved < confirmed < chmod_at < verify_at < activate_at
+    assert "Do not make the directory read-only" not in text
+    assert "before that directory is made read-only" not in text
+
+
 def test_one_activate_command_preflights_publishes_and_switches_in_order(tmp_path, capsys):
     recorder = Recorder(activate_replies())
     assert release.main(["activate", CANDIDATE, str(tmp_path / "a.tar"), str(tmp_path)], recorder) == 0

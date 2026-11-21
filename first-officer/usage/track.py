@@ -84,8 +84,12 @@ def claude_windows(headers, now):
 def assess(windows, warn_percent=WARN_PERCENT, stop_percent=STOP_PERCENT):
     if not windows:
         raise ValueError("Refusing to report on no usage windows")
-    if not 0 < warn_percent <= stop_percent <= 100:
-        raise ValueError("Invalid warning and stop thresholds")
+    if (isinstance(warn_percent, bool) or isinstance(stop_percent, bool)
+            or type(warn_percent) not in (int, float) or type(stop_percent) not in (int, float)
+            or not math.isfinite(warn_percent) or not math.isfinite(stop_percent)
+            or not 0 < warn_percent <= stop_percent
+            or warn_percent > WARN_PERCENT or stop_percent > STOP_PERCENT):
+        raise ValueError("Usage overrides may only be stricter than the default thresholds")
     expected = ({("codex", name) for name, _ in CODEX_WINDOWS} |
                 {("claude", name) for name, _ in CLAUDE_WINDOWS})
     missing = expected - {(row["provider"], row["window"]) for row in windows}

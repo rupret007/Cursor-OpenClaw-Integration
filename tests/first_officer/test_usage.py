@@ -106,6 +106,20 @@ def test_warning_starts_at_ninety_percent_and_stopping_at_ninety_seven():
         track.assess(track.claude_windows(claude_headers(), NOW), 95, 90)
 
 
+def test_usage_overrides_may_only_be_stricter_than_the_defaults(tmp_path, capsys):
+    windows = track.claude_windows(claude_headers(session="0.98"), NOW)
+    with pytest.raises(ValueError, match="stricter"):
+        track.assess(windows, 100, 100)
+    assert track.assess(windows, 80, 90)["stop"] is True
+    ahead = int(time.time()) + 3600
+    claude = tmp_path / "claude.json"
+    claude.write_text(json.dumps(claude_headers(
+        session="0.98", session_reset=ahead, weekly_reset=ahead + 86_400)))
+    assert track.main(["--claude", str(claude), "--warn-percent", "100", "--stop-percent", "100"]) == 1
+    assert "stricter" in capsys.readouterr().err
+    assert track.main(["--claude", str(claude), "--warn-percent", "80", "--stop-percent", "90"]) == track.STOPPED
+
+
 def test_both_providers_report_together_with_central_resets():
     report = track.assess(track.codex_windows(codex_result(session=92), "fixture", NOW) +
                           track.claude_windows(claude_headers(weekly="0.95"), NOW))

@@ -70,7 +70,7 @@ python3 first-officer/usage/track.py \
   --repo "$lane_checkout" --step "Step 3" --next "Start step 4" --failure "none"
 ```
 
-The command exits `0` below the warning threshold, `3` once any window reaches 90 percent, and `4` once any window reaches 97 percent. On either warning it writes `HANDOFF.md` into the lane checkout and commits that one file locally. It never stages another path, never pushes, and refuses to commit on `main` or `master`. It also refuses to write a handoff whose text contains a credential or an address. Use `--warn-percent` and `--stop-percent` only to make the thresholds stricter.
+The command exits `0` below the warning threshold, `3` once any window reaches 90 percent, and `4` once any window reaches 97 percent. On either warning it writes `HANDOFF.md` into the lane checkout and commits that one file locally. It never stages another path, never pushes, and refuses to commit on `main` or `master`. It also refuses to write a handoff whose text contains a credential or an address. `--warn-percent` and `--stop-percent` may only be stricter than 90 and 97. A higher pair is refused.
 
 ## Queue a review lane
 

@@ -53,7 +53,8 @@ for f in "${BASE_DIR}/first-officer/litellm/configure.py" "${BASE_DIR}/first-off
          "${BASE_DIR}/first-officer/release.py" "${BASE_DIR}/first-officer/lanes/queue.py" \
          "${BASE_DIR}/first-officer/tracing/deliver.py" "${BASE_DIR}/first-officer/qa/flaky.py" \
          "${BASE_DIR}/first-officer/status/publish.py" \
-         "${BASE_DIR}/first-officer/acceptance/cycle.py"; do
+         "${BASE_DIR}/first-officer/acceptance/cycle.py" \
+         "${BASE_DIR}/first-officer/pilot/rehearse.py"; do
   [[ -f "$f" ]] || { echo "Missing file: $f" >&2; exit 1; }
   python3 -m py_compile "$f"
 done

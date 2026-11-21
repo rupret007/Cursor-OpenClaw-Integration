@@ -130,6 +130,15 @@ python3 first-officer/acceptance/cycle.py --root "$root" verify
 
 For that sentence the nonce is `mem-b1562a220b03ce99`. The digest changes because it includes the expiry. A verified recall contains `Verified fact: The lane review is weekly.` A second confirm prints `Refused save`. The routine line ends with `Sent no message.`
 
+## Rehearse the authority pilot on a staged lease
+
+`rehearse` writes a private lease under `--root` and runs handoff, one lane, pause and a missed-check-in failover. It refuses the installed runner tree, the conductor state directory and the gateway release store. `checklist` prints the live sequence and does not run it. The live arming commands stay in [CAPTAIN.md](CAPTAIN.md) and wait for Jeff.
+
+```bash
+python3 first-officer/pilot/rehearse.py rehearse --root "$root" --epoch 12 --now 1763700000
+python3 first-officer/pilot/rehearse.py checklist
+```
+
 ## Check prerequisites on bobserver
 
 Run from the PR checkout as the account that owns `openclaw-gateway.service`. The GitHub CLI must authenticate as the configured owner account. The existing Andrea read-only bridge must answer from the service account using its private reader configuration.

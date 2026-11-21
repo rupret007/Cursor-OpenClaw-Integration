@@ -90,6 +90,12 @@ On November 20, 2026 the three tests in `tests/first_officer/test_status.py` pas
 
 On November 20, 2026 the four tests in `tests/first_officer/test_cycle.py` passed. One test saved a fact only after the matching digest, refused the second confirm, checked the receipt, and rejected three tampered chains. One test accepted a confirm at the last second of the ten minutes, refused the next second, refused an edited pending sentence, replaced an expired pending fact, and kept a credential out of the files. Two confirms in parallel saved one fact. The schedule test pinned 06:30, 08:00 and 07:00 Central on November 20, 2026 to the next 07:00. The command path printed the verified fact, the dry-run line and `Audit chain verified: 2 lines.` The offline gate passed 935 Python tests and compiles the module. `INSTALL.md` documents the commands.
 
+## Step 8: supervised authority pilot and staged failover
+
+`first-officer/pilot/rehearse.py` runs the pilot on a lease file under a directory the caller chooses. It refuses the installed runner tree, the conductor state directory and `/opt/openclaw-fo`. It does not import the live watchdog, start a service, or send a message. From a captain-held epoch it arms only a fresh explicit handoff, moves the lease to first-officer at the next epoch, accepts one lane, treats a repeat as a duplicate, and makes a pause reject a new lane. A check-in older than 300 seconds returns the lease to captain, advances the epoch, turns takeover off, interrupts the staged lane and rejects a submit at the old epoch. An explicit handback returns captain at a newer epoch and leaves an in-flight lane running. Two ticks at the same missed check-in advance the epoch once. `checklist` prints the ten live steps and runs none of them.
+
+On November 20, 2026 the three tests in `tests/first_officer/test_pilot.py` passed, including the missed-check-in failover, the handback path, the single epoch advance, the live-path refusal and the checklist text. The offline gate passed 938 Python tests and compiles the module. The live lease was not read or written. Production authority stays with captain until Jeff runs the checklist on bobserver. `JEFF-ACTIONS.md` lists those steps.
+
 ## One combined release and a page Jeff can test from
 
 `first-officer/release.py` turns the whole release into one reviewed operation with one rollback. `build` stages the candidate from the verified prior bundle, runs the packaged Round 13 canary and the Segment 1 and captain gate against it, and packs it. `activate` confirms the running gateway, the owner's GitHub login and the existing Andrea read-only bridge before it changes anything, publishes the candidate read-only under its digest through a private staging directory, prepares the private rollback, switches with the existing installer and confirms readiness. `rollback` restores the exact prior config and pin. Every command accepts `--dry-run`, which prints the exact ordered commands and runs none of them.
@@ -108,7 +114,7 @@ The release is a plan of reviewed commands, so the whole sequence is tested with
 - DONE. The Playwright flaky-report producer and the quarantine workflow are proven above. Quarantine stays visible and the gate stays red.
 - DONE. The shared status publisher and the loopback read-only page are proven above. No collector is running on the machines, and the page is not exposed beyond loopback.
 - DONE. Grounded memory, the lane-review dry run, approval binding and the audit chain are proven above. No message was sent and no timer was installed. The ten gateway routine declarations stay inactive.
-- The lease and watchdog passed a local rehearsal. Complete the supervised production pilot and verify failover.
+- DONE for the staged failover and the checklist. The supervised production pilot on the live lease still waits for Jeff. Production authority stays with captain.
 
 The backlog references the bobserver lanes `infra-20261118`, `consolidate-20261119` and `arch-research-20261118`.
 

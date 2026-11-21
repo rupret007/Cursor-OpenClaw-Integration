@@ -1,6 +1,6 @@
 # What needs Jeff
 
-The offline work recorded in [STATUS.md](STATUS.md) can be checked with [TEST-NOW.md](TEST-NOW.md). The items below are the ones that touch the live gateway, Telegram or production authority, so each one waits for you. Nothing on this list has been started.
+The offline work recorded in [STATUS.md](STATUS.md) can be checked with [TEST-NOW.md](TEST-NOW.md). The items below are the ones that touch the live gateway, Telegram or production authority, so each one waits for you. None of these live items has been started.
 
 Before any of it, you can verify the finished work yourself with [TEST-NOW.md](TEST-NOW.md). None of those checks touch anything live.
 
@@ -29,9 +29,24 @@ After the release is active, work through [LIVE-TEST.md](LIVE-TEST.md) in the pr
 
 ## 3. Approve the supervised authority pilot
 
-The lease, watchdog, epoch handoff, pause, handback, stale-grant rejection and disarm all passed a private rehearsal on the Nuc against the installed fence and watchdog code. Production authority is still held by Grok Bot and nothing has moved.
+The staged failover passed on November 20, 2026. A missed 300 second check-in returned a private lease to captain at epoch 14 and rejected the old epoch. That rehearsal does not read the live fence. Production authority is still held by captain, and the live steps below have not been started.
 
-The pilot needs three things from you: a fresh Grok Bot check-in, an explicit handoff at the expected epoch, and the named Integration CI scope granted at that epoch. [CAPTAIN.md](CAPTAIN.md) has the operator commands. Keep the first pilot to one review lane on one pull request head, and use the documented pause and handback to end it.
+Run the staged command in [TEST-NOW.md](TEST-NOW.md), then the live checklist. Stop at the first line that does not match.
+
+```
+1. Leave the live lease with captain until this staged rehearsal has passed.
+2. Run python3 first-officer/pilot/rehearse.py rehearse --root /tmp/fo-pilot --epoch 12 --now 1763700000.
+3. On bobserver, read captain status. Stop if the holder is not captain.
+4. Require a fresh captain check-in and an explicit handoff at that epoch.
+5. Arm that epoch and run one watchdog tick. Stop unless first-officer holds the next epoch.
+6. Grant integration-ci at the new epoch, submit one pull request, and confirm a repeat is one lane.
+7. Pause that epoch and confirm a new task creates no lane.
+8. A missed 300 second check-in must return the lease to captain at a newer epoch and reject the old epoch.
+9. Hand back at the current epoch, confirm captain holds a newer epoch, and disarm there.
+10. Send no message from this checklist. Telegram checks stay on the live-test list.
+```
+
+The operator commands for steps 3 through 9 are in [CAPTAIN.md](CAPTAIN.md). Keep the first live pilot to one review lane on one pull request head.
 
 ## 4. Confirm the rollback drill window
 

@@ -19,7 +19,7 @@ This is the same gate CI runs. It takes about two minutes.
 bash scripts/test_integration.sh
 ```
 
-Expect `935 passed` from the Python suite and a final line `All integration checks passed.`. The `Handoff failed.` lines inside the exhaustive check are expected: that check deliberately feeds bad arguments and requires each one to be refused.
+Expect `938 passed` from the Python suite and a final line `All integration checks passed.`. The `Handoff failed.` lines inside the exhaustive check are expected: that check deliberately feeds bad arguments and requires each one to be refused.
 
 ## 2. The Segment 1 and captain gate
 
@@ -272,6 +272,30 @@ receipt sent False
 
 The refusal is the second confirm. The fact stays one line, and the receipt says nothing was sent.
 
+## 11. Step 8: rehearse failover on a staged lease
+
+This creates `/tmp/fo-pilot` and writes one private lease file there. It does not read the live fence or start the watchdog.
+
+```bash
+rm -rf /tmp/fo-pilot
+python3 first-officer/pilot/rehearse.py rehearse --root /tmp/fo-pilot --epoch 12 --now 1763700000
+```
+
+Expect:
+
+```
+Armed takeover ON while captain held epoch 12.
+Watchdog moved the lease to first-officer at epoch 13.
+Granted integration-ci at epoch 13.
+One lane accepted for pull 33.
+A second submission was a duplicate.
+Pause rejected a new lane.
+A missed check-in returned the lease to captain at epoch 14.
+An old-epoch submit was rejected.
+```
+
+`python3 first-officer/pilot/rehearse.py checklist` prints the ten live steps. Those steps are not run by the command.
+
 ## What is not provable here yet
 
-Step 8 in [STATUS.md](STATUS.md) is still in progress, and the timed Telegram checks and the supervised authority pilot still need a live gateway and your approval. Hatchet, Restate and the Phoenix UI are not installed. The queue and trace commands are ready to point at them when you approve a host. No status collector is running on the machines. The ten gateway routine declarations stay inactive.
+The live gateway release, the timed Telegram checks and the supervised pilot on the real lease still need your approval. Hatchet, Restate and the Phoenix UI are not installed. No status collector is running on the machines. The ten gateway routine declarations stay inactive. The staged pilot lease is not the live one.

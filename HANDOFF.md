@@ -4,15 +4,15 @@ Resume on branch `codex-candace/fo-finish-20261120`. The commit that contains th
 
 ## Done in this checkout
 
-Steps 1 through 7 are proven in `STATUS.md`. Step 7 saves a fact only when the approval digest matches, records that on a hash-chained audit log, and dry-runs the 07:00 America/Chicago lane review without sending a message. The offline gate passed 935 Python tests. The Node gate passed 23 tests. The four pull-request jobs were green on the Step 6 head `3cd946c`. This commit adds the acceptance cycle and needs those jobs green again.
+Steps 1 through 8 have local evidence in `STATUS.md`. Step 8 rehearses the authority pilot on a staged lease, including a missed-check-in failover, and prints the live checklist without running it. The offline gate passed 938 Python tests. The Node gate passed 23 tests. The four pull-request jobs were green on `3cd946c`. Later commits, including this one, need those jobs green again. The live lease was not touched.
 
 ## Next
 
-Step 8. Prepare the supervised authority pilot and a tested failover checklist. Anything that touches the live gateway waits for Jeff. Do not send a message.
+The eight ordered steps are evidenced locally. Next is the rollback drill on a staged copy, with the timing recorded. Then the secrets and PII scan, the release archive, the doc refresh, and the Cursor plan-usage check. Do not activate the live pilot.
 
 ## Open failures
 
-None in the local gates at this commit. Confirm the pull-request jobs are green on this head. Gateway activation, timed Telegram checks and the supervised authority pilot still wait for Jeff.
+None in the local gates at this commit. Confirm the pull-request jobs are green on this head. Gateway activation, timed Telegram checks and the live authority pilot still wait for Jeff.
 
 ## Do not
 

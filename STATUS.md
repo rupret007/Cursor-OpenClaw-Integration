@@ -20,6 +20,8 @@ The authenticated follow-up found two self-chat entries and two groups on Andrea
 
 ## Captain upgrade
 
+Jeff approved gateway activation and completed sudo authentication. The first attempt stopped during Andrea preflight when the reader's scope could not be verified. The retry used the documented reader connectivity check. Bobserver now runs release `2df63b9d08cb2a6741c626db5469d5fd71add93a31ed87abed9fdfbc061ac802` from reviewed commit `07348e9`. Both plugin paths match the release digest, the gateway service is active and `/readyz` reports ready. The private rollback plan contains the exact previous Segment 1 config and pin. Use the [installer rollback procedure](INSTALL.md#roll-back-to-the-exact-prior-config-and-pin) with the private backup printed by the activation terminal. Timed Telegram acceptance is pending.
+
 The live authority check showed Grok Bot still holds the shared lease. Takeover is off, the watchdog timer is inactive and the latest matching Grok check-in is stale. The pilot arming command requires a fresh Grok check-in and an explicit handoff at the expected epoch. The captain candidate reuses that lease and the existing lane runner. Jeff can grant the named Integration CI scope at the current epoch, pause dispatch and request handback in the private Telegram chat. The runner uses a separate subscription account from the two fleet quota receipts. The candidate reads the runner's own subscription quota before dispatch.
 
 The captain can read current fleet, gate, PR and quota evidence, follow an exact PR head, launch one review lane for it and verify the result against the current GitHub head. The local tests exercise stale grants, duplicate submissions, pause, failed lanes, mismatched heads and the Andrea diagnostic. A private Nuc rehearsal using the installed fence and watchdog code confirmed explicit handoff, epoch advancement, pause, handback, stale-grant rejection and disarm. Production authority remained with Grok Bot. The [Captain guide](CAPTAIN.md) covers the Mac check, operator activation, supervised pilot and rollback.
@@ -37,4 +39,4 @@ The captain can read current fleet, gate, PR and quota evidence, follow an exact
 
 The backlog references the bobserver lanes `infra-20261118`, `consolidate-20261119` and `arch-research-20261118`.
 
-BLOCKED: Jeff's gateway activation, timed Telegram acceptance and the supervised authority pilot remain pending. The restricted reading path to the Mac is verified.
+BLOCKED: The reviewed gateway is active. Timed Telegram acceptance and the supervised authority pilot remain pending.

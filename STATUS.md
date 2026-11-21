@@ -36,14 +36,22 @@ During the Telegram check, a spelling variant bypassed Andrea and reached a rate
 
 The staged release recognizes a leading `@andrea` in Bob the Bot’s private owner chat. It routes messaging summaries to the existing restricted Mac reader. Untagged messages continue through OpenClaw. The packaged canary verifies both paths, the rejected sender path and Andrea’s read-only help for requests to send a text.
 
-The active LiteLLM endpoint returned the three configured model aliases from its model catalog. Flash serves short requests. The candidate routes contextual requests and configured fallbacks through LiteLLM. The packaged canary verifies the model choices and fallback ordering without calling a model. Live completion under load and per-lane budget enforcement still need proof.
+The active LiteLLM endpoint returned the three configured model aliases from its model catalog. Flash serves short requests. The candidate routes contextual requests and configured fallbacks through LiteLLM. The packaged canary verifies the model choices and fallback ordering without calling a model.
+
+## Step 1: LiteLLM failover and per-lane budgets
+
+`first-officer/litellm/configure.py` renders the reviewed fallback routes into the proxy configuration and provisions one native virtual key for each lane. It refuses a plan whose lane omits a fallback target, refuses a routed model priced at zero, requires environment references for the master key and database URL, and sets fail-closed budget enforcement with reservation left on. Lane credentials are written as owner-only files through a locked directory with a pending-file crash path, and the proxy is addressed by hashed key so the live credential never reaches a request URL or access log.
+
+`tests/first_officer/litellm-acceptance.py` proves the behavior against real services. It starts a temporary PostgreSQL 18 cluster with SCRAM authentication, a real LiteLLM 1.110.2 proxy, and two loopback provider fixtures. The primary fixture answers HTTP 503 and the fallback answers HTTP 200. On November 20, 2026 the run passed on the Nuc with Python 3.12 and these results: an unauthenticated completion returned HTTP 401 and reached no provider; both lanes started at zero persisted spend; lane A's first completion was served by the fallback after the primary's single 503 and persisted a 0.10 charge; a second completion persisted a cumulative 0.20, reaching the lane's budget; the third request returned HTTP 422 with error type `budget_exceeded` and made no upstream call; and lane B, untouched by lane A's spend, completed and persisted its own 0.10. Spend is read directly from the proxy's `LiteLLM_VerificationToken` rows rather than from the API's own reply. The fixture redacts its generated key, password and addresses from any failure output.
+
+The gated run on the same tree passed 878 Python tests in the offline integration gate, including the ten `tests/first_officer/test_install.py` cases and the LiteLLM routing tests, and 22 Node tests in the Segment 1 and captain gate. The pull request adds a `first-officer-litellm` job that reruns the acceptance fixture on Ubuntu 24.04 against PostgreSQL 16.
 
 The installed gateway add-on diagnostic found 49 skills and ten inactive routine declarations. It verified the skill route, fetched-page quarantine, restricted fetch, redaction and delivery outcomes using dry runs. Scheduled routine execution still needs proof.
 
 ## Remaining integration and acceptance
 
 - Finish the timed Telegram checks and supervised authority pilot before expanding production scope.
-- Prove LiteLLM provider failover and add per-lane budgets. Apply the gateway route to other API clients as each lane moves over.
+- DONE. LiteLLM provider failover and per-lane budgets are proven above. Applying the gateway route to the remaining API clients follows as each lane moves over.
 - The quota readers and captain admission checks are present. Finish Codex and Claude usage tracking, Central Time reset alerts at 90% and `HANDOFF.md`.
 - Hatchet lane queue pilot with Restate as fallback.
 - The runtime records local traces. Integrate Phoenix and OpenLLMetry and verify trace delivery.

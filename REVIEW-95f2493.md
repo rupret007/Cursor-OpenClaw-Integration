@@ -181,3 +181,14 @@ this checkout, so their production behavior was not proven here.
 - Final release status: **FAIL**.
 - Remaining risks: complete owner-level audit reset, incomplete credential
   detection, and external production verifier/carrier behavior.
+
+## FIXES
+
+Each finding was reproduced with a failing test on the production path, then changed. The original FAIL above is unchanged. Local gates after these commits: secret scan clean (`Files 395`, `History commits 349`, `Logs 0`, before the commit that records this section; the file count includes the local gitignored `data/` tree), `OPENAI_API_ENABLED=0 RUN_COMM_SMOKE=0 bash scripts/test_integration.sh` passed 1033 Python tests, and the Segment 1 and captain Node gate passed 23 tests. The repeated-rollback regression stayed inside that Python run. No live gateway, bobserver, Telegram, or production action was used. Phoenix, Restate and Hatchet were not installed. Draft PR #36 was not merged.
+
+Deleting the acceptance root, the trust directory, the witness, and `root.id` does not let a silent `initialize`/`verify` accept an empty chain while the anchor file remains. That file is owner-writable. It is not a trust anchor. With `FO_AUDIT_ANCHOR` unset, deleting the anchor file too still lets `initialize` mint a new empty chain that `verify` accepts with zero lines. With `FO_AUDIT_ANCHOR` set, a missing or mismatched file fails closed, and replacing the file with a new empty one still starts a new chain. Jeff decides whether that path is outside this user's control. See `JEFF-ACTIONS.md` section 5. `LIVE-TEST.md` was not changed.
+
+| Finding | Commit | Test |
+| --- | --- | --- |
+| MEDIUM — deleting every owner-writable audit copy still blesses a replacement chain | `2b348f0269c5187a99f75a25c5a56e2026f6a11e` Refuse an empty audit replacement while the anchor file remains. Not FIXED. The four-directory repro does not verify as empty while the anchor file remains. Deleting that file, or replacing a configured file with a new empty one, is the residual Jeff decision. | `tests/first_officer/test_cycle.py::test_total_reset_of_the_four_directories_does_not_verify_empty` and `tests/first_officer/test_cycle.py::test_configured_audit_anchor_fails_closed_when_missing_or_mismatched` |
+| MEDIUM — the enforced secret gate misses fine-grained GitHub PATs and lowercase Bearer auth | `d3ed5e8bc992752183c28d6a2deaa7a9d519bd27` Flag fine-grained GitHub PATs and lowercase bearer tokens. The earlier temporary cloud key and alphabetic bearer cases stay detected. | `tests/first_officer/test_privacy.py::test_fine_grained_pats_and_lowercase_bearers_fail_closed` and `tests/first_officer/test_privacy.py::test_temporary_session_keys_and_alphabetic_bearers_fail_closed` |

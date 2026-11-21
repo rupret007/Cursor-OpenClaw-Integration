@@ -2,6 +2,7 @@ import importlib.util
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import shutil
 import threading
 from zoneinfo import ZoneInfo
 
@@ -100,6 +101,22 @@ def test_expired_secret_and_live_routine_do_not_save_or_send(tmp_path):
     assert not (tmp_path / "untouched").exists()
 
 
+def test_deleting_the_acceptance_directory_and_its_sibling_does_not_verify(tmp_path):
+    """Wiping the acceptance root and the sibling copy must not look like a fresh root."""
+    root = tmp_path / "cycle"
+    cycle.run_routine(root, NOW)
+    sibling = root.parent / f".{root.name}.fo-audit-trust"
+    shutil.rmtree(root)
+    if sibling.exists():
+        shutil.rmtree(sibling)
+    with pytest.raises(ValueError, match="truncated"):
+        cycle.verify(root)
+    anchor = cycle.trust_dir(root) / "audit.head"
+    assert anchor.is_file()
+    assert root.parent.resolve() not in anchor.resolve().parents
+    assert root.resolve() not in anchor.resolve().parents
+
+
 def test_resetting_the_acceptance_directory_does_not_erase_the_trust_anchor(tmp_path):
     root = tmp_path / "cycle"
     cycle.run_routine(root, NOW)
@@ -107,11 +124,13 @@ def test_resetting_the_acceptance_directory_does_not_erase_the_trust_anchor(tmp_
         (root / name).unlink()
     with pytest.raises(ValueError, match="truncated"):
         cycle.verify(root)
-    anchor = root.parent / f".{root.name}.fo-audit-trust" / "audit.head"
+    anchor = cycle.trust_dir(root) / "audit.head"
     assert anchor.is_file()
-    assert root not in anchor.resolve().parents
+    assert root.resolve() not in anchor.resolve().parents
+    assert root.parent.resolve() not in anchor.resolve().parents
     fresh = tmp_path / "fresh"
     assert cycle.verify(fresh) == 0
+    assert not cycle.trust_dir(fresh).exists()
     assert not (fresh.parent / f".{fresh.name}.fo-audit-trust").exists()
 
 

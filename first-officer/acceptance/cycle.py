@@ -169,10 +169,33 @@ def _key(root):
     return _read_key(root)
 
 
+def _contained(path, parent):
+    path = path.resolve()
+    parent = parent.resolve()
+    return path == parent or parent in path.parents
+
+
 def trust_dir(root):
-    """The checkpoint copy lives beside the acceptance directory, not inside it."""
-    root = Path(root)
-    return root.parent / f".{root.name}.fo-audit-trust"
+    """Keep the checkpoint outside the acceptance directory and outside its parent.
+
+    A sibling under that parent can be deleted together with the acceptance root.
+    The anchor therefore lives one directory higher, or in FO_AUDIT_TRUST_BASE when
+    that path is set and is not inside the acceptance parent.
+    """
+    root = Path(root).resolve()
+    override = os.environ.get("FO_AUDIT_TRUST_BASE", "").strip()
+    if override:
+        base = Path(override).expanduser().resolve()
+    else:
+        parent = root.parent
+        higher = parent.parent
+        if higher == parent:
+            base = (Path.home() / ".local/state/first-officer/audit-trust").resolve()
+        else:
+            base = (higher / ".fo-audit-trust").resolve()
+    if _contained(base, root) or _contained(base, root.parent):
+        raise ValueError("The audit trust anchor must stay outside the acceptance parent")
+    return base / hashlib.sha256(str(root).encode()).hexdigest()
 
 
 def _checkpoint(root, seq, digest):
@@ -180,10 +203,11 @@ def _checkpoint(root, seq, digest):
     document = {"digest": digest, "mac": _mac(key, seq, digest), "seq": seq}
     _write_json(root / "audit.head", document)
     trust = trust_dir(root)
-    if trust.is_symlink():
+    if trust.is_symlink() or trust.parent.is_symlink():
         raise ValueError("The acceptance file must be a private owner file")
-    trust.mkdir(mode=0o700, exist_ok=True)
+    trust.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(trust, 0o700)
+    os.chmod(trust.parent, 0o700)
     info = trust.lstat()
     if info.st_uid != os.getuid() or not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o077:
         raise ValueError("The acceptance file must be a private owner file")

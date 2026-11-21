@@ -358,7 +358,7 @@ On the Hatchet workflow, set the engine’s idempotency to the same value the cl
 
 On Restate, raise the idempotency retention from the default 24 hours to the longest a review is allowed to sit (use 7 days). A retry the next day with the same key would otherwise run the lane twice. The local ledger still blocks that retry while the row says `queued`. Retention is the backstop when the ledger is restored from an older copy.
 
-`dispatch` fails over only on connection refusal and HTTP 408, 425, 429, 500, 502, 503, 504. A timeout, a drop after send, a redirect, or an authentication error is `uncertain`. The lane is not sent to Restate, and a later call sends nothing until the ledger row is resolved. Keep that. A timeout often means Hatchet accepted the run.
+`dispatch` fails over only on connection refusal and HTTP 425 or 429. A timeout, HTTP 408, any 5xx, a drop after send, a redirect, or an authentication error is `uncertain`. The lane is not sent to Restate, and a later call sends nothing until the ledger row is resolved. Keep that. A timeout or a 5xx often means Hatchet accepted the run, and the two backends do not share an idempotency check.
 
 There is no reviewed “operator looked” command. Add one later that **appends** a row. Do not delete ledger lines.
 

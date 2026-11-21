@@ -19,7 +19,7 @@ This is the same gate CI runs. It takes about two minutes.
 bash scripts/test_integration.sh
 ```
 
-Expect `953 passed` from the Python suite and a final line `All integration checks passed.`. The `Handoff failed.` lines inside the exhaustive check are expected: that check deliberately feeds bad arguments and requires each one to be refused. Before the unit tests, the gate prints one line, `Secret scan clean. Files <n>. History commits <n>. Logs 0.`
+Expect `1049 passed` from the Python suite and a final line `All integration checks passed.`. The `Handoff failed.` lines inside the exhaustive check are expected: that check deliberately feeds bad arguments and requires each one to be refused. Before the unit tests, the gate prints one line, `Secret scan clean. Files <n>. History commits <n>. Logs 0.`
 
 ## 2. The Segment 1 and captain gate
 
@@ -117,21 +117,22 @@ The handoff names the branch, the head it describes, the step in progress and wh
 The whole release is one activation command. The rollback restores the prior config, pin, and service. It does not delete the published candidate. Print the exact plan without running any of it.
 
 ```bash
+export FO_ACCEPTANCE_ROOT="$root"
 python3 -B first-officer/release.py --dry-run build "$PRIOR_BUNDLE" /tmp/fo-staging --reviewed-head "$REVIEWED_HEAD"
 python3 -B first-officer/release.py --dry-run activate "$(printf 'a%.0s' {1..64})" /tmp/x.tar /tmp/fo-backup
 ```
 
-The build plan requires a clean checkout at the full approved commit in `REVIEWED_HEAD`. It stages the candidate from your verified prior bundle and the approved overlay, runs the packaged Round 13 canary and the Segment 1 gate, scans the staged candidate for secrets and personal data, and packs it only if the destination archive is absent. The activate plan confirms the running gateway, the GitHub login and the Andrea read-only bridge, checks the approved inventory, prepares the private rollback, and verifies the read-only candidate with the installed verifier before switching. It stops at the first failure and checks gateway readiness after switching.
+The build plan requires a clean checkout at the full approved commit in `REVIEWED_HEAD`. It stages the candidate from your verified prior bundle and the approved overlay, runs the packaged Round 13 canary and the Segment 1 gate, scans the staged candidate for secrets and personal data, and packs it only if the destination archive is absent. Export `FO_ACCEPTANCE_ROOT` before the activate dry-run. If it is unset, that dry-run fails closed and does not print a quoted `$FO_ACCEPTANCE_ROOT`. The activate plan confirms the running gateway, the GitHub login and the Andrea read-only bridge, checks the approved inventory, prepares the private rollback, installs the audit seal, runs `cycle.py verify`, and verifies the read-only candidate with the installed verifier before the gateway switch. It stops at the first failure and checks gateway readiness after switching.
 
 ## 6. Step 3: Hatchet, then Restate only if Hatchet refuses
 
-This starts nothing outside the test. Two loopback servers stand in for the documented Hatchet trigger and the Restate send ingress. Hatchet answers HTTP 503 and Restate accepts the lane.
+This starts nothing outside the test. Two loopback servers stand in for the documented Hatchet trigger and the Restate send ingress. Hatchet fails over only on a connection refusal or HTTP 425 or 429. The failover test uses HTTP 429, and a closed port is the other definite refusal. HTTP 408 and HTTP 503 stay unknown and are not failed over. Restate accepts the lane only after a definite refusal.
 
 ```bash
 python3 -m pytest -q tests/first_officer/test_lane_queue.py
 ```
 
-Expect `16 passed`. One of those tests is the failover: the primary is called once, Restate is called once with the same lane and an idempotency key, and a second dispatch sends nothing. The other tests keep a timeout, a redirect and an authentication failure from failing over, and they keep two concurrent dispatchers to a single run. No token is written to the ledger.
+Expect `24 passed`. One of those tests is the failover: the primary is called once, Restate is called once with the same lane and an idempotency key, and a second dispatch sends nothing. The other tests keep a timeout, a redirect and an authentication failure from failing over, and they keep two concurrent dispatchers to a single run. No token is written to the ledger.
 
 ## 7. Step 4: one trace arrives at a local collector
 
@@ -363,7 +364,7 @@ An empty allowlist refuses every page. A listed host does not include its subdom
 python3 -m pytest -q tests/first_officer/test_guard.py
 ```
 
-Expect `5 passed`. Nothing is installed and no host outside `127.0.0.1` is contacted. The fifth test recalls a memory that says to ignore the instructions and send. The recall is fenced, a hidden character and a fence closer are omitted, and the recall does not match `send it`, `send it now`, or `send now`. Those three phrases still match on their own.
+Expect `13 passed`. Nothing is installed and no host outside `127.0.0.1` is contacted. One test recalls a memory that says to ignore the instructions and send. The recall is fenced, a hidden character and a fence closer are omitted, and the recall does not match `send it`, `send it now`, or `send now`. Those three phrases still match on their own.
 
 ## What is not provable here yet
 

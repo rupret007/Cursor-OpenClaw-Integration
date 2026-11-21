@@ -8,14 +8,20 @@ Before any of it, you can verify the finished work yourself with [TEST-NOW.md](T
 
 One digest and one activation command. The rollback restores the prior config, pin, and service. It does not delete the published candidate or undo a separately provisioned reader or proxy. Build the candidate on the Nuc from the private prior bundle, read the digest, then activate on bobserver. The review archive from `first-officer/archive.py` is the offline copy of this lane. It is not this activation.
 
+Export `FO_ACCEPTANCE_ROOT` to the acceptance directory you already initialized, and export `OPENCLAW_LITELLM_API_KEY` from the approved private environment, before build or activate. Create `$backup_parent` as a private directory before activate. Activation reads `FO_ACCEPTANCE_ROOT` and fails closed when it is unset. It does not treat `$FO_ACCEPTANCE_ROOT` as a directory.
+
 ```bash
+export FO_ACCEPTANCE_ROOT="$root"
+: "${OPENCLAW_LITELLM_API_KEY:?Export OPENCLAW_LITELLM_API_KEY from the approved private environment before activate}"
+mkdir -p -- "$backup_parent"
+chmod 700 "$backup_parent"
 python3 -B first-officer/release.py build "$PRIOR_BUNDLE" "$staging" --reviewed-head "$REVIEWED_HEAD"
 python3 -B first-officer/release.py activate "$release" "$archive" "$backup_parent"
 ```
 
-Preview either one with `--dry-run` first; it prints the exact ordered commands and runs none of them. Activation refuses to start unless the gateway is already running, the GitHub CLI is authenticated as the owner account and the existing Andrea read-only bridge answers. It compares the manifest digest with the approved release and records the private rollback before it publishes the candidate. It installs the root-owned audit anchor from section 5 after that rollback is recorded and before it publishes. It then publishes the candidate read-only under its digest, switches, and waits for readiness. It stops at the first failure.
+Preview either one with `--dry-run` first; it prints the exact ordered commands and runs none of them. With `FO_ACCEPTANCE_ROOT` unset, activate `--dry-run` fails closed and does not print a quoted `$FO_ACCEPTANCE_ROOT`. Activation refuses to start unless the gateway is already running, the GitHub CLI is authenticated as the owner account and the existing Andrea read-only bridge answers. It compares the manifest digest with the approved release and records the private rollback before it publishes the candidate. It installs the root-owned audit anchor from section 5 after that rollback is recorded and before it publishes, then runs `cycle.py verify`. It then publishes the candidate read-only under its digest, switches, and waits for readiness. It stops at the first failure.
 
-The private rollback directory is printed only after that backup exists. A failure before then does not name a missing path.
+The private rollback directory is printed only after that backup exists. A failure before then does not name a missing path. Rollback does not need `FO_ACCEPTANCE_ROOT`. It still checks the saved config and pin, and it restores that pair when the acceptance directory or the production seal is missing or damaged.
 
 ```bash
 python3 -B first-officer/release.py rollback "$backup"
@@ -64,6 +70,8 @@ The staged file restore already ran. On November 20, 2026 it printed `Restored t
 python3 -B first-officer/release.py rollback "$backup"
 ```
 
+That command does not need `FO_ACCEPTANCE_ROOT`. A missing or damaged acceptance directory or production seal does not block it. The saved config and pin are still validated, and a failed rollback does not start the candidate.
+
 ## 5. Install the root-owned audit anchor during activation
 
 You run this on bobserver while activating. It is the sudo step that creates or updates the audit anchor. The file is `/var/lib/openclaw-fo/audit-anchor`. The directory is `/var/lib/openclaw-fo/`. Both are `root:root`. The directory is mode `0755`. The file is mode `0444`, so the OpenClaw service user can read it and cannot write or replace it. Mode `0600` is not used, because the service must be able to read the file. Only this root step creates or updates the file. Do not point `FO_AUDIT_ANCHOR` at it. That variable is still only an owner-writable copy, and a user-writable copy does not bless a new chain while this file is required.
@@ -79,9 +87,11 @@ sudo install -o root -g root -m 0444 "$anchor_payload" /var/lib/openclaw-fo/audi
 sudo chown root:root /var/lib/openclaw-fo /var/lib/openclaw-fo/audit-anchor
 sudo chmod 0755 /var/lib/openclaw-fo
 sudo chmod 0444 /var/lib/openclaw-fo/audit-anchor
-python3 first-officer/acceptance/cycle.py --root "$FO_ACCEPTANCE_ROOT" verify
+python3 -B first-officer/acceptance/cycle.py --root "$FO_ACCEPTANCE_ROOT" verify
 ```
 
 Success from `export-anchor` is `Audit anchor payload written.` The sudo commands print nothing and exit 0. Success from `verify` is `Audit chain verified: <n> lines.`
+
+`export-anchor` runs `verify` before it writes a payload. It fails closed, exits 1, and writes nothing when `verify` would reject the chain, including a forged `memory.json`, `pending.json`, or `receipt-lane-review.json`. It also fails closed when a required seal is missing, replaced, not owned by root, or not mode-restricted, including mode `0666`. The first installation can export only when `/var/lib/openclaw-fo` does not exist yet, `FO_PRODUCTION_AUDIT_ANCHOR` is unset, and `verify` accepts the chain. After the seal exists, export succeeds only for that chain or a later extension `verify` accepts, so these sudo commands can update the seal. An empty chain, sequence `-1`, is not sealed. The seal anchors history only through the last sudo install. Events appended after that install can be removed until the next one. Events at or before a sealed sequence of zero or higher cannot.
 
 If export, verify, or the installed verifier fails closed, stop. Do not publish the candidate and do not switch the gateway. The command exits 1. The message says the anchor is missing, was replaced, is not owned by root, or is not mode-restricted. Leave `/var/lib/openclaw-fo/audit-anchor` in place. Deleting the acceptance directory, the trust directory, the witness directory, `root.id`, `anchor.json`, or replacing a user-writable `FO_AUDIT_ANCHOR` file does not bless a new empty chain while this root-owned file remains. Do not delete that file to start a new chain. Initialize a new acceptance directory only before the file exists. After it exists, run these sudo commands again only when `verify` would accept the current chain and that chain is the history you intend to keep.

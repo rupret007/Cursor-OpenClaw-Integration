@@ -22,6 +22,14 @@ REVIEWED = "b" * 40
 PUBLISH = "/opt/openclaw-fo/.segment1-publish.Ab3dEf7h"
 
 
+@pytest.fixture(autouse=True)
+def _exported_acceptance_root(tmp_path, monkeypatch):
+    """Activation plans need a real acceptance directory, never a literal dollar path."""
+    root = tmp_path / "acceptance"
+    monkeypatch.setenv("FO_ACCEPTANCE_ROOT", str(root))
+    return root
+
+
 class Recorder:
     """Stands in for the shell so a whole release can be driven without touching a gateway."""
 
@@ -176,7 +184,7 @@ def test_activate_checks_the_digest_and_writes_rollback_before_publish(tmp_path)
     assert order.index("Compare the manifest digest with the approved release") < publish_at
     assert order.index("Check the candidate inventory against the reviewed digest") < publish_at
     assert order.index("Prepare the switch and record the private rollback") < publish_at
-    assert publish_at < order.index("Verify the candidate with the installed verifier before publish") < order.index(
+    assert publish_at < order.index("Verify the candidate with the installed verifier before the gateway switch") < order.index(
         "Switch the gateway to the reviewed release")
     prepare = dict(recorder.calls)["Prepare the switch and record the private rollback"]
     assert "--candidate" in prepare
@@ -228,8 +236,24 @@ def test_activate_dry_run_prints_the_root_audit_anchor_commands(tmp_path, capsys
             doc_at = found + len(line)
             assert shlex.split(line) == argv
     assert Path("/var/lib/openclaw-fo").exists() == existed
-    assert "Audit anchor payload written." in (ROOT / "JEFF-ACTIONS.md").read_text(encoding="utf-8")
-    assert "Audit anchor payload written." in (ROOT / "INSTALL.md").read_text(encoding="utf-8")
+    acceptance = os.environ["FO_ACCEPTANCE_ROOT"]
+    assert f"--root {shlex.quote(acceptance)} export-anchor" in printed
+    assert f"--root {shlex.quote(acceptance)} verify" in printed
+    assert "'$FO_ACCEPTANCE_ROOT'" not in printed
+    assert printed.index("export-anchor") < printed.index(f"--root {shlex.quote(acceptance)} verify")
+    guide = (ROOT / "JEFF-ACTIONS.md").read_text(encoding="utf-8")
+    install = (ROOT / "INSTALL.md").read_text(encoding="utf-8")
+    assert "Audit anchor payload written." in guide
+    assert "Audit anchor payload written." in install
+    section = guide.split("## 2.")[0]
+    assert 'export FO_ACCEPTANCE_ROOT="$root"' in section
+    assert "OPENCLAW_LITELLM_API_KEY" in section
+    assert section.index('export FO_ACCEPTANCE_ROOT="$root"') < section.index("release.py activate")
+    prepare_at = install.index('first-officer/install.py prepare "$backup"')
+    assert install.index('export FO_ACCEPTANCE_ROOT="$root"') < prepare_at
+    seal_at = install.index("sudo chmod 0444 /var/lib/openclaw-fo/audit-anchor", prepare_at)
+    verify_at = install.index('cycle.py --root "$FO_ACCEPTANCE_ROOT" verify', seal_at)
+    assert seal_at < verify_at < install.index('published="/opt/openclaw-fo/first-officer-$release"', seal_at)
 
 
 def test_installed_verifier_fails_closed_when_the_audit_anchor_is_untrusted(tmp_path, monkeypatch):
@@ -296,13 +320,14 @@ def test_one_activate_command_preflights_publishes_and_switches_in_order(tmp_pat
         "Give the audit anchor to root",
         "Keep the service from replacing the audit anchor directory",
         "Keep the audit anchor readable and not writable by the service",
+        "Verify the audit chain after installing the seal",
         "Refuse to republish an existing release directory",
         "Reserve a private staging directory under the release store",
         "Copy the candidate into the staging directory",
         "Place the candidate at its store path",
         "Confirm the move installed this copy",
         "Set the installed read-only permissions for verification",
-        "Verify the candidate with the installed verifier before publish",
+        "Verify the candidate with the installed verifier before the gateway switch",
         "Switch the gateway to the reviewed release",
         "Confirm the gateway is active after the switch",
     ]
@@ -310,11 +335,19 @@ def test_one_activate_command_preflights_publishes_and_switches_in_order(tmp_pat
     assert calls["Copy the candidate into the staging directory"][-1] == f"{PUBLISH}/"
     assert calls["Place the candidate at its store path"][-2:] == [
         PUBLISH, f"/opt/openclaw-fo/first-officer-{CANDIDATE}"]
-    verify = calls["Verify the candidate with the installed verifier before publish"]
+    verify = calls["Verify the candidate with the installed verifier before the gateway switch"]
     assert verify[0].endswith("python3") or verify[0].endswith(sys.executable)
     assert "verify-candidate" in verify
     assert calls["Set the installed read-only permissions for verification"] == [
         "sudo", "chmod", "-R", "a-w,a+rX", f"/opt/openclaw-fo/first-officer-{CANDIDATE}"]
+    acceptance = os.environ["FO_ACCEPTANCE_ROOT"]
+    exported = calls["Export the audit anchor payload"]
+    assert exported[exported.index("--root") + 1] == acceptance
+    assert "'$FO_ACCEPTANCE_ROOT'" not in " ".join(exported)
+    sealed = calls["Verify the audit chain after installing the seal"]
+    assert sealed[-2:] == [acceptance, "verify"]
+    assert calls["Keep the audit anchor readable and not writable by the service"] == [
+        "sudo", "chmod", "0444", "/var/lib/openclaw-fo/audit-anchor"]
     prepare = calls["Prepare the switch and record the private rollback"]
     assert prepare[-6:] == ["--release", CANDIDATE, "--from-release", ACTIVE, "--candidate", prepare[-1]]
     assert prepare[-1].endswith(f"/first-officer-{CANDIDATE}")
@@ -487,6 +520,38 @@ def test_activate_refuses_a_digest_that_is_not_a_reviewed_candidate(tmp_path, di
     assert recorder.calls == []
 
 
+def test_unset_acceptance_root_fails_closed_before_any_release_step(tmp_path, monkeypatch, capsys):
+    """Dry-run and activate refuse an unset acceptance root and create no literal dollar directory."""
+    monkeypatch.delenv("FO_ACCEPTANCE_ROOT", raising=False)
+    work = tmp_path / "work"
+    work.mkdir(mode=0o700)
+    monkeypatch.chdir(work)
+    literal = work / "$FO_ACCEPTANCE_ROOT"
+    called = []
+
+    def runner(entry, _substitutions):
+        called.append(entry["what"])
+        raise AssertionError(entry["what"])
+
+    assert release.main(["--dry-run", "activate", CANDIDATE, str(tmp_path / "a.tar"), str(tmp_path)], runner) == 1
+    dry = capsys.readouterr()
+    assert called == []
+    assert "'$FO_ACCEPTANCE_ROOT'" not in dry.out
+    assert "$FO_ACCEPTANCE_ROOT" not in dry.out
+    assert "FO_ACCEPTANCE_ROOT" in dry.err
+    assert not literal.exists()
+    assert not (tmp_path / "switch").exists()
+
+    assert release.main(["activate", CANDIDATE, str(tmp_path / "a.tar"), str(tmp_path)], runner) == 1
+    live = capsys.readouterr()
+    assert called == []
+    assert "'$FO_ACCEPTANCE_ROOT'" not in live.out
+    assert "$FO_ACCEPTANCE_ROOT" not in live.out
+    assert "FO_ACCEPTANCE_ROOT" in live.err
+    assert not literal.exists()
+    assert not (tmp_path / "switch").exists()
+
+
 def test_rollback_restores_the_prior_release_and_confirms_the_service(tmp_path, capsys):
     recorder = Recorder()
     backup = tmp_path / "switch"
@@ -499,8 +564,9 @@ def test_rollback_restores_the_prior_release_and_confirms_the_service(tmp_path, 
     assert "restored and the gateway is active" in capsys.readouterr().out
 
 
-def test_no_release_step_pushes_merges_or_sends_telegram_traffic():
+def test_no_release_step_pushes_merges_or_sends_telegram_traffic(monkeypatch):
     # Neutral fixed paths, so a temporary directory name cannot mask or fake a match.
+    monkeypatch.setenv("FO_ACCEPTANCE_ROOT", "/private/acceptance")
     private = Path("/private")
     plans = [release.build_plan(ROOT, private / "prior", private / "staging", private / "home", REVIEWED),
              release.activate_plan(ROOT, CANDIDATE, private / "a.tar", private / "extract",

@@ -83,12 +83,21 @@ def audit_anchor_commands(payload):
     ]
 
 
+def require_acceptance_root():
+    """Return the acceptance directory. An unset or unexpanded value is refused."""
+    acceptance = os.environ.get("FO_ACCEPTANCE_ROOT", "").strip()
+    path = Path(acceptance) if acceptance else Path()
+    if not acceptance or acceptance.startswith("$") or path.name.startswith("$"):
+        raise ValueError("Export FO_ACCEPTANCE_ROOT to the acceptance directory before activate.")
+    return acceptance
+
+
 def activate_plan(repo, release, archive, extract, backup, baseline=ANDREA_SUMMARY):
     """Preflight, publish and switch on bobserver. Jeff runs this once, after approving the digest."""
     candidate = extract / f"first-officer-{release}"
     published = STORE / f"first-officer-{release}"
     staged = "{publish}"
-    acceptance = os.environ.get("FO_ACCEPTANCE_ROOT", "").strip() or "$FO_ACCEPTANCE_ROOT"
+    acceptance = require_acceptance_root()
     payload = Path(backup) / "audit-anchor"
     anchor = [
         step("Export the audit anchor payload",
@@ -104,6 +113,11 @@ def activate_plan(repo, release, archive, extract, backup, baseline=ANDREA_SUMMA
     )
     for what, argv in zip(anchor_actions, audit_anchor_commands(payload)):
         anchor.append(step(what, argv))
+    anchor.append(step(
+        "Verify the audit chain after installing the seal",
+        [sys.executable, "-B", repo / "first-officer/acceptance/cycle.py",
+         "--root", acceptance, "verify"],
+    ))
     return [
         step("Confirm the gateway is running before any change",
              ["systemctl", "--user", "is-active", "--quiet", SERVICE]),
@@ -139,7 +153,7 @@ def activate_plan(repo, release, archive, extract, backup, baseline=ANDREA_SUMMA
              ["sudo", "test", "!", "-e", staged]),
         step("Set the installed read-only permissions for verification",
              ["sudo", "chmod", "-R", "a-w,a+rX", published]),
-        step("Verify the candidate with the installed verifier before publish",
+        step("Verify the candidate with the installed verifier before the gateway switch",
              [sys.executable, "-B", repo / "first-officer/install.py", "verify-candidate", backup],
              cwd=repo),
         step("Switch the gateway to the reviewed release",
@@ -245,6 +259,7 @@ def activate(repo, release, archive, backup_parent, runner, dry_run, baseline=AN
         raise ValueError("Expected a reviewed candidate digest distinct from the supported releases")
     if baseline not in SUPPORTED_BASES:
         raise ValueError("Expected a supported prior release")
+    require_acceptance_root()
     backup = Path(backup_parent) / "switch"
     with tempfile.TemporaryDirectory(prefix="fo-release-") as extract:
         plan = activate_plan(repo, release, Path(archive), Path(extract), backup, baseline)

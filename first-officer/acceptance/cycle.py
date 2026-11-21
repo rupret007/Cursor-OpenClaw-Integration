@@ -543,9 +543,16 @@ def export_anchor(root, dest):
     """Write the current chain's seal for the root step. This does not install it.
 
     The payload has no audit key. Only the sudo activation step copies it to the
-    root-owned path and sets the mode the service can read.
+    root-owned path and sets the mode the service can read. Export runs the same
+    verification as ``verify``, including a required production seal. A chain
+    that verify would reject is not written. The first installation, before the
+    seal path and its parent exist, still has to pass verify. An empty chain is
+    not a seal.
     """
     root = _root(root)
+    verify(root)
+    if production_anchor_targets():
+        enforce_production_anchor(root)
     state = _read_chain_state(root)
     if state is None:
         raise ValueError(MISSING_AUDIT)
@@ -556,6 +563,10 @@ def export_anchor(root, dest):
         raise ValueError(RESET_AUDIT)
     if not _same_durable(anchor, root, key, head):
         raise ValueError(ANCHOR_MISMATCH)
+    if type(head.get("seq")) is not int or head["seq"] < 0:
+        raise ValueError(
+            "An empty audit chain cannot be sealed. Append a verified event before exporting the anchor."
+        )
     destination = Path(dest)
     if destination.is_symlink():
         raise ValueError("The acceptance file must be a private owner file")

@@ -169,8 +169,16 @@ def _enforce_audit_anchor():
     cycle.enforce_production_anchor(root)
 
 
-def verify_config(path, release, candidate=None):
-    _enforce_audit_anchor()
+def verify_config(path, release, candidate=None, *, enforce_anchor=True):
+    """Validate one saved config and pin pair.
+
+    Preparation, candidate verification, and activation fail closed when a
+    production seal is required. Rollback passes ``enforce_anchor=False`` so a
+    missing or damaged acceptance directory or seal cannot block restoration
+    of the prior pair. The config and pin are still checked on every path.
+    """
+    if enforce_anchor:
+        _enforce_audit_anchor()
     if candidate is not None:
         # The installed verifier reads the store path. Those files are not there
         # during preparation, so this checks the unpacked copies instead.
@@ -488,8 +496,10 @@ def switch(backup, config, restore):
     if live_identity != identity or not _known_pair(current_config, live_pin, original, candidate):
         raise ValueError("Gateway config or pin changed since preparation. Switch aborted.")
     try:
+        # Activation keeps the seal gate. Rollback must still restore the saved
+        # pair when the acceptance directory or seal is missing or damaged.
         verify_config(backup / ("original-openclaw.json" if restore else "candidate-openclaw.json"),
-                      previous if restore else release)
+                      previous if restore else release, enforce_anchor=not restore)
     except ValueError:
         if not restore:
             _discard_inactive_candidate(backup, config, plan)

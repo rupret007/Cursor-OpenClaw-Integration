@@ -699,5 +699,275 @@ def test_command_prints_the_verified_fact_and_the_dry_run(tmp_path):
     assert "subprocess" not in source and "urllib" not in source
 
 
+def _same_refusal(root, dest):
+    """Export must fail with the same error verify raises, and write no payload."""
+    with pytest.raises(ValueError) as verified:
+        cycle.verify(root)
+    with pytest.raises(ValueError) as exported:
+        cycle.export_anchor(root, dest)
+    assert str(exported.value) == str(verified.value)
+    assert not dest.exists()
+    assert cycle.main(["--root", str(root), "export-anchor", str(dest)]) == 1
+    assert not dest.exists()
+    return str(exported.value)
+
+
+def test_export_anchor_verifies_before_bootstrap_and_refuses_a_forged_record(tmp_path, monkeypatch):
+    """A first export still runs verify. A forged record or a required bad seal does not."""
+    monkeypatch.delenv("FO_AUDIT_ANCHOR", raising=False)
+    monkeypatch.delenv("FO_PRODUCTION_AUDIT_ANCHOR", raising=False)
+    absent = tmp_path / "absent-production-parent"
+    monkeypatch.setattr(cycle, "PRODUCTION_ANCHOR_DIR", absent)
+    monkeypatch.setattr(cycle, "PRODUCTION_ANCHOR", absent / "audit-anchor")
+    assert cycle.production_anchor_targets() == []
+
+    empty = tmp_path / "empty"
+    cycle.initialize(empty)
+    assert cycle.verify(empty) == 0
+    empty_payload = tmp_path / "empty-payload"
+    with pytest.raises(ValueError, match="empty audit chain"):
+        cycle.export_anchor(empty, empty_payload)
+    assert not empty_payload.exists()
+    assert cycle.main(["--root", str(empty), "export-anchor", str(empty_payload)]) == 1
+    assert not empty_payload.exists()
+
+    root = tmp_path / "cycle"
+    cycle.initialize(root)
+    cycle.run_routine(root, NOW)
+    assert cycle.verify(root) == 1
+    payload = tmp_path / "payload"
+    assert cycle.main(["--root", str(root), "export-anchor", str(payload)]) == 0
+    document = json.loads(payload.read_text(encoding="utf-8"))
+    assert document["seq"] == 0
+    assert set(document) == cycle.SEAL_FIELDS
+    assert (root / "audit.key").read_text(encoding="utf-8").strip() not in payload.read_text(encoding="utf-8")
+    assert payload.stat().st_mode & 0o077 == 0
+
+    memory = root / "memory.json"
+    memory.write_text(json.dumps({"facts": [{
+        "digest": "ab" * 32, "expires_at": NOW, "nonce": "mem-" + "cd" * 8,
+        "saved_at": NOW, "text": "A forged fact.",
+    }]}), encoding="utf-8")
+    memory.chmod(0o600)
+    assert "fact" in _same_refusal(root, tmp_path / "forged-memory")
+    memory.unlink()
+
+    pending = root / "pending.json"
+    pending.write_text(json.dumps({
+        "digest": "ab" * 32, "expires_at": NOW + 10, "nonce": "mem-" + "11" * 8,
+        "text": "Not the approved sentence.",
+    }), encoding="utf-8")
+    pending.chmod(0o600)
+    assert "pending" in _same_refusal(root, tmp_path / "forged-pending")
+    pending.unlink()
+
+    receipt_path = root / "receipt-lane-review.json"
+    saved_receipt = receipt_path.read_bytes()
+    receipt = json.loads(saved_receipt)
+    receipt["sent"] = True
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+    receipt_path.chmod(0o600)
+    assert "receipt" in _same_refusal(root, tmp_path / "forged-receipt")
+    receipt_path.write_bytes(saved_receipt)
+    receipt_path.chmod(0o600)
+    assert cycle.verify(root) == 1
+
+    parent = tmp_path / "openclaw-fo"
+    parent.mkdir(mode=0o755)
+    monkeypatch.setattr(cycle, "PRODUCTION_ANCHOR_DIR", parent)
+    monkeypatch.setattr(cycle, "PRODUCTION_ANCHOR", parent / "audit-anchor")
+    assert cycle.production_anchor_targets()
+    assert "missing" in _same_refusal(root, tmp_path / "missing-parent-seal")
+    monkeypatch.setattr(cycle, "PRODUCTION_ANCHOR_DIR", absent)
+    monkeypatch.setattr(cycle, "PRODUCTION_ANCHOR", absent / "audit-anchor")
+
+    missing = tmp_path / "no-such-anchor"
+    monkeypatch.setenv("FO_PRODUCTION_AUDIT_ANCHOR", str(missing))
+    assert "missing" in _same_refusal(root, tmp_path / "missing-seal")
+    monkeypatch.setenv("FO_PRODUCTION_AUDIT_ANCHOR", str(_plant(tmp_path / "wrong-owner", payload.read_bytes(), 0o444)))
+    assert "not owned by root" in _same_refusal(root, tmp_path / "wrong-owner-export")
+    monkeypatch.setenv("FO_PRODUCTION_AUDIT_ANCHOR", str(_plant(tmp_path / "mode666", payload.read_bytes(), 0o666)))
+    refused = _same_refusal(root, tmp_path / "mode666-export")
+    assert "not owned by root" in refused or "not mode-restricted" in refused
+
+
+def _snapshot_chain(root, dest):
+    dest.mkdir(mode=0o700)
+    shutil.copytree(root, dest / "root")
+    for name, place in (
+        ("trust", cycle.trust_dir(root)),
+        ("witness", cycle.witness_dir(root)),
+        ("identity", cycle.identity_dir(root)),
+    ):
+        shutil.copytree(place, dest / name)
+    holder = dest / "anchor"
+    holder.mkdir(mode=0o700)
+    shutil.copy2(cycle.durable_anchor_path(root), holder / "anchor.json")
+
+
+def _restore_chain(root, dest):
+    if root.exists():
+        shutil.rmtree(root)
+    shutil.copytree(dest / "root", root)
+    for name, place in (
+        ("trust", cycle.trust_dir(root)),
+        ("witness", cycle.witness_dir(root)),
+        ("identity", cycle.identity_dir(root)),
+    ):
+        if place.exists():
+            shutil.rmtree(place)
+        shutil.copytree(dest / name, place)
+    anchor = cycle.durable_anchor_path(root)
+    anchor.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    shutil.copy2(dest / "anchor" / "anchor.json", anchor)
+    os.chmod(anchor, 0o600)
+
+
+def _wipe_owner_chain(root):
+    for place in (root, cycle.trust_dir(root), cycle.witness_dir(root), cycle.identity_dir(root)):
+        if place.exists():
+            shutil.rmtree(place)
+    anchor = cycle.durable_anchor_path(root)
+    if anchor.exists():
+        anchor.unlink()
+
+
+def _refusal_text(label, call):
+    try:
+        call()
+    except ValueError as error:
+        return str(error)
+    raise RuntimeError(f"{label} succeeded")
+
+
+def export_anchor_seal_cases(tmp_path):
+    """Root-owned seal cases. The caller is uid 0 inside a user namespace, or really root."""
+    assert os.geteuid() == 0
+    os.environ.pop("FO_AUDIT_ANCHOR", None)
+    os.environ.pop("FO_PRODUCTION_AUDIT_ANCHOR", None)
+    tmp_path = Path(tmp_path)
+    root = tmp_path / "cycle"
+    cycle.initialize(root)
+    cycle.run_routine(root, NOW)
+    if cycle.verify(root) != 1:
+        raise RuntimeError("chain A did not verify")
+    payload = tmp_path / "payload"
+    cycle.export_anchor(root, payload)
+    directory = tmp_path / "anchor-dir"
+    directory.mkdir(mode=0o755)
+    os.chmod(directory, 0o755)
+    os.chown(directory, 0, 0)
+    anchor = directory / "audit-anchor"
+    anchor.write_bytes(payload.read_bytes())
+    os.chmod(anchor, 0o444)
+    os.chown(anchor, 0, 0)
+    os.environ["FO_PRODUCTION_AUDIT_ANCHOR"] = str(anchor)
+    if cycle.verify(root) != 1:
+        raise RuntimeError("live seal rejected chain A")
+    again = tmp_path / "again"
+    cycle.export_anchor(root, again)
+    if json.loads(again.read_text(encoding="utf-8"))["seq"] != 0:
+        raise RuntimeError("matching export changed sequence")
+
+    cycle.run_routine(root, NOW + 86400)
+    extended = tmp_path / "extended"
+    cycle.export_anchor(root, extended)
+    if json.loads(extended.read_text(encoding="utf-8"))["seq"] != 1:
+        raise RuntimeError("extension was not exported")
+    if anchor.read_bytes() != payload.read_bytes():
+        raise RuntimeError("export rewrote the installed seal")
+    if cycle.verify(root) != 2:
+        raise RuntimeError("extension did not verify against the older seal")
+    saved = tmp_path / "saved-chain"
+    _snapshot_chain(root, saved)
+
+    os.environ.pop("FO_PRODUCTION_AUDIT_ANCHOR", None)
+    _wipe_owner_chain(root)
+    cycle.initialize(root)
+    if cycle.verify(root) != 0:
+        raise RuntimeError("replacement chain did not verify before the seal was required")
+    os.environ["FO_PRODUCTION_AUDIT_ANCHOR"] = str(anchor)
+    forged = tmp_path / "forged-export"
+    verify_error = _refusal_text("verify forged", lambda: cycle.verify(root))
+    export_error = _refusal_text("export forged", lambda: cycle.export_anchor(root, forged))
+    if verify_error != export_error or "match" not in export_error:
+        raise RuntimeError("forged empty chain was not refused like verify")
+    if forged.exists() or anchor.read_bytes() != payload.read_bytes():
+        raise RuntimeError("forged export wrote a payload or changed the seal")
+
+    _restore_chain(root, saved)
+    if cycle.verify(root) != 2:
+        raise RuntimeError("restored chain did not verify")
+    cycle.export_anchor(root, tmp_path / "restored-export")
+
+    memory = root / "memory.json"
+    memory.write_text(json.dumps({"facts": [{
+        "digest": "ab" * 32, "expires_at": NOW, "nonce": "mem-" + "cd" * 8,
+        "saved_at": NOW, "text": "A forged fact.",
+    }]}), encoding="utf-8")
+    os.chmod(memory, 0o600)
+    memory_dest = tmp_path / "forged-memory"
+    memory_error = _refusal_text("verify memory", lambda: cycle.verify(root))
+    export_memory = _refusal_text("export memory", lambda: cycle.export_anchor(root, memory_dest))
+    if memory_error != export_memory or "fact" not in export_memory or memory_dest.exists():
+        raise RuntimeError("forged memory was exported")
+    memory.unlink()
+
+    anchor.unlink()
+    missing_error = _refusal_text("verify missing", lambda: cycle.verify(root))
+    export_missing = _refusal_text("export missing", lambda: cycle.export_anchor(root, tmp_path / "missing-export"))
+    if missing_error != export_missing or "missing" not in export_missing:
+        raise RuntimeError("missing seal was exported")
+    anchor.write_bytes(payload.read_bytes())
+    os.chmod(anchor, 0o644)
+    replaced = json.loads(anchor.read_text(encoding="utf-8"))
+    replaced["digest"] = ("1" if replaced["digest"][:1] == "0" else "0") + replaced["digest"][1:]
+    anchor.write_text(json.dumps(replaced), encoding="utf-8")
+    os.chmod(anchor, 0o444)
+    os.chown(anchor, 0, 0)
+    replaced_error = _refusal_text("verify replaced", lambda: cycle.verify(root))
+    export_replaced = _refusal_text("export replaced", lambda: cycle.export_anchor(root, tmp_path / "replaced-export"))
+    if replaced_error != export_replaced or ("match" not in export_replaced and "replaced" not in export_replaced):
+        raise RuntimeError("replaced seal was exported")
+    os.chmod(anchor, 0o644)
+    anchor.write_bytes(payload.read_bytes())
+    os.chmod(anchor, 0o666)
+    os.chown(anchor, 0, 0)
+    mode_error = _refusal_text("verify 0666", lambda: cycle.verify(root))
+    export_mode = _refusal_text("export 0666", lambda: cycle.export_anchor(root, tmp_path / "mode-export"))
+    if mode_error != export_mode or "mode-restricted" not in export_mode:
+        raise RuntimeError("mode 0666 was exported")
+    os.chmod(anchor, 0o444)
+    os.chmod(directory, 0o777)
+    directory_error = _refusal_text("verify directory", lambda: cycle.verify(root))
+    export_directory = _refusal_text("export directory", lambda: cycle.export_anchor(root, tmp_path / "directory-export"))
+    if directory_error != export_directory or "mode-restricted" not in export_directory:
+        raise RuntimeError("writable seal directory was exported")
+    os.chmod(directory, 0o755)
+    if cycle.verify(root) != 2:
+        raise RuntimeError("restored seal was refused")
+    cycle.export_anchor(root, tmp_path / "final-export")
+    print("export-ok")
+
+
+def test_export_anchor_refuses_a_forged_chain_while_a_live_seal_stands(tmp_path):
+    """A root-owned seal blocks export of a replacement chain, including mode 0666."""
+    if os.geteuid() == 0:
+        export_anchor_seal_cases(tmp_path)
+        return
+    if not _can_map_root_user():
+        return
+    completed = subprocess.run(
+        ["unshare", "--user", "--map-root-user", sys.executable, "-B", str(Path(__file__).resolve()),
+         "--export-anchor-selftest", str(tmp_path)],
+        check=False, text=True, capture_output=True, timeout=60,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "export-ok"
+    assert "key" not in completed.stdout
+
+
 if __name__ == "__main__" and len(sys.argv) > 1 and sys.argv[1] == "--root-anchor-selftest":
     root_owned_anchor_cases(Path(sys.argv[2]))
+elif __name__ == "__main__" and len(sys.argv) > 1 and sys.argv[1] == "--export-anchor-selftest":
+    export_anchor_seal_cases(Path(sys.argv[2]))

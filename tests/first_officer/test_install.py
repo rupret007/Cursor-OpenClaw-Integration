@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import shutil
 import stat
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -43,7 +44,7 @@ def controller(tmp_path, monkeypatch):
         return str(pin) if capture else None
 
     monkeypatch.setattr(installer, "systemctl", service)
-    monkeypatch.setattr(installer, "verify_config", lambda *args: calls.append("verify"))
+    monkeypatch.setattr(installer, "verify_config", lambda *args, **kwargs: calls.append("verify"))
     monkeypatch.setattr(installer, "wait_ready", lambda *args: calls.append("ready"))
     backup = tmp_path / "backup"
     installer.prepare(release, backup, config)
@@ -527,3 +528,173 @@ def test_stage_from_captain_preserves_wiring_and_refreshes_overlay(controller, t
     ).read_text(encoding="utf-8")
     assert old_tool.read_bytes() == b"old overlay"
     stage.verify_inventory(candidate, release)
+
+
+def test_rollback_restores_the_prior_pair_when_the_production_seal_is_required(tmp_path, monkeypatch, capsys):
+    """Documented rollback ignores a required seal. Activation still fails closed without one."""
+    monkeypatch.delenv("FO_ACCEPTANCE_ROOT", raising=False)
+    monkeypatch.delenv("FO_PRODUCTION_AUDIT_ANCHOR", raising=False)
+    monkeypatch.delenv("FO_AUDIT_ANCHOR", raising=False)
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "first-officer"))
+    installer = importlib.import_module("install")
+    release_tool = importlib.import_module("release")
+    home = tmp_path / "home"
+    (home / ".openclaw").mkdir(parents=True, mode=0o700)
+    monkeypatch.setattr(installer.Path, "home", lambda: home)
+    store = tmp_path / "releases"
+    store.mkdir()
+    monkeypatch.setattr(installer, "STORE", store)
+    prior_files = {
+        "first-officer-exec-guard.mjs": b"prior-guard\n",
+        "round6/runtime/first-officer-conductor.mjs": b"prior-conductor\n",
+    }
+    prior = store / f"first-officer-{installer.BASELINE}"
+    _write_release(prior, prior_files)
+    unpacked = tmp_path / "unpacked"
+    release = _write_release(unpacked, {
+        "first-officer-exec-guard.mjs": b"candidate-guard\n",
+        "round6/runtime/first-officer-conductor.mjs": b"candidate-conductor\n",
+    })
+    config = home / ".openclaw" / "openclaw.json"
+    base = store / f"first-officer-{installer.BASELINE}"
+    config.write_text(json.dumps({
+        "gateway": {"port": 18101},
+        "plugins": {
+            "load": {"paths": [str(base / "first-officer-exec-guard.mjs"),
+                               str(base / "round6/runtime/first-officer-conductor.mjs")]},
+            "entries": {installer.PLUGIN: {"enabled": True}},
+        },
+        "models": {"providers": {"litellm": {"models": [{"id": installer.FAST_MODEL.split("/")[1]}]}}},
+    }), encoding="utf-8")
+    config.chmod(0o600)
+    pin = tmp_path / "pin.conf"
+    pin.write_text("[Service]\n" + installer.pin_line(installer.BASELINE) + "\n", encoding="utf-8")
+    pin.chmod(0o600)
+    launcher = tmp_path / "openclaw"
+    launcher.write_text("#!/usr/bin/env python3\nimport json\nprint(json.dumps({'valid': True}))\n", encoding="utf-8")
+    launcher.chmod(0o755)
+    verifier = store / "verify-install.py"
+    verifier.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "if len(sys.argv) != 4:\n"
+        "    raise SystemExit(2)\n"
+        "config, release, rollback = sys.argv[1:]\n"
+        f"if rollback != {installer.ROLLBACK_SLOT!r}:\n"
+        "    raise SystemExit(3)\n"
+        "paths = json.loads(Path(config).read_text(encoding='utf-8'))['plugins']['load']['paths']\n"
+        "marker = f'/first-officer-{release}/'\n"
+        "for raw in paths:\n"
+        "    if marker not in raw or not Path(raw).is_file():\n"
+        "        raise SystemExit(4)\n"
+        "raise SystemExit(0)\n",
+        encoding="utf-8",
+    )
+    verifier.chmod(0o755)
+    recorded = []
+    real_run = installer.subprocess.run
+
+    def wrapped(args, **kwargs):
+        recorded.append([str(part) for part in args])
+        return real_run(args, **kwargs)
+
+    stops = []
+    started = []
+    readiness = {"fail": 0}
+
+    def service(*args, capture=False):
+        if args and args[0] == "stop":
+            stops.append(args[0])
+        if args[:3] == ("show", "-p", "ExecStart"):
+            return "{ argv[]=" + str(launcher) + " gateway ; }"
+        if capture:
+            return str(pin)
+        return None
+
+    def ready(payload):
+        started.append(payload)
+        if readiness["fail"]:
+            readiness["fail"] -= 1
+            raise ValueError("synthetic readiness failure")
+
+    monkeypatch.setattr(installer.subprocess, "run", wrapped)
+    monkeypatch.setattr(installer, "systemctl", service)
+    monkeypatch.setattr(installer, "wait_ready", ready)
+    backup = tmp_path / "switch"
+    installer.prepare(release, backup, config, installer.BASELINE, unpacked)
+    for member in backup.iterdir():
+        member.chmod(0o600)
+    shutil.copytree(unpacked, store / f"first-officer-{release}")
+    original = (config.read_bytes(), pin.read_bytes())
+    installer.switch(backup, config, restore=False)
+    candidate = (config.read_bytes(), pin.read_bytes())
+    assert candidate != original
+    assert started[-1] == candidate[0]
+
+    seal = tmp_path / "audit-anchor"
+    monkeypatch.setenv("FO_PRODUCTION_AUDIT_ANCHOR", str(seal))
+    monkeypatch.delenv("FO_ACCEPTANCE_ROOT", raising=False)
+    started.clear()
+    stops.clear()
+    recorded.clear()
+
+    def runner(entry, _substitutions):
+        if "rollback" in entry["argv"]:
+            monkeypatch.setattr(sys, "argv", ["install.py", "rollback", str(backup)])
+            if installer.main() != 0:
+                raise ValueError(f"Release step failed: {entry['what']}")
+            return ""
+        if entry["what"] == "Confirm the gateway is active after the rollback":
+            return ""
+        raise AssertionError(entry["what"])
+
+    assert release_tool.main(["rollback", str(backup)], runner) == 0
+    assert (config.read_bytes(), pin.read_bytes()) == original
+    assert stops == ["stop"]
+    assert started == [original[0]]
+    assert candidate[0] not in started
+    verifier_calls = [args for args in recorded if any(part.endswith("verify-install.py") for part in args)]
+    assert verifier_calls == [installer.installed_verifier(backup / "original-openclaw.json", installer.BASELINE)]
+    assert "restored and the gateway is active" in capsys.readouterr().out
+
+    stop_count = len(stops)
+    with pytest.raises(ValueError, match="missing or does not match"):
+        installer.switch(backup, config, restore=False)
+    assert len(stops) == stop_count
+    assert (config.read_bytes(), pin.read_bytes()) == original
+
+    monkeypatch.setenv("FO_ACCEPTANCE_ROOT", str(tmp_path / "cycle"))
+    with pytest.raises(ValueError, match="missing"):
+        installer.switch(backup, config, restore=False)
+    seal.write_bytes(b"{}\n")
+    seal.chmod(0o666)
+    with pytest.raises(ValueError, match="not owned by root|not mode-restricted"):
+        installer.switch(backup, config, restore=False)
+    assert len(stops) == stop_count
+    assert (config.read_bytes(), pin.read_bytes()) == original
+
+    monkeypatch.delenv("FO_ACCEPTANCE_ROOT", raising=False)
+    config.write_bytes(original[0])
+    pin.write_bytes(candidate[1])
+    readiness["fail"] = 1
+    started.clear()
+    with pytest.raises(ValueError, match="prior configuration and service were restored"):
+        installer.switch(backup, config, restore=True)
+    failed_mixed_rollback_reactivated_candidate = (config.read_bytes(), pin.read_bytes()) == candidate
+    assert failed_mixed_rollback_reactivated_candidate is False
+    assert (config.read_bytes(), pin.read_bytes()) == original
+    assert candidate[0] not in started
+    assert started == [original[0], original[0]]
+
+    config.write_bytes(candidate[0])
+    pin.write_bytes(candidate[1])
+    readiness["fail"] = 1
+    started.clear()
+    with pytest.raises(ValueError, match="prior configuration and service were restored"):
+        installer.switch(backup, config, restore=True)
+    failed_complete_rollback_reactivated_candidate = (config.read_bytes(), pin.read_bytes()) == candidate
+    assert failed_complete_rollback_reactivated_candidate is False
+    assert (config.read_bytes(), pin.read_bytes()) == original
+    assert candidate[0] not in started
+    assert all(payload == original[0] for payload in started)

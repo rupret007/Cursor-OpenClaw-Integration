@@ -76,6 +76,27 @@ def test_history_and_logs_keep_a_removed_secret_and_a_log_line(tmp_path, capsys)
     assert "credential" in captured.err and "phone" in captured.err
 
 
+@pytest.mark.parametrize("trailer", [
+    f"Signed-off-by: {CREDENTIAL}",
+    f"Reviewed-by: Lane <{EMAIL}> {CREDENTIAL}",
+    f"Co-authored-by: {CREDENTIAL} <{EMAIL}>",
+    f"Acked-by: Lane <{CREDENTIAL}@private.test>",
+], ids=["bare", "suffix", "name", "mailbox"])
+def test_history_scans_credentials_inside_identity_trailers(tmp_path, trailer):
+    def git(*args):
+        return subprocess.run(["git", "-C", str(tmp_path), *args], check=True, capture_output=True)
+
+    git("init", "-q", "-b", "demo")
+    git("config", "user.name", "First Officer lane")
+    git("config", "user.email", "lane@example.invalid")
+    git("commit", "--allow-empty", "-qm", "fixture", "-m", trailer)
+    findings, count = scan.scan_history(tmp_path)
+    assert count == 1
+    assert any(item["rule"] == "credential" and item["path"] == "message" for item in findings)
+    rendered, code = scan.report({"files": 0, "commits": count, "logs": 0, "findings": findings})
+    assert code == 1 and CREDENTIAL not in rendered and EMAIL not in rendered
+
+
 def test_history_flags_a_sensitive_pathname_and_a_rename(tmp_path):
     root = tmp_path / "checkout"
     root.mkdir()

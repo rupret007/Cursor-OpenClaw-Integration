@@ -49,13 +49,22 @@ EXAMPLE_ADDRESSES = {(8, 8, 8, 8), (1, 1, 1, 1), (1, 2, 3, 4)}
 EMAIL_HOSTS = {"example.com", "example.org", "example.net", "example.invalid", "github.com", "localhost"}
 SHA = re.compile(r"[0-9a-f]{40}")
 TRAILER = re.compile(
-    r"(?i)^(signed-off-by|co-authored-by|reviewed-by|acked-by|reported-by|tested-by|cc):"
+    r"(?i)(?:signed-off-by|co-authored-by|reviewed-by|acked-by|reported-by|tested-by|cc):"
+    r"[ \t]+[^<>]+[ \t]+<(?P<email>[^<>]+)>"
 )
 
 
 def commit_message(body):
-    """Drop identity trailers. An address in the prose is still a finding."""
-    return "\n".join(line for line in str(body).splitlines() if not TRAILER.match(line.strip()))
+    """Exempt the email in a complete identity trailer from the email rule."""
+    lines = []
+    for line in str(body).splitlines():
+        line = line.strip()
+        identity = TRAILER.fullmatch(line)
+        if identity and EMAIL.fullmatch(identity["email"]):
+            start, end = identity.span("email")
+            line = line[:start] + line[start:end].replace("@", " ") + line[end:]
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def refuse_live(path):

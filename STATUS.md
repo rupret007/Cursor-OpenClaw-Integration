@@ -185,3 +185,11 @@ BLOCKED: The `@andrea` and LiteLLM routing update is staged. Gateway activation,
 ## Review of bc5be0f
 
 `REVIEW-bc5be0f.md` records the independent re-review. Its FIXES section maps each finding to the commit and the test. A confirmed carrier response that is not durably recorded does not cause a second carrier call. The pending digest is synced before the call, and a retry with that pending record and no receipt fails closed for a manual check. A redirect is authorized only from the active route's source list. The installed verifier runs after the candidate files are at the store path and before that directory is made read-only. A rejection removes the store directory and does not stop the gateway. Deleting the acceptance root and both owner-writable audit copies does not verify. There is no local trust anchor the owner cannot delete, so `verify` reports that limitation instead of passing. That is an accepted residual risk for Jeff. The history scan includes one patch per merge parent. On November 21, 2026 `bash scripts/test_integration.sh` passed 994 Python tests and the Node gate passed 23 tests. The secret scan printed `Secret scan clean. Files 364. History commits 320. Logs 0.` before the commit that records this paragraph. That file count includes the local gitignored `data/` tree. The four pull-request jobs passed on `aa6af5d85b609c75177b6f1760e47fe72fb710f0`. No live gateway, bobserver, Telegram, or production action was used, and Phoenix, Restate and Hatchet were not installed.
+
+## Fixes for the review of fdc9d05
+
+| Finding | Commit | Offline regression |
+| --- | --- | --- |
+| HIGH 1. Installed verifier cannot read the candidate | `a09dcfb` | The activation plan copies a private tree and runs the installed-verifier contract with non-owner read and traversal checks. |
+| HIGH 2. Ambiguous carrier response clears the no-retry marker | `0185f6c` | Repeated server confirmations after HTTP failure, oversized, mismatched, or incomplete replies make one carrier request and keep the digest pending. |
+| HIGH 3. Failed validation can delete the active release | `ebff0bb` | Both validation entry points preserve releases referenced by the config, pin, or an interrupted switch journal. |

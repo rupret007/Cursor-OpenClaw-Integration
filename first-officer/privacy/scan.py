@@ -37,7 +37,7 @@ BLOCKED = (
 MAX_BYTES = 1_048_576
 CREDENTIAL = re.compile(
     r"(?<![A-Za-z0-9])(?:sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9]{16,}|"
-    r"AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|\d{8,10}:[A-Za-z0-9_-]{35})"
+    r"(?:AKIA|ASIA)[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|\d{8,10}:[A-Za-z0-9_-]{35})"
 )
 BEARER = re.compile(r"(?<![A-Za-z0-9])Bearer ([A-Za-z0-9._~+/-]{16,})")
 NANP = re.compile(r"(?<!\d)(?:\+?1[\s.-]?)?(?:\(\d{3}\)[\s.-]?|\d{3}[\s.-])\d{3}[\s.-]\d{4}(?!\d)")
@@ -152,7 +152,9 @@ def findings_in_text(text, *, path=None):
                 break
         for match in BEARER.finditer(line):
             token = match.group(1)
-            if any(character.isdigit() for character in token) and not re.fullmatch(r"[A-Z0-9_]+", token):
+            alphabetic = re.fullmatch(r"[A-Za-z]{16,}", token) is not None
+            if ((any(character.isdigit() for character in token) or alphabetic)
+                    and not re.fullmatch(r"[A-Z0-9_]+", token)):
                 rules.append("credential")
                 break
         for match in list(E164.finditer(line)) + list(NANP.finditer(line)):

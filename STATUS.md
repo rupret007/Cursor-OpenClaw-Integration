@@ -136,6 +136,8 @@ The backlog references the bobserver lanes `infra-20261118`, `consolidate-202611
 
 On November 21, 2026 the command printed `Secret scan clean. Files 288. History commits 268. Logs 0.` That history count is this clone before the commit that records the scan. The offline gate then passed 948 Python tests, including the five privacy tests and the three archive tests. The Segment 1 gate passed 23 Node tests. `INSTALL.md` and `TEST-NOW.md` document the command. The pull-request job fetches the full history so CI runs the same scan.
 
+The credential rule also matches the temporary-session cloud access-key prefix and an alphabetic bearer token. The report names the rule and location and does not print the matched value. Source, history, and files-only candidate scans are covered.
+
 A later pass on the same day rejects a directory symlink and does not follow it. Trees named `data` and `artifacts` are scanned. The local binary files `data/andrea_sync.db`, `data/andrea_sync.db-wal` and `data/andrea_sync.db-shm` are not reported; readable text at those paths is. The command then printed `Secret scan clean. Files 336. History commits 280. Logs 0.` That count is this clone before the commit that records the review fixes, and the file count includes the local gitignored `data/` tree. A CI checkout without that tree reports fewer files. The offline gate passed 962 Python tests, including the seven privacy tests. The Segment 1 gate passed 23 Node tests.
 
 ## Review archive

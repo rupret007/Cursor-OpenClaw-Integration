@@ -200,6 +200,45 @@ def test_history_scans_a_credential_that_exists_only_in_a_merge(tmp_path):
     assert code == 1 and CREDENTIAL not in rendered
 
 
+def test_temporary_session_keys_and_alphabetic_bearers_fail_closed(tmp_path, capsys):
+    """Source, history, and a files-only candidate scan report these shapes and do not print them."""
+    access_key = "ASIA" + "A" * 16
+    token = "a" * 16
+    bearer = "Bearer " + token
+    assert [item["rule"] for item in scan.findings_in_text(access_key)] == ["credential"]
+    assert [item["rule"] for item in scan.findings_in_text("AWS_ACCESS_KEY_ID=" + access_key)] == ["credential"]
+    assert [item["rule"] for item in scan.findings_in_text(bearer)] == ["credential"]
+    assert [item["rule"] for item in scan.findings_in_text("Authorization: " + bearer)] == ["credential"]
+
+    root = tmp_path / "checkout"
+    root.mkdir()
+    note = root / "note.txt"
+    note.write_text(access_key + "\n" + bearer + "\n", encoding="utf-8")
+    findings, _count = scan.scan_files(root)
+    rendered, code = scan.report({"files": 1, "commits": 0, "logs": 0, "findings": findings})
+    assert code == 1 and access_key not in rendered and token not in rendered
+    assert "credential note.txt:1" in rendered and "credential note.txt:2" in rendered
+
+    def git(*args):
+        return subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
+
+    git("init", "-q", "-b", "demo")
+    git("config", "user.email", "lane@example.invalid")
+    git("config", "user.name", "First Officer lane")
+    git("add", "note.txt")
+    git("commit", "-q", "-m", "fixture")
+    history, commits = scan.scan_history(root)
+    assert commits == 1
+    assert any(item["rule"] == "credential" and item["path"] == "note.txt" for item in history)
+    history_report, history_code = scan.report({"files": 0, "commits": commits, "logs": 0, "findings": history})
+    assert history_code == 1 and access_key not in history_report and token not in history_report
+
+    assert scan.main(["--root", str(root), "--files-only"]) == 1
+    captured = capsys.readouterr()
+    assert access_key not in captured.err and token not in captured.err
+    assert "credential note.txt:1" in captured.err and "credential note.txt:2" in captured.err
+
+
 def test_the_repository_history_and_logs_stay_clean(capsys):
     result = scan.survey(ROOT)
     assert result["findings"] == []

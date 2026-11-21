@@ -297,3 +297,14 @@ behavior.
 - Remaining risks: failed mixed-pair rollback, owner-resettable audit history,
   bearer scan bypasses, silently disabled LiteLLM evaluation, incomplete
   secondary credential guards, and external verifier/carrier behavior.
+
+## FIXES
+
+Each finding below was reproduced with a failing test on the production path, then changed. The original FAIL above is unchanged. The audit-anchor, uppercase-bearer, LiteLLM-eval, and stale credential-guard findings were not changed. Local gates after these commits: secret scan clean (`Files 400`, `History commits 356`, `Logs 0`, before the commit that records this section; the file count includes the local gitignored `data/` tree and the untracked `REVIEW-fdc9d05.md`), `OPENAI_API_ENABLED=0 RUN_COMM_SMOKE=0 bash scripts/test_integration.sh` passed 1035 Python tests, and the Segment 1 and captain Node gate passed 23 tests. No live gateway, bobserver, Telegram, or production action was used. Phoenix, Restate and Hatchet were not installed. Draft PR #36 was not merged.
+
+A failed rollback or activation writes and starts the saved prior pair. It does not start the candidate when the live config and pin are mixed or already either complete pair. `activate` prints the private rollback directory only after that backup exists. A failure before prepare does not name a missing or incomplete path. Preflight still stops at the first failure, and the backup is still prepared before the gateway switch.
+
+| Finding | Commit | Test |
+| --- | --- | --- |
+| HIGH — a failed rollback from an interrupted pair reactivates the candidate | `d1294277474ba98ae1f45b3785e853bdaf6fb3d5` Do not start the candidate when a rollback fails readiness. `aa8d4c511544869a6be6eb646cdf9a316b59dea6` Restore the prior pair when a switch fails readiness. Recovery writes and starts the saved prior pair for every accepted mixed or complete entry, including activation. | `tests/first_officer/test_install.py::test_readiness_failure_keeps_the_complete_pair_observed_at_entry` |
+| LOW — activation advertises rollback before a rollback backup exists | `7937daca6e5032415557723efb146017a2341e01` Print the rollback path only after the backup exists. | `tests/first_officer/test_release.py::test_activate_stops_at_the_first_failure_and_points_at_the_rollback`, `tests/first_officer/test_release.py::test_activate_points_at_the_rollback_only_after_the_backup_exists`, and `tests/first_officer/test_release.py::test_activate_does_not_advertise_an_incomplete_rollback_directory` |

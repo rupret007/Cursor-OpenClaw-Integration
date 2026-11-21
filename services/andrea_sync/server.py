@@ -3946,6 +3946,7 @@ class SyncServer:
         except Exception:  # noqa: BLE001
             return failure_reply, failure_reason
         summary = ""
+        saw_generic = False
         for candidate in (
             result.get("user_summary"),
             result.get("summary"),
@@ -3961,7 +3962,10 @@ class SyncServer:
                 fallback="",
                 limit=500,
             ).strip()
-            if sanitized and not _is_generic_openclaw_summary(sanitized):
+            if sanitized and _is_generic_openclaw_summary(sanitized):
+                saw_generic = True
+                continue
+            if sanitized:
                 summary = sanitized
                 break
         if summary and is_stale_openclaw_narrative(summary):
@@ -3970,9 +3974,12 @@ class SyncServer:
             disabled = failure_reason[:-7] if failure_reason.endswith("_failed") else failure_reason
             return summary or failure_reply, f"{disabled}_disabled"
         if result.get("ok"):
-            if not summary:
-                return failure_reply, failure_reason
-            return summary, success_reason
+            if summary:
+                return summary, success_reason
+            # A generic completion still uses the route fallback. An empty result does not.
+            if saw_generic:
+                return success_fallback, success_reason
+            return failure_reply, failure_reason
         if summary:
             return summary, failure_reason
         return failure_reply, failure_reason

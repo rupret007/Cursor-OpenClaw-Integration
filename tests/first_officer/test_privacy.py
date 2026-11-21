@@ -96,6 +96,29 @@ def test_history_flags_a_sensitive_pathname_and_a_rename(tmp_path):
     assert code == 1 and EMAIL not in rendered and "[redacted]" in rendered
 
 
+def test_history_scans_a_quoted_path_and_the_deleted_credential(tmp_path):
+    """Git's C-quoted path form must not hide a removed credential."""
+    root = tmp_path / "checkout"
+    root.mkdir()
+    run = lambda *args: subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
+    run("init", "-q", "-b", "demo")
+    run("config", "user.email", "lane@example.invalid")
+    run("config", "user.name", "First Officer lane")
+    run("config", "core.quotePath", "true")
+    name = "cred" + "\t" + "file.txt"
+    secret = root / name
+    secret.write_text(CREDENTIAL + "\n", encoding="utf-8")
+    run("add", "--", name)
+    run("commit", "-q", "-m", "fixture")
+    run("rm", "-q", "--", name)
+    run("commit", "-q", "-m", "remove fixture")
+    findings, count = scan.scan_history(root)
+    assert count == 2
+    assert any(item["rule"] == "credential" for item in findings)
+    rendered, code = scan.report({"files": 0, "commits": count, "logs": 0, "findings": findings})
+    assert code == 1 and CREDENTIAL not in rendered
+
+
 def test_the_repository_history_and_logs_stay_clean(capsys):
     result = scan.survey(ROOT)
     assert result["findings"] == []

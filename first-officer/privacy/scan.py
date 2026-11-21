@@ -233,6 +233,85 @@ def _note_sensitive_path(findings, seen, commit, text):
             findings.append({"rule": finding["rule"], "path": "[redacted]", "commit": commit})
 
 
+def _unquote_git(text, index):
+    """Decode one Git C-quoted token, starting at the opening quote."""
+    if index >= len(text) or text[index] != '"':
+        raise ValueError("The history scan failed")
+    index += 1
+    chars = []
+    while index < len(text):
+        character = text[index]
+        if character == '"':
+            return "".join(chars), index + 1
+        if character != "\\":
+            chars.append(character)
+            index += 1
+            continue
+        index += 1
+        if index >= len(text):
+            break
+        escaped = text[index]
+        simple = {
+            "n": "\n", "t": "\t", "r": "\r", "\\": "\\", '"': '"',
+            "a": "\a", "b": "\b", "f": "\f", "v": "\v",
+        }
+        if escaped in simple:
+            chars.append(simple[escaped])
+            index += 1
+            continue
+        if escaped in "01234567":
+            octal = escaped
+            index += 1
+            for _extra in range(2):
+                if index < len(text) and text[index] in "01234567":
+                    octal += text[index]
+                    index += 1
+                else:
+                    break
+            chars.append(chr(int(octal, 8)))
+            continue
+        chars.append(escaped)
+        index += 1
+    return "".join(chars), index
+
+
+def _git_tokens(body):
+    tokens = []
+    index = 0
+    while index < len(body):
+        if body[index] == " ":
+            index += 1
+            continue
+        if body[index] == '"':
+            token, index = _unquote_git(body, index)
+            tokens.append(token)
+            continue
+        end = body.find(" ", index)
+        if end == -1:
+            tokens.append(body[index:])
+            break
+        tokens.append(body[index:end])
+        index = end
+    return tokens
+
+
+def _path_side(token):
+    if token.startswith("a/") or token.startswith("b/"):
+        return token[2:]
+    return token
+
+
+def _metadata_path(raw):
+    rest = raw.split(" ", 2)[-1]
+    if rest.startswith('"'):
+        try:
+            name, _index = _unquote_git(rest, 0)
+        except ValueError:
+            name = rest
+        return name
+    return rest
+
+
 def scan_history(root):
     git_dir = root / ".git"
     if git_dir.is_file():
@@ -269,22 +348,14 @@ def scan_history(root):
             path = ""
             continue
         if raw.startswith("diff --git "):
-            body = raw[len("diff --git "):]
-            left, separator, right = body.partition(" b/")
-            names = []
-            if left.startswith("a/"):
-                names.append(left[2:])
-            if separator:
-                names.append(right)
+            names = [_path_side(token) for token in _git_tokens(raw[len("diff --git "):]) if token]
             for name in names:
                 _note_sensitive_path(findings, seen, commit, name)
             shown = names[-1] if names else ""
-            if len(shown) >= 2 and shown[0] == '"' and shown[-1] == '"':
-                shown = shown[1:-1]
-            path = public_name(shown)
+            path = public_name(shown) if shown else "[redacted]"
             continue
         if raw.startswith(("rename from ", "rename to ", "copy from ", "copy to ")):
-            _note_sensitive_path(findings, seen, commit, raw.split(" ", 2)[-1])
+            _note_sensitive_path(findings, seen, commit, _metadata_path(raw))
             continue
         if raw.startswith(("Binary files ", "GIT binary patch")):
             key = ("binary", commit, path)

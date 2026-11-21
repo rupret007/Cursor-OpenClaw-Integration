@@ -135,12 +135,11 @@ def test_gateway_start_failure_restores_prior_bytes_and_reports_failure(controll
 
 
 def test_readiness_failure_keeps_the_complete_pair_observed_at_entry(controller, monkeypatch):
-    """A failed readiness check must not start the candidate while rolling back.
+    """A failed readiness check restores the saved prior pair.
 
-    A repeated rollback that already has the complete original pair stays on
-    that pair. An interrupted mixed pair, and a complete candidate pair, also
-    recover the saved prior pair. Activation still restarts a complete pair
-    that was already live.
+    Rollback and activation both do this for a mixed pair and for either
+    complete pair. A repeated rollback that already has the original pair
+    stays on that pair.
     """
     installer, _, config, pin, backup, calls = controller
     original = (
@@ -182,18 +181,13 @@ def test_readiness_failure_keeps_the_complete_pair_observed_at_entry(controller,
         for config_state in ("original", "candidate"):
             for pin_state in ("original", "candidate"):
                 observed = (pairs[config_state][0], pairs[pin_state][1])
-                if not restore and observed in (original, candidate):
-                    expected = observed
-                else:
-                    expected = original
                 config.write_bytes(observed[0])
                 pin.write_bytes(observed[1])
                 attempts["n"] = 0
                 with pytest.raises(ValueError, match="prior configuration and service were restored"):
                     installer.switch(backup, config, restore=restore)
-                assert (config.read_bytes(), pin.read_bytes()) == expected
-                if restore:
-                    assert (config.read_bytes(), pin.read_bytes()) != candidate
+                assert (config.read_bytes(), pin.read_bytes()) == original
+                assert (config.read_bytes(), pin.read_bytes()) != candidate
 
 
 def test_switch_refuses_a_changed_config_without_stopping_the_service(controller):

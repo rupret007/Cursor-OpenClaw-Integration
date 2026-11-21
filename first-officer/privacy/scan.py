@@ -149,6 +149,49 @@ def bearer_token_is_credential(token):
     return any(character.isdigit() for character in token) or alphabetic
 
 
+# Production guards keep every shape the checkout scanner enforces, including the
+# older short classic-token form, and still refuse any dotted address.
+GUARD_SECRET = re.compile(
+    r"sk-[A-Za-z0-9_-]{8,}|github_pat_[A-Za-z0-9_]{16,}|gh[pousr]_[A-Za-z0-9]{8,}|"
+    r"(?:AKIA|ASIA)[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|\d{8,10}:[A-Za-z0-9_-]{35}|"
+    r"\b(?:\d{1,3}\.){3}\d{1,3}\b"
+)
+
+
+def guard_secret_search(text):
+    """True when a guard must refuse the text. The matched characters are not returned."""
+    sample = str(text)
+    if GUARD_SECRET.search(sample):
+        return True
+    for match in BEARER.finditer(sample):
+        if bearer_token_is_credential(match.group(1)):
+            return True
+    return None
+
+
+def guard_secret_sub(replacement, text):
+    """Replace credential and address shapes. The matched characters are not returned."""
+    def bearer_sub(match):
+        if bearer_token_is_credential(match.group(1)):
+            return replacement
+        return match.group(0)
+
+    return GUARD_SECRET.sub(replacement, BEARER.sub(bearer_sub, str(text)))
+
+
+class EnforcedSecret:
+    """Scanner credential rules for memory, Playwright, and usage handoff."""
+
+    def search(self, text):
+        return guard_secret_search(text)
+
+    def sub(self, replacement, text):
+        return guard_secret_sub(replacement, text)
+
+
+enforced_secret = EnforcedSecret()
+
+
 def findings_in_text(text, *, path=None):
     """Return rule and line only. The matched characters are not retained."""
     found = []

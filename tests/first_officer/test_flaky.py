@@ -58,6 +58,32 @@ def test_producer_keeps_a_failed_attempt_after_the_retry_passes():
     assert "sk-live" not in json.dumps(events)
 
 
+def test_producer_redacts_scanner_credential_shapes():
+    """Attempt errors and report errors lose the same shapes the checkout scanner enforces."""
+    pat = "github" + "_pat_" + "a" * 22
+    lowered = "m" * 18
+    upper = "N" * 18
+    alnum = "P" * 12 + "3" * 6
+    access = "AS" + "IA" + "Q" * 16
+    message = f"boom {pat} Bearer {lowered} BEARER {upper} bearer {alnum} {access}"
+    events = flaky.produce(report(
+        ("blinks", "chromium", [attempt("failed", message=message)], "unexpected"),
+    ))
+    rendered = json.dumps(events)
+    for secret in (pat, lowered, upper, alnum, access):
+        assert secret not in rendered
+    assert events["tests"][0]["attempts"][0]["error"] == "boom [redacted] [redacted] [redacted] [redacted] [redacted]"
+
+    raw = report(("blinks", "chromium", [attempt("failed", message="plain failure")], "unexpected"))
+    raw["errors"] = [message]
+    reported = flaky.produce(raw)
+    rendered = json.dumps(reported)
+    for secret in (pat, lowered, upper, alnum, access):
+        assert secret not in rendered
+    assert reported["errors"] == ["boom [redacted] [redacted] [redacted] [redacted] [redacted]"]
+    assert reported["tests"][0]["attempts"][0]["error"] == "plain failure"
+
+
 def test_clean_run_is_green_and_every_other_outcome_is_not():
     clean = flaky.produce(report(("stays green", "chromium", [attempt("passed")], "expected")))
     assert flaky.evaluate(clean, [], TODAY, inventory(clean)) == {

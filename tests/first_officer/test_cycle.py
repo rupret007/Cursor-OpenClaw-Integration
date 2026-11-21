@@ -107,6 +107,28 @@ def test_expired_secret_and_live_routine_do_not_save_or_send(tmp_path):
     assert not (tmp_path / "untouched").exists()
 
 
+def test_memory_refuses_scanner_credential_shapes(tmp_path):
+    """Credential shapes the checkout scanner enforces cannot be saved or recalled."""
+    shapes = (
+        "github" + "_pat_" + "A" * 22,
+        "Bearer " + "a" * 24,
+        "bearer " + "b" * 16,
+        "BEARER " + "C" * 20,
+        "Bearer " + ("D" * 12 + "8" * 8),
+        "AS" + "IA" + "E" * 16,
+        "AK" + "IA" + "F" * 16,
+    )
+    for index, secret in enumerate(shapes):
+        root = tmp_path / f"cycle-{index}"
+        cycle.initialize(root)
+        with pytest.raises(ValueError, match="plain sentence"):
+            cycle.propose(root, f"Note {secret} today.", NOW)
+        assert secret not in _files(root)
+        assert cycle.recall(root) == "No verified saved fact."
+        assert not (root / "pending.json").exists()
+        assert not (root / "memory.json").exists()
+
+
 def test_reinitializing_after_deleting_the_log_and_heads_does_not_verify(tmp_path):
     """Deleting the log, key, and heads must not leave a new empty chain that verifies."""
     root = tmp_path / "cycle"

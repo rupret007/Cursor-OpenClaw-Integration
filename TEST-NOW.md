@@ -19,7 +19,7 @@ This is the same gate CI runs. It takes about two minutes.
 bash scripts/test_integration.sh
 ```
 
-Expect `928 passed` from the Python suite and a final line `All integration checks passed.`. The `Handoff failed.` lines inside the exhaustive check are expected: that check deliberately feeds bad arguments and requires each one to be refused.
+Expect `931 passed` from the Python suite and a final line `All integration checks passed.`. The `Handoff failed.` lines inside the exhaustive check are expected: that check deliberately feeds bad arguments and requires each one to be refused.
 
 ## 2. The Segment 1 and captain gate
 
@@ -27,7 +27,7 @@ Expect `928 passed` from the Python suite and a final line `All integration chec
 node --test tests/first_officer/segment1.test.mjs tests/first_officer/captain.test.mjs
 ```
 
-Expect `# pass 22` and `# fail 0`.
+Expect `# pass 23` and `# fail 0`.
 
 ## 3. Step 1: LiteLLM failover and per-lane budgets
 
@@ -186,6 +186,49 @@ exit 1
 
 `/tmp/fo-flaky/summary.json` names the test under `flakes` with attempts `failed` then `passed`. Exit 1 is the point: a retry did not make the gate green. Add the same test to `quarantine.json` with an owner, an issue, a reason and a UTC window of at most 14 days, then evaluate again. The summary moves the test to `quarantined` and the exit stays 1.
 
+## 9. Step 6: publish a status file the fleet reader accepts
+
+This writes a local snapshot. It does not read the live machines and it does not open a port. The NucBox sample is nine hundred seconds old, so its load must be dropped.
+
+```bash
+mkdir -p /tmp/fo-status
+python3 - <<'PY'
+import json
+from pathlib import Path
+Path("/tmp/fo-status/evidence.json").write_text(json.dumps({
+    "heavy_jobs": 1,
+    "lane_counts": {"running": 1},
+    "nodes": {
+        "mac-mini": {"load1": 1.25, "load5": 1, "load15": 0.5, "codex_jobs": 1, "test_jobs": 0, "age_s": 1},
+        "nucbox": {"load1": 99, "load5": 99, "load15": 99, "codex_jobs": 4, "test_jobs": 4, "age_s": 900},
+    },
+}))
+PY
+python3 first-officer/status/publish.py publish /tmp/fo-status/evidence.json /tmp/fo-status/STATUS.json
+python3 - <<'PY'
+import json
+from pathlib import Path
+path = Path("/tmp/fo-status/STATUS.json")
+document = json.loads(path.read_text())
+assert document["v"] == 1 and document["host"]["heavy_jobs"] == 1
+assert document["nodes"]["nucbox"] == {"missing": True, "stale": True}
+assert "99" not in path.read_text()
+print("mode", oct(path.stat().st_mode & 0o777))
+print("alerts", " ".join(document["alerts"]))
+print("mac-mini load", document["nodes"]["mac-mini"]["load1"])
+PY
+```
+
+Expect a `Published status` line, then:
+
+```
+mode 0o600
+alerts stale
+mac-mini load 1.25
+```
+
+The Node gate in section 2 includes the check that `readFleetSnapshot` accepts this publisher's file and that the fleet view leaves the stale NucBox load off the page. `python3 first-officer/status/publish.py serve /tmp/fo-status/STATUS.json --port 8765` serves that file on `127.0.0.1` until you stop it. The automated test checks that POST is refused and that a credential in the file is not shown.
+
 ## What is not provable here yet
 
-Steps 6 through 8 in [STATUS.md](STATUS.md) are still in progress, and the timed Telegram checks and the supervised authority pilot still need a live gateway and your approval. Hatchet, Restate and the Phoenix UI are not installed. The queue and trace commands are ready to point at them when you approve a host.
+Steps 7 and 8 in [STATUS.md](STATUS.md) are still in progress, and the timed Telegram checks and the supervised authority pilot still need a live gateway and your approval. Hatchet, Restate and the Phoenix UI are not installed. The queue and trace commands are ready to point at them when you approve a host. No status collector is running on the machines.

@@ -78,6 +78,12 @@ The offline gate on this tree passed 918 Python tests, including those 16, and 2
 
 On November 20, 2026 the seven tests in `tests/first_officer/test_flaky.py` passed. A fail-then-pass test stayed `flaky` with both attempts. Putting that failure on an active quarantine list left the gate red, with the test named under `quarantined` and absent from the passing count. The same was true of a quarantined test that had passed cleanly. An expired entry and an orphaned entry also kept the gate red. Rewriting a saved outcome from `flaky` to `expected` did not erase the failed attempt. The offline gate passed 928 Python tests and compiles the module. `INSTALL.md` documents the commands.
 
+## Step 6: shared status view and read-only admin console
+
+`first-officer/status/publish.py` writes the `STATUS.json` file `readFleetSnapshot` already accepts: version 1, a timestamp that matches `generated_at`, and a host object. The file is mode 0600 and stays at or under 3,000 bytes. Lane counts and `heavy_jobs` are copied only when the evidence supplies them. A node sample older than five minutes, or one with an unusable load, is stored as missing and stale, and the fleet view says that machine's current load is unavailable. Free text is not copied. A value that looks like a credential or an address sets a `redacted` alert and is left out of the file. The page binds to `127.0.0.1` only, answers GET `/` and GET `/status.json`, returns 405 for POST, PUT and DELETE, escapes the snapshot in the page, and returns 503 without the body when the file is unreadable or contains a credential. It does not collect live load from the three machines and it does not start a Tailscale serve.
+
+On November 20, 2026 the three tests in `tests/first_officer/test_status.py` passed. The published file was mode 0600, the stale NucBox load was absent, and a credential in the evidence was absent from the file. The page escaped a script tag, refused POST with 405, and refused to display a credential. The Node test `the shared status publisher is accepted by the fleet reader` ran the publisher and passed the file to `readFleetSnapshot` and `fleetStatus`: the Mac Mini load was shown and the stale NucBox load was not. The Node gate is 23 passing tests. The offline gate passed 931 Python tests and compiles the module. `INSTALL.md` documents the commands. No status collector is running on the machines.
+
 ## One combined release and a page Jeff can test from
 
 `first-officer/release.py` turns the whole release into one reviewed operation with one rollback. `build` stages the candidate from the verified prior bundle, runs the packaged Round 13 canary and the Segment 1 and captain gate against it, and packs it. `activate` confirms the running gateway, the owner's GitHub login and the existing Andrea read-only bridge before it changes anything, publishes the candidate read-only under its digest through a private staging directory, prepares the private rollback, switches with the existing installer and confirms readiness. `rollback` restores the exact prior config and pin. Every command accepts `--dry-run`, which prints the exact ordered commands and runs none of them.
@@ -94,7 +100,7 @@ The release is a plan of reviewed commands, so the whole sequence is tested with
 - DONE. The Hatchet lane queue and the Restate fallback are proven above. Live Hatchet and Restate processes stay uninstalled until Jeff approves a host.
 - DONE. Phoenix and OpenLLMetry delivery to a loopback collector is proven above. A Phoenix UI process is not running.
 - DONE. The Playwright flaky-report producer and the quarantine workflow are proven above. Quarantine stays visible and the gate stays red.
-- The fleet reader consumes shared status. Finish the shared status view and admin console.
+- DONE. The shared status publisher and the loopback read-only page are proven above. No collector is running on the machines, and the page is not exposed beyond loopback.
 - Verify grounded memory, scheduled routines, approval binding and the audit log end to end. The gateway add-on diagnostic covers guarded fetch, redaction and the skill catalog.
 - The lease and watchdog passed a local rehearsal. Complete the supervised production pilot and verify failover.
 

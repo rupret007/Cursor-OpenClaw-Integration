@@ -106,6 +106,17 @@ python3 first-officer/qa/flaky.py evaluate "$flaky_events" "$quarantine_json" "$
 
 The summary line is `Passing <n>. Non-passing <n>. Quarantined <n>.`
 
+## Publish the shared status file and open the read-only page
+
+`publish` reads an evidence JSON file and writes `STATUS.json` for the fleet reader. The file is mode 0600. Counts are included only when the evidence has them. A node sample older than five minutes is marked missing and stale, and its load numbers are left out. `serve` shows that file on `127.0.0.1` and answers GET only. Stop it with Ctrl-C. It does not collect live load and it does not open a tailnet listener.
+
+```bash
+python3 first-officer/status/publish.py publish "$evidence_json" "$status_json"
+python3 first-officer/status/publish.py serve "$status_json" --port 8765
+```
+
+The publish line is `Published status <timestamp> (<bytes> bytes).` The page line is `Status page on http://127.0.0.1:<port>/`. Exit `1` means the evidence or the file was refused.
+
 ## Check prerequisites on bobserver
 
 Run from the PR checkout as the account that owns `openclaw-gateway.service`. The GitHub CLI must authenticate as the configured owner account. The existing Andrea read-only bridge must answer from the service account using its private reader configuration.

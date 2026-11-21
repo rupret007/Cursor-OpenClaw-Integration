@@ -241,7 +241,9 @@ def run_lookup(route, prompt, *, allowlist=None, resolve=None, fetcher=None):
                 if fetcher is not None:
                     page = fetcher(url, document)
                 else:
-                    page = fetch.fetch(url, document, resolve=resolve or fetch.system_resolve)
+                    page = fetch.fetch(
+                        url, document, resolve=resolve or fetch.system_resolve, route=route,
+                    )
             except (OSError, ValueError):
                 if "fetch" not in refused:
                     refused.append("fetch")

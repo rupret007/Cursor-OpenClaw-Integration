@@ -216,16 +216,15 @@ def _open(url, addresses):
         raise ValueError("The page was not read") from None
 
 
-def _redirect_ok(current, target, allowlist):
-    """A hop is allowed only when both pages are exact sources of one route."""
-    sources = allowlist.get("sources") or {}
-    for urls in sources.values():
-        if current in urls and target in urls:
-            return True
-    return False
+def _redirect_ok(current, target, allowlist, route):
+    """A hop is allowed only when both pages are exact sources of the active route."""
+    if route not in ("structured_live_news", "structured_grounded_research"):
+        return False
+    urls = (allowlist.get("sources") or {}).get(route) or ()
+    return current in urls and target in urls
 
 
-def fetch(url, allowlist, resolve=system_resolve, token=None):
+def fetch(url, allowlist, resolve=system_resolve, token=None, route=None):
     current = url
     page = None
     for hop in range(2):
@@ -233,7 +232,7 @@ def fetch(url, allowlist, resolve=system_resolve, token=None):
         page, redirect = _open(current, pinned)
         if redirect is None:
             break
-        if hop == 1 or not _redirect_ok(current, redirect, allowlist):
+        if hop == 1 or not _redirect_ok(current, redirect, allowlist, route):
             raise ValueError("The fetch URL is not allowed")
         current = redirect
     if page is None:

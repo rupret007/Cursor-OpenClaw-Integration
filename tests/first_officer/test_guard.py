@@ -669,7 +669,7 @@ def test_a_redirect_must_be_an_exact_source_or_it_is_not_fetched(monkeypatch, tm
         page.redirects["/news"] = "/also"
         write_sources([news, also])
         listed = boundary.load_allowlist(allow_path)
-        followed = fetch.fetch(news, listed, token=TOKEN)
+        followed = fetch.fetch(news, listed, token=TOKEN, route="structured_live_news")
         assert "City hall vote passed" in followed
         assert "unreviewed page" not in followed
         assert page.paths.count("/also") == 1
@@ -723,5 +723,41 @@ def test_a_redirect_must_be_an_exact_source_or_it_is_not_fetched(monkeypatch, tm
         assert reply != "I pulled a live news summary for you."
         assert "unreviewed page" not in reply
         assert page.paths.count("/other") == 0
+    finally:
+        page.shutdown()
+
+
+def test_a_redirect_stays_on_the_active_route_source_list():
+    """A page listed for two routes may redirect only inside the route being fetched."""
+    boundary = load("fo_boundary_route_scope", "first-officer/guard/boundary.py")
+    page = serve_redirects({"/b": b"Research only page"}, {"/a": "/b"})
+    try:
+        origin = f"http://127.0.0.1:{page.server_address[1]}"
+        page_a = origin + "/a"
+        page_b = origin + "/b"
+        allow = fetch.load_allowlist({
+            "version": 1,
+            "hosts": [],
+            "fixtures": [origin],
+            "sources": {
+                "structured_live_news": [page_a],
+                "structured_grounded_research": [page_a, page_b],
+            },
+        })
+        with pytest.raises(ValueError, match="not allowed"):
+            fetch.fetch(page_a, allow, token=TOKEN, route="structured_live_news")
+        assert page.paths == ["/a"]
+        news = boundary.run_lookup("structured_live_news", "What is the news?", allowlist=allow)
+        assert news["ok"] is False
+        assert "Research only page" not in news["summary"]
+        assert page.paths.count("/b") == 0
+        followed = fetch.fetch(page_a, allow, token=TOKEN, route="structured_grounded_research")
+        assert "Research only page" in followed
+        assert page.paths.count("/b") == 1
+        research = boundary.run_lookup(
+            "structured_grounded_research", "What was researched?", allowlist=allow,
+        )
+        assert research["ok"] is True
+        assert "Research only page" in research["summary"]
     finally:
         page.shutdown()

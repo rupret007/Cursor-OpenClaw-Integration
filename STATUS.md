@@ -20,13 +20,15 @@ The authenticated follow-up found two self-chat entries and two groups on Andrea
 
 ## Captain upgrade
 
-Jeff approved gateway activation and completed sudo authentication. The first attempt stopped during Andrea preflight when the reader's scope could not be verified. The retry used the documented reader connectivity check. Bobserver now runs release `2df63b9d08cb2a6741c626db5469d5fd71add93a31ed87abed9fdfbc061ac802` from reviewed commit `07348e9`. Both plugin paths match the release digest, the gateway service is active and `/readyz` reports ready. The private rollback plan contains the exact previous Segment 1 config and pin. Use the [installer rollback procedure](INSTALL.md#roll-back-to-the-exact-prior-config-and-pin) with the private backup printed by the activation terminal. Timed Telegram acceptance is pending.
+Jeff approved gateway activation and completed sudo authentication. The first attempt stopped during Andrea preflight when the reader's scope could not be verified. The retry used the documented reader connectivity check. Bobserver moved to release `2df63b9d08cb2a6741c626db5469d5fd71add93a31ed87abed9fdfbc061ac802` from reviewed commit `07348e9`. Both plugin paths and the verifier pin matched the release, and the gateway passed its readiness check. The private rollback plan contains the exact previous Segment 1 config and pin. Use the [installer rollback procedure](INSTALL.md#roll-back-to-the-exact-prior-config-and-pin) with the private backup printed by the activation terminal.
 
 The live authority check showed Grok Bot still holds the shared lease. Takeover is off, the watchdog timer is inactive and the latest matching Grok check-in is stale. The pilot arming command requires a fresh Grok check-in and an explicit handoff at the expected epoch. The captain candidate reuses that lease and the existing lane runner. Jeff can grant the named Integration CI scope at the current epoch, pause dispatch and request handback in the private Telegram chat. The runner uses a separate subscription account from the two fleet quota receipts. The candidate reads the runner's own subscription quota before dispatch.
 
 The captain can read current fleet, gate, PR and quota evidence, follow an exact PR head, launch one review lane for it and verify the result against the current GitHub head. The local tests exercise stale grants, duplicate submissions, pause, failed lanes, mismatched heads and the Andrea diagnostic. A private Nuc rehearsal using the installed fence and watchdog code confirmed explicit handoff, epoch advancement, pause, handback, stale-grant rejection and disarm. Production authority remained with Grok Bot. The [Captain guide](CAPTAIN.md) covers the Mac check, operator activation, supervised pilot and rollback.
 
 Jeff shared the live Andrea reply from Bob the Bot. It confirms delivery and a live read from the approved groups. The count-only reply failed the content check. The follow-up candidate classifies questions, requests, plan changes and discussion topics on the Mac and sends only fixed labels to the gateway. Preview text and identifiers stay on the Mac. The [Telegram check](LIVE-TEST.md) now requires a useful, accurate finding from a recent approved thread and captures latency.
+
+Jeff approved the summary upgrade. The Mac reader refresh succeeded on retry, and Bobserver read recent activity with qualitative findings in about 3 seconds. That measurement covers only the reader call. Bobserver now runs release `61ff4565dd5638a886effefbd720c92a17b7388acbc6eeaffb7779f78d3f1b36` from reviewed commit `3dd2b84`. Both plugin paths, the verifier pin, the service state and `/readyz` were independently verified. The most recent private rollback directory restores the prior Captain release.
 
 ## Later segments
 
@@ -41,4 +43,4 @@ Jeff shared the live Andrea reply from Bob the Bot. It confirms delivery and a l
 
 The backlog references the bobserver lanes `infra-20261118`, `consolidate-20261119` and `arch-research-20261118`.
 
-BLOCKED: The Andrea content fix needs an approved gateway upgrade, a Mac reader refresh and timed Telegram acceptance. The supervised authority pilot remains pending.
+BLOCKED: The Andrea upgrade is active. Timed Telegram acceptance and the supervised authority pilot remain pending.

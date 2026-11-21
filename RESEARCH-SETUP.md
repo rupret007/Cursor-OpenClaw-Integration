@@ -71,7 +71,7 @@ Clock: install chrony on bobserver and the Nuc. Central Time rendering is only h
 
 ### Why this, and why the alternatives lose
 
-The proxy is already the gateway’s extra-spend path. `first-officer/segment1/model-router.mjs` sets `fastProvider` to `litellm` and routes short turns to `minimax-m3.1-flash`, with configured fallbacks kept on the same provider. `services/andrea_sync/litellm_api.py` calls an OpenAI-compatible `/v1/chat/completions` on loopback or a private HTTPS root. A second router would fork budget accounting from the virtual keys this code already provisions.
+The proxy is already the gateway’s extra-spend path. `first-officer/segment1/model-router.mjs` sets `fastProvider` to `litellm` and routes short turns to `minimax-m3.1-flash`, with configured fallbacks kept on the same provider. `services/andrea_sync/litellm_api.py` calls an OpenAI-compatible `/v1/chat/completions` on loopback HTTP, or on an HTTPS host named in `FO_LITELLM_HOSTS` that resolves only to private addresses. A second router would fork budget accounting from the virtual keys this code already provisions.
 
 LiteLLM’s own virtual keys are the budget mechanism: `max_budget`, `budget_duration`, spend stored on `LiteLLM_VerificationToken`, and a hard stop. The acceptance test watched a lane reach 0.20, then receive HTTP 422 `budget_exceeded`, with no further upstream call. A wrapper that counted tokens in this repo would drift from that table.
 
@@ -143,7 +143,7 @@ A budget change is a new reviewed plan and a new key file. If the stored key dis
 | `requirements-litellm-test.txt` | Pin: `litellm[proxy]==1.110.2` |
 | `.github/workflows/pull-request-integration.yml` | Job `first-officer-litellm` on Ubuntu 24.04, PostgreSQL 16 |
 | `first-officer/segment1/model-router.mjs` | Owner turns use the `litellm/` provider and only fallbacks that provider lists |
-| `services/andrea_sync/litellm_api.py` | Andrea’s chat transport. Loopback or HTTPS, redirects dropped |
+| `services/andrea_sync/litellm_api.py` | Andrea’s chat transport. Loopback HTTP, or allowlisted private HTTPS. Redirects dropped |
 | `services/andrea_sync/model_router.py` | Role names (`router`, `planner`, `worker`, `verifier`, `persona`) resolve to env model ids that must be aliases the lane key allows |
 | `first-officer/stage.py` `wire_model_router` | Patches the private bundle’s conductor so the live gateway takes this router |
 
@@ -181,7 +181,7 @@ The design is the right one, and the acceptance test is a real proxy rather than
 - `num_retries` is unset. Put `0` in the reviewed YAML.
 - A routed model with a negative, non-finite, nonnumeric, missing, or all-zero price is refused before the candidate is written. Leave `block_requests_for_models_without_pricing` on as well.
 - `provision_file` will not rotate a key. Operators need a documented retire step. Deleting the file and re-running is a new key, which is what the pending-file path does. Say so in the runbook so nobody edits the database by hand.
-- `proxy_request` allows any HTTPS hostname. On this deployment the only URL passed to it is `http://127.0.0.1:4000`.
+- `proxy_request` and the Andrea transport accept loopback HTTP without an allowlist. HTTPS is accepted only for a host in `FO_LITELLM_HOSTS` that resolves to private addresses. On this deployment the management URL is `http://127.0.0.1:4000`.
 - Official Compose publishes port 4000 on every interface. The unit above publishes localhost only.
 - Reservation can hold spend across a crash. The killed-request check is the missing test.
 - `allowed_routes` includes `/responses`. Keep it only if a client in the bundle actually calls that route. Otherwise drop it in the reviewed policy so a stolen lane key has a smaller surface.
@@ -1082,7 +1082,7 @@ These are the items that bite a single-operator, two-machine setup even when eac
 6. **Disk caps.** Phoenix retention 14 days. Hatchet payloads for one lane are small. A trace body that ignored `turn_off_message_logging` will fill the disk. The status page should show disk free on bobserver.
 7. **chrony on both machines.** Stale-reset refusals and five-minute staleness depend on it.
 8. **Linger on bobserver only.** User units die at logoff without it. Enabling linger on the Nuc turns a laptop into an accidental server.
-9. **The HTTPS hostname hole.** `queue.py` and `configure.py` allow a private HTTPS URL whose name is not a literal public address. This plan uses `http://127.0.0.1` only, so the hole stays closed without a code change. Do not “improve” the URL to a public name with a firewall exception.
+9. **HTTPS endpoint identity.** `configure.py` and the Andrea transport require `FO_LITELLM_HOSTS` and a private resolution before an HTTPS proxy URL is used. `queue.py` still accepts a non-literal HTTPS name for the lane queue. This plan uses `http://127.0.0.1` only. Do not point a credential-bearing URL at a public name.
 10. **Hatchet idempotency is not the metadata field.** Set it on the workflow or accept that the ledger is the only dedupe.
 11. **Restate’s 24-hour idempotency default.** Raise it, or a next-day retry can double-run.
 12. **No operator command for an `uncertain` ledger row.** Append a resolution. Do not truncate the file.

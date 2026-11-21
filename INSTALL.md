@@ -49,7 +49,7 @@ Use a private copy of the current LiteLLM YAML and a reviewed JSON policy. The p
 python3 first-officer/litellm/configure.py "$proxy_config" "$lane_policy" render "$candidate_config"
 ```
 
-After Jeff approves the proxy switch, use the management environment to provision each lane into its own private credential file. Repeating the command verifies the existing file against the reviewed policy. Load the Andrea lane key into `ANDREA_LITELLM_API_KEY` in Andrea's service environment, with `ANDREA_LITELLM_BASE_URL` and `ANDREA_LITELLM_MODEL` set to the reviewed endpoint and alias.
+After Jeff approves the proxy switch, use the management environment to provision each lane into its own private credential file. Repeating the command verifies the existing file against the reviewed policy. The management URL is loopback HTTP, or an HTTPS host listed in `FO_LITELLM_HOSTS` that resolves only to private addresses. An empty allowlist refuses every HTTPS proxy URL. Load the Andrea lane key into `ANDREA_LITELLM_API_KEY` in Andrea's service environment, with `ANDREA_LITELLM_BASE_URL` and `ANDREA_LITELLM_MODEL` set to that same reviewed endpoint and alias. `ANDREA_LITELLM_BASE_URL` follows the same loopback-HTTP or allowlisted-private-HTTPS rule, and the lane key is not sent when the endpoint fails it.
 
 ```bash
 python3 first-officer/litellm/configure.py "$candidate_config" "$lane_policy" provision \

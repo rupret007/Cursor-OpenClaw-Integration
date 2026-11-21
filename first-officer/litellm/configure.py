@@ -5,10 +5,12 @@ import argparse
 from copy import deepcopy
 import fcntl
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
 import re
+import socket
 import stat
 import sys
 from urllib.error import HTTPError
@@ -117,17 +119,65 @@ def candidate_config(original, plan):
     return cfg
 
 
+HOST = re.compile(
+    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*")
+PRIVATE_ENDPOINT = "Use the local LiteLLM management URL or its private HTTPS root"
+
+
+def litellm_hosts():
+    hosts = []
+    for item in os.environ.get("FO_LITELLM_HOSTS", "").split(","):
+        host = item.strip().lower().rstrip(".")
+        if not host:
+            continue
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            if not HOST.fullmatch(host) or len(host) > 253:
+                raise ValueError(PRIVATE_ENDPOINT)
+        hosts.append(host)
+    return hosts
+
+
+def _usable_private(address):
+    return (address.is_loopback or address.is_private) and not address.is_multicast and not address.is_unspecified
+
+
+def private_endpoint(hostname, resolve=None):
+    host = hostname.lower().rstrip(".")
+    if host not in litellm_hosts():
+        raise ValueError(PRIVATE_ENDPOINT)
+    try:
+        addresses = [ipaddress.ip_address(host)]
+    except ValueError:
+        resolver = resolve or socket.getaddrinfo
+        try:
+            answers = resolver(host, None)
+        except OSError:
+            raise ValueError(PRIVATE_ENDPOINT) from None
+        addresses = []
+        for answer in answers:
+            try:
+                addresses.append(ipaddress.ip_address(answer[4][0]))
+            except (TypeError, ValueError, IndexError):
+                raise ValueError(PRIVATE_ENDPOINT) from None
+    if not addresses or any(not _usable_private(address) for address in addresses):
+        raise ValueError(PRIVATE_ENDPOINT)
+
+
 class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, *_args, **_kwargs):
         return None
 
 
-def proxy_request(base_url, master_key, route, payload=None):
+def proxy_request(base_url, master_key, route, payload=None, *, resolve=None):
     url = urlsplit(base_url)
     if (url.scheme not in ("http", "https") or not url.hostname or url.username is not None or
             url.password is not None or url.path not in ("", "/") or url.query or url.fragment or
             (url.scheme == "http" and url.hostname not in ("localhost", "127.0.0.1", "::1"))):
-        raise ValueError("Use the local LiteLLM management URL or its private HTTPS root")
+        raise ValueError(PRIVATE_ENDPOINT)
+    if url.scheme == "https":
+        private_endpoint(url.hostname, resolve)
     if not TOKEN.fullmatch(master_key):
         raise ValueError("The LiteLLM master key is missing or invalid")
     request = Request(base_url.rstrip("/") + route,

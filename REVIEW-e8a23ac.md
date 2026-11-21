@@ -193,3 +193,21 @@ green. No live acceptance or production rollback was attempted.
 - Remaining external risks: the installed production verifier, carrier
   implementation, live gateway behavior, and real proxy state are outside this
   checkout and were not exercised.
+
+## FIXES
+
+Each finding was reproduced with a failing test, then fixed, except the audit residual stated below. The original FAIL above is unchanged. Local gates after these commits: secret scan clean (`Files 388`, `History commits 345`, `Logs 0`, before the commit that records this section; the file count includes the local gitignored `data/` tree), `bash scripts/test_integration.sh` passed 1028 Python tests, and the Segment 1 and captain Node gate passed 23 tests. No live gateway, bobserver, Telegram, or production action was used. Phoenix, Restate and Hatchet were not installed. Draft PR #36 was not merged.
+
+The server file fence moved in `83b82d13c20c21fae86817f91210a1fa54309c71` so the gate still pins `services/andrea_sync/server.py` after the lookup display unwrap. The confirm phrases in that test are unchanged.
+
+Deleting the acceptance root, the trust directory, and the witness is refused while `root.id` remains. Deleting `root.id` as well still lets `initialize` mint a new empty chain that `verify` accepts with zero lines. That full reset is not fixed.
+
+| Finding | Commit | Test |
+| --- | --- | --- |
+| HIGH — a failed idempotent rollback reactivates the candidate | `de964dea33acf7521ce705313a5725612e1fd789` Keep rollback recovery on the complete pair already live. | `tests/first_officer/test_install.py::test_readiness_failure_keeps_the_complete_pair_observed_at_entry` |
+| MEDIUM — total audit deletion can be blessed as a new valid chain | `c6c8f9e7f77af45fbdfdb9a2c71a4210f90513c2` Refuse a replacement audit chain while the root identity remains. The review repro is refused while `root.id` remains. Deleting `root.id` too is not fixed: a new empty chain still verifies. | `tests/first_officer/test_cycle.py::test_reinitializing_after_deleting_the_log_and_heads_does_not_verify` |
+| MEDIUM — a hand-edited Playwright event artifact can turn the gate green | `a1c5065b24e281d7e3acf7ce2cc008259f13cda1` Evaluate the Playwright report instead of a hand-edited events file. | `tests/first_officer/test_flaky.py::test_a_hand_edited_attempt_cannot_turn_the_gate_green` |
+| MEDIUM — the secret gate misses common credential forms | `2ce6166f9226af7f605b5213dd4193811bf81c94` Flag temporary cloud access keys and alphabetic bearer tokens. | `tests/first_officer/test_privacy.py::test_temporary_session_keys_and_alphabetic_bearers_fail_closed` |
+| MEDIUM — a local write failure can orphan active LiteLLM lane keys | `768eea61d9e71310004d4154896399bd0a5110e0` Write the LiteLLM lane key before asking the proxy to create it. | `tests/first_officer/test_litellm_policy.py::test_a_failed_local_write_does_not_leave_a_second_active_key` |
+| LOW — untrusted fetched text exported unfenced | `4615dda4b29eec5a563ecce9da3427f8c0c4d049` Fence fetched lookup text in the exported summary fields. | `tests/first_officer/test_guard.py::test_normal_lookup_queries_work_through_the_fenced_boundary` |
+| LOW — INSTALL.md verifies before the read-only permission step | `e41d1b79fba3b6afd2390b7d7217c40eb1095eaa` Verify the published candidate after its directory is read-only. `8f50bd29aa504cc8bb78ad8bd7f6fd2a63ef87ce` pins that order. | `tests/first_officer/test_release.py::test_install_doc_verifies_the_candidate_after_it_is_read_only` and `tests/first_officer/test_release.py::test_one_activate_command_preflights_publishes_and_switches_in_order` |

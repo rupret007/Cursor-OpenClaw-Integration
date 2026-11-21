@@ -4043,9 +4043,56 @@ class TestAndreaSync(unittest.TestCase):
         """A plain server delivers the confirmed draft once through its own tool."""
         os.environ["ANDREA_SYNC_TELEGRAM_NOTIFIER"] = "0"
         os.environ["ANDREA_SYNC_BACKGROUND_ENABLED"] = "0"
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        import threading
+
         from services.andrea_sync.outbound import receipt_matches
         from services.andrea_sync.server import SyncServer  # noqa: E402
 
+        class _Carrier(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_POST(self) -> None:
+                length = int(self.headers.get("Content-Length", "0") or "0")
+                raw = self.rfile.read(length) if length else b""
+                self.server.seen.append(raw)
+                request = json.loads(raw)
+                payload = {
+                    "body": request.get("body"),
+                    "carrier": self.server.carrier_id,
+                    "delivered": True,
+                    "digest": request.get("digest"),
+                    "target": request.get("target"),
+                    "tool": request.get("tool"),
+                }
+                data = json.dumps(payload).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, fmt: str, *args: Any) -> None:
+                return
+
+        carrier = ThreadingHTTPServer(("127.0.0.1", 0), _Carrier)
+        carrier.seen = []
+        carrier.carrier_id = "carrier-" + "b1c2d3e4"
+        thread = threading.Thread(target=carrier.serve_forever, daemon=True)
+        thread.start()
+        previous = os.environ.get("ANDREA_OUTBOUND_CARRIER")
+        os.environ["ANDREA_OUTBOUND_CARRIER"] = (
+            f"http://127.0.0.1:{carrier.server_address[1]}/deliver"
+        )
+
+        def _restore_carrier() -> None:
+            carrier.shutdown()
+            if previous is None:
+                os.environ.pop("ANDREA_OUTBOUND_CARRIER", None)
+            else:
+                os.environ["ANDREA_OUTBOUND_CARRIER"] = previous
+
+        self.addCleanup(_restore_carrier)
         server = SyncServer()
         self.assertIs(server.outbound_delivery_tool.__func__, SyncServer._deliver_outbound)
         self.assertEqual(
@@ -4103,6 +4150,9 @@ class TestAndreaSync(unittest.TestCase):
         self.assertEqual(stored[0]["target"], "Candace")
         self.assertEqual(stored[0]["body"], "hi from you")
         self.assertEqual(stored[0]["digest"], pending["digest"])
+        self.assertEqual(stored[0]["carrier"], carrier.carrier_id)
+        self.assertEqual(len(carrier.seen), 1)
+        self.assertNotIn("delivered", json.loads(carrier.seen[0]))
         again = server.outbound_delivery_tool(pending)
         self.assertEqual(again["digest"], pending["digest"])
         repeated = [

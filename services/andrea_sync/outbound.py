@@ -5,11 +5,14 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import hmac
+import http.client
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 from typing import Any, Mapping
+from urllib.parse import urlsplit
 
 
 def canonical(payload: Mapping[str, Any]) -> str:
@@ -108,53 +111,115 @@ def receipt_matches(draft: Mapping[str, Any], receipt: Any) -> bool:
     return hmac.compare_digest(presented, expected)
 
 
-def deliver(draft: Mapping[str, Any], outbox: Path) -> dict[str, Any]:
-    """Record one delivery and return the receipt read back from that record.
+CARRIER_ID = re.compile(r"[A-Za-z0-9_-]{8,64}")
+DISABLED = "Outbound delivery is disabled until a loopback carrier confirms it"
+UNCONFIRMED = "The carrier did not confirm delivery"
 
-    A second call with the same digest returns the stored receipt and does not
-    append another delivery.
+
+def _carrier_target() -> tuple[int, str]:
+    """The only carrier is an explicit loopback HTTP URL. Anything else stays off."""
+    raw = os.environ.get("ANDREA_OUTBOUND_CARRIER", "").strip()
+    parts = urlsplit(raw)
+    if (parts.scheme != "http" or parts.hostname != "127.0.0.1" or parts.port is None
+            or parts.username or parts.password or parts.query or parts.fragment
+            or not parts.path.startswith("/")):
+        raise ValueError(DISABLED)
+    return parts.port, parts.path
+
+
+def _tool_name(draft: Mapping[str, Any]) -> str:
+    tool = str(draft.get("skill_key") or "")
+    if tool not in {"bluebubbles", "send_message"}:
+        return "send_message"
+    return tool
+
+
+def _ask_carrier(draft: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the carrier's confirmation. This function does not decide delivered."""
+    port, path = _carrier_target()
+    request = {
+        "body": str(draft.get("message") or ""),
+        "digest": str(draft.get("digest") or ""),
+        "target": str(draft.get("target") or ""),
+        "tool": _tool_name(draft),
+    }
+    data = json.dumps(request, sort_keys=True, separators=(",", ":")).encode()
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    try:
+        connection.request(
+            "POST", path, body=data, headers={"Content-Type": "application/json"},
+        )
+        response = connection.getresponse()
+        raw = response.read(4097)
+        status = response.status
+    except (OSError, http.client.HTTPException, TimeoutError):
+        raise ValueError(UNCONFIRMED) from None
+    finally:
+        connection.close()
+    if status != 200 or len(raw) > 4096:
+        raise ValueError(UNCONFIRMED)
+    try:
+        payload = json.loads(raw)
+    except (UnicodeError, json.JSONDecodeError):
+        raise ValueError(UNCONFIRMED) from None
+    if not isinstance(payload, dict) or payload.get("delivered") is not True:
+        raise ValueError(UNCONFIRMED)
+    carrier = payload.get("carrier")
+    if (payload.get("target") != request["target"] or payload.get("body") != request["body"]
+            or payload.get("digest") != request["digest"] or payload.get("tool") != request["tool"]
+            or not isinstance(carrier, str) or not CARRIER_ID.fullmatch(carrier)):
+        raise ValueError(UNCONFIRMED)
+    return {
+        "body": payload["body"],
+        "carrier": carrier,
+        "delivered": payload["delivered"],
+        "digest": payload["digest"],
+        "source": "tool",
+        "target": payload["target"],
+        "tool": payload["tool"],
+    }
+
+
+def _stored_for(file: Any, digest: str) -> dict[str, Any] | None:
+    file.seek(0)
+    for raw in file.read().splitlines():
+        if not raw.strip():
+            continue
+        stored = json.loads(raw)
+        if isinstance(stored, dict) and stored.get("digest") == digest:
+            return stored
+    return None
+
+
+def deliver(draft: Mapping[str, Any], outbox: Path) -> dict[str, Any]:
+    """Ask the carrier, then record that response and read it back.
+
+    The outbox does not mark a message delivered. A missing carrier, a refusal,
+    or a response for a different draft leaves no success record. A second call
+    with the same digest returns the stored carrier receipt and does not ask again.
     """
     if not draft_binding_ok(draft):
         raise ValueError("The outbound draft is not bound")
+    _carrier_target()
     path = Path(outbox)
     if path.is_symlink() or path.parent.is_symlink():
         raise ValueError("The outbound outbox must be a private file")
     path.parent.mkdir(mode=0o700, exist_ok=True)
-    tool = str(draft.get("skill_key") or "")
-    if tool not in {"bluebubbles", "send_message"}:
-        tool = "send_message"
-    record = {
-        "body": str(draft.get("message") or ""),
-        "delivered": True,
-        "digest": str(draft.get("digest") or ""),
-        "source": "tool",
-        "target": str(draft.get("target") or ""),
-        "tool": tool,
-    }
-    line = json.dumps(record, sort_keys=True, separators=(",", ":"))
+    digest = str(draft.get("digest") or "")
     handle = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     with os.fdopen(handle, "r+", encoding="utf-8") as file:
         os.fchmod(file.fileno(), 0o600)
         fcntl.flock(file, fcntl.LOCK_EX)
-        file.seek(0)
-        for raw in file.read().splitlines():
-            if not raw.strip():
-                continue
-            stored = json.loads(raw)
-            if isinstance(stored, dict) and stored.get("digest") == record["digest"]:
-                return stored
+        existing = _stored_for(file, digest)
+        if existing is not None and receipt_matches(draft, existing):
+            return existing
+        record = _ask_carrier(draft)
+        line = json.dumps(record, sort_keys=True, separators=(",", ":"))
         file.seek(0, os.SEEK_END)
         file.write(line + "\n")
         file.flush()
         os.fsync(file.fileno())
-        file.seek(0)
-        found = None
-        for raw in file.read().splitlines():
-            if not raw.strip():
-                continue
-            stored = json.loads(raw)
-            if isinstance(stored, dict) and stored.get("digest") == record["digest"]:
-                found = stored
-        if found is None:
+        found = _stored_for(file, digest)
+        if found is None or found.get("carrier") != record["carrier"] or found.get("delivered") is not True:
             raise ValueError("The outbound delivery was not recorded")
         return found

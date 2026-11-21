@@ -4040,7 +4040,7 @@ class SyncServer:
         return True
 
     def _deliver_outbound(self, draft: Dict[str, Any]) -> Dict[str, Any]:
-        """The production delivery tool. The receipt is the stored delivery."""
+        """The production delivery tool. The receipt is the carrier's confirmation."""
         return deliver(draft, self.outbound_outbox)
 
     def _outbound_tool_receipt(self, draft: Dict[str, Any]) -> Dict[str, Any] | None:

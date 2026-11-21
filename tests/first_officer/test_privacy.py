@@ -89,6 +89,62 @@ def test_the_repository_history_and_logs_stay_clean(capsys):
         scan.survey(Path("/opt/openclaw-fo"))
 
 
+def test_a_directory_symlink_is_rejected_and_named_trees_are_scanned(tmp_path):
+    root = tmp_path / "checkout"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "note.txt").write_text("benign\n", encoding="utf-8")
+    (root / "linked").symlink_to(outside, target_is_directory=True)
+    findings, count = scan.scan_files(root)
+    assert findings == [{"rule": "symlink", "path": "linked", "line": 0}]
+    assert count == 0
+
+    planted = root / "data"
+    planted.mkdir()
+    (planted / "note.txt").write_text(CREDENTIAL + "\n", encoding="utf-8")
+    logs = root / "artifacts" / "logs"
+    logs.mkdir(parents=True)
+    (logs / "lane.log").write_text(PHONE + "\n", encoding="utf-8")
+    findings, count = scan.scan_files(root)
+    rules = {(item["rule"], item["path"]) for item in findings}
+    assert ("symlink", "linked") in rules
+    assert ("credential", "data/note.txt") in rules
+    assert ("phone", "artifacts/logs/lane.log") in rules
+    assert count == 2
+    rendered, code = scan.report({"files": count, "commits": 0, "logs": 1, "findings": findings})
+    assert code == 1 and CREDENTIAL not in rendered and PHONE not in rendered
+    log_findings, log_count = scan.default_logs(root)
+    assert log_count == 1
+    assert log_findings == [{"rule": "symlink", "path": "linked", "line": 0}]
+
+    external = tmp_path / "external-logs"
+    external.mkdir()
+    (external / "linked").symlink_to(outside, target_is_directory=True)
+    (external / "lane.log").write_text("clean\n", encoding="utf-8")
+    external_findings, external_count = scan.scan_logs(external)
+    assert {"rule": "symlink", "path": "linked", "line": 0} in external_findings
+    assert external_count == 1
+
+
+def test_only_the_documented_local_database_skips_binary_contents(tmp_path):
+    root = tmp_path / "checkout"
+    (root / "data").mkdir(parents=True)
+    documented = root / "data" / "andrea_sync.db"
+    documented.write_bytes(b"\0local")
+    findings, _count = scan.scan_files(root)
+    assert findings == []
+    other = root / "data" / "other.db"
+    other.write_bytes(b"\0local")
+    findings, _count = scan.scan_files(root)
+    assert {"rule": "binary", "path": "data/other.db", "line": 0} in findings
+    documented.write_text(CREDENTIAL + "\n", encoding="utf-8")
+    findings, _count = scan.scan_files(root)
+    assert ("credential", "data/andrea_sync.db") in {(item["rule"], item["path"]) for item in findings}
+    rendered = scan.report({"files": 1, "commits": 0, "logs": 0, "findings": findings})[0]
+    assert CREDENTIAL not in rendered
+
+
 def test_a_binary_file_and_a_shallow_clone_fail_closed(tmp_path):
     root = tmp_path / "checkout"
     root.mkdir()

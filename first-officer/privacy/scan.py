@@ -19,7 +19,13 @@ FIXTURES = frozenset({
     "sk-live-secretvalue",
     "sk-abcd1234efgh5678",
 })
-SKIP = {".git", "__pycache__", ".pytest_cache", "node_modules", ".venv", "venv", "data", "artifacts"}
+SKIP = {".git", "__pycache__", ".pytest_cache", "node_modules", ".venv", "venv"}
+LOCAL_DATABASE = {
+    Path("data/andrea_sync.db"),
+    Path("data/andrea_sync.db-wal"),
+    Path("data/andrea_sync.db-shm"),
+}
+LOCAL_DATABASE_CAP = 8 * 1024 * 1024
 BLOCKED = (
     Path("/opt/openclaw-fo"),
     Path.home() / ".openclaw",
@@ -147,11 +153,25 @@ def _root(path):
     return root.resolve()
 
 
+def _descend(root, directory, names, findings):
+    """Skip named tooling trees. A directory symlink is a finding and is not followed."""
+    kept = []
+    for name in names:
+        if name in SKIP:
+            continue
+        path = Path(directory) / name
+        if path.is_symlink():
+            findings.append({"rule": "symlink", "path": public_name(path.relative_to(root)), "line": 0})
+            continue
+        kept.append(name)
+    return kept
+
+
 def scan_files(root):
     findings = []
     count = 0
     for directory, names, files in os.walk(root):
-        names[:] = [name for name in names if name not in SKIP]
+        names[:] = _descend(root, directory, names, findings)
         for name in files:
             path = Path(directory) / name
             if path.is_symlink():
@@ -169,14 +189,24 @@ def _file_findings(root, path):
         info = path.stat()
     except OSError:
         return [{"rule": "unreadable", "path": shown, "line": 0}]
-    if info.st_size > MAX_BYTES:
+    if relative in LOCAL_DATABASE:
+        if info.st_size > LOCAL_DATABASE_CAP:
+            return [{"rule": "oversized", "path": shown, "line": 0}]
+        try:
+            payload = path.read_bytes()
+        except OSError:
+            return [{"rule": "unreadable", "path": shown, "line": 0}]
+        if b"\0" in payload:
+            return []
+    elif info.st_size > MAX_BYTES:
         return [{"rule": "oversized", "path": shown, "line": 0}]
-    try:
-        payload = path.read_bytes()
-    except OSError:
-        return [{"rule": "unreadable", "path": shown, "line": 0}]
-    if b"\0" in payload:
-        return [{"rule": "binary", "path": shown, "line": 0}]
+    else:
+        try:
+            payload = path.read_bytes()
+        except OSError:
+            return [{"rule": "unreadable", "path": shown, "line": 0}]
+        if b"\0" in payload:
+            return [{"rule": "binary", "path": shown, "line": 0}]
     text = payload.decode("utf-8", "replace")
     located = [{"rule": item["rule"], "path": "[redacted]", "line": 0}
                for item in findings_in_text(relative.as_posix())]
@@ -257,7 +287,7 @@ def scan_logs(directory):
     findings = []
     count = 0
     for directory_name, names, files in os.walk(root):
-        names[:] = [name for name in names if name not in SKIP]
+        names[:] = _descend(root, directory_name, names, findings)
         for name in files:
             path = Path(directory_name) / name
             if path.suffix != ".log" and "logs" not in path.relative_to(root).parts:
@@ -272,7 +302,7 @@ def default_logs(root):
     findings = []
     count = 0
     for directory, names, files in os.walk(root):
-        names[:] = [name for name in names if name not in SKIP]
+        names[:] = _descend(root, directory, names, findings)
         for name in files:
             path = Path(directory) / name
             relative = path.relative_to(root)

@@ -153,7 +153,7 @@ python3 first-officer/pilot/rollback_drill.py --root "$root"
 
 ## Scan the checkout for secrets and personal data
 
-The scan reads this checkout, the commits reachable from it, and any `*.log` file or `logs` directory under it. Exit 0 prints one clean line. Exit 1 names the rule and the location and does not print the value. A shallow clone is refused. The offline gate runs this command before the unit tests.
+The scan reads this checkout, the commits reachable from it, and any `*.log` file or `logs` directory under it, including trees named `data` or `artifacts`. A file or directory symlink is a failure and is not followed. `.git`, `__pycache__`, `.pytest_cache`, `node_modules`, `.venv` and `venv` are not scanned. The local runtime files `data/andrea_sync.db`, `data/andrea_sync.db-wal` and `data/andrea_sync.db-shm` are not reported when they are binary; readable text at those paths is scanned, and any other file under `data/` or `artifacts/` is scanned. Exit 0 prints one clean line. Exit 1 names the rule and the location and does not print the value. A shallow clone is refused. The offline gate runs this command before the unit tests.
 
 ```bash
 python3 first-officer/privacy/scan.py

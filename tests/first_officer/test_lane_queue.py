@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 import importlib.util
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -613,3 +614,66 @@ def test_status_neither_creates_a_ledger_nor_reads_a_policy(tmp_path, capsys):
     assert queue.main(args) == 0
     assert json.loads(capsys.readouterr().out) == {"phase": "pending", "backend": "hatchet", "run": None}
     assert ledger.read_bytes() == original
+
+
+def test_slow_send_leaves_unrelated_dispatch_and_status_available(tmp_path, tokens, monkeypatch, capsys):
+    ledger = tmp_path / "lanes.jsonl"
+    config = policy("http://localhost", "http://localhost")
+    other = {**REQUEST, "head": OTHER}
+    assert queue.idempotency_key(REQUEST)[-1:] != queue.idempotency_key(other)[-1:]
+    entered = threading.Event()
+    release = threading.Event()
+
+    def post(_opener, _url, _headers, payload, _timeout):
+        if payload["input"]["head"] == HEAD:
+            entered.set()
+            assert release.wait(8)
+            return {"metadata": {"id": "run_slow"}}
+        return {"metadata": {"id": "run_independent"}}
+
+    monkeypatch.setattr(queue, "post", post)
+    with ThreadPoolExecutor(max_workers=3) as workers:
+        slow = workers.submit(dispatch, config, ledger)
+        try:
+            assert entered.wait(3)
+            status = workers.submit(queue.main, [
+                str(tmp_path / "unused-policy"), str(ledger),
+                "--lane", REQUEST["lane"], "--head", HEAD,
+                "--pull-request", str(REQUEST["pull_request"]), "--status",
+            ])
+            independent = workers.submit(dispatch, config, ledger, other)
+            assert status.result(timeout=3) == 0
+            assert json.loads(capsys.readouterr().out)["phase"] == "pending"
+            assert independent.result(timeout=3)["run"] == "run_independent"
+            assert not slow.done()
+        finally:
+            release.set()
+        assert slow.result(timeout=3)["run"] == "run_slow"
+
+
+def test_transition_never_overwrites_newer_receipt(tmp_path, tokens, monkeypatch):
+    ledger = tmp_path / "lanes.jsonl"
+    config = policy("http://localhost", "http://localhost")
+
+    def post(_opener, _url, _headers, _payload, _timeout):
+        with queue.locked_ledger(ledger) as file:
+            pending = queue.latest(file, queue.idempotency_key(REQUEST))
+            queue.append_entry(file, {**pending, "phase": "queued", "run": "run_existing"})
+        return {"metadata": {"id": "run_late"}}
+
+    monkeypatch.setattr(queue, "post", post)
+    with pytest.raises(ValueError, match="changed during dispatch"):
+        dispatch(config, ledger)
+    receipt = dispatch(config, ledger)
+    assert receipt["reused"] and receipt["run"] == "run_existing"
+    assert phases(ledger) == ["pending", "queued"]
+
+
+def test_dispatch_refuses_untrusted_lock_directory(tmp_path, tokens):
+    ledger = tmp_path / "lanes.jsonl"
+    lock_dir = ledger.with_name(ledger.name + ".locks")
+    lock_dir.mkdir()
+    lock_dir.chmod(0o755)
+    with pytest.raises(ValueError, match="lock directory must be private"):
+        dispatch(policy("http://localhost", "http://localhost"), ledger)
+    assert not ledger.exists()

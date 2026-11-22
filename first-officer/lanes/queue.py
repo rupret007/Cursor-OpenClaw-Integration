@@ -285,6 +285,34 @@ def _check_ledger(info):
 
 
 @contextmanager
+def lane_lock(ledger, key):
+    """Serialize one request while allowing unrelated reservations to make progress."""
+    directory = Path(ledger).with_name(Path(ledger).name + ".locks")
+    directory.mkdir(mode=0o700, exist_ok=True)
+    root = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(root)
+        if info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise ValueError("The lane lock directory must be private")
+        # One of 16 persistent locks keeps disk usage bounded across old lane keys.
+        handle = os.open(key[-1:], os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
+                         0o600, dir_fd=root)
+        try:
+            info = os.fstat(handle)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                    or info.st_mode & 0o077 or info.st_nlink != 1):
+                raise ValueError("The lane lock must be a private owner file")
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            if os.fstat(handle).st_nlink != 1:
+                raise ValueError("The lane lock was replaced")
+            yield
+        finally:
+            os.close(handle)
+    finally:
+        os.close(root)
+
+
+@contextmanager
 def locked_ledger(path, *, read_only=False):
     try:
         flags = os.O_RDONLY if read_only else os.O_RDWR | os.O_CREAT
@@ -360,6 +388,14 @@ def queue_state(file, request, key):
     return state
 
 
+def transition(ledger, request, key, expected, entry):
+    """Fsync a state change only while its predecessor is still current."""
+    with locked_ledger(ledger) as file:
+        if queue_state(file, request, key) != expected:
+            raise ValueError("The lane ledger changed during dispatch. Check its current state.")
+        append_entry(file, entry)
+
+
 def dispatch(config, request, ledger, now=None, timeout=TIMEOUT):
     """Dispatch one lane once. Resume from a recorded primary refusal after interruption."""
     timeout = _bounded_timeout(timeout)
@@ -370,8 +406,9 @@ def dispatch(config, request, ledger, now=None, timeout=TIMEOUT):
     else:
         raise ValueError("The queue clock is unusable")
     key = idempotency_key(request)
-    with locked_ledger(ledger) as file:
-        state = queue_state(file, request, key)
+    with lane_lock(ledger, key):
+        with locked_ledger(ledger) as file:
+            state = queue_state(file, request, key)
         if state and state["phase"] == "queued":
             return {**state, "reused": True}
         if state and state["phase"] != "refused":
@@ -379,19 +416,22 @@ def dispatch(config, request, ledger, now=None, timeout=TIMEOUT):
                              "The lane was not sent again.")
 
         def attempt(backend):
+            nonlocal state
             args, target = submission(backend, config[backend], request, key)
             entry = {"at": moment, "backend": backend, "head": request["head"], "key": key,
                      "lane": request["lane"], "phase": "pending", "run": None, "target": target}
-            append_entry(file, entry)
+            transition(ledger, request, key, state, entry)
             try:
                 run = accepted_run(backend, post(*args, timeout))
             except (Refusal, Uncertain) as error:
                 phase = "refused" if isinstance(error, Refusal) else "uncertain"
-                append_entry(file, {**entry, "phase": phase, "detail": str(error)})
+                outcome = {**entry, "phase": phase, "detail": str(error)}
+                transition(ledger, request, key, entry, outcome)
+                state = outcome
                 raise
-            entry.update(phase="queued", run=run)
-            append_entry(file, entry)
-            return {**entry, "reused": False}
+            outcome = {**entry, "phase": "queued", "run": run}
+            transition(ledger, request, key, entry, outcome)
+            return {**outcome, "reused": False}
 
         if not state or state["backend"] != "hatchet":
             try:
@@ -413,8 +453,9 @@ def reconcile_restate(config, request, ledger, timeout=TIMEOUT):
     """Record positive lookup evidence for the original Restate destination only."""
     timeout = _bounded_timeout(timeout)
     key = idempotency_key(request)
-    with locked_ledger(ledger) as file:
-        state = queue_state(file, request, key)
+    with lane_lock(ledger, key):
+        with locked_ledger(ledger) as file:
+            state = queue_state(file, request, key)
         if state and state["phase"] == "queued":
             return {**state, "reused": True}
         if not state or state["backend"] != "restate" or state["phase"] not in ("pending", "uncertain"):
@@ -438,7 +479,7 @@ def reconcile_restate(config, request, ledger, timeout=TIMEOUT):
             raise ValueError("Restate lookup did not confirm acceptance. The lane remains unresolved.") from None
         entry = {**state, "at": int(time.time()), "phase": "queued", "run": run}
         entry.pop("detail", None)
-        append_entry(file, entry)
+        transition(ledger, request, key, state, entry)
         return {**entry, "reused": False}
 
 

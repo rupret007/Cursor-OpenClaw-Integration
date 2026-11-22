@@ -1,6 +1,7 @@
 import { homedir } from 'node:os';
 import { isIP } from 'node:net';
 import { join } from 'node:path';
+import { readMacAndrea } from './andrea-mac.mjs';
 import { sshAndreaSummary } from './andrea-ssh.mjs';
 import { createCaptain } from './captain.mjs';
 import { classifyRequest, createDispatch } from './dispatch.mjs';
@@ -135,9 +136,11 @@ function toolRegistry(api, commands, liveConfig, services) {
     recall: { run: memory, failure: 'The private memory lookup failed. I couldn’t verify a saved fact.' },
     texts: {
       run: async (_, { signal }) => {
+        const local = localFleetNode();
+        if (local === 'mac-mini') return plain(await (services.readMacAndrea ?? readMacAndrea)(signal));
         const summary = await sshAndreaSummary(signal);
         if (summary !== undefined) return plain(summary);
-        if (localFleetNode() === 'nucbox') throw new Error('The local Andrea reader route is unavailable');
+        if (local === 'nucbox') throw new Error('The local Andrea reader route is unavailable');
         return plain(await summarizeAndrea(andreaReader(signal, services)));
       },
       failure: 'The live read through Andrea failed. Your recent text activity is unavailable.',

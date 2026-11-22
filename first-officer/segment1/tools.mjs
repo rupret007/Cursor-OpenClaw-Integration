@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { constants } from 'node:fs';
-import { open } from 'node:fs/promises';
+import { access, open } from 'node:fs/promises';
 import { homedir, loadavg } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -121,8 +121,15 @@ const checks = new Map([
 ]);
 
 async function queryGithub(query, signal) {
+  let github = '/usr/bin/gh';
+  if (process.platform === 'darwin') {
+    const candidates = ['/opt/homebrew/bin/gh', '/usr/local/bin/gh'];
+    const installed = await Promise.all(candidates.map((path) => access(path, constants.X_OK).then(() => path, () => null)));
+    github = installed.find(Boolean);
+    if (!github) throw new Error('The local GitHub CLI is unavailable');
+  }
   const { stdout } = await exec('/usr/bin/nice', [
-    '-n', '10', '/usr/bin/gh', 'api', 'graphql', '--hostname', 'github.com', '-f', 'query=' + query,
+    '-n', '10', github, 'api', 'graphql', '--hostname', 'github.com', '-f', 'query=' + query,
   ], {
     timeout: 8000, killSignal: 'SIGKILL', maxBuffer: 128 * 1024, signal,
     env: { HOME: homedir(), PATH: '/usr/bin:/bin', GH_PROMPT_DISABLED: '1' },

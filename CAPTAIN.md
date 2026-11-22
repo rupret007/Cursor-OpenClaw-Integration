@@ -4,11 +4,11 @@ OpenClaw can captain exact-head CI reviews for open PRs in Cursor-OpenClaw-Integ
 
 The staged pilot and the staged pin restore are proven on a private copy. They do not read the live lease and they do not stop the gateway. Production authority stays with the current holder until the live checklist on this page is run. Gateway activation is one command, `python3 -B first-officer/release.py`, with one rollback. `python3 first-officer/archive.py pack` writes a checksummed copy of this lane for offline testing. That copy is not the gateway release.
 
-## Independent Nuc profile
+## Independent Mac Mini and Nuc profiles
 
-The standalone target is the Nuc with its own gateway, Captain state, queue and LiteLLM route. Andrea still runs on the Mac Mini. Bobserver appears as an optional fleet member. The acceptance run must pass with Bobserver unreachable. Use a separate test Telegram account for the rehearsal and a no-cost model route or loopback provider fixtures.
+The Mac Mini and Nuc are the standalone Captain targets. Each needs its own gateway, Captain state, queue and LiteLLM route. Andrea runs on the Mac Mini. Bobserver is an optional fleet member and an opt-in compute worker. Run the full acceptance suite on each host with Bobserver unreachable. Use a separate test Telegram account for the rehearsal and a no-cost model route or loopback provider fixtures.
 
-Set `FO_LOCAL_NODE=nucbox` in the future Nuc gateway service environment. This gives local load the NucBox label and requires a snapshot tagged with `host.node = "nucbox"` for local job counts and Captain admission. The status publisher accepts `local_node` in its input. Remote fleet samples still need fresh timestamps.
+Set `FO_LOCAL_NODE=mac-mini` for the Mac gateway or `FO_LOCAL_NODE=nucbox` for the Nuc gateway. Local load uses that host's label. Local job counts and Captain admission require a fresh snapshot whose `host.node` matches that setting. The status publisher accepts `local_node` in its input. Remote fleet samples still need fresh timestamps. On the Mac, the gateway reads Andrea locally under the Andrea LaunchAgent account. On the Nuc, it connects to the same read-only Mac reader over a dedicated SSH route.
 
 The independent reader route uses a dedicated Nuc key and a pinned Mac host key. After approval to add that key to the Mac, run from the Nuc checkout under the same Linux account that will run the gateway:
 
@@ -21,7 +21,7 @@ nice -n 10 python3 -B first-officer/provision-andrea.py \\
 
 The local provisioning path connects only to the Mac. The Mac has separate restricted entries for the Nuc and the incumbent reader. The Nuc key can run one read-only summary command. Refreshes and restores on the Nuc use the same `--local-client` flag.
 
-Standalone cutover gates are still open. The current Captain controller loads the legacy conductor watchdog and launches its runner from the existing lane tree. The current release installer expects an existing Bobserver gateway pin. The Nuc needs independent authority, a queue-backed runner, verified local gate and quota sources, and a clean-host installer before it can take over. Verify single Telegram ownership before moving the production bot account, especially when Bobserver comes back online.
+Standalone cutover gates are still open. The current Captain controller loads the legacy conductor watchdog and launches its runner from the existing lane tree. The current release installer expects an existing Bobserver gateway pin. Both hosts need independent authority, a queue-backed runner, verified local gate and quota sources, and a clean-host installer. The Mac needs a launchd rehearsal and the Nuc needs a systemd user-service rehearsal. Exercise peer transfer with a fresh epoch, durable work receipts and exactly one Telegram account consumer. Verify that the former host cannot dispatch after transfer or restart.
 
 ## Daily commands
 

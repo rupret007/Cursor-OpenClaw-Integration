@@ -10,7 +10,7 @@ import { answerSimple, fastModelRef, routeOwnerModel, standaloneSimple } from '.
 import { registerSegmentOne } from '../../first-officer/segment1/register.mjs';
 import { fleetStatus, openPullRequests, readFleetSnapshot, summarizeAndrea } from '../../first-officer/segment1/tools.mjs';
 import { andreaCommand, parseAndreaSummary } from '../../first-officer/segment1/andrea-ssh.mjs';
-import { runMacAndrea } from '../../first-officer/segment1/andrea-mac.mjs';
+import { readMacAndrea, runMacAndrea } from '../../first-officer/segment1/andrea-mac.mjs';
 
 const fixtures = [
   ["what's running / load on each machine", 'fleet'],
@@ -110,7 +110,7 @@ test('timeouts cancel hung calls and keep the turn claimed with an explicit fail
   assert.equal(warnings.length, 2);
 });
 
-test('all Segment 1 handlers are registered on the private inbound hook', async () => {
+test('all Segment 1 handlers are registered on the private inbound hook', async (t) => {
   const owner = '7';
   const config = { channels: { telegram: {} } };
   const events = [];
@@ -188,6 +188,31 @@ test('all Segment 1 handlers are registered on the private inbound hook', async 
   assert.equal(events.filter((event) => event === 'ack').length, 10);
   assert.equal(events.filter((event) => event === 'typing').length, 10);
   assert.equal(events.some((event) => event.includes('synthetic transport detail')), false);
+
+  t.mock.method(services, 'createAndreaReader', () => assert.fail('The Mac should use its local reader'));
+  const priorNode = process.env.FO_LOCAL_NODE;
+  process.env.FO_LOCAL_NODE = 'mac-mini';
+  try {
+    services.readMacAndrea = (signal) => readMacAndrea(signal, async (command) => {
+      assert.equal(command, andreaCommand);
+      return {
+        version: 1,
+        groupSummary: 'Andrea · activity in approved group chats from the last 48 hours.\n2 incoming, 1 outgoing across 1 recent conversations.',
+        activity: {
+          topics: ['scheduling'], developments: ['question'],
+          latest: { intent: 'ask-time', topic: 'scheduling', reply: 'earlier' },
+        },
+      };
+    });
+    const reply = (await dispatchOwner('@andrea summarize my texts')).text;
+    assert.match(reply, /Latest incoming · asks about timing/);
+    assert.match(reply, /after your last outgoing message/);
+    services.readMacAndrea = async () => { throw new Error('synthetic Mac transport detail'); };
+    assert.match((await dispatchOwner('@andrea summarize my texts')).text, /live read through Andrea failed/);
+  } finally {
+    if (priorNode === undefined) delete process.env.FO_LOCAL_NODE;
+    else process.env.FO_LOCAL_NODE = priorNode;
+  }
 });
 
 test('short answers use the configured flash model with bounded context and skip the slow fallback probe', async () => {

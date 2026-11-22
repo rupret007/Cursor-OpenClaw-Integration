@@ -5,7 +5,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
-import { andreaCommand } from './andrea-ssh.mjs';
+import { andreaCommand, parseAndreaSummary } from './andrea-ssh.mjs';
 import { describeAndreaActivity, formatAndreaSummary, inspectAndrea } from './tools.mjs';
 
 const execute = promisify(execFile);
@@ -225,6 +225,14 @@ export async function runMacAndrea(command, readSettings = loadSettings, transpo
     { version: 1, summary: formatAndreaSummary(view), source };
   if (view.counts.recentTextPreviews) result.activity = describeAndreaActivity(view.groups);
   return result;
+}
+
+export async function readMacAndrea(signal, read = runMacAndrea) {
+  signal.throwIfAborted();
+  const result = await read(andreaCommand, undefined, (url, options) =>
+    fetch(url, { ...options, signal: AbortSignal.any([signal, options.signal]) }));
+  signal.throwIfAborted();
+  return parseAndreaSummary(JSON.stringify(result));
 }
 
 async function diagnosticRead(readSettings, transport, read, counts) {

@@ -21,7 +21,7 @@ ANDREA_SUMMARY = "61ff4565dd5638a886effefbd720c92a17b7388acbc6eeaffb7779f78d3f1b
 SUPPORTED_BASES = (BASELINE, SEGMENT1, CAPTAIN, ANDREA_SUMMARY)
 ROLLBACK_SLOT = "4759047e8a16d1691499d55c4b6656882e67bc2275a3297d2283aa9b01538753"
 RUNTIME = Path("round6/runtime")
-MODULES = ("andrea-ssh.mjs", "captain.mjs", "captain-state.py", "dispatch.mjs",
+MODULES = ("andrea-mac.mjs", "andrea-ssh.mjs", "captain.mjs", "captain-state.py", "dispatch.mjs",
            "model-router.mjs", "register.mjs", "runner-quota.py", "tools.mjs")
 OVERLAY = Path(__file__).resolve().parent / "segment1"
 INVENTORY = "SHA256SUMS"

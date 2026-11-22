@@ -109,14 +109,14 @@ echo "[7/11] Andrea security sanity (non-strict)..."
 bash "${BASE_DIR}/scripts/andrea_security_sanity.sh"
 
 echo "[8/11] Andrea reliability probes..."
-bash "${BASE_DIR}/scripts/andrea_reliability_probes.sh"
+bash "${BASE_DIR}/scripts/andrea_reliability_probes.sh" --offline
 
 echo "[9/11] Readiness grade (informational; may be B/C on minimal env)..."
 echo "Operator path bash scripts/andrea_doctor.sh --offline is asserted in tests/test_andrea_readiness_grade.py"
-python3 "${BASE_DIR}/scripts/andrea_readiness_grade.py" || true
+python3 "${BASE_DIR}/scripts/andrea_readiness_grade.py" --offline || true
 
 echo "[10/11] Exhaustive offline feature check..."
-bash "${BASE_DIR}/scripts/exhaustive_feature_check.sh"
+RUN_LIVE_API=0 bash "${BASE_DIR}/scripts/exhaustive_feature_check.sh"
 
 echo "[11/11] Optional live communication smoke (RUN_COMM_SMOKE=1)..."
 if [[ "${RUN_COMM_SMOKE:-0}" == "1" ]]; then

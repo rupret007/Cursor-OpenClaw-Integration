@@ -432,7 +432,8 @@ def test_cursor_tracker_thresholds_and_handoff_commit(spend, exit_code, tmp_path
     assert not track.git(path, "remote").stdout
 
 
-def test_cursor_handoff_gates_the_real_fallback_wrapper_before_invoking_agent(tmp_path):
+@pytest.mark.parametrize("mode", ["cli", "auto"])
+def test_cursor_handoff_gates_the_real_fallback_wrapper_before_invoking_agent(mode, tmp_path):
     agent = tmp_path / "agent"
     calls = tmp_path / "calls.jsonl"
     agent.write_text(
@@ -450,22 +451,24 @@ def test_cursor_handoff_gates_the_real_fallback_wrapper_before_invoking_agent(tm
         "CURSOR_CLI_BIN": str(agent),
         "CURSOR_TEST_CALLS": str(calls),
         "CURSOR_API_KEY": "fixture_cloud_key",
+        "CURSOR_BASE_URL": "http://localhost:1",
     }
-    arguments = [sys.executable, str(HANDOFF_SCRIPT), "--mode", "cli", "--json",
+    arguments = [sys.executable, str(HANDOFF_SCRIPT), "--mode", mode, "--json", "--api-retries", "0",
                  "--repo", str(tmp_path), "--prompt", "Review fixture", "--model", "claude-fixture"]
 
     def handoff():
         result = subprocess.run(arguments, cwd=tmp_path, env=env, capture_output=True, text=True, check=False)
         return result.returncode, json.loads(result.stdout)
 
-    for spend, billing in ((None, {}), (899, {"on_demand_enabled": True}), (900, {}), (970, {})):
+    paid_extras = [(899, {field: True}) for field in cursor_reading()["billing"]]
+    for spend, billing in [(None, {}), *paid_extras, (900, {}), (970, {})]:
         if spend is not None:
             write_cursor_reading(cursor, spend)
             reading = json.loads(cursor.read_text())
             reading["billing"].update(billing)
             cursor.write_text(json.dumps(reading))
         code, result = handoff()
-        assert code != 0 and result["ok"] is False and result["exit_code"] == 5
+        assert code != 0 and result["ok"] is False and result["backend"] == "cli" and result["exit_code"] == 5
         assert "Cursor fallback requires a readable plan below the warning threshold" in result["stderr"]
         assert not calls.exists()
 

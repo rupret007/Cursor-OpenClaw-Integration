@@ -830,6 +830,9 @@ def main() -> int:
 
     cli_wrapper = skill_root / "scripts" / "cursor_cli_fallback.sh"
     cli_binary = detect_cli_binary()
+    backend_mode = requested_mode
+    if requested_mode == "auto" and op == "submit" and "CURSOR_PLAN_READING" in os.environ:
+        backend_mode = "cli"
 
     api_key = os.getenv("CURSOR_API_KEY", "").strip()
     try:
@@ -900,7 +903,7 @@ def main() -> int:
 
     if args.dry_run:
         backend, backend_error = choose_backend(
-            requested_mode=requested_mode,
+            requested_mode=backend_mode,
             has_api_creds=has_api_credentials,
             cli_wrapper_path=cli_wrapper,
             cli_binary=cli_binary,
@@ -945,7 +948,7 @@ def main() -> int:
         return EXIT_OK
 
     backend, backend_error = choose_backend(
-        requested_mode=requested_mode,
+        requested_mode=backend_mode,
         has_api_creds=has_api_credentials,
         cli_wrapper_path=cli_wrapper,
         cli_binary=cli_binary,

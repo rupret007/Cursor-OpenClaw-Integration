@@ -229,15 +229,18 @@ test('the Andrea reader returns a separate approved-group aggregate and preserve
     BLUEBUBBLES_PASSWORD: 'fixture-password',
     BLUEBUBBLES_ALLOWED_CHAT_GUIDS: group + ',SMS;-;OWNER',
   };
-  const read = async (url, options) => {
+  const read = async (url, options, scope = 'allowlist') => {
     assert.equal(options.method, 'GET');
-    if (url.pathname.endsWith('/status')) return Response.json({ status: { chatScope: 'allowlist' } });
-    if (url.pathname.endsWith('/chats')) return Response.json({ chats: [] });
+    if (url.pathname.endsWith('/status')) return Response.json({ status: { chatScope: scope } });
+    if (url.pathname.endsWith('/chats')) throw new Error('Fixture cache timeout');
     assert.equal(decodeURIComponent(url.pathname), '/api/v1/chat/' + group + '/message');
     return Response.json({ data: [{ guid: 'fixture-group-row', text: 'Meet tomorrow at the demonstration library',
       dateCreated: now, isFromMe: false, chats: [{ guid: group, isGroup: true }] }] });
   };
+  await assert.rejects(runMacAndrea(andreaCommand, () => settings,
+    (url, options) => read(url, options, 'contacts_only'), now), { code: 'api-unreachable' });
   const result = await runMacAndrea(andreaCommand, () => settings, read, now);
+  assert.equal(result.source, 'live-provider');
   assert.match(result.summary, /one-to-one.*\nAndrea returned no recent previews/);
   assert.match(result.groupSummary, /approved group chats.*\n1 incoming/);
   const rendered = parseAndreaSummary(JSON.stringify(result));

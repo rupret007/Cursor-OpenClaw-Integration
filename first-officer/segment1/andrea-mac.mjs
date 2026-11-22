@@ -14,6 +14,7 @@ const chatId = /^bb:[^\s\x00-\x1f\x7f]{1,220}$/u;
 const directGuid = /^(?:iMessage|SMS|RCS);-;[^;\s\x00-\x1f\x7f]{1,190}$/i;
 const groupGuid = /^(?:iMessage|SMS|RCS);\+;[^;\s\x00-\x1f\x7f]{1,190}$/i;
 const messageLimit = 20;
+const controlBudget = 9000;
 
 function selfThreads(settings) {
   return new Set([settings.BLUEBUBBLES_CANONICAL_SELF_THREAD_JID,
@@ -97,7 +98,7 @@ function approvedThreads(settings) {
       (groupGuid.test(guid) || (directGuid.test(guid) && !selfHandles.has(directHandle(guid))))));
 }
 
-export function createMacAndreaReader(settings, transport = fetch, counts) {
+export function createMacAndreaReader(settings, transport = fetch, counts, signal) {
   const token = settings.BLUEBUBBLES_CONTROL_TOKEN;
   const owner = settings.BLUEBUBBLES_CANONICAL_SELF_THREAD_JID;
   const excluded = selfThreads(settings);
@@ -113,7 +114,7 @@ export function createMacAndreaReader(settings, transport = fetch, counts) {
 
   function get(path) {
     return getJson(new URL(path, base), transport, {
-      signal: AbortSignal.timeout(4000), headers: { Authorization: 'Bearer ' + token },
+      signal: signal ?? AbortSignal.timeout(controlBudget), headers: { Authorization: 'Bearer ' + token },
     });
   }
 
@@ -181,24 +182,28 @@ function providerRows(body, guid) {
 }
 
 async function inspectMacHistory(settings, transport, now) {
-  const local = createMacAndreaReader(settings, transport);
+  const local = createMacAndreaReader(settings, transport, undefined, AbortSignal.timeout(controlBudget));
   const plan = providerPlan(settings);
   const list = local.chats();
-  // Overlap the scope proof with the cache reads and retain the same time
-  // budget even when four live history reads are needed.
+  // Fetch the scope proof and cache in parallel under one control API budget.
   const status = plan?.allowed.size ? local.status().then((result) => result?.status).catch(() => null) : null;
-  const cached = await inspectAndrea({ chats: () => list, messages: local.messages }, now);
-  if (cached.counts.recentTextPreviews) return { view: cached, source: 'cache' };
-  if (!plan) return { view: cached, source: 'provider-unconfigured' };
-  if (!plan.allowed.size) return { view: cached, source: 'no-authorized-chats' };
+  const cache = await inspectAndrea({ chats: () => list, messages: local.messages }, now)
+    .then((view) => ({ view }), (error) => ({ error }));
+  function cacheResult(source) {
+    if (cache.error) throw cache.error;
+    return { view: cache.view, source };
+  }
+  if (cache.view?.counts.recentTextPreviews) return cacheResult('cache');
+  if (!plan) return cacheResult('provider-unconfigured');
+  if (!plan.allowed.size) return cacheResult('no-authorized-chats');
   const active = await status;
-  if (active?.chatScope !== 'allowlist') return { view: cached, source: 'scope-unverified' };
+  if (active?.chatScope !== 'allowlist') return cacheResult('scope-unverified');
   const declared = active.activeBaseUrl;
   const base = typeof declared === 'string' && URL.canParse(declared)
     ? plan.bases.find((url) => url.href === new URL(declared).href)
     : plan.bases[0];
-  if (!base) return { view: cached, source: 'provider-unconfigured' };
-  const indexed = new Map((await list).chats.map((chat) => [chat.chatJid, chat]));
+  if (!base) return cacheResult('provider-unconfigured');
+  const indexed = new Map((await list.catch(() => ({ chats: [] }))).chats.map((chat) => [chat.chatJid, chat]));
   // Exact direct GUIDs from the existing allowlist are sufficient for a
   // point read. The bounded cache list can omit a cold or newly synced chat.
   const direct = [...plan.allowed].filter((guid) => directGuid.test(guid));
@@ -220,6 +225,10 @@ async function inspectMacHistory(settings, transport, now) {
       return providerRows(await getJson(url, transport, { signal: AbortSignal.timeout(3000) }), guid);
     },
   }, now);
+  const cached = cache.view ?? (grouped ? await inspectAndrea({
+    chats: () => ({ chats: [], complete: false }),
+    messages: local.messages,
+  }, now) : undefined);
   return { view, source: 'live-provider', grouped, cached };
 }
 

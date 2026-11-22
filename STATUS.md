@@ -260,7 +260,7 @@ The Nuc's private gate lock, capacity policy and live weekly Codex quota also pa
 
 The separate Telegram test bot is running through the Nuc user service. Dependencies include OpenClaw 2026.11.6, Node 24.16.0, LiteLLM 1.110.2, PostgreSQL 18.6, llama.cpp b12633 with Qwen2.5 0.5B Instruct, Hatchet Lite 0.120.19, and Restate 1.8.1. [Reviewed runtime CI](https://github.com/rupret007/Cursor-OpenClaw-Integration/actions/runs/45041510156)
 
-The Mac Mini returned a live Andrea digest through the restricted reader. Hatchet verified the exact head of the selected PR with zero model calls. Telegram delivered the result. Repeating the request left one receipt. Restate accepted the authenticated scoped fallback lookup without a second review submission. Captain, LiteLLM, and the queue restarted and reached readiness.
+The Mac Mini returned a live Andrea digest through the restricted reader. Hatchet verified the exact head of the selected PR with zero model calls. Telegram delivered the result. Repeating the request left one receipt. Restate accepted the authenticated scoped fallback lookup without a second review submission. Captain, LiteLLM, and the queue restarted and reached readiness. The verified receipt survived. After restarting, the bot answered Captain status in 2.14 seconds, the simple question in 3.03 seconds, and Andrea in 4.07 seconds.
 
 Actual Telegram Bot API timings from gateway update receipt, in seconds:
 
@@ -278,6 +278,6 @@ Actual Telegram Bot API timings from gateway update receipt, in seconds:
 
 The timings exclude delivery before the gateway receives the update and final display on the client. Windows monitor capture blocked automation of the fresh memory confirmation in this run. Prior real Telegram save and recall evidence remains above.
 
-The [production switch and rollback](JEFF-ACTIONS.md#production-switch-and-rollback-on-the-nuc) waits for Jeff's approval. Bobserver and the production Telegram account remained outside the rehearsal.
+The [production switch and rollback](JEFF-ACTIONS.md#production-switch-and-rollback-on-the-nuc) is approved after the fresh memory check and proof that the incumbent consumer has stopped. The Nuc production draft has a separate LiteLLM lane and reviewed queue settings. Bobserver and the production Telegram account remained outside the rehearsal.
 
-BLOCKED: Production Telegram cutover needs Jeff's approval. The fresh post-restart memory confirmation is pending.
+BLOCKED: Fresh memory confirmation, approved production credential staging, and verified incumbent shutdown remain pending.

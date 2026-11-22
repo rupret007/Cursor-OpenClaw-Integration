@@ -49,15 +49,16 @@ python3 first-officer/litellm/configure.py "$candidate_config" "$lane_policy" pr
 
 Use a distinct gateway lane key in `OPENCLAW_LITELLM_API_KEY`. The installer validates a candidate config that references this variable, so make it available to the operator's validation shell and the gateway service through their approved private environment before preparing the switch.
 
-## Track Codex and Claude usage from a lane
+## Track Codex, Claude, and Cursor usage from a lane
 
-Run the tracker before each step and before any long turn. It reads whichever accounts the lane was given and reports both windows for each, with every reset rendered in America/Chicago so CST and CDT are never confused.
+Run the tracker before each step and before any long turn. It reports the supplied Codex and Claude windows and the current Cursor billing period, with resets in America/Chicago.
 
-Save the Codex reading as the raw `account/rateLimits/read` result from the lane's own `CODEX_HOME`. Save the Claude reading as a JSON object of the response headers from a claude.ai login, which carries `anthropic-ratelimit-unified-status` plus the `5h` and `7d` utilization and reset headers. Pass only the account the lane runs on; a window that is not supplied is reported as unread rather than assumed healthy.
+Save the Codex reading as the raw `account/rateLimits/read` result from the lane's own `CODEX_HOME`. Save the Claude reading as a JSON object of the response headers from a claude.ai login, which carries `anthropic-ratelimit-unified-status` plus the `5h` and `7d` utilization and reset headers. Jeff verifies the existing signed-in CLI profile against the dashboard before providing a Cursor receipt. Use a private receipt in the `account_binding` format in [the local fixture](TEST-NOW.md#4-step-2-codex-claude-and-cursor-usage-tracking). Keep the receipt outside the checkout with mode 0600 and update it by replacing it atomically. Export `CURSOR_PLAN_ACCOUNT` with the matching opaque binding from the approved operator environment. Refresh the account verification and binding after a login or profile change. Leave the reading unread when the existing dashboard session requires a new token. An unread Cursor period exits 1. Export `CURSOR_PLAN_READING` with the path for the local CLI fallback, which admits new launches below 90 percent.
 
 ```bash
 python3 first-officer/usage/track.py \
   --codex "$codex_reading" --codex-account "$lane_account" --claude "$claude_headers" \
+  --cursor "$cursor_reading" \
   --repo "$lane_checkout" --step "Step 3" --next "Start step 4" --failure "none"
 ```
 

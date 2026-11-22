@@ -168,7 +168,19 @@ These additional acceptance items follow the eight ordered integration steps. Ea
 - DONE. The secret and personal-data scan is enforced by the offline gate and by `tests/first_officer/test_privacy.py`. The November 21, 2026 scan was clean, as recorded above.
 - DONE for the review archive above. The gateway tar still waits on the private prior bundle. `first-officer/release.py` remains the single activation command. Its rollback restores the prior config, pin and service, and it does not delete the published candidate.
 - DONE. `CAPTAIN.md`, `INSTALL.md` and `LIVE-TEST.md` match the staged pilot, the scan, the review archive and the live checks that still wait for Jeff.
-- Keep Cursor fallback within plan usage and ensure paid extras remain disabled. Prove the limit and disabled billing configuration with tests and evidence.
+- DONE for the offline Cursor plan-usage gate and subscription fallback. The evidence is below.
+
+### Cursor plan usage and paid extras
+
+`first-officer/usage/track.py` submits Cursor's current billing period to the existing warning, stop and handoff code. It computes utilization from included spend and limit in the same units, reports the billing-period end in America/Chicago, and requires a reading observed within 90 seconds. Missing, expired, malformed and token-required readings report the Cursor window unread and exit 1. The billing evidence requires credits, unlimited usage, on-demand, usage billing and auto top-up to be explicitly disabled. Unknown and duplicate fields fail the check.
+
+The Cursor fallback wrapper checks the same file before starting the local CLI. At 90 percent it blocks a new launch. A configured subscription reading keeps auto-mode submissions on the CLI path even with a Cloud API key in the environment. The CLI runs Composer 2.5 through the existing login, with the Cloud key removed from its environment. A failed launch ends the attempt. The file contract is in [TEST-NOW.md](TEST-NOW.md#4-step-2-codex-claude-and-cursor-usage-tracking).
+
+On November 22, 2026, code at `efa8cb0096b633b8455d5dcd41aea4f6afc96799` passed 41 focused tests, 1,083 Python tests and 22 skill tests in the official offline gate, and all 23 Segment 1 and captain tests. The gate reported `Secret scan clean. Files 421. History commits 369. Logs 0.` on the working tree before the code commit. Fixture tests proved Cursor exits 0 at 89.9 percent, 3 at 90 and 96.9, and 4 at 97. They checked CST and CDT and verified a warning or stop commits only `HANDOFF.md`, with unrelated staged work preserved. Both CLI and auto mode made zero launches for unread input, enabled paid extras, or usage at 90 or 97 percent. Each launched the fixture executable once at 89.9 percent and made one attempt when the executable returned an error.
+
+GitHub Actions passed `first-officer-segment1`, `first-officer-tracing`, `offline-integration` and `first-officer-litellm` on the same code SHA. [CI run 44994290274](https://github.com/rupret007/Cursor-OpenClaw-Integration/actions/runs/44994290274).
+
+The evidence covers the local file, timer command and fallback process. The producer of a live dashboard reading, the live account's billing settings and timer activation remain outside that fixture proof. Follow the latest review checks on [draft PR #37](https://github.com/rupret007/Cursor-OpenClaw-Integration/pull/37).
 
 ## Review of cfaa966
 
@@ -215,3 +227,13 @@ BLOCKED: The `@andrea` and LiteLLM routing update is staged. Gateway activation,
 ## Root-owned audit anchor
 
 Jeff decided on November 21, 2026 at 10:38 AM CT that the OpenClaw audit anchor lives in `/var/lib/openclaw-fo/audit-anchor`. The directory `/var/lib/openclaw-fo/` is `root:root` mode `0755`. The file is `root:root` mode `0444`, so the OpenClaw service user can read it and cannot write or replace it. Mode `0600` is refused. Only the activation sudo step creates or updates the file. `first-officer/release.py` `activate --dry-run` prints those commands and runs none of them. `init`, `verify`, and the installed-verifier path fail closed when the seal is missing, replaced, not owned by `root:root`, or not mode-restricted. A user-writable `FO_AUDIT_ANCHOR` file does not bless a new empty chain while that seal is required. Deleting the owner-writable copies does not either. `REVIEW-935480b.md` keeps the original FAIL. Its FIXES section maps this decision to `b61fe9119f43c44a36531b738c5de6da56608acc` and the tests. Uppercase bearer detection is in `2c04162`, the LiteLLM `--llm-eval` lane is in `d60045b`, and the stale credential guards are in `a87d20a`. On November 21, 2026 `OPENAI_API_ENABLED=0 RUN_COMM_SMOKE=0 bash scripts/test_integration.sh` passed 1044 Python tests and the Node gate passed 23 tests. The secret scan printed `Secret scan clean. Files 404. History commits 362. Logs 0.` before the commit that records this paragraph. That file count includes the local gitignored `data/` tree and the untracked `REVIEW-fdc9d05.md`. No live gateway, bobserver, Telegram, or production action was used, and Phoenix, Restate and Hatchet were not installed. Draft PR #36 was not merged.
+
+## PR #37 merge-readiness review
+
+[REVIEW-efa8cb0.md](REVIEW-efa8cb0.md) records the original findings and final PASS for reviewed source `b833f6be4bedff6d4cf074e3b6b04c2c13925946`. The tracker compares exact Cursor usage at both thresholds and keeps repeat polls on one handoff commit until the lane or report changes. Publication uses an explicit lane ref, an exact prior tip, and a commit tree containing only the handoff change. The fallback verifies a private account-bound receipt and uses one Composer 2.5 launch with a restricted environment. CLI diagnostics and previews use the same plan check. Output and doctor receipts are bounded and private values are withheld.
+
+The complete offline gate passed 1,123 Python tests and 22 skill tests. The focused gate passed 71 tests. The packaged Segment 1 and captain gate passed 23. Release and installer tests passed 58. The activation block in [JEFF-ACTIONS.md](JEFF-ACTIONS.md) parsed and passed its exact offline preview with the live commands replaced by failing sentinels. It records the prior pin and config and checks the installed root-owned verifier and audit seal before switching. The gateway tar still uses the private prior bundle. [PR #37 checks](https://github.com/rupret007/Cursor-OpenClaw-Integration/pull/37/checks)
+
+The planned merge order is #33 → #36 → #37. Gateway activation, the timed Telegram cases, the supervised authority pilot, live rollback and verification of the live Cursor dashboard are Jeff's. The live features remain pending owner acceptance.
+
+READY_FOR_JEFF_INSTALL

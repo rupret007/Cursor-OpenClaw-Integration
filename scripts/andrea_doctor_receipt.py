@@ -23,6 +23,7 @@ import argparse
 import hashlib
 import json
 import os
+import stat
 import sys
 import tempfile
 import time
@@ -30,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 2
+RECEIPT_MAX_BYTES = 256 * 1024
 SUPPORTED_SCHEMA_VERSIONS = {1, 2}
 KIND = "andrea_offline_doctor_receipt"
 PACKET_KIND = "andrea_offline_doctor_audience_packet"
@@ -602,12 +604,21 @@ def verify_receipt(receipt: Any) -> tuple[bool, str, dict[str, Any]]:
 
 def load_receipt(path: Path) -> tuple[bool, str, dict[str, Any]]:
     try:
-        payload = json.loads(path.expanduser().read_text(encoding="utf-8"))
+        path = path.expanduser()
+        if not stat.S_ISREG(path.stat().st_mode):
+            return False, "unreadable_json", {}
+        with open(path, "rb", opener=lambda name, flags: os.open(name, flags | getattr(os, "O_NONBLOCK", 0))) as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_size > RECEIPT_MAX_BYTES:
+                return False, "unreadable_json", {}
+            raw = stream.read(RECEIPT_MAX_BYTES + 1)
+        if len(raw) > RECEIPT_MAX_BYTES:
+            return False, "unreadable_json", {}
+        return verify_receipt(json.loads(raw.decode("utf-8")))
     except FileNotFoundError:
         return False, "missing_file", {}
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+    except (OSError, ValueError, RecursionError):
         return False, "unreadable_json", {}
-    return verify_receipt(payload)
 
 
 def _canonical_audience(value: str) -> str | None:

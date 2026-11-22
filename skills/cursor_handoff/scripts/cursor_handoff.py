@@ -46,6 +46,13 @@ import cursor_api_common  # noqa: E402
 import handoff_context  # noqa: E402
 
 VERSION = "1.4.0"
+CLI_MODEL = "composer-2.5"
+CLI_OUTPUT_LIMIT = 256 * 1024
+CLI_ENVIRONMENT = frozenset({
+    "HOME", "PATH", "LANG", "LANGUAGE", "TZ", "XDG_CACHE_HOME", "XDG_CONFIG_DIRS",
+    "XDG_CONFIG_HOME", "XDG_DATA_DIRS", "XDG_DATA_HOME", "XDG_RUNTIME_DIR",
+    "XDG_STATE_HOME", "CURSOR_CLI_BIN", "CURSOR_PLAN_ACCOUNT", "CURSOR_PLAN_READING",
+})
 
 EXIT_OK = 0
 EXIT_VALIDATION = 2
@@ -67,7 +74,7 @@ def parse_bool_text(value: str) -> bool:
         return True
     if lowered in {"false", "0", "no", "n"}:
         return False
-    raise ValueError(f"Invalid boolean value: {value!r}. Use true|false.")
+    raise ValueError("Invalid boolean value. Use true or false.")
 
 
 def now_branch_name() -> str:
@@ -125,7 +132,7 @@ def build_handoff_prompt(user_prompt: str, read_only: bool, branch: str, include
     mode_line = (
         "READ-ONLY MODE: Analyze/review/plan only. Do NOT edit files, commit, or open PRs."
         if read_only
-        else "EDIT MODE: Ask to cancel all jobs."
+        else "EDIT MODE: Make only the changes requested in the task."
     )
     branch_line = f"\nTarget branch: {branch}" if include_branch else ""
     return f"{mode_line}{branch_line}\n\nTask:\n{user_prompt.strip()}"
@@ -146,7 +153,7 @@ def normalize_repo_input(repo_value: str) -> Tuple[Optional[Path], Optional[str]
     expanded = Path(raw).expanduser()
     if expanded.exists():
         if not expanded.is_dir():
-            return None, None, f"Repo path exists but is not a directory: {expanded}"
+            return None, None, "Repo path exists but is not a directory."
         return expanded.resolve(), None, None
 
     if raw.startswith("http://") or raw.startswith("https://"):
@@ -158,14 +165,88 @@ def normalize_repo_input(repo_value: str) -> Tuple[Optional[Path], Optional[str]
     return None, None, "Invalid --repo. Use local path, GitHub URL, or owner/repo."
 
 
-def detect_cli_binary() -> Optional[str]:
-    preferred = os.getenv("CURSOR_CLI_BIN", "").strip()
-    if preferred:
-        return preferred if shutil.which(preferred) else None
-    for name in ("agent", "cursor-agent"):
-        if shutil.which(name):
-            return name
+def operator_cli_environment() -> Dict[str, str]:
+    """Take CLI settings from the operator's environment before reading dotenv."""
+    env = {
+        key: value for key, value in os.environ.items()
+        if key in CLI_ENVIRONMENT or re.fullmatch(r"LC_[A-Z]+", key)
+    }
+    env.setdefault("HOME", str(Path.home()))
+    entries = (part for part in env.get("PATH", os.defpath).split(os.pathsep) if os.path.isabs(part))
+    env["PATH"] = os.pathsep.join(entries) or os.defpath
+    return env
+
+
+def detect_cli_binary(env: Dict[str, str]) -> Optional[str]:
+    preferred = env.get("CURSOR_CLI_BIN", "").strip()
+    if os.path.dirname(preferred) and not os.path.isabs(preferred):
+        return None
+    for name in (preferred,) if preferred else ("agent", "cursor-agent"):
+        candidate = shutil.which(name, path=env["PATH"])
+        if candidate:
+            return os.path.abspath(candidate)
     return None
+
+
+def cli_plan_error(wrapper: Path, env: Dict[str, str]) -> Optional[str]:
+    try:
+        check = subprocess.run(
+            [str(wrapper), "--check-plan"], env=env, stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "Cursor plan check is unavailable."
+    if check.returncode:
+        return "Cursor fallback requires a readable plan below the warning threshold."
+    return None
+
+
+def safe_cli_output(text: Optional[str]) -> Optional[str]:
+    if not text:
+        return text
+    path = _SCRIPTS_DIR.parents[2] / "first-officer/privacy/scan.py"
+    try:
+        spec = importlib.util.spec_from_file_location("cursor_cli_privacy_scan", path)
+        if not spec or not spec.loader:
+            return "[redacted]"
+        scanner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(scanner)
+        text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]|[\x00-\x08\x0b-\x1f\x7f-\x9f]", "", text)
+        if scanner.findings_in_text(text) or scanner.enforced_secret.search(text):
+            return "[redacted]"
+    except (OSError, ValueError, ImportError):
+        return "[redacted]"
+    return text
+
+
+def safe_cli_metadata(value: Any) -> Any:
+    if isinstance(value, str):
+        return safe_cli_output(value)
+    if isinstance(value, list):
+        return [safe_cli_metadata(item) for item in value]
+    if isinstance(value, dict):
+        return {key: safe_cli_metadata(item) for key, item in value.items()}
+    return value
+
+
+def filter_cli_output() -> int:
+    """Drain CLI output and release it only after inspecting the complete stream."""
+    stream = sys.stdin.buffer
+    raw = stream.read(CLI_OUTPUT_LIMIT + 1)
+    if len(raw) > CLI_OUTPUT_LIMIT:
+        while stream.read(64 * 1024):
+            pass
+        print("[redacted]")
+    elif raw:
+        try:
+            text = safe_cli_output(raw.decode("utf-8"))
+        except UnicodeDecodeError:
+            text = "[redacted]"
+        if text == "[redacted]":
+            print(text)
+        elif text:
+            sys.stdout.write(text)
+    return EXIT_OK
 
 
 def choose_backend(
@@ -181,7 +262,7 @@ def choose_backend(
 
     if requested_mode == "cli":
         if not cli_wrapper_path.exists():
-            return "", f"CLI mode requested but wrapper is missing: {cli_wrapper_path}"
+            return "", "CLI mode requested but the wrapper is unavailable."
         if not cli_binary:
             return "", "CLI mode requested but neither 'agent' nor 'cursor-agent' is available."
         return "cli", None
@@ -312,41 +393,31 @@ class CursorApiClient:
         return status, data, raw, "basic"
 
 
-def load_doctor_receipt_module(search_roots: list[Optional[Path]]) -> Any:
-    """Load the repo-owned receipt validator. Never invent a second checker."""
-    seen: set[Path] = set()
-    for root in search_roots:
-        if root is None:
-            continue
-        try:
-            resolved = Path(root).expanduser().resolve()
-        except OSError:
-            continue
-        if resolved in seen:
-            continue
-        seen.add(resolved)
-        script = resolved / "scripts" / "andrea_doctor_receipt.py"
-        if not script.is_file():
-            continue
-        spec = importlib.util.spec_from_file_location(
-            "andrea_doctor_receipt_handoff", str(script)
-        )
-        if spec is None or spec.loader is None:
-            continue
+def load_doctor_receipt_module(_search_roots: Optional[list[Optional[Path]]] = None) -> Any:
+    """Load the shipped validator. Target roots can supply receipt data only."""
+    script = _SCRIPTS_DIR.parents[2] / "scripts" / "andrea_doctor_receipt.py"
+    try:
+        if script.resolve() != script or not script.is_file():
+            return None
+        spec = importlib.util.spec_from_file_location("andrea_doctor_receipt_handoff", script)
+        if not spec or not spec.loader:
+            return None
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         return module
-    return None
+    except (ImportError, OSError, RuntimeError, ValueError):
+        return None
 
 
 def consult_doctor_receipt(
     *,
     explicit: str,
     local_repo: Optional[Path],
-    search_roots: list[Optional[Path]],
+    search_roots: Optional[list[Optional[Path]]] = None,
     now: Optional[float] = None,
     environ: Optional[Dict[str, str]] = None,
     cwd: Optional[Path] = None,
+    redact_cli: bool = False,
 ) -> Dict[str, Any]:
     """Consult an existing offline doctor receipt. Missing evidence is not a gate."""
     env = os.environ if environ is None else environ
@@ -403,7 +474,8 @@ def consult_doctor_receipt(
     path, source = module.resolve_handoff_receipt_path(
         explicit, local_repo=local_repo, cwd=discovery_cwd, environ=env
     )
-    return module.consult_receipt_for_handoff(path, source=source, now=now)
+    consult = module.consult_receipt_for_handoff(path, source=source, now=now)
+    return safe_cli_metadata(consult) if redact_cli else consult
 
 
 def live_handoff_block_reason(consult: Dict[str, Any], backend: str) -> Optional[str]:
@@ -458,6 +530,10 @@ def emit_text(payload: Dict[str, Any]) -> None:
         print(f"  requested_mode: {checks.get('requested_mode')}")
         print(f"  suggested_backend: {checks.get('suggested_backend')}")
         print(f"  cli_binary: {checks.get('cli_binary')}")
+        if "cli_plan_eligible" in checks:
+            print(f"  cli_plan_eligible: {checks['cli_plan_eligible']}")
+        if checks.get("cli_plan_error"):
+            print(f"  cli_plan_error: {checks['cli_plan_error']}")
         if "me" in checks:
             me = checks["me"]
             print(f"  /v0/me HTTP: {me.get('status')}")
@@ -483,7 +559,10 @@ def emit_text(payload: Dict[str, Any]) -> None:
         print(f"  backend: {payload.get('backend')}")
         if payload.get("backend_error"):
             print(f"  backend_error: {payload.get('backend_error')}")
+        if payload.get("cli_plan_error"):
+            print(f"  cli_plan_error: {payload.get('cli_plan_error')}")
         print(f"  mode_requested: {payload.get('mode_requested')}")
+        print(f"  model: {payload.get('model')}")
         print(f"  read_only: {payload.get('read_only')}")
         print(f"  branch: {payload.get('branch')}")
         print(f"  repo_input: {payload.get('repo_input')}")
@@ -693,6 +772,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    cli_env = operator_cli_environment()
+    operator_mode = os.getenv("OPENCLAW_CURSOR_DEFAULT_MODE", "auto")
     skill_root = Path(__file__).resolve().parent.parent
     dotenv_loaded = env_loader.merge_dotenv_paths(
         [skill_root / ".env", Path.cwd() / ".env"], override=False
@@ -791,9 +872,9 @@ def main() -> int:
             emit_json(payload) if args.json else emit_text(payload)
             return EXIT_VALIDATION
 
-    requested_mode = (args.mode.strip().lower() or os.getenv("OPENCLAW_CURSOR_DEFAULT_MODE", "auto").strip().lower() or "auto")
+    requested_mode = args.mode.strip().lower() or operator_mode.strip().lower() or "auto"
     if requested_mode not in {"api", "cli", "auto"}:
-        payload = {"ok": False, "error": f"Invalid mode: {requested_mode}. Use api|cli|auto."}
+        payload = {"ok": False, "error": "Invalid mode. Use api, cli, or auto."}
         emit_json(payload) if args.json else emit_text(payload)
         return EXIT_VALIDATION
 
@@ -829,19 +910,34 @@ def main() -> int:
         final_prompt = ""
 
     cli_wrapper = skill_root / "scripts" / "cursor_cli_fallback.sh"
-    cli_binary = detect_cli_binary()
+    cli_binary = detect_cli_binary(cli_env)
+    backend_mode = requested_mode
+    if requested_mode == "auto" and op == "submit" and (
+        "CURSOR_PLAN_READING" in cli_env or "CURSOR_PLAN_ACCOUNT" in cli_env
+    ):
+        backend_mode = "cli"
 
-    api_key = os.getenv("CURSOR_API_KEY", "").strip()
-    try:
-        api_base_url = normalize_base_url(os.getenv("CURSOR_BASE_URL"))
-    except ValueError as err:
-        payload = {"ok": False, "error": str(err)}
-        emit_json(payload) if args.json else emit_text(payload)
-        return EXIT_VALIDATION
+    api_key = "" if backend_mode == "cli" else os.getenv("CURSOR_API_KEY", "").strip()
     has_api_credentials = bool(api_key)
+    backend, backend_error = choose_backend(
+        requested_mode=backend_mode,
+        has_api_creds=has_api_credentials,
+        cli_wrapper_path=cli_wrapper,
+        cli_binary=cli_binary,
+    )
+    cli_selected = backend == "cli" or backend_mode == "cli"
+
+    api_base_url = None
+    if not cli_selected:
+        try:
+            api_base_url = normalize_base_url(os.getenv("CURSOR_BASE_URL"))
+        except ValueError as err:
+            payload = {"ok": False, "error": str(err)}
+            emit_json(payload) if args.json else emit_text(payload)
+            return EXIT_VALIDATION
 
     if args.diagnose:
-        suggested_backend = "api" if has_api_credentials else ("cli" if cli_binary else "none")
+        suggested_backend = backend or "none"
         openai_key = (os.getenv("OPENAI_API_KEY") or "").strip()
         openai_on = cursor_api_common.parse_openai_enabled()
         checks: Dict[str, Any] = {
@@ -851,14 +947,19 @@ def main() -> int:
             "api_base_url": api_base_url,
             "requested_mode": requested_mode,
             "suggested_backend": suggested_backend,
-            "cli_binary": cli_binary,
-            "ssl": build_ssl_diagnostics(),
-            "dotenv_files_loaded": [str(p) for p in dotenv_loaded],
+            "cli_binary": safe_cli_output(cli_binary) if cli_selected else cli_binary,
+            **({} if cli_selected else {"ssl": build_ssl_diagnostics()}),
+            "dotenv_files_loaded": [safe_cli_output(str(p)) if cli_selected else str(p) for p in dotenv_loaded],
             "openai_api_key_present": bool(openai_key),
             "openai_api_enabled": openai_on,
-            "openai_api_key_redacted": cursor_api_common.redact_secret(openai_key) if args.show_key else "***",
+            "openai_api_key_redacted": cursor_api_common.redact_secret(openai_key)
+            if args.show_key and not cli_selected else "***",
         }
-        if has_api_credentials:
+        if cli_selected:
+            plan_error = cli_plan_error(cli_wrapper, cli_env)
+            checks["cli_plan_eligible"] = plan_error is None
+            checks["cli_plan_error"] = plan_error
+        if backend == "api" and not args.dry_run:
             api_client = CursorApiClient(
                 ApiConfig(
                     base_url=api_base_url,
@@ -886,7 +987,7 @@ def main() -> int:
         receipt_consult = consult_doctor_receipt(
             explicit=getattr(args, "receipt", "") or "",
             local_repo=local_repo,
-            search_roots=[Path.cwd(), local_repo, skill_root.parent.parent],
+            redact_cli=cli_selected,
         )
         checks["doctor_receipt"] = receipt_consult
         payload = {
@@ -899,14 +1000,17 @@ def main() -> int:
         return EXIT_OK
 
     if args.dry_run:
-        backend, backend_error = choose_backend(
-            requested_mode=requested_mode,
-            has_api_creds=has_api_credentials,
-            cli_wrapper_path=cli_wrapper,
-            cli_binary=cli_binary,
-        )
+        plan_error = cli_plan_error(cli_wrapper, cli_env) if cli_selected else None
+        if cli_selected and backend == "cli":
+            if op != "submit":
+                backend_error = "CLI mode supports submission only."
+            elif local_repo is None:
+                backend_error = "CLI mode requires a local repo directory."
+        preview = final_prompt if op == "submit" else prompt_text
+        if cli_selected:
+            preview = safe_cli_output(preview)
         payload = {
-            "ok": True,
+            "ok": not cli_selected or not (backend_error or plan_error),
             "dry_run": True,
             "backend": backend if backend else "unavailable",
             "backend_error": backend_error,
@@ -925,13 +1029,18 @@ def main() -> int:
             "timeout_seconds": args.timeout_seconds,
             "api_retries": args.api_retries,
             "cli_timeout_seconds": args.cli_timeout_seconds,
-            "prompt_preview": final_prompt[:500] if op == "submit" else prompt_text[:500],
-            "model": api_model,
+            "prompt_preview": preview[:500],
+            "model": CLI_MODEL if cli_selected else api_model,
         }
+        if cli_selected:
+            payload["cli_plan_eligible"] = plan_error is None
+            payload["cli_plan_error"] = plan_error
+            for field in ("agent_id", "branch", "repo_input", "repo_local_path", "repo_url", "cli_binary"):
+                payload[field] = safe_cli_output(payload[field])
         receipt_consult = consult_doctor_receipt(
             explicit=getattr(args, "receipt", "") or "",
             local_repo=local_repo,
-            search_roots=[Path.cwd(), local_repo, skill_root.parent.parent],
+            redact_cli=cli_selected,
         )
         payload["doctor_receipt"] = receipt_consult
         payload["receipt_would_block"] = live_handoff_block_reason(
@@ -944,12 +1053,6 @@ def main() -> int:
         emit_json(payload) if args.json else emit_text(payload)
         return EXIT_OK
 
-    backend, backend_error = choose_backend(
-        requested_mode=requested_mode,
-        has_api_creds=has_api_credentials,
-        cli_wrapper_path=cli_wrapper,
-        cli_binary=cli_binary,
-    )
     if not backend:
         payload = {"ok": False, "error": backend_error}
         emit_json(payload) if args.json else emit_text(payload)
@@ -958,7 +1061,7 @@ def main() -> int:
     receipt_consult = consult_doctor_receipt(
         explicit=getattr(args, "receipt", "") or "",
         local_repo=local_repo,
-        search_roots=[Path.cwd(), local_repo, skill_root.parent.parent],
+        redact_cli=cli_selected,
     )
     receipt_block = live_handoff_block_reason(receipt_consult, backend)
     if receipt_block:
@@ -991,7 +1094,7 @@ def main() -> int:
             emit_json(payload) if args.json else emit_text(payload)
             return EXIT_VALIDATION
         if not cli_wrapper.exists():
-            payload = {"ok": False, "backend": "cli", "error": f"CLI wrapper missing: {cli_wrapper}"}
+            payload = {"ok": False, "backend": "cli", "error": "The Cursor CLI wrapper is unavailable."}
             emit_json(payload) if args.json else emit_text(payload)
             return EXIT_PREREQ
         if not cli_binary:
@@ -999,13 +1102,15 @@ def main() -> int:
             emit_json(payload) if args.json else emit_text(payload)
             return EXIT_PREREQ
 
-        env = os.environ.copy()
-        env["CURSOR_CLI_BIN"] = cli_binary
+        cli_env["CURSOR_CLI_BIN"] = cli_binary
         run_kw: Dict[str, Any] = {
             "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+            "stdin": subprocess.DEVNULL,
             "capture_output": True,
             "check": False,
-            "env": env,
+            "env": cli_env,
         }
         if args.cli_timeout_seconds > 0:
             run_kw["timeout"] = args.cli_timeout_seconds
@@ -1023,14 +1128,18 @@ def main() -> int:
             }
             emit_json(payload) if args.json else emit_text(payload)
             return EXIT_CLI
+        except OSError:
+            payload = {"ok": False, "backend": "cli", "error": "Could not start the Cursor CLI wrapper."}
+            emit_json(payload) if args.json else emit_text(payload)
+            return EXIT_CLI
         if proc.returncode != 0:
             payload = {
                 "ok": False,
                 "backend": "cli",
                 "error": "CLI handoff failed",
                 "exit_code": proc.returncode,
-                "stdout": proc.stdout.strip(),
-                "stderr": proc.stderr.strip(),
+                "stdout": safe_cli_output(proc.stdout.strip()),
+                "stderr": safe_cli_output(proc.stderr.strip()),
             }
             emit_json(payload) if args.json else emit_text(payload)
             return EXIT_CLI
@@ -1041,10 +1150,10 @@ def main() -> int:
             "submitted": True,
             "status": "submitted",
             "read_only": read_only,
-            "branch": branch,
-            "model": api_model,
-            "cli_binary": cli_binary,
-            "stdout": proc.stdout.strip(),
+            "branch": safe_cli_output(branch),
+            "model": CLI_MODEL,
+            "cli_binary": safe_cli_output(cli_binary),
+            "stdout": safe_cli_output(proc.stdout.strip()),
         }
         emit_json(payload) if args.json else emit_text(payload)
         return EXIT_OK
@@ -1270,6 +1379,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--filter-cli-output"]:
+        sys.exit(filter_cli_output())
     try:
         sys.exit(main())
     except KeyboardInterrupt:

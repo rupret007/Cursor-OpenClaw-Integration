@@ -1,8 +1,14 @@
 # First Officer handoff
 
-Resume on branch `codex-candace/fo-finish-20261120`. The commit that contains this file is the resume point. Use `git rev-parse HEAD`. Draft PR #36 targets `codex/first-officer-segment-1`.
+Work is on `codex-travis/fo-cursor-plan-20261122` in [PR #37](https://github.com/rupret007/Cursor-OpenClaw-Integration/pull/37). The reviewed base is #36 at `3733bf1119977c92eeb668b12757de8ab3384770`, stacked on #33 at `3d350ba`. The fixed source head is `b833f6be4bedff6d4cf074e3b6b04c2c13925946`. Use the published PR head as the approved checkout after confirming its checks.
 
-## Done in this checkout
+## Cursor fallback and review
+
+[REVIEW-efa8cb0.md](REVIEW-efa8cb0.md) preserves the independent FAIL findings and records their fixes and final PASS. The new private receipt carries Jeff's opaque account binding. An unread or mismatched plan, enabled billing extras, and usage at 90 percent or above all block the fallback. CLI mode strips ambient credentials and runs one Composer 2.5 process. Read-only work uses Ask mode. The handoff commit changes only `HANDOFF.md` on the named lane. Repeated warning polls keep the same resume point.
+
+The full offline gate passed 1,123 Python tests and 22 skill tests. The combined focused gate passed 71 tests, the Segment 1 and captain gate passed 23, and the release and installer gate passed 58. The original offline baseline passed 1,083 Python and 22 skill tests with the installed Node directory on PATH. The [PR checks](https://github.com/rupret007/Cursor-OpenClaw-Integration/pull/37/checks) report all four jobs for the published head. [TEST-NOW.md](TEST-NOW.md) gives the local commands.
+
+## Prior work on the reviewed base
 
 Steps 1 through 8 and the review fixes for `0878331`, `cfaa966`, `acc0167`, `4046f4a`, `bc5be0f`, `e8a23ac`, `95f2493`, and `935480b` have local evidence in `STATUS.md` and the matching `REVIEW-*.md` files. `REVIEW-95f2493.md` keeps the original FAIL. Its FIXES section maps each finding to the commit and the test. The root-owned audit anchor is in `b61fe9119f43c44a36531b738c5de6da56608acc`. Jeff still runs that sudo step on bobserver.
 
@@ -10,11 +16,11 @@ Restricted news, research, recent-message and synthesis lookups answer a normal 
 
 ## Next
 
-Follow `RESEARCH-SETUP.md`. Leave Phoenix, Restate and Hatchet uninstalled until Jeff approves a host and the licenses are checked. Phoenix 22.0.0 is the tracing target, not Langfuse, and its license is read from the image before any install. The status page stays on loopback and Tailscale Serve. Never Funnel and never a public bind. Cursor plan usage is still open. Do not activate the live pilot or roll back the live gateway. Do not install Llama Prompt Guard unless Jeff asks, and do not add LLM Guard. Do not merge.
+The planned merge order is #33 → #36 → #37, subject to Jeff's approval. Use the single [activation block](JEFF-ACTIONS.md#1-approve-and-activate-the-combined-release) and keep its separate rollback command. The exact activation preview ran offline. Build the gateway tar on the Nuc from the private prior bundle before Jeff starts the live activation.
 
-## Open failures
+## Pending owner checks
 
-None in the local gates. `REVIEW-935480b.md` keeps the original FAIL. Its FIXES section maps the mixed-pair rollback, the activation path wording, and the root-owned audit anchor to the commit and the test. Uppercase bearer detection, the LiteLLM `--llm-eval` lane, and the stale credential guards are in this checkout. The four pull-request jobs passed on `aa6af5d85b609c75177b6f1760e47fe72fb710f0`. This handoff does not claim those jobs for the later commits. Gateway activation, the timed Telegram checks in `LIVE-TEST.md`, the live authority pilot and a live rollback still wait for Jeff. The gateway tar still needs the private prior bundle. The installed verifier program at `/opt/openclaw-fo/verify-install.py` is not in this checkout; Jeff's check for that file is in `JEFF-ACTIONS.md`. Section 5 is the paste-ready sudo step Jeff runs on bobserver during activation. It has not been run. Draft PR #36 was not merged.
+Jeff verifies the existing Cursor CLI login against the live dashboard and supplies the private receipt. Gateway activation, timed Telegram checks, the supervised authority pilot, the root-owned audit seal and live rollback remain his checkpoints. Keep the external queue and tracing services uninstalled.
 
 ## Do not
 

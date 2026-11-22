@@ -1,45 +1,64 @@
 # What needs Jeff
 
-The offline work recorded in [STATUS.md](STATUS.md) can be checked with [TEST-NOW.md](TEST-NOW.md). The items below are the ones that touch the live gateway, Telegram or production authority, so each one waits for you. None of these live items has been started.
-
-Before any of it, you can verify the finished work yourself with [TEST-NOW.md](TEST-NOW.md). None of those checks touch anything live.
+[TEST-NOW.md](TEST-NOW.md) covers the offline checks. [PR #33](https://github.com/rupret007/Cursor-OpenClaw-Integration/pull/33) carries the original Segment 1 work. [PR #36](https://github.com/rupret007/Cursor-OpenClaw-Integration/pull/36) carries the combined release. [PR #37](https://github.com/rupret007/Cursor-OpenClaw-Integration/pull/37) follows #36 with the Cursor plan checks. The planned merge order is #33 → #36 → #37, with Jeff's approval before each merge to main. Use the full approved commit for both checkouts.
 
 ## 1. Approve and activate the combined release
 
-One digest and one activation command. The rollback restores the prior config, pin, and service. It does not delete the published candidate or undo a separately provisioned reader or proxy. Build the candidate on the Nuc from the private prior bundle, read the digest, then activate on bobserver. The review archive from `first-officer/archive.py` is the offline copy of this lane. It is not this activation.
+Build on the Nuc from the retained `first-officer-61ff4565dd5638a886effefbd720c92a17b7388acbc6eeaffb7779f78d3f1b36.tar` in the private `OpenClawFirstOfficer/segment1` directory under Windows LocalAppData. From WSL, extract it into a private directory and set `PRIOR_BUNDLE` to the extracted directory containing `SHA256SUMS`. In the clean reviewed checkout, set `REVIEWED_HEAD` to the approved full Git commit, create a private staging directory with `staging="$(mktemp -d)"`, and run `nice -n 10 python3 -B first-officer/release.py build "$PRIOR_BUNDLE" "$staging" --reviewed-head "$REVIEWED_HEAD"`. Keep the digest and private tar printed by the build. Transfer that tar to `~/.openclaw/segment1-staged/` on bobserver. The offline review archive is a separate artifact.
 
-Export `FO_ACCEPTANCE_ROOT` to the acceptance directory you already initialized, and export `OPENCLAW_LITELLM_API_KEY` from the approved private environment, before build or activate. Create `$backup_parent` as a private directory before activate. Activation reads `FO_ACCEPTANCE_ROOT` and fails closed when it is unset. It does not treat `$FO_ACCEPTANCE_ROOT` as a directory.
+On bobserver, use the gateway owner's terminal in the same clean reviewed checkout. Load `OPENCLAW_LITELLM_API_KEY` through the approved private environment in the operator shell and the gateway service. Use the existing acceptance directory with a verified, nonempty audit chain. The installed verifier at `/opt/openclaw-fo/verify-install.py` must be a readable `root:root` regular file with group and other write access disabled. The activation command checks that before it touches the gateway.
 
-```bash
-export FO_ACCEPTANCE_ROOT="$root"
-: "${OPENCLAW_LITELLM_API_KEY:?Export OPENCLAW_LITELLM_API_KEY from the approved private environment before activate}"
-mkdir -p -- "$backup_parent"
-chmod 700 "$backup_parent"
-python3 -B first-officer/release.py build "$PRIOR_BUNDLE" "$staging" --reviewed-head "$REVIEWED_HEAD"
-python3 -B first-officer/release.py activate "$release" "$archive" "$backup_parent"
-```
-
-Preview either one with `--dry-run` first; it prints the exact ordered commands and runs none of them. With `FO_ACCEPTANCE_ROOT` unset, activate `--dry-run` fails closed and does not print a quoted `$FO_ACCEPTANCE_ROOT`. Activation refuses to start unless the gateway is already running, the GitHub CLI is authenticated as the owner account and the existing Andrea read-only bridge answers. It compares the manifest digest with the approved release and records the private rollback before it publishes the candidate. It installs the root-owned audit anchor from section 5 after that rollback is recorded and before it publishes, then runs `cycle.py verify`. It then publishes the candidate read-only under its digest, switches, and waits for readiness. It stops at the first failure.
-
-The private rollback directory is printed only after that backup exists. A failure before then does not name a missing path. Rollback does not need `FO_ACCEPTANCE_ROOT`. It still checks the saved config and pin, and it restores that pair when the acceptance directory or the production seal is missing or damaged.
+Paste this block. It prints the activation and conditional rollback plans before asking you to type `ACTIVATE`. You can preview it in the local reviewed checkout by entering a dummy 64-character lowercase hex release digest and dummy absolute acceptance path, then pressing Enter at the confirmation. That runs only the dry-run command and needs no tar, key, Bobserver connection or sudo.
 
 ```bash
-python3 -B first-officer/release.py rollback "$backup"
+(
+  set +x
+  set -euo pipefail
+  umask 077
+  read -r -p 'Approved full Git commit: ' reviewed_head
+  [[ "$reviewed_head" =~ ^[0-9a-f]{40}$ ]]
+  [[ "$(git rev-parse HEAD)" = "$reviewed_head" ]]
+
+  read -r -p 'Approved release digest: ' release
+  [[ "$release" =~ ^[0-9a-f]{64}$ ]]
+  read -r -p 'Existing acceptance directory on bobserver: ' root
+  export FO_ACCEPTANCE_ROOT="$root"
+  baseline=61ff4565dd5638a886effefbd720c92a17b7388acbc6eeaffb7779f78d3f1b36
+  archive="$HOME/.openclaw/segment1-staged/first-officer-$release.tar"
+  backup_parent="$HOME/.openclaw/backups/fo-combined-$release-$(date +%s)-$$"
+
+  nice -n 10 python3 -B first-officer/release.py --dry-run activate \
+    "$release" "$archive" "$backup_parent" --from-release "$baseline"
+  read -r -p 'Type ACTIVATE on bobserver to switch this release: ' confirm
+  [[ "$confirm" = ACTIVATE ]] || exit 0
+
+  [[ -z "$(git status --porcelain --untracked-files=all)" ]]
+
+  : "${OPENCLAW_LITELLM_API_KEY:?Load the approved gateway lane key into this shell}"
+  export OPENCLAW_LITELLM_API_KEY
+  test -r "$archive"
+  test -d "$FO_ACCEPTANCE_ROOT"
+  mkdir -p -- "$HOME/.openclaw/backups"
+  mkdir -m 0700 -- "$backup_parent"
+  nice -n 10 python3 -B first-officer/release.py activate \
+    "$release" "$archive" "$backup_parent" --from-release "$baseline"
+)
 ```
 
-What changes when this is active: the `@andrea` prefix in your private owner chat routes to the existing restricted Mac reader, and the gateway's routed model traffic uses its own budgeted LiteLLM lane key instead of the shared credential.
+Activation checks the running gateway, GitHub owner login, the restricted Andrea reader and the candidate inventory. It snapshots the exact prior config and pin, installs and verifies the root-owned audit seal, then publishes the candidate read-only. With the store copy in place, the installed verifier receives the saved candidate config, approved digest, and pin's rollback slot. A verifier failure stops the release before the gateway switches. The installer waits for `/readyz` and attempts to restore the prior pair if readiness fails. If the switch succeeds and its final service status check fails, the wrapper attempts one rollback and returns failure even after recovery.
 
-The checkout does not contain the installed verifier `/opt/openclaw-fo/verify-install.py`. Activation calls it with the same three arguments as the service pin: the config path, the release digest, and the rollback slot. It does not pass the unpacked directory. `verify-candidate` runs that command after the candidate files are in place with their installed read-only permissions and before the gateway is switched. A non-zero exit leaves the gateway running and removes the rejected directory only if the complete prior config and pin are still in place and there is no switch journal. You can run the same read-only check yourself before the switch. It must exit 0:
+The exact installed verifier invocation before the switch is `python3 -I -B /opt/openclaw-fo/verify-install.py "$backup/candidate-openclaw.json" "$release" 4759047e8a16d1691499d55c4b6656882e67bc2275a3297d2283aa9b01538753`.
+
+Keep the printed private rollback directory. A manual rollback uses the saved config and pin and needs no acceptance root. The seal and published bundle stay on disk.
 
 ```bash
-python3 -I -B /opt/openclaw-fo/verify-install.py "$backup/candidate-openclaw.json" "$release" 4759047e8a16d1691499d55c4b6656882e67bc2275a3297d2283aa9b01538753
+read -r -p 'Private rollback directory printed by activation: ' backup
+nice -n 10 python3 -B first-officer/release.py rollback "$backup"
 ```
-
-A non-zero exit means that installed program rejected the candidate. Leave the gateway on the current release and do not run the switch. If the candidate might already be in use, `verify-candidate` preserves its store directory.
 
 ## 2. Run the timed Telegram acceptance checks
 
-After the release is active, work through [LIVE-TEST.md](LIVE-TEST.md) in the private owner chat and report which checks pass. These are the first messages that reach the live bot, so they need you at the keyboard. The check that previously failed was the Andrea text summary; the current release answers the untagged command `summarize my texts` and its common spelling variants through the read-only reader.
+After a successful activation, run [LIVE-TEST.md](LIVE-TEST.md) in Bob the Bot's private owner chat. Check fleet, gate, PRs and CI, memory save and recall, quota, a simple model answer and Andrea. Send `@andrea summarize my texts`, then test `summarize my texts` and `summarise my texts` without the mention. Check for useful, accurate findings from a recent approved thread. Record only each case, typing and acknowledgment within two seconds, elapsed time and pass or fail.
 
 ## 3. Approve the supervised authority pilot
 
@@ -64,34 +83,30 @@ The operator commands for steps 3 through 9 are in [CAPTAIN.md](CAPTAIN.md). Kee
 
 ## 4. Confirm a live rollback window
 
-The staged file restore already ran. On November 20, 2026 it printed `Restored the prior pin in 114 us. The gateway was not touched.` That number is the copy on disk, not a gateway restart. A live rollback still stops and starts `openclaw-gateway.service`, and that has not been run. Use the private backup from an activation when you want that window.
-
-```bash
-python3 -B first-officer/release.py rollback "$backup"
-```
-
-That command does not need `FO_ACCEPTANCE_ROOT`. A missing or damaged acceptance directory or production seal does not block it. The saved config and pin are still validated, and a failed rollback does not start the candidate.
+The staged drill restored a file on disk. A live rollback stops and starts `openclaw-gateway.service`. For that check, arrange a separate window and use the private backup and [rollback command in section 1](#1-approve-and-activate-the-combined-release).
 
 ## 5. Install the root-owned audit anchor during activation
 
 You run this on bobserver while activating. It is the sudo step that creates or updates the audit anchor. The file is `/var/lib/openclaw-fo/audit-anchor`. The directory is `/var/lib/openclaw-fo/`. Both are `root:root`. The directory is mode `0755`. The file is mode `0444`, so the OpenClaw service user can read it and cannot write or replace it. Mode `0600` is not used, because the service must be able to read the file. Only this root step creates or updates the file. Do not point `FO_AUDIT_ANCHOR` at it. That variable is still only an owner-writable copy, and a user-writable copy does not bless a new chain while this file is required.
 
-Set `FO_ACCEPTANCE_ROOT` to the acceptance directory you already initialized, and `$backup` to the private rollback directory from activation. `export-anchor` writes a private payload. The payload does not contain the audit key. Run these commands before the candidate is published. `--dry-run` prints them and runs none of them.
+Before publishing, activation runs `export-anchor` to create the private seal payload in the rollback directory. The audit key stays in the acceptance directory. The sudo steps install the directory and seal with the ownership and modes above. Activation then verifies the sealed chain. The activation preview lists each command.
 
-```bash
-export FO_ACCEPTANCE_ROOT="$root"
-anchor_payload="$backup/audit-anchor"
-python3 -B first-officer/acceptance/cycle.py --root "$FO_ACCEPTANCE_ROOT" export-anchor "$anchor_payload"
+For inspection, the dry run shows these exact seal commands after it exports the payload. They are part of activation.
+
+```text
 sudo install -d -o root -g root -m 0755 /var/lib/openclaw-fo
 sudo install -o root -g root -m 0444 "$anchor_payload" /var/lib/openclaw-fo/audit-anchor
 sudo chown root:root /var/lib/openclaw-fo /var/lib/openclaw-fo/audit-anchor
 sudo chmod 0755 /var/lib/openclaw-fo
 sudo chmod 0444 /var/lib/openclaw-fo/audit-anchor
-python3 -B first-officer/acceptance/cycle.py --root "$FO_ACCEPTANCE_ROOT" verify
 ```
 
 Success from `export-anchor` is `Audit anchor payload written.` The sudo commands print nothing and exit 0. Success from `verify` is `Audit chain verified: <n> lines.`
 
 `export-anchor` runs `verify` before it writes a payload. It fails closed, exits 1, and writes nothing when `verify` would reject the chain, including a forged `memory.json`, `pending.json`, or `receipt-lane-review.json`. It also fails closed when a required seal is missing, replaced, not owned by root, or not mode-restricted, including mode `0666`. The first installation can export only when `/var/lib/openclaw-fo` does not exist yet, `FO_PRODUCTION_AUDIT_ANCHOR` is unset, and `verify` accepts the chain. After the seal exists, export succeeds only for that chain or a later extension `verify` accepts, so these sudo commands can update the seal. An empty chain, sequence `-1`, is not sealed. The seal anchors history only through the last sudo install. Events appended after that install can be removed until the next one. Events at or before a sealed sequence of zero or higher cannot.
 
-If export, verify, or the installed verifier fails closed, stop. Do not publish the candidate and do not switch the gateway. The command exits 1. The message says the anchor is missing, was replaced, is not owned by root, or is not mode-restricted. Leave `/var/lib/openclaw-fo/audit-anchor` in place. Deleting the acceptance directory, the trust directory, the witness directory, `root.id`, `anchor.json`, or replacing a user-writable `FO_AUDIT_ANCHOR` file does not bless a new empty chain while this root-owned file remains. Do not delete that file to start a new chain. Initialize a new acceptance directory only before the file exists. After it exists, run these sudo commands again only when `verify` would accept the current chain and that chain is the history you intend to keep.
+An anchor export or audit verification failure stops before the candidate is published. A candidate verifier failure stops before the gateway switch. The command exits 1 and reports which step failed. Leave `/var/lib/openclaw-fo/audit-anchor` in place. Deleting the acceptance directory, the trust directory, the witness directory, `root.id`, `anchor.json`, or replacing a user-writable `FO_AUDIT_ANCHOR` file does not bless a new empty chain while this root-owned file remains. Do not delete that file to start a new chain. Initialize a new acceptance directory only before the file exists. After it exists, run these sudo commands again only when `verify` would accept the current chain and that chain is the history you intend to keep.
+
+## 6. Verify live Cursor allowance
+
+On the Nuc, check the Cursor dashboard in the existing signed-in profile that the Cursor CLI will use. Confirm that its current included-plan period and all billing switches match the receipt. Keep the verified account binding and the private mode-0600 receipt outside the repo, and use the matching binding when running the tracker and fallback. Leave the reading unread if the dashboard requires a new token. See the [fixture format and expected tracker result](TEST-NOW.md#4-step-2-codex-claude-and-cursor-usage-tracking) and [operator setup](INSTALL.md#track-codex-claude-and-cursor-usage-from-a-lane).

@@ -82,6 +82,9 @@ def test_dry_run_prints_the_ordered_plan_and_runs_nothing(tmp_path, capsys):
     assert recorder.calls == []
     assert "sudo mv -nT '{publish}' /opt/openclaw-fo/first-officer-" + CANDIDATE in printed
     assert "(reads the packaged Andrea preflight on standard input)" in printed
+    assert "/opt/openclaw-fo/verify-install.py" in printed
+    assert "If the final service check fails after the switch succeeds, roll back and exit 1." in printed
+    assert "Confirm the gateway is active after the rollback" in printed
 
 
 def test_one_build_command_stages_gates_and_packs_in_order(tmp_path, capsys):
@@ -412,6 +415,8 @@ def test_activate_dry_run_prints_the_root_audit_anchor_commands(tmp_path, capsys
     install = (ROOT / "INSTALL.md").read_text(encoding="utf-8")
     assert "Audit anchor payload written." in guide
     assert "Audit anchor payload written." in install
+    assert "/var/lib/openclaw-fo/audit-anchor" in guide
+    assert all(value in guide for value in ("root:root", "0755", "0444"))
     section = guide.split("## 2.")[0]
     assert 'export FO_ACCEPTANCE_ROOT="$root"' in section
     assert "OPENCLAW_LITELLM_API_KEY" in section
@@ -474,6 +479,7 @@ def test_one_activate_command_preflights_publishes_and_switches_in_order(tmp_pat
 
     order = [what for what, _ in recorder.calls]
     assert order == [
+        "Confirm the installed release verifier is a readable root-owned file",
         "Confirm the gateway is running before any change",
         "Confirm the GitHub CLI authenticates as the configured owner",
         "Confirm the existing Andrea read-only bridge answers",
@@ -595,6 +601,74 @@ def test_activation_copy_is_readable_by_the_operator_at_verification(tmp_path, m
     assert (published / "plugin.mjs").stat().st_mode & 0o777 == 0o444
 
 
+def test_verifier_preflight_refuses_missing_or_symlink_paths(tmp_path):
+    plan = release.activate_plan(ROOT, CANDIDATE, tmp_path / "a.tar", tmp_path, tmp_path / "switch")
+    entry = plan[0]
+    assert entry["argv"][-1] == "/opt/openclaw-fo/verify-install.py"
+    check = entry["argv"][:-1]
+    readable_root_file = Path("/usr/bin/env").resolve(strict=True)
+    assert readable_root_file.is_file() and readable_root_file.stat().st_uid == 0
+    assert subprocess.run([*check, readable_root_file], check=False).returncode == 0
+    symlink = tmp_path / "verifier.py"
+    symlink.symlink_to(readable_root_file)
+    assert subprocess.run([*check, symlink], check=False).returncode == 1
+    assert subprocess.run([*check, tmp_path / "missing.py"], check=False).returncode == 1
+
+
+@pytest.mark.parametrize("uid,gid,mode,readable,expected", [
+    (0, 0, 0o100644, True, 0),
+    (1, 0, 0o100644, True, 1),
+    (0, 1, 0o100644, True, 1),
+    (0, 0, 0o100664, True, 1),
+    (0, 0, 0o100646, True, 1),
+    (0, 0, 0o100600, False, 1),
+])
+def test_verifier_preflight_requires_safe_metadata(monkeypatch, uid, gid, mode, readable, expected):
+    fake_info = os.stat_result((mode, 0, 0, 1, uid, gid, 0, 0, 0, 0))
+    with monkeypatch.context() as fixture:
+        fixture.setattr(os, "lstat", lambda _: fake_info)
+        fixture.setattr(os, "access", lambda *_: readable)
+        fixture.setattr(sys, "argv", ["-c", "/fixture/verifier.py"])
+        with pytest.raises(SystemExit) as result:
+            exec(release.VERIFIER_PREFLIGHT, {})
+    assert result.value.code == expected
+
+
+@pytest.mark.parametrize("failure,recovery_failure,last_step,error", [
+    ("Confirm the gateway is active after the switch", False, "Confirm the gateway is active after the rollback",
+     "Post-activation gateway check failed."),
+    ("Confirm the gateway is active after the switch", True, "Restore the exact prior config and pin",
+     "Automatic rollback failed."),
+    ("Switch the gateway to the reviewed release", False, "Switch the gateway to the reviewed release",
+     "Release step failed"),
+])
+def test_activation_recovers_only_after_successful_switch(tmp_path, capsys, failure, recovery_failure, last_step, error):
+    recorder = Recorder(activate_replies(), failure=failure)
+    backup = tmp_path / "switch"
+
+    def runner(entry, substitutions):
+        result = recorder(entry, substitutions)
+        if entry["what"] == "Prepare the switch and record the private rollback":
+            write_private_rollback(backup)
+        if recovery_failure and entry["what"] == "Restore the exact prior config and pin":
+            raise ValueError("The installer could not restore the gateway")
+        return result
+
+    assert release.main(["activate", CANDIDATE, str(tmp_path / "a.tar"), str(tmp_path)], runner) == 1
+    order = [what for what, _ in recorder.calls]
+    assert order[-1] == last_step
+    assert order.count("Restore the exact prior config and pin") == (
+        failure == "Confirm the gateway is active after the switch"
+    )
+    captured = capsys.readouterr()
+    assert error in captured.err
+    assert f"Keep this private rollback directory: {backup}" in captured.out
+    assert f"First Officer release {CANDIDATE} is active." not in captured.out
+    assert ("The prior config and pin are restored and the gateway is active." in captured.out) == (
+        last_step == "Confirm the gateway is active after the rollback"
+    )
+
+
 def test_activate_stops_at_the_first_failure_and_points_at_the_rollback(tmp_path, capsys):
     recorder = Recorder(activate_replies(), failure="Check the candidate inventory against the reviewed digest")
     assert release.main(["activate", CANDIDATE, str(tmp_path / "a.tar"), str(tmp_path)], recorder) == 1
@@ -669,7 +743,11 @@ def test_activate_refuses_a_foreign_github_login_and_an_unexpected_staging_direc
     recorder = Recorder(wrong_owner)
     assert release.main(["activate", CANDIDATE, str(tmp_path / "a.tar"), str(tmp_path)], recorder) == 1
     assert "unusable result" in capsys.readouterr().err
-    assert len(recorder.calls) == 2
+    assert [what for what, _ in recorder.calls] == [
+        "Confirm the installed release verifier is a readable root-owned file",
+        "Confirm the gateway is running before any change",
+        "Confirm the GitHub CLI authenticates as the configured owner",
+    ]
 
     escaped = {**activate_replies(),
                "Reserve a private staging directory under the release store": "/tmp/anywhere"}

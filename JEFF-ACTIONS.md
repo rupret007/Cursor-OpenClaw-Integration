@@ -118,3 +118,11 @@ An anchor export or audit verification failure stops before the candidate is pub
 ## 6. Verify live Cursor allowance
 
 On the Nuc, check the Cursor dashboard in the existing signed-in profile that the Cursor CLI will use. Confirm that its current included-plan period and all billing switches match the receipt. Keep the verified account binding and the private mode-0600 receipt outside the repo, and use the matching binding when running the tracker and fallback. Leave the reading unread if the dashboard requires a new token. See the [fixture format and expected tracker result](TEST-NOW.md#4-step-2-codex-claude-and-cursor-usage-tracking) and [operator setup](INSTALL.md#track-codex-claude-and-cursor-usage-from-a-lane).
+
+### Production switch and rollback on the Nuc
+
+1. Keep the separate test bot on the Nuc until its restart checks pass. Prepare a separate production config, environment, state directory, and budgeted local LiteLLM lane.
+2. Wait for Jeff's approval. Identify the current production Telegram consumer and verify it has stopped before the Nuc starts polling. Keep the production bot parked if you cannot verify that stop.
+3. Pair the Nuc and Mac authority keys. For the first standalone lease, initialize it on the Mac with Telegram disabled. Park the Mac and import its signed handoff on the Nuc. Verify the new active epoch.
+4. Stop the separate test consumer. Provide the production bot identity and owner allowlist privately, then start the guarded Nuc service and run LIVE-TEST.md in the production owner chat.
+5. To roll back, stop and verify the Nuc process has exited. Preserve its private state and receipts. Drain reviews, sign a newer handoff to the prepared Mac, and verify its epoch and bot identity before starting its consumer. Keep the bot parked if the Mac is unavailable. Bobserver stays outside this cutover.

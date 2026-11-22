@@ -257,6 +257,8 @@ const activityDevelopments = new Map([
   ['plan-confirmed', 'plan-confirmed'], ['share-item', 'shared-item'], ['share-update', 'update'],
 ]);
 
+const followUpIntents = new Set(['ask-time', 'ask-location', 'ask-confirmation', 'ask-question', 'request-action']);
+
 export function describeAndreaActivity(groups) {
   const messages = groups.flatMap((group, conversation) => group.map((row) => ({
     conversation, timestamp: Date.parse(row.timestamp), preview: row.preview, isFromMe: row.isFromMe,
@@ -265,6 +267,14 @@ export function describeAndreaActivity(groups) {
     .sort((a, b) => b.timestamp - a.timestamp);
   const topics = new Set();
   const developments = new Set();
+  const lastOutgoing = new Map();
+  for (const message of messages) {
+    if (message.isFromMe && !lastOutgoing.has(message.conversation)) {
+      lastOutgoing.set(message.conversation, message.timestamp);
+    }
+  }
+  const conversationsToCheck = new Set();
+  const followUps = new Map();
   let latest = null;
 
   for (const message of messages) {
@@ -281,16 +291,26 @@ export function describeAndreaActivity(groups) {
     const development = activityDevelopments.get(intent);
     if (development) developments.add(development);
 
-    if (latest === null && !message.isFromMe) {
-      const outgoing = messages.filter((candidate) => candidate.conversation === message.conversation && candidate.isFromMe);
-      // A later outgoing preview shows activity in the same chat, not which message it answered.
-      const reply = outgoing.some(({ timestamp }) => timestamp > message.timestamp) ? 'later' :
-        outgoing.some(({ timestamp }) => timestamp < message.timestamp) ? 'earlier' : 'none';
-      latest = { intent, topic: labels[0] ?? null, reply };
+    if (!message.isFromMe) {
+      const outgoing = lastOutgoing.get(message.conversation);
+      if (latest === null) {
+        const reply = outgoing > message.timestamp ? 'later' : outgoing < message.timestamp ? 'earlier' : 'none';
+        latest = { intent, topic: labels[0] ?? null, reply };
+      }
+      // Count at most one candidate per conversation. A later or tied outgoing
+      // preview leaves it unclear whether this request still needs attention.
+      if (followUpIntents.has(intent) && !(outgoing >= message.timestamp) &&
+          !conversationsToCheck.has(message.conversation)) {
+        conversationsToCheck.add(message.conversation);
+        followUps.set(intent, (followUps.get(intent) ?? 0) + 1);
+      }
     }
   }
 
-  return { topics: [...topics].slice(0, 4), developments: [...developments].slice(0, 3), latest };
+  return {
+    activity: { topics: [...topics].slice(0, 4), developments: [...developments].slice(0, 3), latest },
+    followUps: [...followUps].map(([intent, conversations]) => ({ intent, conversations })),
+  };
 }
 
 export async function inspectAndrea(reader, now = Date.now()) {

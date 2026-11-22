@@ -84,10 +84,25 @@ async function getJson(url, transport, options) {
   }
 }
 
+function approvedThreads(settings) {
+  const configured = [settings.BLUEBUBBLES_ALLOWED_CHAT_GUIDS, settings.BLUEBUBBLES_ALLOWED_CHAT_GUID]
+    .filter((value) => typeof value === 'string');
+  if (!configured.length) return null;
+  const excluded = selfThreads(settings);
+  const selfHandles = new Set([...excluded]
+    .filter((id) => id.startsWith('bb:') && directGuid.test(id.slice(3)))
+    .map((id) => directHandle(id.slice(3))));
+  return new Set(configured.join(',').split(',').map((value) => value.trim())
+    .filter((guid) => !excluded.has('bb:' + guid) &&
+      (groupGuid.test(guid) || (directGuid.test(guid) && !selfHandles.has(directHandle(guid))))));
+}
+
 export function createMacAndreaReader(settings, transport = fetch, counts) {
   const token = settings.BLUEBUBBLES_CONTROL_TOKEN;
   const owner = settings.BLUEBUBBLES_CANONICAL_SELF_THREAD_JID;
   const excluded = selfThreads(settings);
+  const approved = approvedThreads(settings);
+  const allowed = (id) => chatId.test(id) && !excluded.has(id) && (!approved || approved.has(id.slice(3)));
   const base = new URL(settings.BLUEBUBBLES_CONTROL_BASE_URL ||
     'http://localhost:' + (settings.BLUEBUBBLES_CONTROL_PORT || '4315'));
   if (base.protocol !== 'http:' || !loopback(base) ||
@@ -114,10 +129,10 @@ export function createMacAndreaReader(settings, transport = fetch, counts) {
       }
       return { complete: chats.length < 100, chats: chats.filter((row) =>
         row?.isGroup === false && typeof row.chatJid === 'string' &&
-        chatId.test(row.chatJid) && !excluded.has(row.chatJid)) };
+        allowed(row.chatJid)) };
     },
     async messages(id) {
-      if (typeof id !== 'string' || !chatId.test(id) || excluded.has(id)) throw new Error('Andrea chat was excluded');
+      if (typeof id !== 'string' || !allowed(id)) throw new Error('Andrea chat was excluded');
       const { messages } = await get('/v1/bluebubbles/chats/' + encodeURIComponent(id) + '/messages?limit=20');
       if (!Array.isArray(messages) || messages.length > 20) throw new Error('Andrea message list was invalid');
       if (counts) {
@@ -132,14 +147,7 @@ export function createMacAndreaReader(settings, transport = fetch, counts) {
 }
 
 function providerPlan(settings) {
-  const excluded = selfThreads(settings);
-  const selfHandles = new Set([...excluded]
-    .filter((id) => id.startsWith('bb:') && directGuid.test(id.slice(3)))
-    .map((id) => directHandle(id.slice(3))));
-  const allowed = new Set([settings.BLUEBUBBLES_ALLOWED_CHAT_GUIDS, settings.BLUEBUBBLES_ALLOWED_CHAT_GUID]
-    .filter(Boolean).join(',').split(',').map((value) => value.trim())
-    .filter((guid) => !excluded.has('bb:' + guid) &&
-      (groupGuid.test(guid) || (directGuid.test(guid) && !selfHandles.has(directHandle(guid))))));
+  const allowed = approvedThreads(settings) ?? new Set();
   const password = settings.BLUEBUBBLES_PASSWORD;
   const bases = [settings.BLUEBUBBLES_BASE_URL, ...(settings.BLUEBUBBLES_BASE_URL_CANDIDATES ?? '').split(',')]
     .filter((value) => URL.canParse(value ?? '')).map((value) => new URL(value))
@@ -223,7 +231,7 @@ export async function runMacAndrea(command, readSettings = loadSettings, transpo
   const result = grouped ? { version: 1, summary: formatAndreaSummary(cached, { allowEmpty: true }), source,
     groupSummary: formatAndreaSummary(view, { grouped: true }) } :
     { version: 1, summary: formatAndreaSummary(view), source };
-  if (view.counts.recentTextPreviews) result.activity = describeAndreaActivity(view.groups);
+  if (view.counts.recentTextPreviews) Object.assign(result, describeAndreaActivity(view.groups));
   return result;
 }
 

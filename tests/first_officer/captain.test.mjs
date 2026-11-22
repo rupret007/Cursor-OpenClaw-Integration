@@ -219,3 +219,43 @@ test('the Andrea reader returns a separate approved-group aggregate and preserve
   assert.doesNotMatch(JSON.stringify(result), /approved-group|demonstration library|fixture-password/);
   assert.throws(() => parseAndreaSummary(JSON.stringify({ ...result, groupSummary: result.summary })), /invalid/);
 });
+
+
+test('Andrea flags distinct possible follow-ups from approved recent chats', async () => {
+  const now = Date.parse('2026-11-20T15:00:00Z');
+  const alpha = 'bb:iMessage;-;fixture-alpha';
+  const bravo = 'bb:iMessage;-;fixture-bravo';
+  const charlie = 'bb:iMessage;-;fixture-charlie';
+  const excluded = 'bb:iMessage;-;fixture-excluded';
+  const chats = [alpha, bravo, charlie, excluded].map((chatJid) => ({ chatJid, isGroup: false }));
+  const row = (chatJid, offset, preview, isFromMe = false) => ({
+    chatJid, timestamp: new Date(now - offset * 60_000).toISOString(), preview, isFromMe, isBotMessage: false,
+  });
+  const messages = new Map([
+    [alpha, [row(alpha, 1, 'What time should we meet?'), row(alpha, 2, 'Which day would work?')]],
+    [bravo, [row(bravo, 3, 'Could you confirm the meeting?')]],
+    [charlie, [row(charlie, 4, 'Where should we meet?'), row(charlie, 2, 'Sounds good', true)]],
+  ]);
+  const settings = {
+    BLUEBUBBLES_CONTROL_BASE_URL: 'http://localhost:4315',
+    BLUEBUBBLES_CONTROL_TOKEN: 'fixture-control-input',
+    BLUEBUBBLES_CANONICAL_SELF_THREAD_JID: 'bb:iMessage;-;fixture-self',
+    BLUEBUBBLES_ALLOWED_CHAT_GUIDS: [alpha, bravo, charlie].map((id) => id.slice(3)).join(','),
+  };
+  const reads = [];
+  const result = await runMacAndrea(andreaCommand, async () => settings, async (url) => {
+    if (url.pathname.endsWith('/chats')) return Response.json({ chats });
+    const chat = decodeURIComponent(url.pathname.split('/').at(-2));
+    reads.push(chat);
+    return Response.json({ messages: messages.get(chat) });
+  }, now);
+  assert.deepEqual(new Set(reads), new Set([alpha, bravo, charlie]));
+  assert.deepEqual(result.followUps, [
+    { intent: 'ask-time', conversations: 1 }, { intent: 'ask-confirmation', conversations: 1 },
+  ]);
+  const reply = parseAndreaSummary(JSON.stringify(result));
+  assert.match(reply, /May need your reply · timing questions in 1 conversation, confirmation requests in 1 conversation/);
+  assert.doesNotMatch(reply, /What time should we meet|fixture-alpha|location questions/);
+  const injected = { ...result, followUps: [{ intent: 'free text must not pass', conversations: 1 }] };
+  assert.doesNotMatch(parseAndreaSummary(JSON.stringify(injected)), /free text must not pass|May need your reply/);
+});

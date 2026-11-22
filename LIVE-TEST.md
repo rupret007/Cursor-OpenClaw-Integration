@@ -23,6 +23,8 @@ A timeout, unavailable source, stale sample or missing reply is a failed live ca
 
 This checklist also applies to each standalone host after its approved cutover. For standalone tests, keep Bobserver unavailable. The fleet check should report the active host from its live kernel sample and show Bobserver as unavailable if no fresh remote sample exists.
 
+For `@andrea summarize my texts`, confirm a known pending question or request produces a useful `May need your reply` line. Verify a conversation with a later visible outgoing message stays out of that list. The summary can only assess the previews Andrea can read.
+
 On each standalone host, check `captain status` before and after a guarded gateway restart. Send the agreed synthetic review request, then repeat it and check `handoff`. Require one accepted job and a separate exact-head worker result. Exercise peer transfer and rollback while preserving the prior receipts. The old host must remain parked after restart and must refuse a stale epoch.
 
 The loopback status page, the local trace collector and the review archive stay off this check. Do not open a public port, use Tailscale Funnel, or roll the gateway back from here. A live rollback uses the private backup printed by activation and is a separate approval.

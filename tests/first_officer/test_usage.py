@@ -1,13 +1,16 @@
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
+import sys
 import time
 
 import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
+HANDOFF_SCRIPT = ROOT / "skills/cursor_handoff/scripts/cursor_handoff.py"
 spec = importlib.util.spec_from_file_location("usage_track", ROOT / "first-officer/usage/track.py")
 track = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(track)
@@ -32,6 +35,29 @@ def claude_headers(session="0.4", weekly="0.7", status="allowed",
             "anthropic-ratelimit-unified-5h-reset": str(session_reset),
             "anthropic-ratelimit-unified-7d-utilization": weekly,
             "anthropic-ratelimit-unified-7d-reset": str(weekly_reset)}
+
+
+def cursor_reading(spend=400, *, now=NOW, end=CDT_RESET):
+    return {
+        "observed_at": now,
+        "period_start": now - 86_400,
+        "period_end": end,
+        "included_spend": spend,
+        "included_limit": 1000,
+        "billing": {
+            "has_credits": False,
+            "unlimited": False,
+            "on_demand_enabled": False,
+            "usage_billing_enabled": False,
+            "auto_top_up_enabled": False,
+        },
+    }
+
+
+def write_cursor_reading(path, spend=400):
+    now = int(time.time())
+    path.write_text(json.dumps(cursor_reading(spend, now=now, end=now + 3600)))
+    return path
 
 
 def repo(tmp_path, branch="codex-candace/fo-finish-20261120"):
@@ -99,7 +125,7 @@ def test_warning_starts_at_ninety_percent_and_stopping_at_ninety_seven():
     assert used(90)["stop"] is False
     assert used(96.9)["stop"] is False
     assert used(97)["stop"] is True
-    assert used(89.9)["unread"] == [("codex", "5h"), ("codex", "weekly")]
+    assert used(89.9)["unread"] == [("codex", "5h"), ("codex", "weekly"), ("cursor", "billing-period")]
     with pytest.raises(ValueError, match="no usage windows"):
         track.assess([])
     with pytest.raises(ValueError, match="thresholds"):
@@ -115,20 +141,24 @@ def test_usage_overrides_may_only_be_stricter_than_the_defaults(tmp_path, capsys
     claude = tmp_path / "claude.json"
     claude.write_text(json.dumps(claude_headers(
         session="0.98", session_reset=ahead, weekly_reset=ahead + 86_400)))
-    assert track.main(["--claude", str(claude), "--warn-percent", "100", "--stop-percent", "100"]) == 1
+    cursor = write_cursor_reading(tmp_path / "cursor.json")
+    args = ["--claude", str(claude), "--cursor", str(cursor)]
+    assert track.main(args + ["--warn-percent", "100", "--stop-percent", "100"]) == 1
     assert "stricter" in capsys.readouterr().err
-    assert track.main(["--claude", str(claude), "--warn-percent", "80", "--stop-percent", "90"]) == track.STOPPED
+    assert track.main(args + ["--warn-percent", "80", "--stop-percent", "90"]) == track.STOPPED
 
 
-def test_both_providers_report_together_with_central_resets():
+def test_all_three_providers_report_together_with_central_resets():
     report = track.assess(track.codex_windows(codex_result(session=92), "fixture", NOW) +
-                          track.claude_windows(claude_headers(weekly="0.95"), NOW))
+                          track.claude_windows(claude_headers(weekly="0.95"), NOW) +
+                          track.cursor_windows(cursor_reading(), NOW))
     assert report["unread"] == [] and report["stop"] is False
     assert [(row["provider"], row["window"]) for row in report["warned"]] == [
         ("claude", "weekly"), ("codex", "5h")]
     text = track.report_text(report)
     assert "Codex 5h window at 92% used. It resets November 21, 2025 at 1:26:40 a.m. CST." in text
     assert "Claude weekly window at 95% used. It resets July 28, 2025 at 5:53:20 a.m. CDT." in text
+    assert "Cursor billing-period window at 40% used. It resets July 28, 2025 at 5:53:20 a.m. CDT." in text
     assert "At or above the 90% warning threshold." in text
 
 
@@ -227,8 +257,9 @@ def test_handoff_refuses_scanner_credential_shapes(tmp_path, capsys):
     ahead = int(time.time()) + 3600
     codex = tmp_path / "codex.json"
     codex.write_text(json.dumps(codex_result(session=93, session_reset=ahead, weekly_reset=ahead)))
+    cursor = write_cursor_reading(tmp_path / "cursor.json")
     leaked = "github" + "_pat_" + "b" * 22
-    assert track.main(["--codex", str(codex), "--codex-account", "fixture", "--repo", str(path),
+    assert track.main(["--codex", str(codex), "--codex-account", "fixture", "--cursor", str(cursor), "--repo", str(path),
                        "--failure", f"saw {leaked}"]) == 1
     captured = capsys.readouterr()
     assert leaked not in captured.err + captured.out
@@ -248,8 +279,9 @@ def test_command_line_reports_quietly_and_hands_off_once_a_window_warns(tmp_path
 
     claude.write_text(json.dumps(claude_headers(session_reset=ahead, weekly_reset=ahead + 86_400)))
     codex.write_text(live_codex())
+    cursor = write_cursor_reading(tmp_path / "cursor.json")
     arguments = ["--codex", str(codex), "--codex-account", "fixture", "--claude", str(claude),
-                 "--repo", str(path), "--step", "Step 2", "--next", "Start step 3"]
+                 "--cursor", str(cursor), "--repo", str(path), "--step", "Step 2", "--next", "Start step 3"]
     assert track.main(arguments) == track.OK
     assert "Codex 5h window at 40% used." in capsys.readouterr().out
     assert not (path / "HANDOFF.md").exists()
@@ -263,7 +295,7 @@ def test_command_line_reports_quietly_and_hands_off_once_a_window_warns(tmp_path
     assert track.main(arguments) == track.STOPPED
     assert "Stop after the handoff." in (path / "HANDOFF.md").read_text()
 
-    assert track.main(["--codex", str(codex), "--codex-account", "someone-else"]) == 1
+    assert track.main(["--codex", str(codex), "--codex-account", "someone-else", "--cursor", str(cursor)]) == 1
     assert "Usage tracking failed" in capsys.readouterr().err
 
 
@@ -272,8 +304,9 @@ def test_command_line_redacts_a_credential_from_its_failure_text(tmp_path, capsy
     ahead = int(time.time()) + 3600
     codex = tmp_path / "codex.json"
     codex.write_text(json.dumps(codex_result(session=93, session_reset=ahead, weekly_reset=ahead)))
-    assert track.main(["--codex", str(codex), "--codex-account", "fixture", "--repo", str(path),
-                       "--next", "rotate sk-abcd1234efgh5678"]) == 1
+    cursor = write_cursor_reading(tmp_path / "cursor.json")
+    arguments = ["--codex", str(codex), "--codex-account", "fixture", "--cursor", str(cursor), "--repo", str(path)]
+    assert track.main(arguments + ["--next", "rotate sk-abcd1234efgh5678"]) == 1
     captured = capsys.readouterr()
     assert "sk-abcd1234efgh5678" not in captured.err + captured.out
     assert "credential or address" in captured.err
@@ -282,13 +315,168 @@ def test_command_line_redacts_a_credential_from_its_failure_text(tmp_path, capsy
     same_shape = "Bearer " + ("ANDREA_SYNC_INTERNAL_TOKEN"[:-1] + "M")
     mixed = "bearer " + "ab-cd.ef_ghijklm"
     for failure in (same_shape, mixed):
-        assert track.main(["--codex", str(codex), "--codex-account", "fixture", "--repo", str(path),
-                           "--failure", "saw " + failure]) == 1
+        assert track.main(arguments + ["--failure", "saw " + failure]) == 1
         captured = capsys.readouterr()
         assert failure not in captured.err + captured.out
         assert "credential or address" in captured.err
         assert not (path / "HANDOFF.md").exists()
 
-    assert track.main(["--codex", str(tmp_path / "sk-abcd1234efgh5678/absent.json")]) == 1
+    assert track.main(["--codex", str(tmp_path / "sk-abcd1234efgh5678/absent.json"), "--cursor", str(cursor)]) == 1
     captured = capsys.readouterr().err
     assert "sk-abcd1234efgh5678" not in captured and "[redacted]/absent.json" in captured
+
+
+@pytest.mark.parametrize(("end", "reset_text"), [
+    (CST_RESET, "November 21, 2025 at 1:26:40 a.m. CST"),
+    (CDT_RESET, "July 28, 2025 at 5:53:20 a.m. CDT"),
+])
+def test_cursor_uses_included_spend_and_the_billing_period_end(end, reset_text):
+    reading = cursor_reading(375, end=end)
+    reading["included_limit"] = 500
+    assert track.cursor_windows(reading, NOW) == [{
+        "provider": "cursor", "window": "billing-period", "used": 75.0,
+        "reset": end, "reset_text": reset_text,
+    }]
+
+
+@pytest.mark.parametrize("fields", [
+    {"included_limit": 0}, {"included_limit": True}, {"included_limit": "1000"},
+    {"included_spend": -1}, {"included_spend": float("nan")}, {"included_spend": True},
+    {"period_end": NOW}, {"period_end": "2025-07-28"}, {"period_start": NOW + 1},
+    {"observed_at": NOW - 91}, {"observed_at": NOW + 1},
+])
+def test_cursor_rejects_unusable_amounts_and_noncurrent_periods(fields):
+    with pytest.raises(ValueError):
+        track.cursor_windows(cursor_reading() | fields, NOW)
+
+
+@pytest.mark.parametrize("field", [
+    "has_credits", "unlimited", "on_demand_enabled", "usage_billing_enabled", "auto_top_up_enabled",
+])
+def test_cursor_timer_refuses_each_paid_extra_even_at_zero_included_usage(field, tmp_path, capsys):
+    cursor = write_cursor_reading(tmp_path / "cursor.json", spend=0)
+    reading = json.loads(cursor.read_text())
+    for unsafe in (True, None, 0, "false"):
+        reading["billing"][field] = unsafe
+        cursor.write_text(json.dumps(reading))
+        assert track.main(["--cursor", str(cursor)]) == 1
+        captured = capsys.readouterr()
+        assert "The cursor billing-period window was not read." in captured.err
+        assert "Cursor paid extras are not confirmed disabled" in captured.err
+        assert not captured.out
+    del reading["billing"][field]
+    cursor.write_text(json.dumps(reading))
+    assert track.main(["--cursor", str(cursor)]) == 1
+    assert "Cursor paid extras are not confirmed disabled" in capsys.readouterr().err
+
+
+def test_cursor_timer_refuses_unread_input_even_with_healthy_codex_and_claude(tmp_path, capsys):
+    path, _, head = repo(tmp_path)
+    ahead = int(time.time()) + 3600
+    codex = tmp_path / "codex.json"
+    codex.write_text(json.dumps(codex_result(session_reset=ahead, weekly_reset=ahead)))
+    claude = tmp_path / "claude.json"
+    claude.write_text(json.dumps(claude_headers(session_reset=ahead, weekly_reset=ahead)))
+    cursor = tmp_path / "cursor.json"
+    args = ["--codex", str(codex), "--codex-account", "fixture", "--claude", str(claude), "--repo", str(path)]
+
+    for cursor_args in ([], ["--cursor", str(cursor)]):
+        assert track.main(args + cursor_args) == 1
+        assert "The cursor billing-period window was not read." in capsys.readouterr().err
+
+    no_session = {"status": "unread", "reason": "dashboard_token_required"}
+    token_value = "private-session-fixture"
+    valid = cursor_reading(0, now=ahead - 3600, end=ahead)
+    for unusable in (
+        "{",
+        " " * (256 * 1024 + 1),
+        json.dumps(no_session),
+        json.dumps(valid | {"dashboard_token": token_value}),
+        json.dumps(valid | {"billing": valid["billing"] | {"new_billing_mode": "metered"}}),
+        json.dumps(valid | {"observed_at": ahead - 3600 - 91}),
+        json.dumps(valid).replace('"has_credits": false', '"has_credits": true, "has_credits": false'),
+    ):
+        cursor.write_text(unusable)
+        assert track.main(args + ["--cursor", str(cursor)]) == 1
+        captured = capsys.readouterr()
+        assert "The cursor billing-period window was not read." in captured.err
+        assert token_value not in captured.err and not captured.out
+        assert cursor.read_text() == unusable
+
+    assert track.git(path, "rev-parse", "HEAD").stdout.strip() == head
+    assert not (path / "HANDOFF.md").exists()
+
+
+@pytest.mark.parametrize(("spend", "exit_code"), [(0, 0), (899, 0), (900, 3), (969, 3), (970, 4), (1000, 4)])
+def test_cursor_tracker_thresholds_and_handoff_commit(spend, exit_code, tmp_path, capsys):
+    path, branch, head = repo(tmp_path)
+    cursor = write_cursor_reading(tmp_path / "cursor.json", spend)
+    (path / "README.md").write_text("unrelated staged edit\n")
+    track.git(path, "add", "README.md")
+
+    assert track.main(["--cursor", str(cursor), "--repo", str(path),
+                       "--step", "Cursor fallback", "--next", "Resume after billing reset"]) == exit_code
+    report = capsys.readouterr().out
+    assert f"Cursor billing-period window at {spend / 10:g}% used." in report
+    if exit_code:
+        handoff = (path / "HANDOFF.md").read_text()
+        assert f"Branch `{branch}` is at `{head}`." in handoff
+        assert f"Cursor billing-period window at {spend / 10:g}% used." in handoff
+        assert ("Stop after the handoff." in handoff) is (exit_code == 4)
+        assert "Handoff committed as" in report
+        assert track.git(path, "show", "--name-only", "--format=").stdout.split() == ["HANDOFF.md"]
+    else:
+        assert not (path / "HANDOFF.md").exists()
+        assert track.git(path, "rev-parse", "HEAD").stdout.strip() == head
+    assert track.git(path, "diff", "--cached", "--name-only").stdout.split() == ["README.md"]
+    assert not track.git(path, "remote").stdout
+
+
+def test_cursor_handoff_gates_the_real_fallback_wrapper_before_invoking_agent(tmp_path):
+    agent = tmp_path / "agent"
+    calls = tmp_path / "calls.jsonl"
+    agent.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "with open(os.environ['CURSOR_TEST_CALLS'], 'a') as log:\n"
+        "    log.write(json.dumps([sys.argv[1:], 'CURSOR_API_KEY' in os.environ]) + '\\n')\n"
+        "sys.exit(int(os.environ.get('CURSOR_TEST_EXIT', '0')))\n"
+    )
+    agent.chmod(0o700)
+    cursor = tmp_path / "plan.json"
+    env = {
+        "PATH": os.environ["PATH"],
+        "CURSOR_PLAN_READING": str(cursor),
+        "CURSOR_CLI_BIN": str(agent),
+        "CURSOR_TEST_CALLS": str(calls),
+        "CURSOR_API_KEY": "fixture_cloud_key",
+    }
+    arguments = [sys.executable, str(HANDOFF_SCRIPT), "--mode", "cli", "--json",
+                 "--repo", str(tmp_path), "--prompt", "Review fixture", "--model", "claude-fixture"]
+
+    def handoff():
+        result = subprocess.run(arguments, cwd=tmp_path, env=env, capture_output=True, text=True, check=False)
+        return result.returncode, json.loads(result.stdout)
+
+    for spend, billing in ((None, {}), (899, {"on_demand_enabled": True}), (900, {}), (970, {})):
+        if spend is not None:
+            write_cursor_reading(cursor, spend)
+            reading = json.loads(cursor.read_text())
+            reading["billing"].update(billing)
+            cursor.write_text(json.dumps(reading))
+        code, result = handoff()
+        assert code != 0 and result["ok"] is False and result["exit_code"] == 5
+        assert "Cursor fallback requires a readable plan below the warning threshold" in result["stderr"]
+        assert not calls.exists()
+
+    write_cursor_reading(cursor, 899)
+    code, result = handoff()
+    assert code == 0 and result["ok"] is True and result["model"] == "composer-2.5"
+    (argv, had_key), = (json.loads(line) for line in calls.read_text().splitlines())
+    assert argv[:2] == ["--model", "composer-2.5"] and "Review fixture" in argv[2]
+    assert len(argv) == 3 and had_key is False
+
+    env["CURSOR_TEST_EXIT"] = "2"
+    code, result = handoff()
+    assert code != 0 and result["ok"] is False
+    assert len(calls.read_text().splitlines()) == 2

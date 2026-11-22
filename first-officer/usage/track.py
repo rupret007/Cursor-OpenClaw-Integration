@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Track the lane's Codex and Claude windows and hand off before either runs out."""
+"""Track Codex, Claude and Cursor subscription usage and hand off at the lane limit."""
 
 import argparse
 from datetime import datetime
@@ -24,6 +24,11 @@ PROTECTED = ("main", "master")
 CLAUDE_HEADER = "anthropic-ratelimit-unified-{}-{}"
 CLAUDE_WINDOWS = (("session", "5h"), ("weekly", "7d"))
 CODEX_WINDOWS = (("5h", "session"), ("weekly", "weekly"))
+CURSOR_WINDOW = ("cursor", "billing-period")
+CURSOR_MAX_AGE = 90
+CURSOR_PERIOD_FIELDS = {"observed_at", "period_start", "period_end", "included_spend", "included_limit"}
+CURSOR_BILLING_FLAGS = {"has_credits", "unlimited", "on_demand_enabled", "usage_billing_enabled",
+                        "auto_top_up_enabled"}
 
 
 def _enforced_secret():
@@ -91,6 +96,27 @@ def claude_windows(headers, now):
     return rows
 
 
+def cursor_windows(reading, now):
+    """Normalize a current, subscription-only Cursor billing period."""
+    if not isinstance(reading, dict) or reading.keys() != CURSOR_PERIOD_FIELDS | {"billing"}:
+        raise ValueError("Incomplete or unknown Cursor plan reading")
+    billing = reading["billing"]
+    if (not isinstance(billing, dict) or billing.keys() != CURSOR_BILLING_FLAGS
+            or any(value is not False for value in billing.values())):
+        raise ValueError("Cursor paid extras are not confirmed disabled")
+
+    start, end, observed = (reading[key] for key in ("period_start", "period_end", "observed_at"))
+    if (any(type(epoch) is not int for epoch in (start, end, observed))
+            or not 0 < start <= observed <= now < end or now - observed > CURSOR_MAX_AGE):
+        raise ValueError("Cursor billing-period reading is stale or invalid")
+
+    spend, limit = reading["included_spend"], reading["included_limit"]
+    if type(spend) is not int or type(limit) is not int or spend < 0 or limit <= 0:
+        raise ValueError("Unusable Cursor included spend or limit")
+    used = 100 * min(spend, limit) / limit
+    return [window(*CURSOR_WINDOW, used, end, now)]
+
+
 def assess(windows, warn_percent=WARN_PERCENT, stop_percent=STOP_PERCENT):
     if not windows:
         raise ValueError("Refusing to report on no usage windows")
@@ -101,7 +127,7 @@ def assess(windows, warn_percent=WARN_PERCENT, stop_percent=STOP_PERCENT):
             or warn_percent > WARN_PERCENT or stop_percent > STOP_PERCENT):
         raise ValueError("Usage overrides may only be stricter than the default thresholds")
     expected = ({("codex", name) for name, _ in CODEX_WINDOWS} |
-                {("claude", name) for name, _ in CLAUDE_WINDOWS})
+                {("claude", name) for name, _ in CLAUDE_WINDOWS} | {CURSOR_WINDOW})
     missing = expected - {(row["provider"], row["window"]) for row in windows}
     warned = sorted((row for row in windows if row["used"] >= warn_percent),
                     key=lambda row: -row["used"])
@@ -176,13 +202,31 @@ def commit_handoff(repo, report, branch, head, step, next_step, failures=()):
     return git(repo, "rev-parse", "HEAD").stdout.strip()
 
 
-def read_json(path):
+def read_json(path, *, object_pairs_hook=None):
     if path is None:
         return None
-    text = Path(path).read_text(encoding="utf-8")
+    with Path(path).open(encoding="utf-8") as stream:
+        text = stream.read(256 * 1024 + 1)
     if len(text) > 256 * 1024:
         raise ValueError("Usage reading is too large to trust")
-    return json.loads(text)
+    return json.loads(text, object_pairs_hook=object_pairs_hook)
+
+
+def unique_fields(pairs):
+    fields = dict(pairs)
+    if len(fields) != len(pairs):
+        raise ValueError("Cursor plan reading repeats a field")
+    return fields
+
+
+def read_cursor_windows(path, now):
+    try:
+        if path is None or not path.is_file():
+            raise ValueError("Missing Cursor plan reading")
+        reading = read_json(path, object_pairs_hook=unique_fields)
+    except (OSError, ValueError, RecursionError):
+        raise ValueError("Provide a fresh Cursor plan reading with unique fields") from None
+    return cursor_windows(reading, now)
 
 
 def main(argv=None):
@@ -190,6 +234,7 @@ def main(argv=None):
     parser.add_argument("--codex", type=Path, help="Codex account/rateLimits/read result as JSON")
     parser.add_argument("--codex-account", help="Account identifier the Codex reading must match")
     parser.add_argument("--claude", type=Path, help="Claude response headers as a JSON object")
+    parser.add_argument("--cursor", type=Path, help="Fresh, normalized Cursor plan and billing JSON")
     parser.add_argument("--warn-percent", type=float, default=WARN_PERCENT)
     parser.add_argument("--stop-percent", type=float, default=STOP_PERCENT)
     parser.add_argument("--repo", type=Path, help="Checkout that receives HANDOFF.md on a warning")
@@ -199,7 +244,11 @@ def main(argv=None):
     args = parser.parse_args(argv)
     now = time.time()
     try:
-        windows = []
+        windows = read_cursor_windows(args.cursor, now)
+    except (ValueError, OverflowError) as error:
+        print(f"The cursor billing-period window was not read. {error}.", file=sys.stderr)
+        return 1
+    try:
         if args.codex is not None:
             windows += codex_windows(read_json(args.codex), args.codex_account, now)
         if args.claude is not None:

@@ -15,8 +15,8 @@ Executes a best-effort handoff to local Cursor CLI tools:
 
 The script:
   - validates repo path
-  - composes a mode-aware prompt
-  - tries multiple invocation styles safely
+  - checks the fresh subscription reading in CURSOR_PLAN_READING
+  - runs one Composer 2.5 invocation using the existing Cursor login
 EOF
   exit 0
 fi
@@ -74,34 +74,27 @@ FINAL_PROMPT="$MODE_PREFIX
 $BRANCH_NOTE
 $PROMPT_TEXT"
 
-# Capture help text once for capability probing.
-HELP_TEXT="$("$CLI_BIN" --help </dev/null 2>&1 || true)"
-
-run_attempt() {
-  local label="$1"
-  shift
-  if "$@"; then
-    echo "CLI backend: $CLI_BIN"
-    echo "Invocation: $label"
-    return 0
-  fi
-  return 1
-}
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TRACKER="$SCRIPT_DIR/../../../first-officer/usage/track.py"
+if [[ ! -f "$TRACKER" ]]; then
+  echo "ERROR: Cursor plan check is unavailable" >&2
+  exit 5
+fi
+if ! usage_report="$(python3 -B "$TRACKER" --cursor "${CURSOR_PLAN_READING:-}")"; then
+  printf '%s\n' "$usage_report" >&2
+  echo "ERROR: Cursor fallback requires a readable plan below the warning threshold" >&2
+  exit 5
+fi
 
 cd "$REPO_PATH"
 
-# Attempt 1: common --cwd + --prompt style
-if [[ "$HELP_TEXT" == *"--cwd"* && "$HELP_TEXT" == *"--prompt"* ]]; then
-  run_attempt "cwd+prompt flags" "$CLI_BIN" --cwd "$REPO_PATH" --prompt "$FINAL_PROMPT" && exit 0
+# Use the existing subscription login and a first-party model. A failed launch
+# can have consumed usage already, so do not retry it with other arguments.
+unset CURSOR_API_KEY
+if "$CLI_BIN" --model composer-2.5 "$FINAL_PROMPT"; then
+  echo "CLI backend: $CLI_BIN"
+  exit 0
 fi
-
-# Attempt 2: common --repo + --prompt style
-if [[ "$HELP_TEXT" == *"--repo"* && "$HELP_TEXT" == *"--prompt"* ]]; then
-  run_attempt "repo+prompt flags" "$CLI_BIN" --repo "$REPO_PATH" --prompt "$FINAL_PROMPT" && exit 0
-fi
-
-# Attempt 3: prompt via positional argument
-run_attempt "positional prompt" "$CLI_BIN" "$FINAL_PROMPT" && exit 0
 
 echo "ERROR: local CLI handoff failed for binary '$CLI_BIN'" >&2
 exit 5

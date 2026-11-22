@@ -1042,7 +1042,7 @@ def main() -> int:
             "status": "submitted",
             "read_only": read_only,
             "branch": branch,
-            "model": api_model,
+            "model": "composer-2.5",
             "cli_binary": cli_binary,
             "stdout": proc.stdout.strip(),
         }

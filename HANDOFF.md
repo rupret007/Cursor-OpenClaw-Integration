@@ -1,14 +1,12 @@
 # First Officer handoff
 
-Resume on branch `codex-travis/fo-cursor-plan-20261122` in [draft PR #37](https://github.com/rupret007/Cursor-OpenClaw-Integration/pull/37), targeting `codex-candace/fo-finish-20261120` at `3733bf1119977c92eeb668b12757de8ab3384770`. The tested code head is `efa8cb0096b633b8455d5dcd41aea4f6afc96799`. The commit containing this handoff includes the evidence and operator notes. Use `git rev-parse HEAD` for the current checkout SHA.
+Work is on `codex-travis/fo-cursor-plan-20261122` in [PR #37](https://github.com/rupret007/Cursor-OpenClaw-Integration/pull/37). The reviewed base is #36 at `3733bf1119977c92eeb668b12757de8ab3384770`, stacked on #33 at `3d350ba`. The fixed source head is `b833f6be4bedff6d4cf074e3b6b04c2c13925946`. Use the published PR head as the approved checkout after confirming its checks.
 
-## Cursor fallback
+## Cursor fallback and review
 
-Finished the last queued-after-step-8 item for offline acceptance. The current Cursor billing period now goes through the existing usage report and handoff. An unread window exits 1, and the fallback requires explicit disabled billing flags and usage below 90 percent. Tests cover a token-required dashboard marker, stale and malformed readings, each billing flag, both Central Time abbreviations, and a real handoff commit restricted to `HANDOFF.md`. The real skill and shell wrapper launched a fixture once for a fresh 89.9 percent reading. Missing input, paid flags and usage at 90 or 97 percent produced zero launches in CLI and auto mode. Auto mode stayed on CLI with a fixture Cloud key present.
+[REVIEW-efa8cb0.md](REVIEW-efa8cb0.md) preserves the independent FAIL findings and records their fixes and final PASS. The new private receipt carries Jeff's opaque account binding. An unread or mismatched plan, enabled billing extras, and usage at 90 percent or above all block the fallback. CLI mode strips ambient credentials and runs one Composer 2.5 process. Read-only work uses Ask mode. The handoff commit changes only `HANDOFF.md` on the named lane. Repeated warning polls keep the same resume point.
 
-On November 22, 2026, the focused command in [TEST-NOW.md](TEST-NOW.md) passed 41 tests. `OPENAI_API_ENABLED=0 RUN_COMM_SMOKE=0 bash scripts/test_integration.sh` passed 1,083 Python tests and 22 skill tests and ended with `All integration checks passed.` The Segment 1 and captain Node command passed 23 tests. See [STATUS.md](STATUS.md#cursor-plan-usage-and-paid-extras) for thresholds, scanner evidence and the link to draft CI.
-
-All four GitHub checks passed on the tested code head. [CI run 44994290274](https://github.com/rupret007/Cursor-OpenClaw-Integration/actions/runs/44994290274).
+The combined focused gate passed 71 tests, the Segment 1 and captain gate passed 23, and the release and installer gate passed 58. The original offline baseline passed 1,083 Python and 22 skill tests with the installed Node directory on PATH. The [PR checks](https://github.com/rupret007/Cursor-OpenClaw-Integration/pull/37/checks) report all four jobs for the published head. [TEST-NOW.md](TEST-NOW.md) gives the local commands.
 
 ## Prior work on the reviewed base
 
@@ -18,11 +16,11 @@ Restricted news, research, recent-message and synthesis lookups answer a normal 
 
 ## Next
 
-Review the draft's Cursor changes and CI results. Any live Cursor account reading or timer setup requires separate approval and a reading from the existing signed-in account. The fixture work leaves that account and the timer untouched. Gateway activation, timed Telegram checks, the live authority pilot, live rollback and the sudo audit-anchor step are Jeff's. Leave Phoenix, Restate, Hatchet and Llama Prompt Guard uninstalled. Keep the draft open for review.
+The planned merge order is #33 → #36 → #37, subject to Jeff's approval. Use the single [activation block](JEFF-ACTIONS.md#1-approve-and-activate-the-combined-release) and keep its separate rollback command. The exact activation preview ran offline. Build the gateway tar on the Nuc from the private prior bundle before Jeff starts the live activation.
 
-## Open failures
+## Pending owner checks
 
-None in the local gates. The live dashboard read and billing settings await an approved separate check. The gateway tar still needs the private prior bundle. The checks for the installed verifier and audit anchor are in `JEFF-ACTIONS.md`.
+Jeff verifies the existing Cursor CLI login against the live dashboard and supplies the private receipt. Gateway activation, timed Telegram checks, the supervised authority pilot, the root-owned audit seal and live rollback remain his checkpoints. Keep the external queue and tracing services uninstalled.
 
 ## Do not
 

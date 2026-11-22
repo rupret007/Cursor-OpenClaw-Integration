@@ -252,4 +252,8 @@ A second real Telegram run timed the guarded Nuc from update receipt to Bot API 
 
 The isolated test gateways are stopped. The separate test bot remains paired on the Nuc. The copied test credential and config were removed from the Mac. Bobserver and production authority remained outside the exercise.
 
-BLOCKED: Full standalone acceptance and production host configuration remain pending.
+Jeff chose the Nuc first. Its private gateway and LiteLLM systemd definitions validate. The local model, LiteLLM and PostgreSQL use loopback. The standalone gateway used a separate budgeted lane to answer a simple question in 3.35 seconds through the packaged OpenClaw path. The first cold-start attempt exceeded the acknowledgment target, and the repeat met it. The pinned LiteLLM acceptance test also verified fallback and budget exhaustion with synthetic providers. The temporary user service reached readiness and stopped cleanly.
+
+The Nuc's private gate lock, capacity policy and live weekly Codex quota also passed. The production queue routes still need configuration. The Mac Mini was unavailable for the production Andrea check. The production Telegram account remains disabled in the staged Nuc config.
+
+BLOCKED: The Mac Mini reader, production queue bindings and production Telegram cutover remain pending.

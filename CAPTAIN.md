@@ -62,6 +62,8 @@ For standalone `quota status`, put a mode `0600` `quota.json` beside the authori
 
 ### Prepare the native service
 
+For the Nuc's local quick-answer route, point the OpenClaw LiteLLM provider to its loopback proxy and list the approved alias in the provider model catalog. Give the conductor exactly one matching LiteLLM entry in allowedCompletionModels and include that entry in allowedModels. Use the proxy's private gateway lane key through the service environment. With only a local model, keep the fallback map empty. The Nuc rehearsal used one CPU model slot and two CPU threads.
+
 Render the unit or plist into private scratch before approval. Use a private, host-specific OpenClaw config that points to the pinned candidate, an empty mode `0700` gateway state directory for a clean-host rehearsal, and a mode `0600` JSON object for the service environment. The environment file accepts the gateway LiteLLM key, the two queue lane tokens, and the private queue host list. The service definition contains only the file path. For the enabled Telegram profile, set the Captain plugin's `hooks.allowConversationAccess` to true and use the same single owner in `channels.telegram.allowFrom` and `channels.telegram.execApprovals.approvers`, with `dmPolicy: allowlist`. Set the queue policy's `token_env` names to `FO_HATCHET_LANE_TOKEN` and `FO_RESTATE_LANE_TOKEN`.
 
 ```bash

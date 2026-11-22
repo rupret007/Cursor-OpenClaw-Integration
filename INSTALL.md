@@ -49,15 +49,16 @@ python3 first-officer/litellm/configure.py "$candidate_config" "$lane_policy" pr
 
 Use a distinct gateway lane key in `OPENCLAW_LITELLM_API_KEY`. The installer validates a candidate config that references this variable, so make it available to the operator's validation shell and the gateway service through their approved private environment before preparing the switch.
 
-## Track Codex and Claude usage from a lane
+## Track Codex, Claude, and Cursor usage from a lane
 
-Run the tracker before each step and before any long turn. It reads whichever accounts the lane was given and reports both windows for each, with every reset rendered in America/Chicago so CST and CDT are never confused.
+Run the tracker before each step and before any long turn. It reports the supplied Codex and Claude windows and the current Cursor billing period, with resets in America/Chicago.
 
-Save the Codex reading as the raw `account/rateLimits/read` result from the lane's own `CODEX_HOME`. Save the Claude reading as a JSON object of the response headers from a claude.ai login, which carries `anthropic-ratelimit-unified-status` plus the `5h` and `7d` utilization and reset headers. Pass only the account the lane runs on; a window that is not supplied is reported as unread rather than assumed healthy.
+Save the Codex reading as the raw `account/rateLimits/read` result from the lane's own `CODEX_HOME`. Save the Claude reading as a JSON object of the response headers from a claude.ai login, which carries `anthropic-ratelimit-unified-status` plus the `5h` and `7d` utilization and reset headers. Supply a fresh, normalized Cursor reading from the existing login in the [fixture format](TEST-NOW.md#4-step-2-codex-claude-and-cursor-usage-tracking). If obtaining it requires a new token, leave the reading unread. An unread Cursor period exits 1. For the local Cursor fallback, point `CURSOR_PLAN_READING` to the same file. The fallback admits new launches below 90 percent.
 
 ```bash
 python3 first-officer/usage/track.py \
   --codex "$codex_reading" --codex-account "$lane_account" --claude "$claude_headers" \
+  --cursor "$cursor_reading" \
   --repo "$lane_checkout" --step "Step 3" --next "Start step 4" --failure "none"
 ```
 

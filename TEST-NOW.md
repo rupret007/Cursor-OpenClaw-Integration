@@ -7,7 +7,7 @@ Start in the branch under review.
 ```bash
 cd ~/work/openclaw-finish
 git fetch origin
-git switch codex-candace/fo-finish-20261120
+git switch codex-travis/fo-cursor-plan-20261122
 git log --oneline -1
 ```
 
@@ -16,10 +16,10 @@ git log --oneline -1
 This is the same gate CI runs. It takes about two minutes.
 
 ```bash
-bash scripts/test_integration.sh
+OPENAI_API_ENABLED=0 RUN_COMM_SMOKE=0 bash scripts/test_integration.sh
 ```
 
-Expect `1049 passed` from the Python suite and a final line `All integration checks passed.`. The `Handoff failed.` lines inside the exhaustive check are expected: that check deliberately feeds bad arguments and requires each one to be refused. Before the unit tests, the gate prints one line, `Secret scan clean. Files <n>. History commits <n>. Logs 0.`
+Expect `1083 passed` from the Python suite and a final line `All integration checks passed.`. The `Handoff failed.` lines inside the exhaustive check are expected: that check deliberately feeds bad arguments and requires each one to be refused. Before the unit tests, the gate prints one line, `Secret scan clean. Files <n>. History commits <n>. Logs 0.`
 
 ## 2. The Segment 1 and captain gate
 
@@ -63,54 +63,71 @@ returned HTTP 422 with zero upstream calls. Lane B completed with 0.10 tracked s
 
 That one run proves four things: an unauthenticated completion is refused before any provider is called, a completion whose primary provider fails is served by the configured fallback, a lane that has spent its budget is refused with no upstream call at all, and a second lane is untouched by the first lane's spending. The spend figures are read out of the proxy's own PostgreSQL rows, not from what the API says about itself.
 
-## 4. Step 2: Codex and Claude usage tracking
+## 4. Step 2: Codex, Claude, and Cursor usage tracking
 
-Build a throwaway repository and two synthetic readings. The Codex file is shaped like a real `account/rateLimits/read` result and the Claude file like the response headers a claude.ai login receives. The five-hour Codex window is set over the 90 percent warning line on purpose.
+The focused gate exercises the tracker, the handoff commit, and the Cursor fallback wrapper with a fixture executable. It passed 41 tests on November 22, 2026 at `efa8cb0096b633b8455d5dcd41aea4f6afc96799`.
 
 ```bash
-rm -rf /tmp/fo-demo && mkdir /tmp/fo-demo && cd /tmp/fo-demo
-git init -q -b demo/usage-check . && git config user.email d@example.invalid && git config user.name Demo
-echo demo > README.md && git add README.md && git commit -q -m demo
-cat > codex.json <<'JSON'
-{"accountId": "demo", "ordinaryUsageAllowed": true, "rateLimits": {
-  "primary": {"usedPercent": 93.4, "resetsAt": 1800000000, "windowDurationMins": 300},
-  "secondary": {"usedPercent": 62, "resetsAt": 1800500000, "windowDurationMins": 10080},
-  "credits": {"hasCredits": false, "unlimited": false}}}
-JSON
-cat > claude.json <<'JSON'
-{"anthropic-ratelimit-unified-status": "allowed",
- "anthropic-ratelimit-unified-5h-utilization": "0.41",
- "anthropic-ratelimit-unified-5h-reset": "1800000000",
- "anthropic-ratelimit-unified-7d-utilization": "0.88",
- "anthropic-ratelimit-unified-7d-reset": "1800500000"}
-JSON
-cd ~/work/openclaw-finish
+python3 -m pytest -q tests/first_officer/test_usage.py tests/test_cursor_handoff_model_flag.py
+```
+
+Cursor uses a local normalized JSON file from the same existing login as the fallback CLI. The top-level fields are `observed_at`, `period_start`, `period_end`, `included_spend`, `included_limit` and `billing`. The three timestamps are integer Unix seconds. The spend and limit are integers in the same units, such as millionths of a dollar. A readable period must contain the observation and still be open. The observation may be at most 90 seconds old. Each of the five billing flags below must be JSON `false`. Use an absent file or the unread marker below when the existing session cannot supply the reading without a new token.
+
+Run the tracker against three synthetic readings in a throwaway Git checkout. Cursor is set at exactly 90 percent.
+
+```bash
+fo_usage_demo=$(mktemp -d)
+git -C "$fo_usage_demo" init -q -b demo/usage-check
+git -C "$fo_usage_demo" -c user.email=demo@example.invalid -c user.name=Demo \
+  commit --allow-empty -qm fixture
+python3 - "$fo_usage_demo" <<'FIXTURES'
+import json
+from pathlib import Path
+import sys
+import time
+
+root = Path(sys.argv[1])
+now = int(time.time())
+reset = now + 3600
+readings = {
+    "codex": {"accountId": "demo", "ordinaryUsageAllowed": True, "rateLimits": {
+        "primary": {"usedPercent": 40, "resetsAt": reset, "windowDurationMins": 300},
+        "secondary": {"usedPercent": 62, "resetsAt": reset, "windowDurationMins": 10080},
+        "credits": {"hasCredits": False, "unlimited": False}}},
+    "claude": {"anthropic-ratelimit-unified-status": "allowed",
+        "anthropic-ratelimit-unified-5h-utilization": "0.41",
+        "anthropic-ratelimit-unified-5h-reset": str(reset),
+        "anthropic-ratelimit-unified-7d-utilization": "0.88",
+        "anthropic-ratelimit-unified-7d-reset": str(reset)},
+    "cursor": {"observed_at": now, "period_start": now - 86_400, "period_end": reset,
+        "included_spend": 900, "included_limit": 1000, "billing": {
+            "has_credits": False, "unlimited": False, "on_demand_enabled": False,
+            "usage_billing_enabled": False, "auto_top_up_enabled": False}},
+    "cursor-unread": {"status": "unread", "reason": "dashboard_token_required"},
+}
+for name, reading in readings.items():
+    (root / f"{name}.json").write_text(json.dumps(reading), encoding="utf-8")
+FIXTURES
+
+fo_usage_exit=0
 python3 -B first-officer/usage/track.py \
-  --codex /tmp/fo-demo/codex.json --codex-account demo --claude /tmp/fo-demo/claude.json \
-  --repo /tmp/fo-demo --step "Step 3" --next "Start step 4"
-echo "exit $?"
+  --codex "$fo_usage_demo/codex.json" --codex-account demo \
+  --claude "$fo_usage_demo/claude.json" --cursor "$fo_usage_demo/cursor.json" \
+  --repo "$fo_usage_demo" --step "Cursor fixture" --next "Resume after review" || fo_usage_exit=$?
+echo "exit $fo_usage_exit"
+git -C "$fo_usage_demo" show --format= --name-only HEAD
+git -C "$fo_usage_demo" remote
+
+fo_usage_exit=0
+python3 -B first-officer/usage/track.py \
+  --codex "$fo_usage_demo/codex.json" --codex-account demo \
+  --claude "$fo_usage_demo/claude.json" --cursor "$fo_usage_demo/cursor-unread.json" || fo_usage_exit=$?
+echo "exit $fo_usage_exit"
 ```
 
-Expect this report, then the handoff line and `exit 3`:
+The first report prints `Cursor billing-period window at 90% used.` followed by the period end in Central Time. It exits 3 and commits only `HANDOFF.md`. The remote list is empty. The second report says `The cursor billing-period window was not read.` and exits 1 even with healthy Codex and Claude readings.
 
-```
-Claude session window at 41% used. It resets January 15, 2027 at 2:00:00 a.m. CST.
-Claude weekly window at 88% used. It resets January 20, 2027 at 8:53:20 p.m. CST.
-Codex 5h window at 93.4% used. It resets January 15, 2027 at 2:00:00 a.m. CST.
-Codex weekly window at 62% used. It resets January 20, 2027 at 8:53:20 p.m. CST.
-At or above the 90% warning threshold.
-Handoff committed as <commit>.
-```
-
-Every reset is in your time zone. Exit `3` is the 90 percent warning and exit `4` is the 97 percent stop. Now check what the lane wrote and committed.
-
-```bash
-cat /tmp/fo-demo/HANDOFF.md
-git -C /tmp/fo-demo log --oneline
-git -C /tmp/fo-demo remote
-```
-
-The handoff names the branch, the head it describes, the step in progress and what comes next. The log shows one new commit named `Record First Officer usage warning and resume point`. The remote list is empty, which is the point: the lane commits locally and never pushes. To watch it refuse a dangerous case, rerun the same command with `--repo` pointed at a checkout on `main`; it stops with `Refusing to commit a handoff on a protected branch` and writes nothing.
+The automated cases exercise 89.9, 90, 96.9 and 97 percent, both CST and CDT, each paid flag, malformed or stale data, and a warning with an unrelated staged edit. They call the real handoff skill in CLI and auto mode. A healthy 89.9 percent fixture causes one Composer 2.5 launch with the Cloud key absent. At 90 percent and above, or when billing evidence is unsafe or unread, the fixture records zero launches.
 
 ## 5. The single activation command, with nothing activated
 

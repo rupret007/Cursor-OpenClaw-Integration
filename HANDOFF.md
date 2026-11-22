@@ -1,8 +1,16 @@
 # First Officer handoff
 
-Resume on branch `codex-candace/fo-finish-20261120`. The commit that contains this file is the resume point. Use `git rev-parse HEAD`. Draft PR #36 targets `codex/first-officer-segment-1`.
+Resume on branch `codex-travis/fo-cursor-plan-20261122` in [draft PR #37](https://github.com/rupret007/Cursor-OpenClaw-Integration/pull/37), targeting `codex-candace/fo-finish-20261120` at `3733bf1119977c92eeb668b12757de8ab3384770`. The tested code head is `efa8cb0096b633b8455d5dcd41aea4f6afc96799`. The commit containing this handoff includes the evidence and operator notes. Use `git rev-parse HEAD` for the current checkout SHA.
 
-## Done in this checkout
+## Cursor fallback
+
+Finished the last queued-after-step-8 item for offline acceptance. The current Cursor billing period now goes through the existing usage report and handoff. An unread window exits 1, and the fallback requires explicit disabled billing flags and usage below 90 percent. Tests cover a token-required dashboard marker, stale and malformed readings, each billing flag, both Central Time abbreviations, and a real handoff commit restricted to `HANDOFF.md`. The real skill and shell wrapper launched a fixture once for a fresh 89.9 percent reading. Missing input, paid flags and usage at 90 or 97 percent produced zero launches in CLI and auto mode. Auto mode stayed on CLI with a fixture Cloud key present.
+
+On November 22, 2026, the focused command in [TEST-NOW.md](TEST-NOW.md) passed 41 tests. `OPENAI_API_ENABLED=0 RUN_COMM_SMOKE=0 bash scripts/test_integration.sh` passed 1,083 Python tests and 22 skill tests and ended with `All integration checks passed.` The Segment 1 and captain Node command passed 23 tests. See [STATUS.md](STATUS.md#cursor-plan-usage-and-paid-extras) for thresholds, scanner evidence and the link to draft CI.
+
+All four GitHub checks passed on the tested code head. [CI run 44994290274](https://github.com/rupret007/Cursor-OpenClaw-Integration/actions/runs/44994290274).
+
+## Prior work on the reviewed base
 
 Steps 1 through 8 and the review fixes for `0878331`, `cfaa966`, `acc0167`, `4046f4a`, `bc5be0f`, `e8a23ac`, `95f2493`, and `935480b` have local evidence in `STATUS.md` and the matching `REVIEW-*.md` files. `REVIEW-95f2493.md` keeps the original FAIL. Its FIXES section maps each finding to the commit and the test. The root-owned audit anchor is in `b61fe9119f43c44a36531b738c5de6da56608acc`. Jeff still runs that sudo step on bobserver.
 
@@ -10,11 +18,11 @@ Restricted news, research, recent-message and synthesis lookups answer a normal 
 
 ## Next
 
-Follow `RESEARCH-SETUP.md`. Leave Phoenix, Restate and Hatchet uninstalled until Jeff approves a host and the licenses are checked. Phoenix 22.0.0 is the tracing target, not Langfuse, and its license is read from the image before any install. The status page stays on loopback and Tailscale Serve. Never Funnel and never a public bind. Cursor plan usage is still open. Do not activate the live pilot or roll back the live gateway. Do not install Llama Prompt Guard unless Jeff asks, and do not add LLM Guard. Do not merge.
+Review the draft's Cursor changes and CI results. Any live Cursor account reading or timer setup requires separate approval and a reading from the existing signed-in account. The fixture work leaves that account and the timer untouched. Gateway activation, timed Telegram checks, the live authority pilot, live rollback and the sudo audit-anchor step are Jeff's. Leave Phoenix, Restate, Hatchet and Llama Prompt Guard uninstalled. Keep the draft open for review.
 
 ## Open failures
 
-None in the local gates. `REVIEW-935480b.md` keeps the original FAIL. Its FIXES section maps the mixed-pair rollback, the activation path wording, and the root-owned audit anchor to the commit and the test. Uppercase bearer detection, the LiteLLM `--llm-eval` lane, and the stale credential guards are in this checkout. The four pull-request jobs passed on `aa6af5d85b609c75177b6f1760e47fe72fb710f0`. This handoff does not claim those jobs for the later commits. Gateway activation, the timed Telegram checks in `LIVE-TEST.md`, the live authority pilot and a live rollback still wait for Jeff. The gateway tar still needs the private prior bundle. The installed verifier program at `/opt/openclaw-fo/verify-install.py` is not in this checkout; Jeff's check for that file is in `JEFF-ACTIONS.md`. Section 5 is the paste-ready sudo step Jeff runs on bobserver during activation. It has not been run. Draft PR #36 was not merged.
+None in the local gates. The live dashboard read and billing settings await an approved separate check. The gateway tar still needs the private prior bundle. The checks for the installed verifier and audit anchor are in `JEFF-ACTIONS.md`.
 
 ## Do not
 

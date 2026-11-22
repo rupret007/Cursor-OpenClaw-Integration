@@ -168,7 +168,19 @@ These additional acceptance items follow the eight ordered integration steps. Ea
 - DONE. The secret and personal-data scan is enforced by the offline gate and by `tests/first_officer/test_privacy.py`. The November 21, 2026 scan was clean, as recorded above.
 - DONE for the review archive above. The gateway tar still waits on the private prior bundle. `first-officer/release.py` remains the single activation command. Its rollback restores the prior config, pin and service, and it does not delete the published candidate.
 - DONE. `CAPTAIN.md`, `INSTALL.md` and `LIVE-TEST.md` match the staged pilot, the scan, the review archive and the live checks that still wait for Jeff.
-- Keep Cursor fallback within plan usage and ensure paid extras remain disabled. Prove the limit and disabled billing configuration with tests and evidence.
+- DONE for the offline Cursor plan-usage gate and subscription fallback. The evidence is below.
+
+### Cursor plan usage and paid extras
+
+`first-officer/usage/track.py` submits Cursor's current billing period to the existing warning, stop and handoff code. It computes utilization from included spend and limit in the same units, reports the billing-period end in America/Chicago, and requires a reading observed within 90 seconds. Missing, expired, malformed and token-required readings report the Cursor window unread and exit 1. The billing evidence requires credits, unlimited usage, on-demand, usage billing and auto top-up to be explicitly disabled. Unknown and duplicate fields fail the check.
+
+The Cursor fallback wrapper checks the same file before starting the local CLI. At 90 percent it blocks a new launch. A configured subscription reading keeps auto-mode submissions on the CLI path even with a Cloud API key in the environment. The CLI runs Composer 2.5 through the existing login, with the Cloud key removed from its environment. A failed launch ends the attempt. The file contract is in [TEST-NOW.md](TEST-NOW.md#4-step-2-codex-claude-and-cursor-usage-tracking).
+
+On November 22, 2026, code at `efa8cb0096b633b8455d5dcd41aea4f6afc96799` passed 41 focused tests, 1,083 Python tests and 22 skill tests in the official offline gate, and all 23 Segment 1 and captain tests. The gate reported `Secret scan clean. Files 421. History commits 369. Logs 0.` on the working tree before the code commit. Fixture tests proved Cursor exits 0 at 89.9 percent, 3 at 90 and 96.9, and 4 at 97. They checked CST and CDT and verified a warning or stop commits only `HANDOFF.md`, with unrelated staged work preserved. Both CLI and auto mode made zero launches for unread input, enabled paid extras, or usage at 90 or 97 percent. Each launched the fixture executable once at 89.9 percent and made one attempt when the executable returned an error.
+
+GitHub Actions passed `first-officer-segment1`, `first-officer-tracing`, `offline-integration` and `first-officer-litellm` on the same code SHA. [CI run 44994290274](https://github.com/rupret007/Cursor-OpenClaw-Integration/actions/runs/44994290274).
+
+The evidence covers the local file, timer command and fallback process. The producer of a live dashboard reading, the live account's billing settings and timer activation remain outside that fixture proof. Follow the latest review checks on [draft PR #37](https://github.com/rupret007/Cursor-OpenClaw-Integration/pull/37).
 
 ## Review of cfaa966
 

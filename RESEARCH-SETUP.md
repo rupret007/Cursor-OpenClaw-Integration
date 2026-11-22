@@ -196,7 +196,7 @@ The design is the right one, and the acceptance test is a real proxy rather than
 
 ### Recommendation
 
-Keep **`first-officer/usage/track.py`**. Run it from a systemd user timer every 10 minutes on the machine that holds the CLI login. Codex and Claude are parsed by code that is already tested. Add a Cursor reading in front of the same `assess` and `commit_handoff` functions, because the three subscription lanes are Codex, Claude, and Cursor, and only the first two exist in the script.
+Keep **`first-officer/usage/track.py`**. The proposed systemd user timer runs every 10 minutes on the machine that holds the CLI login. All three subscription lanes feed the same `assess` and `commit_handoff` functions. The Cursor file contract and offline evidence are in [TEST-NOW.md](TEST-NOW.md#4-step-2-codex-claude-and-cursor-usage-tracking).
 
 Do not build a new tracker.
 
@@ -206,7 +206,7 @@ The windows are not published as a token budget. Counting local logs drifts from
 
 - Codex: `codex app-server` JSON-RPC `account/rateLimits/read`, already wrapped by `first-officer/segment1/runner-quota.py`. Primary window is 300 minutes, secondary is 10080. The parser rejects any other duration.
 - Claude: unified rate-limit headers (`anthropic-ratelimit-unified-5h-utilization`, the 7-day pair, and `anthropic-ratelimit-unified-status`). A second, undocumented source is `GET https://api.anthropic.com/api/oauth/usage` with the Claude Code OAuth token and the beta header Claude Code sends. Prefer the header shape `track.py` already parses. A normalizer may turn the OAuth JSON into that header object. A second parser would fork the tests in `tests/first_officer/test_usage.py`.
-- Cursor: the signed-in IDE session can read the current billing period from Cursor’s dashboard service. There is no parser for it here. The reset is the billing-period end, which is a calendar boundary, not a 5-hour window. Render that instant in America/Chicago the same way as the others. Treat “included spend / included limit” as the percent. If the dashboard call cannot be made without storing a new token, skip the number and report the window unread. An unread Cursor window must fail the timer, not look healthy.
+- Cursor: supply the current billing period and billing flags as normalized local JSON from the existing signed-in account. The tracker uses included spend divided by included limit for utilization and renders the billing-period end in America/Chicago. Leave the window unread if obtaining the dashboard data requires storing a new token. An unread window fails the timer command.
 
 LiteLLM spend is the wrong meter for these three. A lane can be under its dollar cap and out of a weekly subscription, or the reverse.
 
@@ -223,9 +223,9 @@ The service runs, in order:
 1. Codex: the existing `read_runner_quota` path, writing JSON the `codex_windows` loader accepts. Cap the RPC at the 7 seconds `captain.mjs` already uses for `runner-quota`.
 2. Claude: one usage read, written as the header object `claude_windows` accepts.
 3. Cursor: one period read, or an explicit unread marker.
-4. `python3 -B first-officer/usage/track.py --codex … --claude … --repo <lane checkout> --step … --next …`
+4. `python3 -B first-officer/usage/track.py --codex … --claude … --cursor … --repo <lane checkout> --step … --next …`
 
-If any of the three inputs is missing, the unit exits 1 **before** calling `track.py`. The script itself treats a provider you simply did not pass as “unread” and can still exit 0. That is safe only when the unit refuses to start half-blind.
+The proposed unit requires all three readings. The tracker itself exits 1 whenever Cursor is unread, including an omitted `--cursor` argument. Codex and Claude can be omitted for the Cursor-only fallback check.
 
 The unit is `Nice=10`, same as the rest of the lane tooling. It must not run overlapping copies (`systemd` `Type=oneshot` with no parallel timer). Cache successful readings for 90 seconds in a mode `0600` file so a retry storm cannot hammer the vendor.
 
@@ -267,7 +267,7 @@ On a timer rehearsal, using fixture files, not live vendors:
 - A checkout on `main` exits with the protected-branch refusal and does not write the file.
 - A Claude payload with status `rejected` reports 100% even if the fraction is low.
 - A reset epoch in the past is an error, not a healthy window.
-- A run with `--codex` and no `--claude` is rejected by the **unit**, even though the script would print “unread” and exit 0.
+- The proposed unit requires the Codex and Claude inputs. The tracker exits 1 when Cursor is unread, even with healthy Codex and Claude inputs.
 - The committed handoff’s reset line contains `CST` for a January epoch and `CDT` for a July epoch.
 - Captain admission and `track.py` agree on the same Codex fixture. They share `quota_windows`, so a disagreement means the timer wrote a different JSON than the captain read.
 
@@ -289,9 +289,9 @@ There is no fallback that marks a window healthy because the read failed.
 
 The parser, the Chicago rendering, and the single-file commit are in good shape. The production wrapper is the missing part.
 
-- Unread is not a failure inside `assess`. The timer must supply every lane the host is responsible for.
+- `assess` records unread windows. The timer entry point rejects unread Cursor data before evaluating thresholds. Supply every lane the timer is responsible for.
 - Claude’s durable automated source is the OAuth usage endpoint or a status-line payload, not a response header sitting on disk. Normalize into the header object. Do not add a parallel interpreter.
-- Cursor is absent. Until it is present, the timer records Cursor as unread and fails. A green usage run that never looked at Cursor would be a false comfort.
+- Cursor has an offline-tested reader. A live producer of the normalized reading remains a separate approval.
 - Captain blocking is Codex-only, at 90%, inside `quota_windows`. Claude at 90% pages only if this timer runs. Wire the timer before the captain pilot depends on “we will notice.”
 - The handoff overwrite is easy to miss because the tests use a fresh repo.
 - The secret pattern also matches a dotted quad that is a version (`1.2.3.4`). That refusal is worth keeping. Write versions with a word between the numbers if a handoff needs them.
@@ -1076,7 +1076,7 @@ These are the items that bite a single-operator, two-machine setup even when eac
 
 1. **Backups and a restore drill.** LiteLLM salt, the three databases, the Hatchet and Restate volumes, the lane ledger, the audit chain, and the private rollback directory from `release.py`. A weekly encrypted copy off both machines. One restore onto a scratch directory, timed, which `STATUS.md` already lists as a queued item. A backup that has never been restored is a hope.
 2. **Redaction in traces and handoffs.** Covered above, and called out again because it is the failure that leaks a private text into Phoenix or into `HANDOFF.md`. The secret scan of the repo and history is already a queued item in `STATUS.md`. Add the trace store to that scan.
-3. **Cursor in the usage timer.** Until it exists, the timer cannot go green.
+3. **Cursor in the usage timer.** The fixture-tested command fails for an unread Cursor period. The proposed timer and a live reading still need separate approval.
 4. **Subscription versus extra-spend.** A runbook line, visible on the status page: subscriptions are percents with Chicago resets, LiteLLM is dollars with a UTC budget window. Credits on the Codex payload block dispatch.
 5. **Image digests and a monthly update hour.** Pins above are current as of 20 November 2026. They will not stay current. Update one component at a time, re-run its acceptance, and do not move the gateway pin in the same hour.
 6. **Disk caps.** Phoenix retention 14 days. Hatchet payloads for one lane are small. A trace body that ignored `turn_off_message_logging` will fill the disk. The status page should show disk free on bobserver.

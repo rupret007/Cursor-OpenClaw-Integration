@@ -78,8 +78,9 @@ Defined in `.env.example`:
 
 - Uses `scripts/cursor_cli_fallback.sh`
 - Detects local `agent` first, then `cursor-agent`
-- Uses safe quoting and no GUI automation
-- Requires local repo path
+- Requires a local repo path and the First Officer tracker in the same checkout as the skill
+- Reads a fresh subscription file from `CURSOR_PLAN_READING` in the [fixture format](../../TEST-NOW.md#4-step-2-codex-claude-and-cursor-usage-tracking). The reading must come from the same existing login that the CLI uses and confirm that every paid extra is off.
+- Starts one CLI invocation below 90 percent usage using the existing login and the pinned Composer 2.5 model. [Cursor CLI options](https://cursor.com/docs/cli/overview), [Composer 2.5 model ID](https://cursor.com/docs/models/cursor-composer-2-5).
 
 ### Read an Existing Agent's Status
 
@@ -107,7 +108,8 @@ the work. This status readout does not send a follow-up, retry, or create a job.
 
 ### Auto Mode
 
-- Uses API when credentials exist
+- Uses the CLI path for submissions when `CURSOR_PLAN_READING` is configured, including when a Cloud API key is present
+- Otherwise uses API when credentials exist
 - Falls back to CLI wrapper otherwise
 - Fails clearly if neither backend is available
 

@@ -29,12 +29,16 @@ TENANT = "b7e1c0de4a114c0e9a110c0ffee00001"
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
+    def do_GET(self):
+        self.do_POST()
+
     def do_POST(self):
         length = int(self.headers.get("Content-Length", "0") or "0")
         raw = self.rfile.read(length) if length else b""
         spec = self.server.routes.get(self.path, {"status": 404, "body": {}})
         self.server.seen.append({
             "path": self.path,
+            "method": self.command,
             "body": raw,
             "authorization": self.headers.get("Authorization"),
             "idempotency": self.headers.get("idempotency-key"),
@@ -132,6 +136,7 @@ def test_primary_success_never_calls_restate_and_a_repeat_is_free(tmp_path, toke
     assert restate.seen == []
     body = json.loads(hatchet.seen[0]["body"])
     assert body["workflowName"] == "review-lane"
+    assert body["returnOnlyId"] is True
     assert body["input"] == REQUEST
     assert body["additionalMetadata"] == {"idempotencyKey": queue.idempotency_key(REQUEST)}
     assert hatchet.seen[0]["authorization"] == f"Bearer {HATCHET_TOKEN}"
@@ -566,11 +571,18 @@ def test_unusable_primary_receipts_stay_uncertain(tmp_path, tokens, spec):
         stop(restate)
 
 
-def test_restate_lookup_recovers_only_positive_receipt_on_original_route(tmp_path, tokens):
+@pytest.mark.parametrize("scope", [None, "pilot-review"])
+def test_restate_lookup_recovers_only_positive_receipt_on_original_route(tmp_path, tokens, scope):
+    send_path = RESTATE_PATH if scope is None else f"/restate/scope/{scope}/send/LaneQueue/submit"
     hatchet = serve({HATCHET_PATH: {"status": 429}})
-    restate = serve({RESTATE_PATH: {"raw": b"unreadable"}})
+    restate = serve({send_path: {"raw": b"unreadable"}})
     ledger = tmp_path / "lanes.jsonl"
     config = policy(urls(hatchet), urls(restate))
+    if scope is not None:
+        config["restate"]["scope"] = scope
+    config_file = tmp_path / "queue.json"
+    config_file.write_text(json.dumps(config))
+    config = queue.load_config(config_file)
     try:
         with pytest.raises(ValueError, match="Restate outcome is unknown"):
             dispatch(config, ledger)
@@ -579,18 +591,33 @@ def test_restate_lookup_recovers_only_positive_receipt_on_original_route(tmp_pat
         changed["restate"]["handler"] = "alternate"
         with pytest.raises(ValueError, match="original Restate destination"):
             queue.reconcile_restate(changed, REQUEST, ledger)
+        if scope is not None:
+            changed["restate"].update(handler="submit", scope="other-scope")
+            with pytest.raises(ValueError, match="original Restate destination"):
+                queue.reconcile_restate(changed, REQUEST, ledger)
         assert len(restate.seen) == 1
         with pytest.raises(ValueError, match="remains unresolved"):
             queue.reconcile_restate(config, REQUEST, ledger)
         assert ledger.read_bytes() == original
         restate.routes["/restate/lookup"] = {"body": {"invocationId": "inv_recovered"}}
+        status_path = "/restate/status/inv_recovered"
+        # A deterministic ID is returned even when the invocation was never accepted or was purged.
+        with pytest.raises(ValueError, match="remains unresolved"):
+            queue.reconcile_restate(config, REQUEST, ledger)
+        assert ledger.read_bytes() == original
+        restate.routes[status_path] = {"body": {"stage": "created"}}
         receipt = queue.reconcile_restate(config, REQUEST, ledger)
         assert receipt["run"] == "inv_recovered"
         assert dispatch(config, ledger)["reused"]
-        assert [call["path"] for call in restate.seen] == [RESTATE_PATH, "/restate/lookup", "/restate/lookup"]
-        assert json.loads(restate.seen[-1]["body"]) == {
+        assert [(call["method"], call["path"]) for call in restate.seen] == [
+            ("POST", send_path), ("POST", "/restate/lookup"),
+            ("POST", "/restate/lookup"), ("GET", status_path),
+            ("POST", "/restate/lookup"), ("GET", status_path),
+        ]
+        assert json.loads(restate.seen[-2]["body"]) == {
             "target": "idempotentInvocation", "service": "LaneQueue", "handler": "submit",
             "idempotencyKey": queue.idempotency_key(REQUEST),
+            **({"scope": scope} if scope is not None else {}),
         }
         assert len(hatchet.seen) == 1
         assert phases(ledger) == ["pending", "refused", "pending", "uncertain", "queued"]

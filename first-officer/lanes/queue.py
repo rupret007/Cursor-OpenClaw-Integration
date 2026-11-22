@@ -50,6 +50,7 @@ MAX_LEDGER = 4 * 1024 * 1024
 FAILOVER_STATUS = (425, 429)
 HATCHET_FIELDS = ("base_url", "tenant", "workflow", "token_env")
 RESTATE_FIELDS = ("base_url", "service", "handler", "token_env")
+RESTATE_SCOPE = re.compile(r"[A-Za-z0-9_.-]{1,36}")
 
 
 def _pinhttp():
@@ -198,6 +199,10 @@ def post(opener, url, headers, payload, timeout):
     """Return the decoded object, raise Refusal when nothing was accepted, or Uncertain."""
     request = Request(url, data=json.dumps(payload).encode(),
                       headers={"Content-Type": "application/json", **headers})
+    return response_json(opener, request, timeout)
+
+
+def response_json(opener, request, timeout):
     try:
         response = opener.open(request, timeout=timeout)
     except HTTPError as error:
@@ -244,6 +249,22 @@ def run_identifier(value):
     return value
 
 
+def restate_route(config):
+    """Build the send path and the matching idempotent lookup target."""
+    service, handler = config["service"], config["handler"]
+    if not NAME.fullmatch(service) or not NAME.fullmatch(handler):
+        raise ValueError("The Restate lane queue needs a service and a handler")
+    target = {"target": "idempotentInvocation", "service": service, "handler": handler}
+    prefix = "/restate"
+    if "scope" in config:
+        scope = config["scope"]
+        if not isinstance(scope, str) or not RESTATE_SCOPE.fullmatch(scope):
+            raise ValueError("The Restate queue scope must be a valid scope name")
+        target["scope"] = scope
+        prefix += f"/scope/{scope}"
+    return f"{prefix}/send/{quote(service)}/{quote(handler)}", target
+
+
 def submission(backend, config, request, key):
     """Validate the selected route and resolve its credential before reserving a send."""
     if backend == "hatchet":
@@ -251,14 +272,12 @@ def submission(backend, config, request, key):
         if not TENANT.fullmatch(tenant) or not NAME.fullmatch(workflow):
             raise ValueError("The Hatchet lane queue needs a tenant and a workflow name")
         path = f"/api/v1/stable/tenants/{quote(tenant)}/workflow-runs/trigger"
-        payload = {"workflowName": workflow, "input": request,
+        # The ID is available before the workflow is replicated for status queries.
+        payload = {"workflowName": workflow, "input": request, "returnOnlyId": True,
                    "additionalMetadata": {"idempotencyKey": key}}
         extra_headers = {}
     else:
-        service, handler = config["service"], config["handler"]
-        if not NAME.fullmatch(service) or not NAME.fullmatch(handler):
-            raise ValueError("The Restate lane queue needs a service and a handler")
-        path = f"/restate/send/{quote(service)}/{quote(handler)}"
+        path, _ = restate_route(config)
         payload = request
         extra_headers = {"idempotency-key": key}
     token = secret(config["token_env"])
@@ -462,19 +481,24 @@ def reconcile_restate(config, request, ledger, timeout=TIMEOUT):
             raise ValueError("The ledger has no unresolved Restate submission")
         route = config["restate"]
         base = route["base_url"].rstrip("/")
-        service, handler = route["service"], route["handler"]
-        if not NAME.fullmatch(service) or not NAME.fullmatch(handler):
-            raise ValueError("The Restate lane queue needs a service and a handler")
-        target = hashlib.sha256(f"{base}/restate/send/{quote(service)}/{quote(handler)}".encode()).hexdigest()
+        path, lookup_target = restate_route(route)
+        target = hashlib.sha256((base + path).encode()).hexdigest()
         if state.get("target") != target:
             raise ValueError("The ledger cannot verify this as the original Restate destination")
         base, opener = endpoint(base)
-        payload = {"target": "idempotentInvocation", "service": service, "handler": handler,
-                   "idempotencyKey": key}
+        payload = {**lookup_target, "idempotencyKey": key}
+        headers = {"Authorization": "Bearer " + secret(route["token_env"])}
+        deadline = time.monotonic() + timeout
         try:
-            body = post(opener, f"{base}/restate/lookup",
-                        {"Authorization": "Bearer " + secret(route["token_env"])}, payload, timeout)
+            body = post(opener, f"{base}/restate/lookup", headers, payload, timeout)
             run = run_identifier(body.get("invocationId"))
+            # Lookup computes an ID even for work that was never accepted or has expired.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise Uncertain("Restate lookup used up the reconciliation timeout")
+            status = response_json(opener, Request(f"{base}/restate/status/{run}", headers=headers), remaining)
+            if status.get("stage") not in ("created", "started", "completed"):
+                raise Uncertain("Restate returned no invocation stage")
         except (Refusal, Uncertain):
             raise ValueError("Restate lookup did not confirm acceptance. The lane remains unresolved.") from None
         entry = {**state, "at": int(time.time()), "phase": "queued", "run": run}
@@ -490,6 +514,8 @@ def load_config(path):
     expected = {"hatchet": HATCHET_FIELDS, "restate": RESTATE_FIELDS}
     for name, fields in expected.items():
         section = config[name]
+        if name == "restate" and isinstance(section, dict) and "scope" in section:
+            fields += ("scope",)
         if not isinstance(section, dict) or set(section) != set(fields):
             raise ValueError(f"The {name} queue policy is incomplete")
         if not all(isinstance(section[field], str) for field in fields):
@@ -499,8 +525,7 @@ def load_config(path):
             raise ValueError("A queue credential is named by an environment variable")
     if not TENANT.fullmatch(config["hatchet"]["tenant"]) or not NAME.fullmatch(config["hatchet"]["workflow"]):
         raise ValueError("The Hatchet lane queue needs a tenant and a workflow name")
-    if not NAME.fullmatch(config["restate"]["service"]) or not NAME.fullmatch(config["restate"]["handler"]):
-        raise ValueError("The Restate lane queue needs a service and a handler")
+    restate_route(config["restate"])
     return config
 
 

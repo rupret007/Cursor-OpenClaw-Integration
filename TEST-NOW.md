@@ -153,7 +153,9 @@ This starts nothing outside the test. Two loopback servers stand in for the docu
 python3 -m pytest -q tests/first_officer/test_lane_queue.py
 ```
 
-Expect `32 passed`. One of those tests is the failover: the primary is called once, Restate is called once with the same lane and an idempotency key, and a second dispatch sends nothing. The other tests keep a timeout, a redirect and an authentication failure from failing over, and they keep two concurrent dispatchers to a single run. No token is written to the ledger. Recovery tests resume from a recorded Hatchet refusal, retain an unresolved state when a receipt is truncated, and recover Restate acceptance by lookup without another send. The local status check needs neither credentials nor an existing ledger. The concurrency fixtures keep one submission blocked while an unrelated request and a local status read complete, then verify that a stale completion cannot replace a newer receipt.
+Expect `33 passed`. One of those tests is the failover: the primary is called once, Restate is called once with the same lane and an idempotency key, and a second dispatch sends nothing. The other tests keep a timeout, a redirect and an authentication failure from failing over, and they keep two concurrent dispatchers to a single run. No token is written to the ledger. Recovery tests resume from a recorded Hatchet refusal, retain an unresolved state when a receipt is truncated, and recover Restate acceptance by scoped lookup and status without another send. The local status check needs neither credentials nor an existing ledger. The concurrency fixtures keep one submission blocked while an unrelated request and a local status read complete, then verify that a stale completion cannot replace a newer receipt.
+
+Run the [isolated queue pilot](QUEUE-PILOT.md) to check the same contract on the pinned backends and real synthetic workers.
 
 ## 7. Step 4: one trace arrives at a local collector
 
@@ -389,4 +391,4 @@ Expect `13 passed`. Nothing is installed and no host outside `127.0.0.1` is cont
 
 ## What is not provable here yet
 
-The live gateway release, the timed Telegram checks and the supervised pilot on the real lease still need your approval. The gateway tar needs the private prior bundle, which is not in this repository. Hatchet, Restate and the Phoenix UI are not installed. No status collector is running on the machines. The ten gateway routine declarations stay inactive. The staged pilot lease is not the live one.
+The live gateway release, the timed Telegram checks and the supervised pilot on the real lease still need your approval. The gateway tar needs the private prior bundle, which is not in this repository. The live Hatchet, Restate and Phoenix services still require installation approval. No status collector is running on the machines. The ten gateway routine declarations stay inactive. The staged pilot lease is not the live one.

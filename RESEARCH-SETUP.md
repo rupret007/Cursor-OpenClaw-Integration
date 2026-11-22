@@ -33,7 +33,7 @@ Do not write to bobserver, the live gateway, Telegram, or the Mac reader until t
 2. **Phoenix on the Nuc, loopback only.** One throwaway completion, one trace in the local UI, then tear the container down. This is `STATUS.md` step 4 and it spends nothing if the completion is a fixture.
 3. **Name the flaky-report contract.** The installed bundle reads a report this checkout does not contain. Confirm that path on the Nuc before writing a producer.
 4. **Publish `STATUS.json` from a timer** in the schema `readFleetSnapshot` already validates. Serve it only on loopback.
-5. **When a host is approved,** bring up PostgreSQL, LiteLLM 1.110.2, Hatchet Lite v0.120.19, and Restate 1.8.1, each bound to localhost. Re-run `tests/first_officer/litellm-acceptance.py` and `tests/first_officer/test_lane_queue.py` against the real listeners, not only the stand-ins.
+5. **When a host is approved,** bring up PostgreSQL, LiteLLM 1.110.2, Hatchet Lite v0.120.19, and Restate 1.8.1, each bound to localhost. Use the [isolated queue pilot](QUEUE-PILOT.md) for the queue and run `tests/first_officer/litellm-acceptance.py` for LiteLLM.
 6. **Wire the usage timer** so a missing Codex, Claude, or Cursor reading is a failure. Keep the 90% commit behavior.
 7. **Tailscale Serve** in front of the status page and Phoenix. Check `ss` afterward. Every published port should say `127.0.0.1`.
 8. **Guards, approval digests, and the hash-chained audit log** before any new tool is allowed to run.
@@ -313,7 +313,7 @@ The parser, the Chicago rendering, and the single-file commit are in good shape.
 
 ### Durable dispatch and recovery
 
-The local ledger reserves a send before the network call. It stores the selected backend and a fingerprint of the configured route, then records a definite refusal, an unknown outcome, or an acceptance receipt. A restart after a durable Hatchet refusal resumes with Restate. A pending entry represents a potentially accepted send. For Restate, the operator can recover positive evidence using the ingress lookup API and the original request key. Lookup operates without submitting a lane. A miss can mean retention expired, so it leaves the reservation intact. Use this against the same Restate deployment. Queue acceptance and job completion are separate events. [Restate HTTP invocation and lookup](https://docs.restate.dev/services/invocation/http)
+The local ledger reserves a send before the network call. It stores the selected backend and a fingerprint of the configured route, then records a definite refusal, an unknown outcome, or an acceptance receipt. A restart after a durable Hatchet refusal resumes with Restate. A pending entry represents a potentially accepted send. For Restate, the operator can recover positive evidence using the ingress lookup API and the original request key. Lookup computes the ID without submitting a lane. Restate 1.8.1 can return that ID after retention expires or when a job never existed. Verify it with the ingress status endpoint. A status miss leaves the reservation intact. Use this against the same Restate deployment. Queue acceptance and job completion are separate events. [Restate HTTP invocation and lookup](https://docs.restate.dev/services/invocation/http)
 
 Hatchet supports workflow-level idempotency expressions. In the worker pilot, declare the expression over `additional_metadata.idempotencyKey` and verify collision behavior and retention in the pinned deployment. Sending that metadata alone does not establish server-side deduplication. Hatchet's own client guidance keeps POST outside default transport retries because a lost response can follow a successful submission. [Hatchet expressions](https://docs.hatchet.run/v1/cel-expressions) · [Hatchet retry policies](https://docs.hatchet.run/v1/retry-policies)
 
@@ -401,14 +401,14 @@ Add one host proof, still on localhost, before any PR is queued:
 5. The ledger file mode is `0600` and contains neither token.
 6. A worker heartbeat is visible. A trigger with no worker is a failure, not a success, even if the trigger returns an id.
 
-`TEST-NOW.md` section 6 stays the offline version of this.
+`TEST-NOW.md` section 6 covers the offline gate. [QUEUE-PILOT.md](QUEUE-PILOT.md) records the isolated test on the pinned servers.
 
 ### Failure and fallback
 
 | Outcome | Next step |
 | --- | --- |
-| Hatchet 503, connection refused | Restate send, same idempotency key |
-| Hatchet timeout, 401, redirect, unreadable body | Stop. Page. Do not send to Restate |
+| Hatchet connection refused, HTTP 425 or HTTP 429 at the trusted ingress | Restate send, same idempotency key |
+| Hatchet timeout, 401, 503, redirect, unreadable body | Stop. Page. Do not send to Restate |
 | Both refused | Exit 1. The captain records a failed lane. The owner retries by hand after looking |
 | Hatchet up, worker dead | Run stays queued. Dead-man (section 9) notices the missing heartbeat. Do not fail over, because the run is accepted |
 | Restate volume started with a new node name | Treat as data loss. Restore the volume. Do not “start fresh” over a lane that may have run |

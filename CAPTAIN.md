@@ -56,7 +56,9 @@ The standalone review uses the same Hatchet and Restate dispatcher from the [iso
 
 The packaged worker adapters are under `round6/runtime/segment1/queue-runtime/workers`. Point `FO_CAPTAIN_REVIEW_SCRIPT` at the absolute path of that release's `round6/runtime/segment1/review-worker.mjs`. Run the Hatchet adapter with `hatchet-sdk==2.0.0a6` in its own venv. Use `@restatedev/restate-sdk@1.15.0` beside a private copy of the Restate adapter and register its loopback endpoint with the local Restate node. The worker uses the local read-only GitHub CLI. Both adapters verify the exact queued head and return the lane, PR, head, and CI result. Neither uses a model. A queue acceptance receipt is shown while the worker runs. A missing or uncertain receipt stays visible and blocks a repeat dispatch or handoff until it is resolved.
 
-The standalone registry requires current local gate and capacity evidence. Publish a snapshot from the local collector with the correct `local_node`, actual `heavy_jobs` and configured `heavy_max`, plus the observed `gate.hold` and `gate.running` booleans. A missing or stale snapshot disables review admission. The snapshot publisher does not act as a collector.
+The standalone registry probes the gate on its own host. Put a mode `0600` `gate.json` beside the authority with exactly `directory`, `lock` and `hold`. Use the absolute directory and two basenames from the installed local gate. The full gate must take an exclusive flock on that same existing file for the duration of the run. Keep the lock inode stable. The probe reads the hold marker and tests the lock without creating either file. The dispatcher holds a shared lock through submission and refuses a held or unverifiable gate before reserving a review. Keep publishing current local capacity with `local_node`, `heavy_jobs` and `heavy_max`. A stale or unavailable capacity report still prevents dispatch.
+
+For standalone `quota status`, put a mode `0600` `quota.json` beside the authority with a single `codex` field containing the absolute path to the local, signed-in Codex executable. This uses an on-demand quota query through the CLI, with no turn submission. The reply shows current local Codex windows and explicitly identifies provider windows that the local check cannot verify. The model-free CI review continues to use its reviewed queue policy for admission.
 
 ### Prepare the native service
 
@@ -94,7 +96,7 @@ launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/local.openclaw.ca
 launchctl bootout "gui/$(id -u)/local.openclaw.captain"
 ```
 
-Standalone cutover gates still include the native Mac service rehearsal, live gate and quota collectors, and the full Telegram checklist on each host. Verify both peer transfer and rollback through the generated services. The existing Bobserver install procedure serves the legacy profile.
+Standalone cutover gates still include the native Mac service rehearsal, binding the live gate and quota probes on each host, and the full Telegram checklist on each host. Verify both peer transfer and rollback through the generated services. The existing Bobserver install procedure serves the legacy profile.
 
 ## Daily commands
 

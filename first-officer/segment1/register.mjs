@@ -3,10 +3,10 @@ import { isIP } from 'node:net';
 import { join } from 'node:path';
 import { readMacAndrea } from './andrea-mac.mjs';
 import { sshAndreaSummary } from './andrea-ssh.mjs';
-import { createCaptain } from './captain.mjs';
+import { createCaptain, localState } from './captain.mjs';
 import { classifyRequest, createDispatch } from './dispatch.mjs';
 import { answerSimple, standaloneSimple } from './model-router.mjs';
-import { fleetStatus, localFleetNode, openPullRequests, readIntegrationGithub, standaloneGateStatus, summarizeAndrea } from './tools.mjs';
+import { fleetStatus, localFleetNode, openPullRequests, readIntegrationGithub, standaloneGateStatus, standaloneQuotaStatus, summarizeAndrea } from './tools.mjs';
 
 const account = 'default';
 const expectedGithubAccount = 'rupret007';
@@ -91,7 +91,7 @@ function andreaReader(signal, { readPrivateConfig, createAndreaReader }) {
 
 function toolRegistry(api, commands, liveConfig, services) {
   const { quotaStatus, githubReply, redacted } = services;
-  const gateStatus = () => localFleetNode() === 'bobserver' ? services.gateStatus() : standaloneGateStatus();
+  const gateStatus = () => localFleetNode() === 'bobserver' ? services.gateStatus() : standaloneGateStatus({ read: () => localState('local-gate') });
   const memory = (request, turn) => memoryReply(api, commands, liveConfig, request, turn);
   return {
     fleet: {
@@ -114,6 +114,7 @@ function toolRegistry(api, commands, liveConfig, services) {
     },
     quota: {
       run: async () => {
+        if (localFleetNode() !== 'bobserver') return plain(await standaloneQuotaStatus({ read: () => localState('local-quota') }));
         let profile = 0;
         return plain((await quotaStatus()).replace(/^Codex [^·\r\n]+·/gm, () => 'Codex profile ' + ++profile + ' ·'));
       },

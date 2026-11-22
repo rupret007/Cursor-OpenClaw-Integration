@@ -28,10 +28,10 @@ const terminal = {
   'ci-unavailable': 'GitHub could not verify the worker result against the current head. Recheck CI before using the result.',
 };
 
-function localState(operation, payload = {}) {
+export function localState(operation, payload = {}) {
   return new Promise((resolve, reject) => {
     const child = execFile('/usr/bin/nice', ['-n', '10', '/usr/bin/python3', '-I', '-B', stateScript, operation],
-      { maxBuffer: 32 * 1024, ...(operation === 'submit' ? {} : { timeout: operation === 'runner-quota' ? 7000 : 2500 }) },
+      { maxBuffer: 32 * 1024, ...(operation === 'submit' ? {} : { timeout: ['runner-quota', 'local-quota'].includes(operation) ? 7000 : 2500 }) },
       (error, stdout) => {
         if (error) return reject(new Error('Captain state unavailable'));
         try { resolve(JSON.parse(stdout)); } catch { reject(new Error('Invalid captain state')); }
@@ -63,14 +63,18 @@ export async function integrationCI(pr, read) {
   return { head, ci: statuses.every((result) => result === 'success') ? 'passing' : 'failing' };
 }
 
-async function fleetAdmission() {
+async function fleetAdmission(_signal, standalone) {
   const snapshot = await readFleetSnapshot();
   const clock = Date.now() - snapshot.ts * 1000;
   const gate = snapshot.host.locks?.find((row) => row.slot === 'fullgate');
-  if (!fleetSnapshotIsLocal(snapshot) || clock < -30_000 || clock > 300_000 || typeof gate?.held !== 'boolean' ||
-      !Array.isArray(snapshot.gates) || !Number.isSafeInteger(snapshot.host.heavy_jobs) ||
-      !Number.isSafeInteger(snapshot.host.heavy_max)) return 'Fleet or gate evidence is stale or unavailable.';
-  if (gate.held || snapshot.gates.some((row) => row.gate === 'running')) return 'The gate is busy.';
+  if (!fleetSnapshotIsLocal(snapshot) || clock < -30_000 || clock > 300_000 ||
+      !Number.isSafeInteger(snapshot.host.heavy_jobs) || !Number.isSafeInteger(snapshot.host.heavy_max)) {
+    return 'Fleet capacity evidence is stale or unavailable.';
+  }
+  if (!standalone) {
+    if (typeof gate?.held !== 'boolean' || !Array.isArray(snapshot.gates)) return 'Gate evidence is unavailable.';
+    if (gate.held || snapshot.gates.some((row) => row.gate === 'running')) return 'The gate is busy.';
+  }
   if (loadavg()[0] > 16 || snapshot.host.heavy_jobs >= snapshot.host.heavy_max) return 'The Captain host is at its lane capacity.';
 }
 
@@ -130,7 +134,7 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
         grant?.epoch !== lease.epoch || grant.paused) return 'Dispatch is paused until Jeff grants OpenClaw this scope at the current epoch.';
     if (view.active) return jobText(view.active);
     const [fleet, gate, quota, result] = await Promise.all([
-      bounded(4500, admit).catch(() => 'Fleet or gate evidence is unavailable.'),
+      bounded(4500, (signal) => admit(signal, view.standalone)).catch(() => 'Fleet or gate evidence is unavailable.'),
       status('gate', turn),
       runnerQuota(),
       bounded(9500, () => integrationCI(pr, get)).catch(() => ({ ci: 'unavailable' })),
@@ -167,6 +171,8 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
     if (placed.result === 'duplicate') return 'This review request already has a captain lane. Ask for “handoff” to see the receipt.';
     if (placed.result === 'active') return 'Another captain lane is active. Ask for “handoff” to see it.';
     if (placed.result === 'stale') return 'The epoch or approval changed before dispatch. No lane was launched.';
+    if (placed.result === 'gate-unavailable') return 'The live gate could not be verified when submitting. No review was sent.';
+    if (placed.result === 'gate-blocked') return 'The gate is running or on hold. No review was sent.';
     if (placed.result === 'runner-unconfigured') return 'The standalone queue runner is unavailable. No review was submitted.';
     if (placed.result !== 'running') return placed.job?.queuePhase
       ? jobText(placed.job)

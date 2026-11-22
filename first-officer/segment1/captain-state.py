@@ -1,6 +1,6 @@
 """Keep the Telegram captain grant and lane receipts next to the existing fence."""
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import fcntl
 import hashlib
 import importlib.util
@@ -261,6 +261,56 @@ class StandaloneAuthority:
         return {"epoch": bundle["epoch"]}
 
 
+class LiveGate:
+    """Probe the same local lock and hold marker used by the host's full gate."""
+
+    def __init__(self, authority):
+        self.authority = authority
+
+    @contextmanager
+    def open(self):
+        config = read_private(self.authority.AUTHORITY / "gate.json", 4096)
+        if not isinstance(config, dict) or config.keys() != {"directory", "lock", "hold"}:
+            raise ValueError("Invalid standalone gate policy")
+        directory = Path(config["directory"])
+        if (not directory.is_absolute() or directory.resolve() != directory or
+                any(not isinstance(config[key], str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}", config[key])
+                    for key in ("lock", "hold")) or config["lock"] == config["hold"]):
+            raise ValueError("Invalid standalone gate path")
+        parent = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            info = os.fstat(parent)
+            if info.st_uid != os.getuid() or info.st_mode & 0o022:
+                raise ValueError("The standalone gate directory is unsafe")
+            handle = os.open(config["lock"], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+            try:
+                info = os.fstat(handle)
+                if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022 or info.st_nlink != 1:
+                    raise ValueError("The standalone gate lock is unsafe")
+                try:
+                    fcntl.flock(handle, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                    running = False
+                except BlockingIOError:
+                    running = True
+                try:
+                    marker = os.stat(config["hold"], dir_fd=parent, follow_symlinks=False)
+                except FileNotFoundError:
+                    hold = False
+                else:
+                    if not stat.S_ISREG(marker.st_mode) or marker.st_uid != os.getuid() or marker.st_mode & 0o022:
+                        raise ValueError("The standalone hold marker is unsafe")
+                    hold = True
+                yield {"node": self.authority.node, "observed": int(time.time()), "hold": hold, "running": running}
+            finally:
+                os.close(handle)
+        finally:
+            os.close(parent)
+
+    def read(self):
+        with self.open() as reading:
+            return reading
+
+
 class CaptainQueue:
     """Use the reviewed dispatcher and its local receipt for standalone reviews."""
 
@@ -367,6 +417,7 @@ class Controller:
             raise ValueError("Captain state is not private")
         self.file = self.private / "state.json"
         self.queue = CaptainQueue(watchdog.AUTHORITY) if self.standalone else None
+        self.gate = LiveGate(watchdog) if self.standalone else None
 
     @contextmanager
     def locked(self, write=False):
@@ -480,7 +531,7 @@ class Controller:
                 or not SHA.fullmatch(head) or ci not in ("passing", "failing")):
             raise ValueError("Invalid lane plan")
         lane = "fo-ci-" + digest(f"{pr}:{head}".encode())[:24]
-        with self.locked(write=True) as data:
+        with self.locked(write=True) as data, ExitStack() as resources:
             record = self.fence.status()
             grant = data["grant"]
             if (not self.matches(record, epoch) or not grant or grant["epoch"] != epoch or grant["paused"]
@@ -502,6 +553,12 @@ class Controller:
                     queue_config = self.queue.config()
                 except (OSError, ValueError):
                     return {"result": "runner-unconfigured"}
+                try:
+                    gate = resources.enter_context(self.gate.open())
+                except (OSError, KeyError, TypeError, ValueError):
+                    return {"result": "gate-unavailable"}
+                if gate["hold"] or gate["running"]:
+                    return {"result": "gate-blocked"}
 
             job = {"lane": lane, "pr": pr, "head": head, "ci": ci, "epoch": epoch,
                    "state": "launching", "started": int(time.time()), "delivery": None,
@@ -625,6 +682,13 @@ class Controller:
         return {"result": result}
 
 
+def quota_reader():
+    spec = importlib.util.spec_from_file_location("runner_quota", Path(__file__).with_name("runner-quota.py"))
+    quota = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(quota)
+    return quota
+
+
 def main():
     sys.dont_write_bytecode = True
     os.umask(0o077)
@@ -656,6 +720,13 @@ def main():
             return authority.release(req["epoch"], controller.locked)
         if entry == "local-import":
             return authority.accept(req, controller.file, controller.locked)
+        if entry == "local-gate":
+            return controller.gate.read()
+        if entry == "local-quota":
+            profile = read_private(LOCAL_AUTHORITY / "quota.json", 4096)
+            if not isinstance(profile, dict) or profile.keys() != {"codex"} or not isinstance(profile["codex"], str):
+                raise ValueError("The standalone quota profile is invalid")
+            return quota_reader().read_local_quota(profile["codex"])
         if entry == "runner-quota":
             controller.queue.config()
             return {"allowed": True, "modelFree": True}
@@ -664,10 +735,7 @@ def main():
         import conductor_watchdog
 
         if entry == "runner-quota":
-            spec = importlib.util.spec_from_file_location("runner_quota", Path(__file__).with_name("runner-quota.py"))
-            quota = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(quota)
-            return quota.read_runner_quota(RUNNER / "conductor-action")
+            return quota_reader().read_runner_quota(RUNNER / "conductor-action")
         controller = Controller(conductor_watchdog)
     actions = {"view": controller.view, "submit": lambda: controller.submit(req),
                "handoff": controller.handoff, "block": lambda: controller.block(req),

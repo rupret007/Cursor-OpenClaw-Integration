@@ -52,15 +52,29 @@ export function fleetSnapshotIsLocal(snapshot, local = localFleetNode()) {
   return Boolean(snapshot?.host) && (snapshot.host.node ?? 'bobserver') === local;
 }
 
-export async function standaloneGateStatus({ read = readFleetSnapshot, now = Date.now, local = localFleetNode() } = {}) {
-  const snapshot = await read();
-  const gate = snapshot?.gate;
-  if (!fleetSnapshotIsLocal(snapshot, local) || !recent(snapshot.ts * 1000, now()) ||
-      typeof gate?.hold !== 'boolean' || typeof gate?.running !== 'boolean') {
+export async function standaloneGateStatus({ read, now = Date.now, local = localFleetNode() }) {
+  const gate = await read();
+  if (gate?.node !== local || !recent(gate.observed * 1000, now()) ||
+      typeof gate.hold !== 'boolean' || typeof gate.running !== 'boolean') {
     throw new Error('Current local gate evidence is unavailable');
   }
   const state = gate.hold ? 'HOLD is active' : gate.running ? 'Full gate is running' : 'Gate is idle';
-  return state + ' · observed ' + stamp(snapshot.ts * 1000) + '.';
+  return state + ' · observed ' + stamp(gate.observed * 1000) + '.';
+}
+
+export async function standaloneQuotaStatus({ read, now = Date.now }) {
+  const quota = await read();
+  const time = now();
+  if (!recent(quota?.observed * 1000, time, 60_000)) throw new Error('Local quota evidence is unavailable');
+  const windows = [['5-hour', quota.session], ['weekly', quota.weekly]].map(([label, window]) => {
+    if (!Number.isFinite(window?.used) || window.used < 0 || window.used > 100 ||
+        !Number.isSafeInteger(window.reset) || window.reset * 1000 <= time) {
+      throw new Error('Local quota windows are unavailable');
+    }
+    return label + ' · ' + window.used + '% used · resets ' + stamp(window.reset * 1000);
+  });
+  return ['Local Codex quota · checked ' + stamp(quota.observed * 1000) + '.', ...windows,
+    'Other provider quota windows are unavailable from this local check.'].join('\\n');
 }
 
 export async function fleetStatus({ node, localOnly }, {

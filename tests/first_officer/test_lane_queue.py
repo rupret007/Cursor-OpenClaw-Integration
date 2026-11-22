@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+import fcntl
 import importlib.util
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -716,6 +717,9 @@ def test_standalone_captain_queue_requires_exact_worker_output_and_never_resends
     authority = captain.StandaloneAuthority("nucbox", authority_root)
     captain.save(authority.path, {"node": "nucbox", "epoch": 3, "active": True})
     reviews = captain.Controller(authority, private=authority_root / "reviews")
+    gate = tmp_path / "fullgate.lock"
+    gate.touch(mode=0o600)
+    captain.save(authority_root / "gate.json", {"directory": str(tmp_path), "lock": gate.name, "hold": "HOLD"})
 
     run = "hatchet_run" if backend == "hatchet" else "inv_restate_run"
     hatchet_status = f"/api/v1/stable/workflow-runs/{run}/status"
@@ -738,6 +742,17 @@ def test_standalone_captain_queue_requires_exact_worker_output_and_never_resends
         grant = {"message": 100, "epoch": 3, "owner": "123456"}
         assert reviews.control("grant", grant) == {"result": "grant"}
         req = {**grant, "pr": 33, "head": HEAD, "ci": "passing", "message": 101}
+        with gate.open("rb") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            assert reviews.gate.read()["running"]
+            assert reviews.submit(req) == {"result": "gate-blocked"}
+        marker = tmp_path / "HOLD"
+        marker.touch(mode=0o600)
+        assert reviews.gate.read()["hold"]
+        assert reviews.submit(req) == {"result": "gate-blocked"}
+        marker.unlink()
+        assert not hatchet.seen and not restate.seen
+        assert not reviews.gate.read()["running"]
         placed = reviews.submit(req)
         job = placed["job"]
         assert job["backend"] == ("hatchet" if backend == "lost" else backend)

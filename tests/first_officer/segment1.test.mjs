@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import { budgets, classifyRequest, createDispatch } from '../../first-officer/segment1/dispatch.mjs';
 import { answerSimple, fastModelRef, routeOwnerModel, standaloneSimple } from '../../first-officer/segment1/model-router.mjs';
 import { registerSegmentOne } from '../../first-officer/segment1/register.mjs';
-import { fleetStatus, openPullRequests, readFleetSnapshot, standaloneGateStatus, summarizeAndrea } from '../../first-officer/segment1/tools.mjs';
+import { fleetStatus, openPullRequests, readFleetSnapshot, standaloneGateStatus, standaloneQuotaStatus, summarizeAndrea } from '../../first-officer/segment1/tools.mjs';
 import { andreaCommand, parseAndreaSummary } from '../../first-officer/segment1/andrea-ssh.mjs';
 import { readMacAndrea, runMacAndrea } from '../../first-officer/segment1/andrea-mac.mjs';
 
@@ -306,13 +306,25 @@ test('a Nuc Captain never presents its local load or a legacy snapshot as Bobser
 
 test('standalone gate status requires current evidence from the active host', async () => {
   const ts = 1_800_000_000;
-  const base = { ts, host: { node: 'mac-mini' }, gate: { hold: true, running: false } };
+  const base = { observed: ts, node: 'mac-mini', hold: true, running: false };
   const options = { now: () => ts * 1000, local: 'mac-mini' };
   assert.match(await standaloneGateStatus({ ...options, read: async () => base }), /HOLD is active/);
   await assert.rejects(standaloneGateStatus({ ...options, local: 'nucbox', read: async () => base }), /unavailable/);
-  await assert.rejects(standaloneGateStatus({ ...options, read: async () => ({ ...base, ts: ts - 301 }) }),
+  await assert.rejects(standaloneGateStatus({ ...options, read: async () => ({ ...base, observed: ts - 301 }) }),
     /unavailable/);
-  await assert.rejects(standaloneGateStatus({ ...options, read: async () => ({ ...base, gate: {} }) }), /unavailable/);
+  await assert.rejects(standaloneGateStatus({ ...options, read: async () => ({ ...base, hold: undefined }) }), /unavailable/);
+});
+
+test('standalone quota rejects an expired window before reporting usage', async () => {
+  const observed = 1_800_000_000;
+  const receipt = { observed, session: { used: 15, reset: observed + 1800 },
+    weekly: { used: 31, reset: observed + 5000 } };
+  const now = () => observed * 1000;
+  assert.match(await standaloneQuotaStatus({ read: async () => receipt, now }), /5-hour · 15% used/);
+  await assert.rejects(standaloneQuotaStatus({ read: async () => ({ ...receipt, observed: observed - 61 }), now }),
+    /evidence is unavailable/);
+  await assert.rejects(standaloneQuotaStatus({ read: async () => ({ ...receipt, session: { used: 15, reset: observed } }), now }),
+    /windows are unavailable/);
 });
 
 test('GitHub uses one live query and binds CI to the exact visible head', async () => {

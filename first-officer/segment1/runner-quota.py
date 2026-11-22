@@ -68,6 +68,23 @@ def quota_rpc(proc, timeout=5):
         return receive(2)
 
 
+def read_local_quota(binary):
+    """Query the standalone host's signed-in local CLI without copying credentials."""
+    path = Path(binary)
+    if not path.is_absolute() or path.name != "codex" or not os.access(path, os.X_OK) or not path.is_file():
+        raise ValueError("The approved standalone Codex CLI is unavailable")
+    with subprocess.Popen(
+        ["/usr/bin/nice", "-n", "10", str(path), "app-server", "--listen", "stdio://"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    ) as proc:
+        try:
+            result = quota_rpc(proc)
+            now = time.time()
+            return {**quota_windows(result, result.get("accountId"), now), "observed": int(now)}
+        finally:
+            proc.kill()
+
+
 def read_runner_quota(runner):
     hooks = runpy.run_path(str(runner))
     credentials = hooks["codex_credential"](hooks["JEFF_AUTH"])

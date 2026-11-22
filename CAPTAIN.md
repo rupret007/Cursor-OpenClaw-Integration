@@ -8,7 +8,7 @@ The staged pilot and the staged pin restore are proven on a private copy. They d
 
 The Mac Mini and Nuc are the standalone Captain targets. Each needs its own gateway, Captain state, queue and LiteLLM route. Andrea runs on the Mac Mini. Bobserver is an optional fleet member and an opt-in compute worker. Run the full acceptance suite on each host with Bobserver unreachable. Use a separate test Telegram account for the rehearsal and a no-cost model route or loopback provider fixtures.
 
-Set `FO_LOCAL_NODE=mac-mini` for the Mac gateway or `FO_LOCAL_NODE=nucbox` for the Nuc gateway. Local load uses that host's label. Local job counts and Captain admission require a fresh snapshot whose `host.node` matches that setting. The status publisher accepts `local_node` in its input. Remote fleet samples still need fresh timestamps. On the Mac, the gateway reads Andrea locally under the Andrea LaunchAgent account. On the Nuc, it connects to the same read-only Mac reader over a dedicated SSH route.
+Set `FO_LOCAL_NODE=mac-mini` for the Mac gateway or `FO_LOCAL_NODE=nucbox` for the Nuc gateway. Local load uses that host's label. Local load and tracked process counts come from the active host. Standalone admission checks live local capacity and the local gate. Remote fleet samples still need fresh timestamps. On the Mac, the gateway reads Andrea locally under the Andrea LaunchAgent account. On the Nuc, it connects to the same read-only Mac reader over a dedicated SSH route.
 
 The independent reader route uses a dedicated Nuc key and a pinned Mac host key. After approval to add that key to the Mac, run from the Nuc checkout under the same Linux account that will run the gateway:
 

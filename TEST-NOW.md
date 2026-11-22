@@ -19,7 +19,7 @@ This is the same gate CI runs. It takes about two minutes.
 OPENAI_API_ENABLED=0 RUN_COMM_SMOKE=0 bash scripts/test_integration.sh
 ```
 
-Expect `1123 passed` from the Python suite and a final line `All integration checks passed.`. The `Handoff failed.` lines inside the exhaustive check are expected: that check deliberately feeds bad arguments and requires each one to be refused. Before the unit tests, the gate prints one line, `Secret scan clean. Files <n>. History commits <n>. Logs 0.`
+Expect `1128 passed` from the Python suite and a final line `All integration checks passed.`. The `Handoff failed.` lines inside the exhaustive check are expected: that check deliberately feeds bad arguments and requires each one to be refused. Before the unit tests, the gate prints one line, `Secret scan clean. Files <n>. History commits <n>. Logs 0.`
 
 ## 2. The Segment 1 and captain gate
 
@@ -153,7 +153,7 @@ This starts nothing outside the test. Two loopback servers stand in for the docu
 python3 -m pytest -q tests/first_officer/test_lane_queue.py
 ```
 
-Expect `24 passed`. One of those tests is the failover: the primary is called once, Restate is called once with the same lane and an idempotency key, and a second dispatch sends nothing. The other tests keep a timeout, a redirect and an authentication failure from failing over, and they keep two concurrent dispatchers to a single run. No token is written to the ledger.
+Expect `29 passed`. One of those tests is the failover: the primary is called once, Restate is called once with the same lane and an idempotency key, and a second dispatch sends nothing. The other tests keep a timeout, a redirect and an authentication failure from failing over, and they keep two concurrent dispatchers to a single run. No token is written to the ledger. Recovery tests resume from a recorded Hatchet refusal, retain an unresolved state when a receipt is truncated, and recover Restate acceptance by lookup without another send. The local status check needs neither credentials nor an existing ledger.
 
 ## 7. Step 4: one trace arrives at a local collector
 

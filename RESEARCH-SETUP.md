@@ -311,6 +311,14 @@ The parser, the Chicago rendering, and the single-file commit are in good shape.
 
 **Fallback: Restate 1.8.1**, image `docker.restate.dev/restatedev/restate:1.8.1`, single node, fixed `--node-name`.
 
+### Durable dispatch and recovery
+
+The local ledger reserves a send before the network call. It stores the selected backend and a fingerprint of the configured route, then records a definite refusal, an unknown outcome, or an acceptance receipt. A restart after a durable Hatchet refusal resumes with Restate. A pending entry represents a potentially accepted send. For Restate, the operator can recover positive evidence using the ingress lookup API and the original request key. Lookup operates without submitting a lane. A miss can mean retention expired, so it leaves the reservation intact. Use this against the same Restate deployment. Queue acceptance and job completion are separate events. [Restate HTTP invocation and lookup](https://docs.restate.dev/services/invocation/http)
+
+Hatchet supports workflow-level idempotency expressions. In the worker pilot, declare the expression over `additional_metadata.idempotencyKey` and verify collision behavior and retention in the pinned deployment. Sending that metadata alone does not establish server-side deduplication. Hatchet's own client guidance keeps POST outside default transport retries because a lost response can follow a successful submission. [Hatchet expressions](https://docs.hatchet.run/v1/cel-expressions) · [Hatchet retry policies](https://docs.hatchet.run/v1/retry-policies)
+
+Temporal exposes separate policies for a workflow ID that is active and one that has already closed. Apply the same distinction in the pilot between recovering the current run and authorizing a fresh run. If dispatch expands to several hosts, move reservations into one transactional store with a uniqueness constraint on the logical request. Put a matching idempotency boundary in the worker before side effects. The present file ledger serializes dispatch on one filesystem and retains the existing lane, full head and pull request identity. Before enabling unattended reconciliation, test worker crash and leader changes against the pinned backends, including expired receipts, ambiguous Hatchet responses and competing dispatchers. [Temporal workflow IDs](https://nodejs.temporal.io/api/interfaces/common.BaseWorkflowOptions) · [Transactional outbox](https://learn.microsoft.com/en-us/azure/architecture/databases/guide/transactional-out-box-cosmos)
+
 That pair is what `first-officer/lanes/queue.py` implements. The client is the contract. Installing a different primary would throw away 16 passing tests.
 
 **Temporal is not installed.** The self-hosted Compose stack is a server, PostgreSQL, and Elasticsearch, and the project tells you to treat the service like a database. That weight is for many workflows and several teams. This workload is one review lane, one head, one pull request.

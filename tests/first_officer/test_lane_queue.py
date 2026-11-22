@@ -51,7 +51,10 @@ class Handler(BaseHTTPRequestHandler):
             data = spec.get("raw", json.dumps(spec.get("body", {})).encode())
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Content-Length", str(len(data) + spec.get("short_by", 0)))
+            if spec.get("short_by"):
+                self.send_header("Connection", "close")
+                self.close_connection = True
             self.end_headers()
             self.wfile.write(data)
         except (BrokenPipeError, ConnectionResetError):
@@ -521,3 +524,92 @@ def test_cli_prints_the_fallback_and_refuses_a_protected_outcome(tmp_path, token
     finally:
         stop(hatchet)
         stop(restate)
+
+
+def test_known_primary_refusal_is_resumed_without_reposting_to_hatchet(tmp_path, tokens, monkeypatch):
+    hatchet = serve({HATCHET_PATH: {"status": 429}})
+    restate = serve({RESTATE_PATH: {"body": {"invocationId": "inv_resumed", "status": "Accepted"}}})
+    ledger = tmp_path / "lanes.jsonl"
+    config = policy(urls(hatchet), urls(restate))
+    try:
+        monkeypatch.delenv("FO_RESTATE_LANE_TOKEN")
+        with pytest.raises(ValueError, match="missing from the environment"):
+            dispatch(config, ledger)
+        assert phases(ledger) == ["pending", "refused"]
+        monkeypatch.setenv("FO_RESTATE_LANE_TOKEN", RESTATE_TOKEN)
+        monkeypatch.delenv("FO_HATCHET_LANE_TOKEN")
+        assert dispatch(config, ledger)["run"] == "inv_resumed"
+        monkeypatch.delenv("FO_RESTATE_LANE_TOKEN")
+        assert dispatch(config, ledger)["reused"]
+        assert len(hatchet.seen) == len(restate.seen) == 1
+    finally:
+        stop(hatchet)
+        stop(restate)
+
+
+@pytest.mark.parametrize("spec", [
+    {"body": {"run": {"metadata": []}}},
+    {"body": {"run": {"metadata": {"id": "run_truncated"}}}, "short_by": 1},
+])
+def test_unusable_primary_receipts_stay_uncertain(tmp_path, tokens, spec):
+    hatchet = serve({HATCHET_PATH: spec})
+    restate = serve({})
+    ledger = tmp_path / "lanes.jsonl"
+    try:
+        with pytest.raises(ValueError, match="outcome is unknown"):
+            dispatch(policy(urls(hatchet), urls(restate)), ledger)
+        assert phases(ledger) == ["pending", "uncertain"]
+        assert restate.seen == []
+    finally:
+        stop(hatchet)
+        stop(restate)
+
+
+def test_restate_lookup_recovers_only_positive_receipt_on_original_route(tmp_path, tokens):
+    hatchet = serve({HATCHET_PATH: {"status": 429}})
+    restate = serve({RESTATE_PATH: {"raw": b"unreadable"}})
+    ledger = tmp_path / "lanes.jsonl"
+    config = policy(urls(hatchet), urls(restate))
+    try:
+        with pytest.raises(ValueError, match="Restate outcome is unknown"):
+            dispatch(config, ledger)
+        original = ledger.read_bytes()
+        changed = policy(urls(hatchet), urls(restate))
+        changed["restate"]["handler"] = "alternate"
+        with pytest.raises(ValueError, match="original Restate destination"):
+            queue.reconcile_restate(changed, REQUEST, ledger)
+        assert len(restate.seen) == 1
+        with pytest.raises(ValueError, match="remains unresolved"):
+            queue.reconcile_restate(config, REQUEST, ledger)
+        assert ledger.read_bytes() == original
+        restate.routes["/restate/lookup"] = {"body": {"invocationId": "inv_recovered"}}
+        receipt = queue.reconcile_restate(config, REQUEST, ledger)
+        assert receipt["run"] == "inv_recovered"
+        assert dispatch(config, ledger)["reused"]
+        assert [call["path"] for call in restate.seen] == [RESTATE_PATH, "/restate/lookup", "/restate/lookup"]
+        assert json.loads(restate.seen[-1]["body"]) == {
+            "target": "idempotentInvocation", "service": "LaneQueue", "handler": "submit",
+            "idempotencyKey": queue.idempotency_key(REQUEST),
+        }
+        assert len(hatchet.seen) == 1
+        assert phases(ledger) == ["pending", "refused", "pending", "uncertain", "queued"]
+    finally:
+        stop(hatchet)
+        stop(restate)
+
+
+def test_status_neither_creates_a_ledger_nor_reads_a_policy(tmp_path, capsys):
+    ledger = tmp_path / "absent.jsonl"
+    args = [str(tmp_path / "missing-policy.json"), str(ledger), "--lane", REQUEST["lane"],
+            "--head", HEAD, "--pull-request", str(REQUEST["pull_request"]), "--status"]
+    assert queue.main(args) == 0
+    assert json.loads(capsys.readouterr().out) == {"phase": "unseen"}
+    assert not ledger.exists()
+    ledger.write_text(json.dumps({"at": NOW, "backend": "hatchet", "head": HEAD,
+                                  "key": queue.idempotency_key(REQUEST), "lane": REQUEST["lane"],
+                                  "phase": "pending", "run": None}) + "\n")
+    ledger.chmod(0o600)
+    original = ledger.read_bytes()
+    assert queue.main(args) == 0
+    assert json.loads(capsys.readouterr().out) == {"phase": "pending", "backend": "hatchet", "run": None}
+    assert ledger.read_bytes() == original

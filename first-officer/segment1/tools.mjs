@@ -43,17 +43,30 @@ export async function readFleetSnapshot(path = join(homedir(), 'work/status/STAT
   }
 }
 
-export async function fleetStatus({ node }, { read = readFleetSnapshot, load = loadavg, now = Date.now } = {}) {
+export function localFleetNode(value = process.env.FO_LOCAL_NODE ?? 'bobserver') {
+  if (!nodes.has(value)) throw new Error('Unknown local fleet host');
+  return value;
+}
+
+export function fleetSnapshotIsLocal(snapshot, local = localFleetNode()) {
+  return Boolean(snapshot?.host) && (snapshot.host.node ?? 'bobserver') === local;
+}
+
+export async function fleetStatus({ node, localOnly }, {
+  read = readFleetSnapshot, load = loadavg, now = Date.now, local = localFleetNode(),
+} = {}) {
   // Local load and remote collector availability are independent.
   const snapshot = await read().catch(() => undefined);
   const checkedAt = now();
   const fresh = recent(snapshot?.ts * 1000, checkedAt);
+  const localEvidence = fresh && fleetSnapshotIsLocal(snapshot, local);
+  if (localOnly) node = local;
   const lines = ['Fleet load (1 / 5 / 15 minutes) and tracked work'];
   for (const [id, name] of nodes) {
     if (node && node !== id) continue;
-    if (id === 'bobserver') {
+    if (id === local) {
       const loads = load();
-      const jobs = fresh && natural(snapshot.host?.heavy_jobs)
+      const jobs = localEvidence && natural(snapshot.host?.heavy_jobs)
         ? snapshot.host.heavy_jobs + ' heavy jobs as of ' + stamp(snapshot.ts * 1000)
         : 'job count unavailable';
       lines.push(validLoads(loads)
@@ -77,7 +90,7 @@ export async function fleetStatus({ node }, { read = readFleetSnapshot, load = l
   }
   if (!node) {
     const counts = ['running', 'active', 'queued', 'stalled'].flatMap((state) =>
-      fresh && natural(snapshot.lane_counts?.[state]) ? [snapshot.lane_counts[state] + ' ' + state] : [],
+      localEvidence && natural(snapshot.lane_counts?.[state]) ? [snapshot.lane_counts[state] + ' ' + state] : [],
     );
     lines.push(counts.length ? 'Lane counts at ' + stamp(snapshot.ts * 1000) + ' · ' + counts.join(', ') :
       'Current lane counts unavailable.');

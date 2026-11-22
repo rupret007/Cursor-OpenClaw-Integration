@@ -17,7 +17,7 @@ from pathlib import Path
 import sys
 
 
-NODES = ("mac-mini", "nucbox", "macbook-pro")
+NODES = ("bobserver", "mac-mini", "nucbox", "macbook-pro")
 COUNTS = ("running", "active", "queued", "stalled")
 MAX_BYTES = 3000
 FRESH_S = 300
@@ -57,6 +57,10 @@ def build(evidence, now):
     if SECRET.search(json.dumps(evidence, default=str)):
         alerts.append("redacted")
     document = {"alerts": alerts, "generated_at": _stamp(now), "host": {}, "ts": now, "v": 1}
+    if "local_node" in evidence:
+        if evidence["local_node"] not in NODES:
+            raise ValueError("The local status host is unknown")
+        document["host"]["node"] = evidence["local_node"]
     heavy = evidence.get("heavy_jobs", None)
     if heavy is not None:
         if not _natural(heavy, 100):

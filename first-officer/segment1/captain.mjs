@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { loadavg } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { bounded } from './dispatch.mjs';
-import { readFleetSnapshot } from './tools.mjs';
+import { fleetSnapshotIsLocal, readFleetSnapshot } from './tools.mjs';
 
 const stateScript = fileURLToPath(new URL('./captain-state.py', import.meta.url));
 const repo = 'repos/rupret007/Cursor-OpenClaw-Integration';
@@ -67,11 +67,11 @@ async function fleetAdmission() {
   const snapshot = await readFleetSnapshot();
   const clock = Date.now() - snapshot.ts * 1000;
   const gate = snapshot.host.locks?.find((row) => row.slot === 'fullgate');
-  if (clock < -30_000 || clock > 300_000 || typeof gate?.held !== 'boolean' ||
+  if (!fleetSnapshotIsLocal(snapshot) || clock < -30_000 || clock > 300_000 || typeof gate?.held !== 'boolean' ||
       !Array.isArray(snapshot.gates) || !Number.isSafeInteger(snapshot.host.heavy_jobs) ||
       !Number.isSafeInteger(snapshot.host.heavy_max)) return 'Fleet or gate evidence is stale or unavailable.';
   if (gate.held || snapshot.gates.some((row) => row.gate === 'running')) return 'The gate is busy.';
-  if (loadavg()[0] > 16 || snapshot.host.heavy_jobs >= snapshot.host.heavy_max) return 'Bobserver is at its lane capacity.';
+  if (loadavg()[0] > 16 || snapshot.host.heavy_jobs >= snapshot.host.heavy_max) return 'The Captain host is at its lane capacity.';
 }
 
 function role(view) {
@@ -160,7 +160,7 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
     if (placed.result === 'active') return 'Another captain lane is active. Ask for “handoff” to see it.';
     if (placed.result === 'stale') return 'The epoch or approval changed before dispatch. No lane was launched.';
     if (placed.result !== 'running') return 'The runner did not confirm launch. OpenClaw will reconcile the local receipt.';
-    return 'I delegated one exact-head CI review to the existing Bobserver runner. ' + jobText(placed.job);
+    return 'I delegated one exact-head CI review to the configured runner. ' + jobText(placed.job);
   }
 
   async function run(request, turn) {

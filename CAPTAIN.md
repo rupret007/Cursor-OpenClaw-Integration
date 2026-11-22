@@ -4,6 +4,25 @@ OpenClaw can captain exact-head CI reviews for open PRs in Cursor-OpenClaw-Integ
 
 The staged pilot and the staged pin restore are proven on a private copy. They do not read the live lease and they do not stop the gateway. Production authority stays with the current holder until the live checklist on this page is run. Gateway activation is one command, `python3 -B first-officer/release.py`, with one rollback. `python3 first-officer/archive.py pack` writes a checksummed copy of this lane for offline testing. That copy is not the gateway release.
 
+## Independent Nuc profile
+
+The standalone target is the Nuc with its own gateway, Captain state, queue and LiteLLM route. Andrea still runs on the Mac Mini. Bobserver appears as an optional fleet member. The acceptance run must pass with Bobserver unreachable. Use a separate test Telegram account for the rehearsal and a no-cost model route or loopback provider fixtures.
+
+Set `FO_LOCAL_NODE=nucbox` in the future Nuc gateway service environment. This gives local load the NucBox label and requires a snapshot tagged with `host.node = "nucbox"` for local job counts and Captain admission. The status publisher accepts `local_node` in its input. Remote fleet samples still need fresh timestamps.
+
+The independent reader route uses a dedicated Nuc key and a pinned Mac host key. After approval to add that key to the Mac, run from the Nuc checkout under the same Linux account that will run the gateway:
+
+```bash
+read -r -p 'Mac Mini SSH host: ' mac_host
+read -r -p 'Mac Mini username: ' mac_user
+nice -n 10 python3 -B first-officer/provision-andrea.py \\
+  --local-client --mac-host "$mac_host" --mac-user "$mac_user"
+```
+
+The local provisioning path connects only to the Mac. The Mac has separate restricted entries for the Nuc and the incumbent reader. The Nuc key can run one read-only summary command. Refreshes and restores on the Nuc use the same `--local-client` flag.
+
+Standalone cutover gates are still open. The current Captain controller loads the legacy conductor watchdog and launches its runner from the existing lane tree. The current release installer expects an existing Bobserver gateway pin. The Nuc needs independent authority, a queue-backed runner, verified local gate and quota sources, and a clean-host installer before it can take over. Verify single Telegram ownership before moving the production bot account, especially when Bobserver comes back online.
+
 ## Daily commands
 
 | Send in the private owner chat | What OpenClaw does |

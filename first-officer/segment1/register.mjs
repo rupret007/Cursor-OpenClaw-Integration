@@ -5,7 +5,7 @@ import { sshAndreaSummary } from './andrea-ssh.mjs';
 import { createCaptain } from './captain.mjs';
 import { classifyRequest, createDispatch } from './dispatch.mjs';
 import { answerSimple, standaloneSimple } from './model-router.mjs';
-import { fleetStatus, openPullRequests, summarizeAndrea } from './tools.mjs';
+import { fleetStatus, localFleetNode, openPullRequests, summarizeAndrea } from './tools.mjs';
 
 const account = 'default';
 const expectedGithubAccount = 'rupret007';
@@ -134,8 +134,12 @@ function toolRegistry(api, commands, liveConfig, services) {
     remember: { run: memory, failure: 'The private memory request failed. The fact wasn’t confirmed as saved.' },
     recall: { run: memory, failure: 'The private memory lookup failed. I couldn’t verify a saved fact.' },
     texts: {
-      run: async (_, { signal }) => plain(await sshAndreaSummary(signal) ??
-        await summarizeAndrea(andreaReader(signal, services))),
+      run: async (_, { signal }) => {
+        const summary = await sshAndreaSummary(signal);
+        if (summary !== undefined) return plain(summary);
+        if (localFleetNode() === 'nucbox') throw new Error('The local Andrea reader route is unavailable');
+        return plain(await summarizeAndrea(andreaReader(signal, services)));
+      },
       failure: 'The live read through Andrea failed. Your recent text activity is unavailable.',
     },
     'andrea-help': {

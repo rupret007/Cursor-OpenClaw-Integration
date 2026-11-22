@@ -254,6 +254,24 @@ test('fleet refuses old remote readings and keeps independent local evidence', a
   }), /Mac Mini · current load and tracked jobs unavailable/);
 });
 
+test('a Nuc Captain never presents its local load or a legacy snapshot as Bobserver evidence', async () => {
+  const now = Date.parse('2026-11-20T04:00:00Z');
+  const read = async () => ({ ts: now / 1000, host: { heavy_jobs: 2 }, lane_counts: { running: 1 } });
+  const options = { read, load: () => [1, 2, 3], now: () => now, local: 'nucbox' };
+  const result = await fleetStatus({}, options);
+  assert.match(result, /NucBox · 1\.00 \/ 2\.00 \/ 3\.00.*job count unavailable/);
+  assert.match(result, /Bobserver · current load and tracked jobs unavailable/);
+  assert.doesNotMatch(result, /2 heavy jobs|1 running/);
+  const localRequest = classifyRequest('load', { ...intentHooks, legacyStatus: () => 'load' });
+  const localResult = await fleetStatus(localRequest, options);
+  assert.match(localResult, /NucBox/);
+  assert.doesNotMatch(localResult, /Bobserver/);
+  const localSnapshot = async () => ({
+    ts: now / 1000, host: { node: 'nucbox', heavy_jobs: 1 }, lane_counts: { running: 1 },
+  });
+  assert.match(await fleetStatus({}, { ...options, read: localSnapshot }), /NucBox.*1 heavy jobs/);
+});
+
 test('GitHub uses one live query and binds CI to the exact visible head', async () => {
   const signal = new AbortController().signal;
   const head = 'a'.repeat(40);

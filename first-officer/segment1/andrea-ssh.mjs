@@ -97,7 +97,8 @@ export function parseAndreaSummary(payload) {
 }
 
 export async function sshAndreaSummary(signal, {
-  directory = join(homedir(), '.ssh/openclaw-fo-andrea'),
+  directory = join(homedir(), process.env.FO_LOCAL_NODE === 'nucbox'
+    ? '.ssh/openclaw-fo-andrea-nuc' : '.ssh/openclaw-fo-andrea'),
   run = execute,
 } = {}) {
   const folder = await lstat(directory).catch((error) => {

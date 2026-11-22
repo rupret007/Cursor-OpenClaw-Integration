@@ -3,14 +3,19 @@
 
 import argparse
 from datetime import datetime
+from decimal import Decimal
+from fractions import Fraction
 import importlib.util
 import json
 import math
 import os
 from pathlib import Path
 import re
+import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 from zoneinfo import ZoneInfo
 
@@ -20,26 +25,31 @@ WARN_PERCENT = 90.0
 STOP_PERCENT = 97.0
 OK, WARNED, STOPPED = 0, 3, 4
 HANDOFF = "HANDOFF.md"
+HANDOFF_COMMIT = "Record First Officer usage warning and resume point"
 PROTECTED = ("main", "master")
 CLAUDE_HEADER = "anthropic-ratelimit-unified-{}-{}"
 CLAUDE_WINDOWS = (("session", "5h"), ("weekly", "7d"))
 CODEX_WINDOWS = (("5h", "session"), ("weekly", "weekly"))
 CURSOR_WINDOW = ("cursor", "billing-period")
 CURSOR_MAX_AGE = 90
-CURSOR_PERIOD_FIELDS = {"observed_at", "period_start", "period_end", "included_spend", "included_limit"}
+CURSOR_ACCOUNT = re.compile(r"[0-9a-f]{64}")
+READING_MAX_BYTES = 256 * 1024
+CURSOR_PERIOD_FIELDS = {"observed_at", "period_start", "period_end", "included_spend", "included_limit",
+                        "account_binding"}
 CURSOR_BILLING_FLAGS = {"has_credits", "unlimited", "on_demand_enabled", "usage_billing_enabled",
                         "auto_top_up_enabled"}
 
 
-def _enforced_secret():
+def _privacy_rules():
     path = Path(__file__).resolve().parents[1] / "privacy" / "scan.py"
     spec = importlib.util.spec_from_file_location("fo_enforced_secret_usage", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.enforced_secret
+    return module
 
 
-SECRET = _enforced_secret()
+PRIVACY = _privacy_rules()
+SECRET = PRIVACY.enforced_secret
 BRANCH = re.compile(r"[0-9A-Za-z][0-9A-Za-z._/-]{0,199}")
 SHA = re.compile(r"[0-9a-f]{40}")
 
@@ -52,14 +62,18 @@ def chicago_reset(epoch):
 
 
 def window(provider, name, used, reset, now):
-    if type(used) not in (int, float) or not math.isfinite(used) or used < 0:
+    if type(used) not in (int, float, Fraction) or not math.isfinite(used) or used < 0:
         raise ValueError(f"Unusable {provider} {name} utilization")
     if type(reset) is not int or not 0 < reset < 1 << 42:
         raise ValueError(f"Unusable {provider} {name} reset time")
     if reset <= now:
         raise ValueError(f"The {provider} {name} reading is stale")
-    return {"provider": provider, "window": name, "used": min(float(used), 100.0),
-            "reset": reset, "reset_text": chicago_reset(reset)}
+    try:
+        reset_text = chicago_reset(reset)
+    except (ValueError, OverflowError, OSError):
+        raise ValueError(f"Unusable {provider} {name} reset time") from None
+    utilization = min(used, 100) if isinstance(used, Fraction) else min(float(used), 100.0)
+    return {"provider": provider, "window": name, "used": utilization, "reset": reset, "reset_text": reset_text}
 
 
 def codex_windows(result, account, now):
@@ -96,10 +110,14 @@ def claude_windows(headers, now):
     return rows
 
 
-def cursor_windows(reading, now):
+def cursor_windows(reading, now, account):
     """Normalize a current, subscription-only Cursor billing period."""
     if not isinstance(reading, dict) or reading.keys() != CURSOR_PERIOD_FIELDS | {"billing"}:
         raise ValueError("Incomplete or unknown Cursor plan reading")
+    if not isinstance(account, str) or not CURSOR_ACCOUNT.fullmatch(account):
+        raise ValueError("Cursor plan account binding is missing or invalid")
+    if reading["account_binding"] != account:
+        raise ValueError("Cursor plan account binding does not match")
     billing = reading["billing"]
     if (not isinstance(billing, dict) or billing.keys() != CURSOR_BILLING_FLAGS
             or any(value is not False for value in billing.values())):
@@ -113,8 +131,12 @@ def cursor_windows(reading, now):
     spend, limit = reading["included_spend"], reading["included_limit"]
     if type(spend) is not int or type(limit) is not int or spend < 0 or limit <= 0:
         raise ValueError("Unusable Cursor included spend or limit")
-    used = 100 * min(spend, limit) / limit
+    used = Fraction(100 * min(spend, limit), limit)
     return [window(*CURSOR_WINDOW, used, end, now)]
+
+
+def reaches_threshold(used, threshold):
+    return used >= (Fraction(str(threshold)) if isinstance(used, Fraction) else threshold)
 
 
 def assess(windows, warn_percent=WARN_PERCENT, stop_percent=STOP_PERCENT):
@@ -129,23 +151,36 @@ def assess(windows, warn_percent=WARN_PERCENT, stop_percent=STOP_PERCENT):
     expected = ({("codex", name) for name, _ in CODEX_WINDOWS} |
                 {("claude", name) for name, _ in CLAUDE_WINDOWS} | {CURSOR_WINDOW})
     missing = expected - {(row["provider"], row["window"]) for row in windows}
-    warned = sorted((row for row in windows if row["used"] >= warn_percent),
+    warned = sorted((row for row in windows if reaches_threshold(row["used"], warn_percent)),
                     key=lambda row: -row["used"])
     return {"windows": sorted(windows, key=lambda row: (row["provider"], row["window"])),
             "warned": warned, "unread": sorted(missing),
             "warn_percent": warn_percent, "stop_percent": stop_percent,
-            "stop": any(row["used"] >= stop_percent for row in warned)}
+            "stop": any(reaches_threshold(row["used"], stop_percent) for row in warned)}
+
+
+def format_percent(used, *thresholds):
+    if not isinstance(used, Fraction):
+        return f"{used:.6g}"
+    # Round down at a precision that can represent both configured thresholds.
+    places = max(6, *(-Decimal(str(threshold)).as_tuple().exponent for threshold in thresholds))
+    scale = 10 ** places
+    whole, remainder = divmod(used.numerator * scale // used.denominator, scale)
+    return f"{whole}.{remainder:0{places}d}".rstrip("0").rstrip(".")
 
 
 def report_text(report):
-    lines = [f"{row['provider'].capitalize()} {row['window']} window at {row['used']:.6g}% used."
+    thresholds = report["warn_percent"], report["stop_percent"]
+    lines = [f"{row['provider'].capitalize()} {row['window']} window at {format_percent(row['used'], *thresholds)}% used."
              f" It resets {row['reset_text']}." for row in report["windows"]]
     for provider, name in report["unread"]:
         lines.append(f"The {provider} {name} window was not read.")
     if report["stop"]:
-        lines.append(f"At or above the {report['stop_percent']:.6g}% stop threshold. Stop after the handoff.")
+        stop_percent = str(report["stop_percent"]).removesuffix(".0")
+        lines.append(f"At or above the {stop_percent}% stop threshold. Stop after the handoff.")
     elif report["warned"]:
-        lines.append(f"At or above the {report['warn_percent']:.6g}% warning threshold.")
+        warn_percent = str(report["warn_percent"]).removesuffix(".0")
+        lines.append(f"At or above the {warn_percent}% warning threshold.")
     return "\n".join(lines)
 
 
@@ -169,47 +204,138 @@ def handoff_text(report, branch, head, step, next_step, failures):
         "- Nothing was pushed, merged or activated by this handoff.",
         "",
     ])
-    if SECRET.search(body):
+    if SECRET.search(body) or PRIVACY.findings_in_text(body):
         raise ValueError("Refusing to write a handoff containing a credential or address")
     return body
 
 
-def git(repo, *args, check=True):
+def git(repo, *args, check=True, index_file=None, data=None):
+    env = {key: value for key, value in os.environ.items() if key != "GIT_INDEX_FILE"}
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    if index_file is not None:
+        env["GIT_INDEX_FILE"] = str(index_file)
     return subprocess.run(["git", "-C", str(repo), *args], check=check, capture_output=True,
-                          text=True, timeout=30, env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
+                          encoding="utf-8", input=data, timeout=30, env=env)
 
 
-def commit_handoff(repo, report, branch, head, step, next_step, failures=()):
-    """Write the handoff and commit only that file. A lane never pushes and never commits on main."""
-    repo = Path(repo)
-    observed = git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
-    if observed != branch:
-        raise ValueError("The checkout is not on the branch named in the handoff")
-    if observed in PROTECTED:
+def handoff_anchor(repo, branch, head):
+    """Reuse the resume point from the previous generated handoff on the same branch."""
+    commit = git(repo, "show", "--format=%s", "--name-only", head, "--").stdout.splitlines()
+    if [line for line in commit if line] != [HANDOFF_COMMIT, HANDOFF]:
+        return head
+    prior = git(repo, "show", f"{head}:{HANDOFF}").stdout
+    prefix = f"- Branch `{branch}` is at `"
+    candidates = [line[len(prefix):-2] for line in prior.splitlines()
+                  if line.startswith(prefix) and line.endswith("`.")]
+    if len(candidates) == 1 and SHA.fullmatch(candidates[0]) and git(
+            repo, "merge-base", "--is-ancestor", candidates[0], head, check=False).returncode == 0:
+        return candidates[0]
+    return head
+
+
+def checked_out(repo, reference, commit):
+    return (git(repo, "symbolic-ref", "-q", "HEAD", check=False).stdout.strip() == reference
+            and git(repo, "rev-parse", "--verify", "HEAD", check=False).stdout.strip() == commit)
+
+
+def publish_handoff(repo, reference, parent, commit, blob, document, scratch):
+    """Update the named lane and synchronize only HANDOFF.md in its checked-out index."""
+    index = Path(git(repo, "rev-parse", "--path-format=absolute", "--git-path", "index").stdout.strip())
+    lock = index.with_name(index.name + ".lock")
+    try:
+        stream = lock.open("xb")
+    except FileExistsError:
+        raise ValueError("The checkout index is busy. Handoff was deferred.") from None
+
+    published = synchronized = False
+    try:
+        with stream:
+            if not checked_out(repo, reference, parent):
+                raise ValueError("The checkout changed before the handoff could be recorded")
+            checkout_index = scratch / "checkout-index"
+            if index.exists():
+                shutil.copyfile(index, checkout_index)
+            else:
+                git(repo, "read-tree", parent, index_file=checkout_index)
+            git(repo, "update-index", "--add", "--cacheinfo", f"100644,{blob},{HANDOFF}",
+                index_file=checkout_index)
+            stream.write(checkout_index.read_bytes())
+            stream.flush()
+            if not checked_out(repo, reference, parent):
+                raise ValueError("The checkout changed before the handoff could be recorded")
+            if git(repo, "-c", "core.hooksPath=/dev/null", "update-ref", "--no-deref",
+                   reference, commit, parent, check=False).returncode:
+                raise ValueError("The lane advanced or rejected the handoff update")
+            published = True
+            if not checked_out(repo, reference, commit):
+                raise ValueError("Handoff committed to its lane. The checkout changed before synchronization.")
+            pending = tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=repo, prefix=".fo-handoff-", delete=False,
+            )
+            try:
+                with pending:
+                    pending.write(document)
+                if not checked_out(repo, reference, commit):
+                    raise ValueError("Handoff committed to its lane. The checkout changed before synchronization.")
+                os.replace(pending.name, repo / HANDOFF)
+            finally:
+                Path(pending.name).unlink(missing_ok=True)
+        os.replace(lock, index)
+        synchronized = True
+    except (OSError, subprocess.SubprocessError):
+        if published:
+            raise ValueError("Handoff committed to its lane. Checkout synchronization failed.") from None
+        raise
+    finally:
+        if not stream.closed:
+            stream.close()
+        if not synchronized:
+            lock.unlink(missing_ok=True)
+
+
+def commit_handoff(repo, report, branch, head, step, next_step, failures=(), *, expected_parent=None):
+    """Write a handoff-only commit on the explicitly selected lane without invoking commit hooks."""
+    if not BRANCH.fullmatch(branch):
+        raise ValueError("Expected the lane's branch name and full head commit")
+    if branch in PROTECTED:
         raise ValueError("Refusing to commit a handoff on a protected branch")
-    if not SHA.fullmatch(head) or git(repo, "merge-base", "--is-ancestor", head, "HEAD",
+    repo = Path(git(repo, "rev-parse", "--show-toplevel").stdout.strip())
+    reference = f"refs/heads/{branch}"
+    if git(repo, "symbolic-ref", "-q", "HEAD", check=False).stdout.strip() != reference:
+        raise ValueError("The checkout is not on the branch named in the handoff")
+    parent = git(repo, "rev-parse", "--verify", reference).stdout.strip()
+    if not SHA.fullmatch(parent) or (expected_parent is not None and parent != expected_parent):
+        raise ValueError("The lane advanced before the handoff could be recorded")
+    if not SHA.fullmatch(head) or git(repo, "merge-base", "--is-ancestor", head, parent,
                                       check=False).returncode != 0:
         raise ValueError("The named head is not in this branch's history")
     document = handoff_text(report, branch, head, step, next_step, failures)
-    target = repo / HANDOFF
-    pending = target.with_name(HANDOFF + ".pending")
-    pending.write_text(document, encoding="utf-8")
-    os.replace(pending, target)
-    if not git(repo, "status", "--porcelain", "--", HANDOFF).stdout.strip():
-        return None
-    git(repo, "add", "--", HANDOFF)
-    git(repo, "commit", "--only", "-m", "Record First Officer usage warning and resume point", "--", HANDOFF)
-    return git(repo, "rev-parse", "HEAD").stdout.strip()
+    with tempfile.TemporaryDirectory(prefix="fo-handoff-") as temporary:
+        scratch = Path(temporary)
+        parent_index = scratch / "parent-index"
+        git(repo, "read-tree", parent, index_file=parent_index)
+        blob = git(repo, "hash-object", "-w", "--stdin", data=document).stdout.strip()
+        git(repo, "update-index", "--add", "--cacheinfo", f"100644,{blob},{HANDOFF}",
+            index_file=parent_index)
+        tree = git(repo, "write-tree", index_file=parent_index).stdout.strip()
+        if tree == git(repo, "rev-parse", f"{parent}^{{tree}}").stdout.strip():
+            if not checked_out(repo, reference, parent):
+                raise ValueError("The checkout changed before the handoff could be recorded")
+            return None
+        commit = git(repo, "commit-tree", tree, "-p", parent, "-m", HANDOFF_COMMIT).stdout.strip()
+        publish_handoff(repo, reference, parent, commit, blob, document, scratch)
+        return commit
 
 
-def read_json(path, *, object_pairs_hook=None):
+def read_json(path):
     if path is None:
         return None
     with Path(path).open(encoding="utf-8") as stream:
-        text = stream.read(256 * 1024 + 1)
-    if len(text) > 256 * 1024:
+        text = stream.read(READING_MAX_BYTES + 1)
+    if len(text) > READING_MAX_BYTES:
         raise ValueError("Usage reading is too large to trust")
-    return json.loads(text, object_pairs_hook=object_pairs_hook)
+    return json.loads(text)
 
 
 def unique_fields(pairs):
@@ -219,14 +345,24 @@ def unique_fields(pairs):
     return fields
 
 
-def read_cursor_windows(path, now):
+def read_cursor_windows(path, now, account):
     try:
-        if path is None or not path.is_file():
+        if path is None:
             raise ValueError("Missing Cursor plan reading")
-        reading = read_json(path, object_pairs_hook=unique_fields)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077
+                    or info.st_nlink != 1 or info.st_size > READING_MAX_BYTES):
+                raise ValueError("Invalid Cursor plan file")
+            contents = stream.read(READING_MAX_BYTES + 1)
+            current = os.fstat(stream.fileno())
+            if len(contents) != info.st_size or current.st_ctime_ns != info.st_ctime_ns:
+                raise ValueError("Cursor plan file changed while reading")
+        reading = json.loads(contents.decode("utf-8"), object_pairs_hook=unique_fields)
     except (OSError, ValueError, RecursionError):
-        raise ValueError("Provide a fresh Cursor plan reading with unique fields") from None
-    return cursor_windows(reading, now)
+        raise ValueError("Provide a fresh private Cursor plan reading with unique fields") from None
+    return cursor_windows(reading, now, account)
 
 
 def main(argv=None):
@@ -244,7 +380,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     now = time.time()
     try:
-        windows = read_cursor_windows(args.cursor, now)
+        windows = read_cursor_windows(args.cursor, now, os.environ.get("CURSOR_PLAN_ACCOUNT"))
     except (ValueError, OverflowError) as error:
         print(f"The cursor billing-period window was not read. {error}.", file=sys.stderr)
         return 1
@@ -260,12 +396,19 @@ def main(argv=None):
         if args.repo is not None:
             branch = git(args.repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
             head = git(args.repo, "rev-parse", "HEAD").stdout.strip()
-            commit = commit_handoff(args.repo, report, branch, head, args.step, args.next_step,
-                                    args.failure)
+            anchor = handoff_anchor(args.repo, branch, head)
+            commit = commit_handoff(args.repo, report, branch, anchor, args.step, args.next_step,
+                                    args.failure, expected_parent=head)
             print(f"Handoff committed as {commit}." if commit else "Handoff already current.")
         return STOPPED if report["stop"] else WARNED
-    except (OSError, ValueError, subprocess.SubprocessError) as error:
-        print(f"Usage tracking failed: {SECRET.sub('[redacted]', str(error))}", file=sys.stderr)
+    except subprocess.SubprocessError:
+        print("Usage tracking failed: Could not verify or record the handoff in Git.", file=sys.stderr)
+        return 1
+    except (OSError, ValueError) as error:
+        detail = SECRET.sub("[redacted]", str(error))
+        if PRIVACY.findings_in_text(detail):
+            detail = "Error detail withheld to protect private data"
+        print(f"Usage tracking failed: {detail}", file=sys.stderr)
         return 1
 
 

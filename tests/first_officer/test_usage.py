@@ -18,6 +18,12 @@ spec.loader.exec_module(track)
 NOW = 1_753_000_000
 CST_RESET = 1_763_710_000
 CDT_RESET = 1_753_700_000
+CURSOR_ACCOUNT = "a" * 64
+
+
+@pytest.fixture(autouse=True)
+def cursor_plan_account(monkeypatch):
+    monkeypatch.setenv("CURSOR_PLAN_ACCOUNT", CURSOR_ACCOUNT)
 
 
 def codex_result(session=40, weekly=70, session_reset=CST_RESET, weekly_reset=CDT_RESET):
@@ -39,6 +45,7 @@ def claude_headers(session="0.4", weekly="0.7", status="allowed",
 
 def cursor_reading(spend=400, *, now=NOW, end=CDT_RESET):
     return {
+        "account_binding": CURSOR_ACCOUNT,
         "observed_at": now,
         "period_start": now - 86_400,
         "period_end": end,
@@ -57,6 +64,7 @@ def cursor_reading(spend=400, *, now=NOW, end=CDT_RESET):
 def write_cursor_reading(path, spend=400):
     now = int(time.time())
     path.write_text(json.dumps(cursor_reading(spend, now=now, end=now + 3600)))
+    path.chmod(0o600)
     return path
 
 
@@ -151,7 +159,7 @@ def test_usage_overrides_may_only_be_stricter_than_the_defaults(tmp_path, capsys
 def test_all_three_providers_report_together_with_central_resets():
     report = track.assess(track.codex_windows(codex_result(session=92), "fixture", NOW) +
                           track.claude_windows(claude_headers(weekly="0.95"), NOW) +
-                          track.cursor_windows(cursor_reading(), NOW))
+                          track.cursor_windows(cursor_reading(), NOW, CURSOR_ACCOUNT))
     assert report["unread"] == [] and report["stop"] is False
     assert [(row["provider"], row["window"]) for row in report["warned"]] == [
         ("claude", "weekly"), ("codex", "5h")]
@@ -203,6 +211,90 @@ def test_handoff_commits_only_itself_and_never_repeats_an_unchanged_document(tmp
     assert changed == ["HANDOFF.md"]
     assert (path / "README.md").read_text() == "unrelated lane edit\n"
     assert "98% used" in (path / "HANDOFF.md").read_text()
+
+
+def test_handoff_commit_tree_and_ref_publish_never_run_repo_hooks(tmp_path):
+    path, branch, head = repo(tmp_path)
+    hooks = path / ".git" / "hooks"
+    hook = hooks / "pre-commit"
+    hook.write_text("#!/bin/sh\nprintf 'hook ran' > hook-fixture.txt\ngit add hook-fixture.txt\n")
+    hook.chmod(0o700)
+    ref_hook = hooks / "reference-transaction"
+    ref_hook.write_text("#!/bin/sh\nprintf 'ref hook ran' > ref-hook-fixture.txt\n")
+    ref_hook.chmod(0o700)
+    report = track.assess(track.cursor_windows(cursor_reading(900), NOW, CURSOR_ACCOUNT))
+
+    commit = track.commit_handoff(path, report, branch, head, "Fixture", "Next fixture")
+
+    assert track.git(path, "show", "--format=", "--name-only", commit).stdout.strip() == "HANDOFF.md"
+    assert not (path / "hook-fixture.txt").exists()
+    assert not (path / "ref-hook-fixture.txt").exists()
+    assert not track.git(path, "status", "--porcelain").stdout
+
+
+def test_handoff_refuses_to_publish_if_checkout_switches_to_main(tmp_path, monkeypatch, capsys):
+    path, branch, head = repo(tmp_path)
+    track.git(path, "branch", "main")
+    cursor = write_cursor_reading(tmp_path / "cursor.json", 900)
+    execute = track.git
+
+    def switch_before_ref_update(repo, *args, **kwargs):
+        result = execute(repo, *args, **kwargs)
+        if args[0] == "commit-tree":
+            execute(path, "switch", "main")
+        return result
+
+    monkeypatch.setattr(track, "git", switch_before_ref_update)
+    assert track.main(["--cursor", str(cursor), "--repo", str(path)]) == 1
+    assert "checkout changed before" in capsys.readouterr().err
+    assert execute(path, "symbolic-ref", "--short", "HEAD").stdout.strip() == "main"
+    assert execute(path, "rev-parse", "refs/heads/main").stdout.strip() == head
+    assert execute(path, "rev-parse", f"refs/heads/{branch}").stdout.strip() == head
+    assert not (path / "HANDOFF.md").exists()
+    assert not (path / ".git" / "index.lock").exists()
+
+
+def test_handoff_compare_and_swap_preserves_a_concurrent_lane_tip(tmp_path, monkeypatch, capsys):
+    path, branch, head = repo(tmp_path)
+    reference = f"refs/heads/{branch}"
+    tree = track.git(path, "rev-parse", "HEAD^{tree}").stdout.strip()
+    parallel = track.git(path, "commit-tree", tree, "-p", head, "-m", "parallel fixture").stdout.strip()
+    cursor = write_cursor_reading(tmp_path / "cursor.json", 900)
+    execute = track.git
+
+    def advance_lane(repo, *args, **kwargs):
+        if args[:3] == ("-c", "core.hooksPath=/dev/null", "update-ref"):
+            execute(path, "update-ref", reference, parallel, head)
+        return execute(repo, *args, **kwargs)
+
+    monkeypatch.setattr(track, "git", advance_lane)
+    assert track.main(["--cursor", str(cursor), "--repo", str(path)]) == 1
+    assert "lane advanced or rejected" in capsys.readouterr().err
+    assert execute(path, "rev-parse", reference).stdout.strip() == parallel
+    assert not (path / "HANDOFF.md").exists()
+    assert not (path / ".git" / "index.lock").exists()
+
+
+def test_handoff_never_synchronizes_after_checkout_moves_during_ref_update(tmp_path, monkeypatch, capsys):
+    path, branch, head = repo(tmp_path)
+    track.git(path, "branch", "main")
+    cursor = write_cursor_reading(tmp_path / "cursor.json", 900)
+    execute = track.git
+
+    def switch_after_ref_update(repo, *args, **kwargs):
+        result = execute(repo, *args, **kwargs)
+        if args[:3] == ("-c", "core.hooksPath=/dev/null", "update-ref"):
+            execute(path, "symbolic-ref", "HEAD", "refs/heads/main")
+        return result
+
+    monkeypatch.setattr(track, "git", switch_after_ref_update)
+    assert track.main(["--cursor", str(cursor), "--repo", str(path)]) == 1
+    assert "committed to its lane" in capsys.readouterr().err
+    assert execute(path, "rev-parse", "HEAD").stdout.strip() == head
+    assert execute(path, "rev-parse", f"refs/heads/{branch}").stdout.strip() != head
+    assert not (path / "HANDOFF.md").exists()
+    assert not execute(path, "diff", "--cached", "--name-only").stdout
+    assert not (path / ".git" / "index.lock").exists()
 
 
 def test_handoff_refuses_a_protected_branch_a_moved_head_and_a_leaked_credential(tmp_path):
@@ -333,7 +425,7 @@ def test_command_line_redacts_a_credential_from_its_failure_text(tmp_path, capsy
 def test_cursor_uses_included_spend_and_the_billing_period_end(end, reset_text):
     reading = cursor_reading(375, end=end)
     reading["included_limit"] = 500
-    assert track.cursor_windows(reading, NOW) == [{
+    assert track.cursor_windows(reading, NOW, CURSOR_ACCOUNT) == [{
         "provider": "cursor", "window": "billing-period", "used": 75.0,
         "reset": end, "reset_text": reset_text,
     }]
@@ -347,7 +439,7 @@ def test_cursor_uses_included_spend_and_the_billing_period_end(end, reset_text):
 ])
 def test_cursor_rejects_unusable_amounts_and_noncurrent_periods(fields):
     with pytest.raises(ValueError):
-        track.cursor_windows(cursor_reading() | fields, NOW)
+        track.cursor_windows(cursor_reading() | fields, NOW, CURSOR_ACCOUNT)
 
 
 @pytest.mark.parametrize("field", [
@@ -397,6 +489,7 @@ def test_cursor_timer_refuses_unread_input_even_with_healthy_codex_and_claude(tm
         json.dumps(valid).replace('"has_credits": false', '"has_credits": true, "has_credits": false'),
     ):
         cursor.write_text(unusable)
+        cursor.chmod(0o600)
         assert track.main(args + ["--cursor", str(cursor)]) == 1
         captured = capsys.readouterr()
         assert "The cursor billing-period window was not read." in captured.err
@@ -432,32 +525,177 @@ def test_cursor_tracker_thresholds_and_handoff_commit(spend, exit_code, tmp_path
     assert not track.git(path, "remote").stdout
 
 
+def test_cursor_refuses_missing_wrong_or_malformed_account_binding(tmp_path, monkeypatch, capsys):
+    cursor = write_cursor_reading(tmp_path / "cursor.json")
+    for expected_account in (None, "a" * 63, "A" * 64, "b" * 64):
+        if expected_account is None:
+            monkeypatch.delenv("CURSOR_PLAN_ACCOUNT")
+        else:
+            monkeypatch.setenv("CURSOR_PLAN_ACCOUNT", expected_account)
+        assert track.main(["--cursor", str(cursor)]) == 1
+        captured = capsys.readouterr()
+        assert "Cursor plan account binding" in captured.err
+        assert not captured.out and CURSOR_ACCOUNT not in captured.err
+        if expected_account is not None:
+            assert expected_account not in captured.err
+
+    monkeypatch.setenv("CURSOR_PLAN_ACCOUNT", CURSOR_ACCOUNT)
+    reading = json.loads(cursor.read_text())
+    reading["account_binding"] = "b" * 64
+    cursor.write_text(json.dumps(reading))
+    assert track.main(["--cursor", str(cursor)]) == 1
+    assert "account binding does not match" in capsys.readouterr().err
+
+
+def test_cursor_requires_a_private_owned_regular_single_link_file(tmp_path, monkeypatch, capsys):
+    cursor = write_cursor_reading(tmp_path / "cursor.json")
+    cursor.chmod(0o640)
+    assert track.main(["--cursor", str(cursor)]) == 1
+    cursor.chmod(0o600)
+    alias = tmp_path / "alias"
+    alias.symlink_to(cursor)
+    assert track.main(["--cursor", str(alias)]) == 1
+    alias.unlink()
+    os.link(cursor, alias)
+    assert track.main(["--cursor", str(cursor)]) == 1
+    alias.unlink()
+    os.mkfifo(alias, mode=0o600)
+    result = subprocess.run(
+        [sys.executable, "-B", str(ROOT / "first-officer/usage/track.py"), "--cursor", str(alias)],
+        capture_output=True, text=True, timeout=3, check=False,
+    )
+    assert result.returncode == 1 and not result.stdout
+    assert "fresh private Cursor plan reading" in result.stderr
+
+    uid = os.getuid()
+    with monkeypatch.context() as other:
+        other.setattr(track.os, "getuid", lambda: uid + 1)
+        assert track.main(["--cursor", str(cursor)]) == 1
+    assert track.main(["--cursor", str(cursor)]) == 0
+    captured = capsys.readouterr()
+    assert captured.err.count("fresh private Cursor plan reading") == 4
+    assert "Cursor billing-period window" in captured.out
+
+
+def test_cursor_invalid_date_preserves_only_the_fixed_error_label(tmp_path, capsys):
+    cursor = write_cursor_reading(tmp_path / "cursor.json")
+    reading = json.loads(cursor.read_text())
+    reading["period_end"] = 400_000_000_001
+    cursor.write_text(json.dumps(reading))
+    assert track.main(["--cursor", str(cursor)]) == 1
+    captured = capsys.readouterr()
+    assert not captured.out
+    assert captured.err == "The cursor billing-period window was not read. Unusable cursor billing-period reset time.\n"
+
+
+@pytest.mark.parametrize(("spend", "limit", "expected", "label"), [
+    (17_999_999, 20_000_000, 0, "89.999995"),
+    (18_000_000, 20_000_000, 3, "90"),
+    (19_399_999, 20_000_000, 3, "96.999995"),
+    (19_400_000, 20_000_000, 4, "97"),
+    (89_999_999_999_999_999, 100_000_000_000_000_000, 0, "89.999999"),
+    (96_999_999_999_999_999, 100_000_000_000_000_000, 3, "96.999999"),
+])
+def test_cursor_use_exact_thresholds_and_display_below_the_cutoff(spend, limit, expected, label, tmp_path, capsys):
+    cursor = write_cursor_reading(tmp_path / "cursor.json", spend)
+    reading = json.loads(cursor.read_text())
+    reading["included_limit"] = limit
+    cursor.write_text(json.dumps(reading))
+    assert track.main(["--cursor", str(cursor)]) == expected
+    assert f"Cursor billing-period window at {label}% used." in capsys.readouterr().out
+
+
+def test_cursor_keeps_a_precise_stricter_threshold_in_decision_and_display(tmp_path, capsys):
+    cursor = write_cursor_reading(tmp_path / "cursor.json", 89_999_999_999)
+    reading = json.loads(cursor.read_text())
+    reading["included_limit"] = 100_000_000_000
+    cursor.write_text(json.dumps(reading))
+    assert track.main(["--cursor", str(cursor), "--warn-percent", "89.999999999"]) == track.WARNED
+    report = capsys.readouterr().out
+    assert "at 89.999999999% used" in report
+    assert "the 89.999999999% warning threshold" in report
+
+
+def test_repeated_cli_warning_reuses_the_same_resume_commit_until_lane_changes(tmp_path, capsys):
+    path, branch, head = repo(tmp_path)
+    cursor = write_cursor_reading(tmp_path / "cursor.json", 900)
+    args = ["--cursor", str(cursor), "--repo", str(path), "--step", "Fixture", "--next", "Continue"]
+    pending = path / "HANDOFF.md.pending"
+    pending.write_text("unrelated pending fixture")
+    assert track.main(args) == track.WARNED
+    first = track.git(path, "rev-parse", "HEAD").stdout
+    assert track.main(args) == track.WARNED
+    assert track.git(path, "rev-parse", "HEAD").stdout == first
+    assert "Handoff already current." in capsys.readouterr().out
+    assert f"- Branch `{branch}` is at `{head}`." in (path / "HANDOFF.md").read_text()
+    assert pending.read_text() == "unrelated pending fixture"
+
+    track.git(path, "commit", "--allow-empty", "-m", "new lane work")
+    next_head = track.git(path, "rev-parse", "HEAD").stdout.strip()
+    assert track.main(args) == track.WARNED
+    assert f"- Branch `{branch}` is at `{next_head}`." in (path / "HANDOFF.md").read_text()
+
+
+def test_handoff_refuses_scanner_personal_data_without_emitting_values(tmp_path, capsys):
+    path, _, start = repo(tmp_path)
+    cursor = write_cursor_reading(tmp_path / "cursor.json", 900)
+    args = ["--cursor", str(cursor), "--repo", str(path), "--failure"]
+    synthetic_fields = (
+        "fixture" + "@" + "private.invalid",
+        "+" + "19990000099",
+        "fd00" + "::" + "78",
+        "-" * 5 + "BEGIN PRIVATE KEY" + "-" * 5,
+    )
+    for value in synthetic_fields:
+        assert track.main(args + ["Saw " + value]) == 1
+        captured = capsys.readouterr()
+        assert "credential or address" in captured.err
+        assert value not in captured.out + captured.err
+    assert track.git(path, "rev-parse", "HEAD").stdout.strip() == start
+    assert not (path / "HANDOFF.md").exists()
+
+
 @pytest.mark.parametrize("mode", ["cli", "auto"])
 def test_cursor_handoff_gates_the_real_fallback_wrapper_before_invoking_agent(mode, tmp_path):
     agent = tmp_path / "agent"
     calls = tmp_path / "calls.jsonl"
+    exit_file = tmp_path / "agent-exit"
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    home = tmp_path / "login"
+    home.mkdir(mode=0o700)
     agent.write_text(
         "#!/usr/bin/env python3\n"
         "import json, os, sys\n"
-        "with open(os.environ['CURSOR_TEST_CALLS'], 'a') as log:\n"
-        "    log.write(json.dumps([sys.argv[1:], 'CURSOR_API_KEY' in os.environ]) + '\\n')\n"
-        "sys.exit(int(os.environ.get('CURSOR_TEST_EXIT', '0')))\n"
+        "from pathlib import Path\n"
+        "fixture = Path(__file__).resolve().parent\n"
+        "forbidden = {'CURSOR_API_KEY', 'CURSOR_AUTH_TOKEN', 'CURSOR_BASE_URL', 'OPENAI_API_KEY'}\n"
+        "with (fixture / 'calls.jsonl').open('a') as log:\n"
+        "    log.write(json.dumps([sys.argv[1:], sorted(forbidden.intersection(os.environ)), "
+        "sys.stdin.read()]) + '\\n')\n"
+        "code = fixture / 'agent-exit'\n"
+        "sys.exit(int(code.read_text()) if code.exists() else 0)\n"
     )
     agent.chmod(0o700)
     cursor = tmp_path / "plan.json"
     env = {
         "PATH": os.environ["PATH"],
+        "HOME": str(home),
         "CURSOR_PLAN_READING": str(cursor),
+        "CURSOR_PLAN_ACCOUNT": CURSOR_ACCOUNT,
         "CURSOR_CLI_BIN": str(agent),
-        "CURSOR_TEST_CALLS": str(calls),
         "CURSOR_API_KEY": "fixture_cloud_key",
+        "CURSOR_AUTH_TOKEN": "fixture_alternate_key",
+        "OPENAI_API_KEY": "fixture_provider_key",
         "CURSOR_BASE_URL": "http://localhost:1",
     }
     arguments = [sys.executable, str(HANDOFF_SCRIPT), "--mode", mode, "--json", "--api-retries", "0",
-                 "--repo", str(tmp_path), "--prompt", "Review fixture", "--model", "claude-fixture"]
+                 "--repo", str(checkout), "--prompt", "Review fixture", "--model", "claude-fixture",
+                 "--read-only", "true"]
 
     def handoff():
-        result = subprocess.run(arguments, cwd=tmp_path, env=env, capture_output=True, text=True, check=False)
+        result = subprocess.run(arguments, cwd=checkout, env=env, capture_output=True, text=True,
+                                check=False, input="unused fixture stdin")
         return result.returncode, json.loads(result.stdout)
 
     paid_extras = [(899, {field: True}) for field in cursor_reading()["billing"]]
@@ -475,11 +713,12 @@ def test_cursor_handoff_gates_the_real_fallback_wrapper_before_invoking_agent(mo
     write_cursor_reading(cursor, 899)
     code, result = handoff()
     assert code == 0 and result["ok"] is True and result["model"] == "composer-2.5"
-    (argv, had_key), = (json.loads(line) for line in calls.read_text().splitlines())
-    assert argv[:2] == ["--model", "composer-2.5"] and "Review fixture" in argv[2]
-    assert len(argv) == 3 and had_key is False
+    (argv, inherited, stdin), = (json.loads(line) for line in calls.read_text().splitlines())
+    assert argv[:-1] == ["--print", "--output-format", "text", "--model", "composer-2.5", "--mode=ask"]
+    assert "Review fixture" in argv[-1]
+    assert inherited == [] and stdin == ""
 
-    env["CURSOR_TEST_EXIT"] = "2"
+    exit_file.write_text("2")
     code, result = handoff()
     assert code != 0 and result["ok"] is False
     assert len(calls.read_text().splitlines()) == 2

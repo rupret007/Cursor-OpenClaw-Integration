@@ -71,17 +71,19 @@ The focused gate exercises the tracker, the handoff commit, and the Cursor fallb
 python3 -m pytest -q tests/first_officer/test_usage.py tests/test_cursor_handoff_model_flag.py
 ```
 
-Cursor uses a local normalized JSON file from the same existing login as the fallback CLI. The top-level fields are `observed_at`, `period_start`, `period_end`, `included_spend`, `included_limit` and `billing`. The three timestamps are integer Unix seconds. The spend and limit are integers in the same units, such as millionths of a dollar. A readable period must contain the observation and still be open. The observation may be at most 90 seconds old. Each of the five billing flags below must be JSON `false`. Use an absent file or the unread marker below when the existing session cannot supply the reading without a new token.
+Cursor uses a private normalized JSON receipt from the existing login. Its fields are `account_binding`, `observed_at`, `period_start`, `period_end`, `included_spend`, `included_limit`, `billing`. The binding is an opaque 64-character lowercase hex identifier that Jeff assigns to the verified login and exports as `CURSOR_PLAN_ACCOUNT`. Keep the file owned by the invoking user with mode 0600, outside the checkout for fallback. The timestamps are integer Unix seconds and the spend and limit are integers in the same units. The billing period must contain the observation and still be open. The observation may be at most 90 seconds old and all five billing flags must be JSON false. If the existing session cannot supply the reading without a new token, leave it unread.
 
 Run the tracker against three synthetic readings in a throwaway Git checkout. Cursor is set at exactly 90 percent.
 
 ```bash
 fo_usage_demo=$(mktemp -d)
+export CURSOR_PLAN_ACCOUNT="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
 git -C "$fo_usage_demo" init -q -b demo/usage-check
 git -C "$fo_usage_demo" -c user.email=demo@example.invalid -c user.name=Demo \
   commit --allow-empty -qm fixture
 python3 - "$fo_usage_demo" <<'FIXTURES'
 import json
+import os
 from pathlib import Path
 import sys
 import time
@@ -99,14 +101,16 @@ readings = {
         "anthropic-ratelimit-unified-5h-reset": str(reset),
         "anthropic-ratelimit-unified-7d-utilization": "0.88",
         "anthropic-ratelimit-unified-7d-reset": str(reset)},
-    "cursor": {"observed_at": now, "period_start": now - 86_400, "period_end": reset,
+    "cursor": {"account_binding": os.environ["CURSOR_PLAN_ACCOUNT"], "observed_at": now, "period_start": now - 86_400, "period_end": reset,
         "included_spend": 900, "included_limit": 1000, "billing": {
             "has_credits": False, "unlimited": False, "on_demand_enabled": False,
             "usage_billing_enabled": False, "auto_top_up_enabled": False}},
     "cursor-unread": {"status": "unread", "reason": "dashboard_token_required"},
 }
 for name, reading in readings.items():
-    (root / f"{name}.json").write_text(json.dumps(reading), encoding="utf-8")
+    path = root / f"{name}.json"
+    path.write_text(json.dumps(reading), encoding="utf-8")
+    path.chmod(0o600)
 FIXTURES
 
 fo_usage_exit=0
@@ -127,7 +131,7 @@ echo "exit $fo_usage_exit"
 
 The first report prints `Cursor billing-period window at 90% used.` followed by the period end in Central Time. It exits 3 and commits only `HANDOFF.md`. The remote list is empty. The second report says `The cursor billing-period window was not read.` and exits 1 even with healthy Codex and Claude readings.
 
-The automated cases exercise 89.9, 90, 96.9 and 97 percent, both CST and CDT, each paid flag, malformed or stale data, and a warning with an unrelated staged edit. They call the real handoff skill in CLI and auto mode. A healthy 89.9 percent fixture causes one Composer 2.5 launch with the Cloud key absent. At 90 percent and above, or when billing evidence is unsafe or unread, the fixture records zero launches.
+The automated cases exercise 89.9, 90, 96.9 and 97 percent, both CST and CDT, each paid flag, malformed or stale data, and a warning with an unrelated staged edit. They also test exact rounding at both boundaries, a repeated warning from the tracker entry point, and private-file and account-binding checks. A healthy 89.9 percent fixture starts one headless Composer 2.5 process in CLI and auto mode. Read-only jobs use Ask mode. The child receives neither ambient model credentials nor caller input. At 90 percent and above, or when billing evidence is unsafe or unread, the fixture records zero launches.
 
 ## 5. The single activation command, with nothing activated
 

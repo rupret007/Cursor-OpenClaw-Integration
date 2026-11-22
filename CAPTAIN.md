@@ -60,7 +60,7 @@ The standalone registry requires current local gate and capacity evidence. Publi
 
 ### Prepare the native service
 
-Render the unit or plist into private scratch before approval. Use a private, host-specific OpenClaw config that points to the pinned candidate, an empty mode `0700` gateway state directory for a clean-host rehearsal, and a mode `0600` JSON object for the service environment. The environment file accepts the gateway LiteLLM key, the two queue lane tokens, and the private queue host list. The service definition contains only the file path. Set the queue policy's `token_env` names to `FO_HATCHET_LANE_TOKEN` and `FO_RESTATE_LANE_TOKEN`.
+Render the unit or plist into private scratch before approval. Use a private, host-specific OpenClaw config that points to the pinned candidate, an empty mode `0700` gateway state directory for a clean-host rehearsal, and a mode `0600` JSON object for the service environment. The environment file accepts the gateway LiteLLM key, the two queue lane tokens, and the private queue host list. The service definition contains only the file path. For the enabled Telegram profile, set the Captain plugin's `hooks.allowConversationAccess` to true and use the same single owner in `channels.telegram.allowFrom` and `channels.telegram.execApprovals.approvers`, with `dmPolicy: allowlist`. Set the queue policy's `token_env` names to `FO_HATCHET_LANE_TOKEN` and `FO_RESTATE_LANE_TOKEN`.
 
 ```bash
 umask 077

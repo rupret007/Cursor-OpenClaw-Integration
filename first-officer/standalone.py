@@ -54,7 +54,12 @@ WantedBy=default.target
 def load_module(name, source):
     spec = importlib.util.spec_from_file_location(name, source)
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    previous = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = previous
     return module
 
 
@@ -77,6 +82,24 @@ def private_config(path):
     return path.read_bytes()
 
 
+def check_telegram_owner(config):
+    telegram = config.get("channels", {}).get("telegram")
+    if telegram is None or telegram.get("enabled") is False:
+        return
+    conductor = config.get("plugins", {}).get("entries", {}).get("first-officer-conductor", {})
+    if conductor.get("hooks", {}).get("allowConversationAccess") is not True:
+        raise ValueError("The Captain needs conversation-hook access for Telegram")
+    allow = telegram.get("allowFrom")
+    approvers = telegram.get("execApprovals", {}).get("approvers")
+    if (telegram.get("dmPolicy") != "allowlist" or not isinstance(allow, list) or len(allow) != 1
+            or not isinstance(approvers, list) or len(approvers) != 1):
+        raise ValueError("Use the same single Telegram owner and approver")
+    owner = re.sub(r"^(?:telegram|tg):", "", str(allow[0]), flags=re.IGNORECASE)
+    approver = re.sub(r"^(?:telegram|tg):", "", str(approvers[0]), flags=re.IGNORECASE)
+    if owner != approver or not re.fullmatch(r"[1-9][0-9]{0,15}", owner):
+        raise ValueError("Use the same single Telegram owner and approver")
+
+
 def prepare(node, release, python, node_binary, openclaw, config, state, secrets, check=subprocess.run):
     for path in (release, config, state, secrets):
         absolute(path)
@@ -91,6 +114,7 @@ def prepare(node, release, python, node_binary, openclaw, config, state, secrets
     stage = load_module("fo_standalone_stage", ROOT / "stage.py")
     stage.verify_inventory(release, pin.group(1))
     config_data = json.loads(private_config(config))
+    check_telegram_owner(config_data)
     plugin_paths = config_data["plugins"]["load"]["paths"]
     expected = [str(release / "first-officer-exec-guard.mjs"),
                 str(release / "round6/runtime/first-officer-conductor.mjs")]

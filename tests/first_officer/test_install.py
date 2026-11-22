@@ -752,6 +752,20 @@ def test_standalone_service_pins_the_same_guard_on_both_hosts(tmp_path):
     assert 'Environment="FO_LOCAL_NODE=nucbox"' in nuc.decode()
     assert f'"{release / standalone.RUNTIME}" "local-run"' in nuc.decode()
     assert b"fixture-setting" not in mac + nuc
+    settings = json.loads(config.read_bytes())
+    settings["channels"] = {"telegram": {"enabled": True, "dmPolicy": "allowlist", "allowFrom": [123456],
+                                           "execApprovals": {"approvers": [123456]}}}
+    config.write_text(json.dumps(settings))
+    with pytest.raises(ValueError, match="conversation-hook access"):
+        standalone.prepare("nucbox", *arguments)
+    settings["plugins"]["entries"] = {"first-officer-conductor": {"hooks": {"allowConversationAccess": True}}}
+    settings["channels"]["telegram"]["execApprovals"]["approvers"] = [234567]
+    config.write_text(json.dumps(settings))
+    with pytest.raises(ValueError, match="same single Telegram owner"):
+        standalone.prepare("nucbox", *arguments)
+    settings["channels"]["telegram"]["execApprovals"]["approvers"] = [123456]
+    config.write_text(json.dumps(settings))
+    assert standalone.prepare("nucbox", *arguments) == nuc
     secrets.write_text(json.dumps({"FO_LOCAL_NODE": "bobserver"}))
     with pytest.raises(ValueError, match="environment file is invalid"):
         standalone.prepare("nucbox", *arguments)

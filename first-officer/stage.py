@@ -25,15 +25,18 @@ MODULES = ("andrea-mac.mjs", "andrea-ssh.mjs", "captain.mjs", "captain-state.py"
            "model-router.mjs", "register.mjs", "review-worker.mjs", "runner-quota.py", "tools.mjs")
 OVERLAY = Path(__file__).resolve().parent / "segment1"
 QUEUE_MODULES = {
-    "queue-runtime/lanes/queue.py": OVERLAY.parent / "lanes/queue.py",
-    "queue-runtime/pinhttp.py": OVERLAY.parent / "pinhttp.py",
-    "queue-runtime/workers/hatchet-review.py": OVERLAY.parent / "workers/hatchet-review.py",
-    "queue-runtime/workers/restate-review.mjs": OVERLAY.parent / "workers/restate-review.mjs",
+    "queue-runtime/lanes/queue.py": "lanes/queue.py",
+    "queue-runtime/pinhttp.py": "pinhttp.py",
+    "queue-runtime/workers/hatchet-review.py": "workers/hatchet-review.py",
+    "queue-runtime/workers/restate-review.mjs": "workers/restate-review.mjs",
 }
 
 
 def overlay_sources():
-    return {**{name: OVERLAY / name for name in MODULES}, **QUEUE_MODULES}
+    return {
+        **{name: OVERLAY / name for name in MODULES},
+        **{name: OVERLAY.parent / source for name, source in QUEUE_MODULES.items()},
+    }
 INVENTORY = "SHA256SUMS"
 SAFE_NAME = re.compile(r"[a-zA-Z0-9_.-]+(?:/[a-zA-Z0-9_.-]+)*")
 COMMIT = re.compile(r"[0-9a-f]{40}")

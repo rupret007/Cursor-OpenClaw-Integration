@@ -284,4 +284,6 @@ The [production switch and rollback](JEFF-ACTIONS.md#production-switch-and-rollb
 
 The exact staged production unit was exercised with an isolated parked lease and exited before starting Telegram.
 
+An approved read-only check found the incumbent Bobserver gateway running. The Mac standby plist validated with Telegram disabled. The paired release and production handoff keys passed a signed transfer, rollback, and replay rejection in separate scratch homes. Production authority remains uninitialized on the Nuc and Mac.
+
 BLOCKED: Approved private production credential staging and verified incumbent shutdown remain pending.

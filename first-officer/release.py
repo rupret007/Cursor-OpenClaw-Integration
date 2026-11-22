@@ -19,6 +19,19 @@ SERVICE = "openclaw-gateway.service"
 OWNER = "rupret007"
 RELEASE = "{release}"
 DIGEST = re.compile(r"[0-9a-f]{64}")
+VERIFIER_PREFLIGHT = """\
+import os
+import stat
+import sys
+
+path = sys.argv[1]
+try:
+    info = os.lstat(path)
+except OSError:
+    sys.exit(1)
+safe = stat.S_ISREG(info.st_mode) and (info.st_uid, info.st_gid) == (0, 0) and not info.st_mode & 0o022
+sys.exit(0 if safe and os.access(path, os.R_OK) else 1)
+"""
 ANDREA_PREFLIGHT = """\
 import { pathToFileURL } from 'node:url';
 import { join } from 'node:path';
@@ -119,6 +132,8 @@ def activate_plan(repo, release, archive, extract, backup, baseline=ANDREA_SUMMA
          "--root", acceptance, "verify"],
     ))
     return [
+        step("Confirm the installed release verifier is a readable root-owned file",
+             [sys.executable, "-I", "-B", "-c", VERIFIER_PREFLIGHT, STORE / "verify-install.py"]),
         step("Confirm the gateway is running before any change",
              ["systemctl", "--user", "is-active", "--quiet", SERVICE]),
         step("Confirm the GitHub CLI authenticates as the configured owner",
@@ -265,6 +280,8 @@ def activate(repo, release, archive, backup_parent, runner, dry_run, baseline=AN
         plan = activate_plan(repo, release, Path(archive), Path(extract), backup, baseline)
         if dry_run:
             print(describe(plan))
+            print("\nIf the final service check fails after the switch succeeds, roll back and exit 1.")
+            print(describe(rollback_plan(repo, backup)))
             return 0
 
         def run_and_record_backup(entry, substitutions):
@@ -274,7 +291,20 @@ def activate(repo, release, archive, backup_parent, runner, dry_run, baseline=AN
                 print(f"Keep this private rollback directory: {backup}")
             return output
 
-        run(plan, {}, run_and_record_backup)
+        switch_steps, postcheck = plan[:-1], plan[-1:]
+        run(switch_steps, {}, run_and_record_backup)
+        try:
+            run(postcheck, {}, runner)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            print("Post-activation gateway check failed.", file=sys.stderr)
+            if not rollback_backup_ready(backup):
+                print("The saved rollback is unavailable.", file=sys.stderr)
+                return 1
+            try:
+                rollback(repo, backup, runner, dry_run=False)
+            except (OSError, ValueError, subprocess.SubprocessError):
+                print("Automatic rollback failed. Use the printed private rollback directory.", file=sys.stderr)
+            return 1
     print(f"First Officer release {release} is active.")
     if rollback_backup_ready(backup):
         print(f"Roll back with: python3 -B first-officer/release.py rollback {backup}")

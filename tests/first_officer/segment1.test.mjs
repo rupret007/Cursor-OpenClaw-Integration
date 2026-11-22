@@ -560,3 +560,23 @@ test('the shared status publisher is accepted by the fleet reader', async () => 
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+
+test('the approved LiteLLM alias can serve simple turns from an independent local proxy', async () => {
+  const alias = 'qwen-local-fast';
+  const reference = 'litellm/' + alias;
+  const routeFor = () => ({ reason: 'short-chat' });
+  const config = {
+    plugins: { entries: { 'first-officer-conductor': { llm: { allowedCompletionModels: [reference] } } } },
+    models: { providers: { litellm: { models: [{ id: alias }] } } },
+  };
+  const requests = [];
+  const runtime = { llm: { complete: async ({ model }) => {
+    requests.push(model);
+    return { text: 'A fixture answer.', stopReason: 'stop' };
+  } } };
+  assert.equal(routeOwnerModel({ prompt: 'define a branch' }, config, routeFor).model, alias);
+  await answerSimple(runtime, 'define a branch', new AbortController().signal, config);
+  await answerSimple(runtime, 'define a branch', new AbortController().signal, { ...config, models: {} });
+  assert.deepEqual(requests, [reference, fastModelRef]);
+});

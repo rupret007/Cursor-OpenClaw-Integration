@@ -154,8 +154,8 @@ function toolRegistry(api, commands, liveConfig, services, state) {
       run: () => plain('Andrea’s messaging access here is read-only. Try “@andrea summarize my texts” for recent activity in your approved chats.'),
     },
     simple: {
-      run: async ({ prompt }, { signal }) => {
-        const answer = redacted(await answerSimple(api.runtime, prompt, signal), 1250);
+      run: async ({ prompt }, { signal, owner }) => {
+        const answer = redacted(await answerSimple(api.runtime, prompt, signal, liveConfig(owner)), 1250);
         if (!answer) throw new Error('Fast answer unavailable');
         return plain(answer);
       },

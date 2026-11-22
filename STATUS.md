@@ -240,13 +240,10 @@ The planned merge order is #33 → #36 → #37. Gateway activation, the timed Te
 
 The current candidate supports Captain on the Mac Mini and Nuc. Bobserver is optional compute. [Draft PR #39](https://github.com/rupret007/Cursor-OpenClaw-Integration/pull/39) stages the independent gateway profiles and restricted Andrea route. In the isolated Nuc rehearsal, the guarded gateway used its configured Python, returned a synthetic Andrea digest in 1.98 seconds, and met the two-second acknowledgment target. The previous pinned build also proved the exact-head review, verified completion and duplicate receipt behavior through the isolated Telegram path. An earlier cold-start run missed the acknowledgment target. [Runtime candidate CI](https://github.com/rupret007/Cursor-OpenClaw-Integration/actions/runs/45014994365)
 
-The live Mac Mini reader check needs Jeff's interactive SSH sign-in. From the reviewed Nuc checkout, run:
+Jeff signed into the Mac Mini and approved the Nuc's dedicated key. Live loopback checks showed the scope and chat cache exceeded four seconds. The fixed reader gives those calls one shared nine-second budget and uses bounded provider history only after Andrea confirms the allowlist. The diagnostic verified recent approved history with no read failures. The Nuc key was installed and the forced read-only command verified successfully.
 
-```bash
-nice -n 10 python3 -B first-officer/provision-andrea.py \
-  --mac-host jeffs-mac-mini --mac-user jeffstory --diagnose-live
-```
+The native Mac Mini and Nuc rehearsals ran the packaged OpenClaw 2026.11.6 with local Telegram test endpoints and the real Mac reader. Andrea returned a digest in 5.02 seconds on the guarded Mac and 5.26 seconds on the guarded Nuc. Both met the acknowledgment target. The native Mac reports its staged Captain epoch and refuses to start with a parked lease. The Mac's existing OpenClaw installation is older than the rehearsed version, and the temporary rehearsal left the existing gateway unchanged.
 
-The command reports counts from the scoped reader. Keep the approved thread comparison private. Native Mac and Nuc Telegram acceptance, peer transfer and rollback remain open. Follow [LIVE-TEST.md](LIVE-TEST.md) with Bobserver unavailable and use the test Telegram account. Production activation remains pending.
+Live acceptance still needs the approved Telegram test account, host-specific gate, capacity and quota sources, and the signed peer transfer and rollback with the intended services. Follow [LIVE-TEST.md](LIVE-TEST.md) with Bobserver unavailable. Production activation remains pending.
 
-BLOCKED: Live Mac Mini sign-in and standalone Telegram acceptance are pending.
+BLOCKED: The standalone Telegram test account and host cutover checks are pending.

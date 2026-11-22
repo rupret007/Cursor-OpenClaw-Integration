@@ -77,11 +77,18 @@ export async function standaloneQuotaStatus({ read, now = Date.now }) {
     'Other provider quota windows are unavailable from this local check.'].join('\\n');
 }
 
+export function validLocalCapacity(reading, local, now) {
+  return reading?.node === local && recent(reading.observed * 1000, now, 60_000) && natural(reading.used) &&
+    Number.isSafeInteger(reading.limit) && reading.limit >= 1 && reading.limit <= 100;
+}
+
 export async function fleetStatus({ node, localOnly }, {
-  read = readFleetSnapshot, load = loadavg, now = Date.now, local = localFleetNode(),
+  read = readFleetSnapshot, load = loadavg, now = Date.now, local = localFleetNode(), capacity,
 } = {}) {
   // Local load and remote collector availability are independent.
-  const snapshot = await read().catch(() => undefined);
+  const [snapshot, live] = await Promise.all([
+    read().catch(() => undefined), capacity?.().catch(() => undefined),
+  ]);
   const checkedAt = now();
   const fresh = recent(snapshot?.ts * 1000, checkedAt);
   const localEvidence = fresh && fleetSnapshotIsLocal(snapshot, local);
@@ -91,9 +98,12 @@ export async function fleetStatus({ node, localOnly }, {
     if (node && node !== id) continue;
     if (id === local) {
       const loads = load();
-      const jobs = localEvidence && natural(snapshot.host?.heavy_jobs)
-        ? snapshot.host.heavy_jobs + ' heavy jobs as of ' + stamp(snapshot.ts * 1000)
-        : 'job count unavailable';
+      let jobs = 'job count unavailable';
+      if (capacity && validLocalCapacity(live, local, checkedAt)) {
+        jobs = live.used + '/' + live.limit + ' tracked heavy processes as of ' + stamp(live.observed * 1000);
+      } else if (!capacity && localEvidence && natural(snapshot.host?.heavy_jobs)) {
+        jobs = snapshot.host.heavy_jobs + ' heavy jobs as of ' + stamp(snapshot.ts * 1000);
+      }
       lines.push(validLoads(loads)
         ? name + ' · ' + formatLoad(loads) + ' at ' + stamp(checkedAt) + ' · ' + jobs
         : name + ' · live load unavailable · ' + jobs);

@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { loadavg } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { bounded } from './dispatch.mjs';
-import { fleetSnapshotIsLocal, readFleetSnapshot } from './tools.mjs';
+import { fleetSnapshotIsLocal, readFleetSnapshot, validLocalCapacity } from './tools.mjs';
 
 const stateScript = fileURLToPath(new URL('./captain-state.py', import.meta.url));
 const repo = 'repos/rupret007/Cursor-OpenClaw-Integration';
@@ -63,7 +63,15 @@ export async function integrationCI(pr, read) {
   return { head, ci: statuses.every((result) => result === 'success') ? 'passing' : 'failing' };
 }
 
-async function fleetAdmission(_signal, standalone) {
+async function fleetAdmission(_signal, standalone, readState) {
+  if (standalone) {
+    const load = loadavg()[0];
+    const capacity = await readState('local-capacity');
+    if (!validLocalCapacity(capacity, standalone, Date.now()) || !Number.isFinite(load)) {
+      return 'Local capacity evidence is unavailable.';
+    }
+    return load > 16 || capacity.used >= capacity.limit ? 'The Captain host is at its lane capacity.' : undefined;
+  }
   const snapshot = await readFleetSnapshot();
   const clock = Date.now() - snapshot.ts * 1000;
   const gate = snapshot.host.locks?.find((row) => row.slot === 'fullgate');
@@ -71,10 +79,8 @@ async function fleetAdmission(_signal, standalone) {
       !Number.isSafeInteger(snapshot.host.heavy_jobs) || !Number.isSafeInteger(snapshot.host.heavy_max)) {
     return 'Fleet capacity evidence is stale or unavailable.';
   }
-  if (!standalone) {
-    if (typeof gate?.held !== 'boolean' || !Array.isArray(snapshot.gates)) return 'Gate evidence is unavailable.';
-    if (gate.held || snapshot.gates.some((row) => row.gate === 'running')) return 'The gate is busy.';
-  }
+  if (typeof gate?.held !== 'boolean' || !Array.isArray(snapshot.gates)) return 'Gate evidence is unavailable.';
+  if (gate.held || snapshot.gates.some((row) => row.gate === 'running')) return 'The gate is busy.';
   if (loadavg()[0] > 16 || snapshot.host.heavy_jobs >= snapshot.host.heavy_max) return 'The Captain host is at its lane capacity.';
 }
 
@@ -134,7 +140,7 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
         grant?.epoch !== lease.epoch || grant.paused) return 'Dispatch is paused until Jeff grants OpenClaw this scope at the current epoch.';
     if (view.active) return jobText(view.active);
     const [fleet, gate, quota, result] = await Promise.all([
-      bounded(4500, (signal) => admit(signal, view.standalone)).catch(() => 'Fleet or gate evidence is unavailable.'),
+      bounded(4500, (signal) => admit(signal, view.standalone, state)).catch(() => 'Fleet or gate evidence is unavailable.'),
       status('gate', turn),
       runnerQuota(),
       bounded(9500, () => integrationCI(pr, get)).catch(() => ({ ci: 'unavailable' })),
@@ -172,6 +178,8 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
     if (placed.result === 'active') return 'Another captain lane is active. Ask for “handoff” to see it.';
     if (placed.result === 'stale') return 'The epoch or approval changed before dispatch. No lane was launched.';
     if (placed.result === 'gate-unavailable') return 'The live gate could not be verified when submitting. No review was sent.';
+    if (placed.result === 'capacity-unavailable') return 'Live local capacity could not be verified. No review was sent.';
+    if (placed.result === 'capacity-blocked') return 'The Captain host is at its lane capacity. No review was sent.';
     if (placed.result === 'gate-blocked') return 'The gate is running or on hold. No review was sent.';
     if (placed.result === 'runner-unconfigured') return 'The standalone queue runner is unavailable. No review was submitted.';
     if (placed.result !== 'running') return placed.job?.queuePhase

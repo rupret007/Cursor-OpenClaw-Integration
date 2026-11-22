@@ -252,3 +252,25 @@ def test_standalone_transfer_waits_for_gateway_child_after_supervisor_exit(capta
         pytest.fail("Gateway child retained the handoff lock after exiting")
     with pytest.raises(ValueError, match="parked"):
         authority.run_gateway(gateway)
+
+
+def test_standalone_capacity_counts_configured_live_process(captain, tmp_path):
+    module, _, _ = captain
+    root = tmp_path / "authority"
+    root.mkdir(mode=0o700)
+    authority = module.StandaloneAuthority("nucbox", root)
+    binary = tmp_path / "fo-cap-fixture"
+    binary.symlink_to("/bin/sleep")
+    policy = root / "capacity.json"
+    module.save(policy, {"commands": [binary.name], "limit": 1})
+    assert module.local_capacity(authority)["used"] == 0
+    with subprocess.Popen([str(binary), "30"]) as process:
+        try:
+            reading = module.local_capacity(authority)
+            assert (reading["node"], reading["used"], reading["limit"]) == ("nucbox", 1, 1)
+        finally:
+            process.terminate()
+    assert module.local_capacity(authority)["used"] == 0
+    module.save(policy, {"commands": [], "limit": 1})
+    with pytest.raises(ValueError, match="Invalid standalone capacity"):
+        module.local_capacity(authority)

@@ -708,7 +708,7 @@ def test_dispatch_refuses_untrusted_lock_directory(tmp_path, tokens):
 
 
 @pytest.mark.parametrize("backend", ["hatchet", "restate", "lost"])
-def test_standalone_captain_queue_requires_exact_worker_output_and_never_resends(tmp_path, tokens, backend):
+def test_standalone_captain_queue_requires_exact_worker_output_and_never_resends(tmp_path, tokens, backend, monkeypatch):
     spec = importlib.util.spec_from_file_location("captain_state", ROOT / "first-officer/segment1/captain-state.py")
     captain = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(captain)
@@ -720,6 +720,8 @@ def test_standalone_captain_queue_requires_exact_worker_output_and_never_resends
     gate = tmp_path / "fullgate.lock"
     gate.touch(mode=0o600)
     captain.save(authority_root / "gate.json", {"directory": str(tmp_path), "lock": gate.name, "hold": "HOLD"})
+    monkeypatch.setattr(captain.os, "getloadavg", lambda: (0.0, 0.0, 0.0))
+    captain.save(authority_root / "capacity.json", {"commands": ["testloadfixture"], "limit": 1})
 
     run = "hatchet_run" if backend == "hatchet" else "inv_restate_run"
     hatchet_status = f"/api/v1/stable/workflow-runs/{run}/status"

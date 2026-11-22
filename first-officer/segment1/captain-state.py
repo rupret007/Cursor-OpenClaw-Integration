@@ -311,6 +311,25 @@ class LiveGate:
             return reading
 
 
+def local_capacity(authority):
+    policy = read_private(authority.AUTHORITY / "capacity.json", 4096)
+    if not isinstance(policy, dict) or policy.keys() != {"commands", "limit"}:
+        raise ValueError("Invalid standalone capacity policy")
+    commands, limit = policy["commands"], policy["limit"]
+    if (type(limit) is not int or not 1 <= limit <= 100 or not isinstance(commands, list)
+            or not 1 <= len(commands) <= 32 or any(
+                not isinstance(command, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", command)
+                for command in commands)):
+        raise ValueError("Invalid standalone capacity policy")
+    listing = subprocess.run(
+        ["/bin/ps", "-U", str(os.getuid()), "-o", "comm="], check=True, timeout=1,
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, errors="replace",
+    ).stdout
+    names = set(commands)
+    used = sum(Path(line.strip()).name in names for line in listing.splitlines())
+    return {"node": authority.node, "observed": int(time.time()), "used": used, "limit": limit}
+
+
 class CaptainQueue:
     """Use the reviewed dispatcher and its local receipt for standalone reviews."""
 
@@ -559,6 +578,12 @@ class Controller:
                     return {"result": "gate-unavailable"}
                 if gate["hold"] or gate["running"]:
                     return {"result": "gate-blocked"}
+                try:
+                    capacity = local_capacity(self.watchdog)
+                except (OSError, TypeError, ValueError, subprocess.SubprocessError):
+                    return {"result": "capacity-unavailable"}
+                if capacity["used"] >= capacity["limit"] or os.getloadavg()[0] > 16:
+                    return {"result": "capacity-blocked"}
 
             job = {"lane": lane, "pr": pr, "head": head, "ci": ci, "epoch": epoch,
                    "state": "launching", "started": int(time.time()), "delivery": None,
@@ -722,6 +747,8 @@ def main():
             return authority.accept(req, controller.file, controller.locked)
         if entry == "local-gate":
             return controller.gate.read()
+        if entry == "local-capacity":
+            return local_capacity(authority)
         if entry == "local-quota":
             profile = read_private(LOCAL_AUTHORITY / "quota.json", 4096)
             if not isinstance(profile, dict) or profile.keys() != {"codex"} or not isinstance(profile["codex"], str):

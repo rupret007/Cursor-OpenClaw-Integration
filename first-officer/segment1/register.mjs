@@ -91,11 +91,14 @@ function andreaReader(signal, { readPrivateConfig, createAndreaReader }) {
 
 function toolRegistry(api, commands, liveConfig, services) {
   const { quotaStatus, githubReply, redacted } = services;
+  const statusFleet = (request) => fleetStatus(request, {
+    capacity: localFleetNode() === 'bobserver' ? undefined : () => localState('local-capacity'),
+  });
   const gateStatus = () => localFleetNode() === 'bobserver' ? services.gateStatus() : standaloneGateStatus({ read: () => localState('local-gate') });
   const memory = (request, turn) => memoryReply(api, commands, liveConfig, request, turn);
   return {
     fleet: {
-      run: async (request) => plain(await fleetStatus(request)),
+      run: async (request) => plain(await statusFleet(request)),
       failure: 'The live fleet status check failed. Current load and jobs are unavailable.',
     },
     gate: {
@@ -104,7 +107,7 @@ function toolRegistry(api, commands, liveConfig, services) {
     },
     overview: {
       run: async () => {
-        const [fleet, gate] = await Promise.allSettled([fleetStatus({}), gateStatus()]);
+        const [fleet, gate] = await Promise.allSettled([statusFleet({}), gateStatus()]);
         return plain([
           fleet.status === 'fulfilled' ? fleet.value : 'The live fleet status check failed.',
           gate.status === 'fulfilled' ? gate.value : 'The live gate status check failed.',

@@ -302,6 +302,12 @@ test('a Nuc Captain never presents its local load or a legacy snapshot as Bobser
     ts: now / 1000, host: { node: 'nucbox', heavy_jobs: 1 }, lane_counts: { running: 1 },
   });
   assert.match(await fleetStatus({}, { ...options, read: localSnapshot }), /NucBox.*1 heavy jobs/);
+  const capacity = async () => ({ node: 'nucbox', observed: now / 1000, used: 2, limit: 3 });
+  assert.match(await fleetStatus({}, { ...options, capacity }), /NucBox.*2\/3 tracked heavy processes/);
+  const unavailable = await fleetStatus({}, { ...options, read: localSnapshot,
+    capacity: async () => { throw new Error('unavailable'); } });
+  assert.match(unavailable, /NucBox.*job count unavailable/);
+  assert.doesNotMatch(unavailable, /1 heavy jobs/);
 });
 
 test('standalone gate status requires current evidence from the active host', async () => {

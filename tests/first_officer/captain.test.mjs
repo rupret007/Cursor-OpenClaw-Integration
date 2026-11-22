@@ -258,4 +258,6 @@ test('Andrea flags distinct possible follow-ups from approved recent chats', asy
   assert.doesNotMatch(reply, /What time should we meet|fixture-alpha|location questions/);
   const injected = { ...result, followUps: [{ intent: 'free text must not pass', conversations: 1 }] };
   assert.doesNotMatch(parseAndreaSummary(JSON.stringify(injected)), /free text must not pass|May need your reply/);
+  const exaggerated = { ...result, followUps: [{ intent: 'ask-time', conversations: 4 }] };
+  assert.doesNotMatch(parseAndreaSummary(JSON.stringify(exaggerated)), /May need your reply/);
 });

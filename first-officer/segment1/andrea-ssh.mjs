@@ -8,7 +8,7 @@ export const andreaCommand = 'first-officer-andrea-summary-v1';
 const execute = promisify(execFile);
 const title = 'Andrea · synced one-to-one text activity from the last 48 hours.';
 const groupTitle = 'Andrea · activity in approved group chats from the last 48 hours.';
-const countLine = /^\d{1,2} incoming, \d{1,2} outgoing across [1-4] recent conversations\.$/;
+const countLine = /^\d{1,2} incoming, \d{1,2} outgoing across ([1-4]) recent conversations\.$/;
 const lineFormats = [
   countLine,
   /^The latest message was incoming in [1-4] of those conversations\.$/,
@@ -43,12 +43,12 @@ const followUpLabels = new Map([
   ['ask-confirmation', 'confirmation requests'], ['ask-question', 'questions'], ['request-action', 'action requests'],
 ]);
 
-function formatFollowUps(items) {
+function formatFollowUps(items, conversationsRead) {
   if (!Array.isArray(items) || items.length > 4 ||
       !items.every((item) => exactKeys(item, ['intent', 'conversations']) && followUpLabels.has(item.intent) &&
         Number.isInteger(item.conversations) && item.conversations >= 1 && item.conversations <= 4) ||
       new Set(items.map((item) => item.intent)).size !== items.length ||
-      items.reduce((total, item) => total + item.conversations, 0) > 4) return '';
+      items.reduce((total, item) => total + item.conversations, 0) > conversationsRead) return '';
   return items.map(({ intent, conversations }) => followUpLabels.get(intent) + ' in ' +
     conversations + (conversations === 1 ? ' conversation' : ' conversations')).join(', ');
 }
@@ -72,7 +72,7 @@ function validActivity(activity) {
     (latest.topic === null || activityTopics.has(latest.topic)) && ['later', 'earlier', 'none'].includes(latest.reply));
 }
 
-function formatActivity(heading, lines, { topics, developments, latest }, followUps) {
+function formatActivity(heading, lines, { topics, developments, latest }, followUp) {
   const result = [heading];
   if (topics.length) result.push('Topics · ' + topics.map((key) => activityTopics.get(key)).join(', ') + '.');
   if (developments.length) {
@@ -89,7 +89,6 @@ function formatActivity(heading, lines, { topics, developments, latest }, follow
       if (latest.reply === 'later') result.push('You posted in that conversation afterward.');
     }
   }
-  const followUp = formatFollowUps(followUps);
   if (followUp) result.push('May need your reply · ' + followUp + '.');
   if (result.length === 1) result.push('The recent previews did not give Andrea a clear topic or request.');
   for (const line of lines) {
@@ -109,7 +108,10 @@ export function parseAndreaSummary(payload) {
       lines.length > lineFormats.length || lines.some((line) => !lineFormats.some((format) => format.test(line)))) {
     throw new Error('Andrea summary response was invalid');
   }
-  if (countLine.test(lines[0]) && validActivity(activity)) return formatActivity(heading, lines, activity, followUps);
+  const counts = countLine.exec(lines[0]);
+  if (counts && validActivity(activity)) {
+    return formatActivity(heading, lines, activity, formatFollowUps(followUps, Number(counts[1])));
+  }
   return summary;
 }
 

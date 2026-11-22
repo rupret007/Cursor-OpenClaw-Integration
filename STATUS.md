@@ -244,6 +244,10 @@ Jeff signed into the Mac Mini and approved the Nuc's dedicated key. Live loopbac
 
 The native Mac Mini and Nuc rehearsals ran the packaged OpenClaw 2026.11.6 with local Telegram test endpoints and the real Mac reader. Andrea returned a digest in 5.02 seconds on the guarded Mac and 5.26 seconds on the guarded Nuc. Both met the acknowledgment target. The native Mac reports its staged Captain epoch and refuses to start with a parked lease. The Mac's existing OpenClaw installation is older than the rehearsed version, and the temporary rehearsal left the existing gateway unchanged.
 
-Live acceptance still needs the approved Telegram test account, host-specific gate, capacity and quota sources, and the signed peer transfer and rollback with the intended services. Follow [LIVE-TEST.md](LIVE-TEST.md) with Bobserver unavailable. Production activation remains pending.
+Jeff paired a separate Telegram test bot. The guarded Nuc answered Captain status and returned a useful Andrea digest through actual Telegram, with the digest visible within seven seconds. Signed handoff moved the same test bot to the Mac at epoch 4. The Mac answered Captain status and returned a useful digest within 14 seconds. Signed rollback parked the Mac and restored the Nuc at epoch 5, verified in Telegram. These are upper bounds from checking the desktop chat. The acknowledgment was visible for both Andrea replies. Its exact arrival and the typing indicator were not measured in the actual Telegram chat.
 
-BLOCKED: The standalone Telegram test account and host cutover checks are pending.
+On the restored Nuc, Telegram returned the live GitHub query, local fleet load, the test gate's kernel lock state, and a private memory confirmation card. The memory confirmation and recall were verified in the loopback rehearsal. The Nuc's signed-in Codex account returns a weekly-only quota, which the previous renderer rejected. The rebuilt gateway showed current weekly quota and correctly marked the five-hour window unavailable in actual Telegram. [Runtime quota CI](https://github.com/rupret007/Cursor-OpenClaw-Integration/actions/runs/45018345712)
+
+The isolated test gateways are stopped. The separate test bot remains paired on the Nuc. The copied test credential and config were removed from the Mac. Bobserver and production authority remained outside the exercise.
+
+BLOCKED: The full production-host checklist and approved production activation remain pending.

@@ -278,8 +278,10 @@ Actual Telegram Bot API timings from gateway update receipt, in seconds:
 
 An isolated Mac-route outage test on the real test bot returned the live Andrea failure in 2.06 seconds. A simple local question still answered in 2.54 seconds. Restoring the test route returned a live Andrea digest in 5.34 seconds. The Mac and its authorized key were untouched.
 
-The timings exclude delivery before the gateway receives the update and final display on the client. Windows monitor capture blocked automation of the fresh memory confirmation in this run. Prior real Telegram save and recall evidence remains above.
+The timings exclude delivery before the gateway receives the update and final display on the client. Windows monitor capture blocked automation of the fresh memory confirmation in this run. The bot recalled the previously confirmed synthetic fact after the Nuc service restart, verifying persistence in real Telegram. The earlier real Telegram save and recall are recorded above.
 
 The [production switch and rollback](JEFF-ACTIONS.md#production-switch-and-rollback-on-the-nuc) is approved after the fresh memory check and proof that the incumbent consumer has stopped. The Nuc production draft has a separate LiteLLM lane and reviewed queue settings. Bobserver and the production Telegram account remained outside the rehearsal.
 
-BLOCKED: Fresh memory confirmation, approved production credential staging, and verified incumbent shutdown remain pending.
+The exact staged production unit was exercised with an isolated parked lease and exited before starting Telegram.
+
+BLOCKED: Approved private production credential staging and verified incumbent shutdown remain pending.

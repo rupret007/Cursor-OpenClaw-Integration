@@ -96,7 +96,7 @@ launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/local.openclaw.ca
 launchctl bootout "gui/$(id -u)/local.openclaw.captain"
 ```
 
-Standalone cutover gates still include the native Mac service rehearsal, binding the live gate, capacity and quota probes on each host, and the full Telegram checklist on each host. Verify both peer transfer and rollback through the generated services. The existing Bobserver install procedure serves the legacy profile.
+Standalone cutover gates still include the native Mac service rehearsal, binding the live gate, capacity and quota probes on each host, and the full Telegram checklist on each host. Verify both peer transfer and rollback through the generated services. Use the standalone checklist in [LIVE-TEST.md](LIVE-TEST.md) for both hosts. The Bobserver pilot and rollback below apply only to the legacy profile.
 
 ## Daily commands
 
@@ -151,7 +151,7 @@ nice -n 10 python3 -B first-officer/provision-andrea.py \
 
 After it reports `Andrea reader verified from bobserver.` and Jeff approves, activate the reviewed gateway release. Then send `@andrea summarize my texts` to **Bob the Bot**, the OpenClaw Telegram account. Use the [Telegram acceptance checks](LIVE-TEST.md) to compare its findings privately with a recent thread. Use the error line to diagnose a refused refresh. `no-authorized-chats` means the allowlist supplied no eligible non-self thread.
 
-## Activate and run the supervised pilot
+## Legacy Bobserver pilot
 
 1. Review the PR and its current CI, then use the [single activation command](INSTALL.md#publish-and-activate-the-reviewed-candidate). Leave the lease with Grok Bot while running the [timed Telegram checks](LIVE-TEST.md). Privately compare the Andrea summary with the recent thread. The staged checklist, `python3 first-officer/pilot/rehearse.py checklist`, prints the live sequence and runs none of it.
 2. In an SSH shell on Bobserver, verify the existing shared lease using the operator CLI.
@@ -178,7 +178,7 @@ After it reports `Andrea reader verified from bobserver.` and Jeff approves, act
 6. Send `captain pause epoch N`, try another in-scope task and verify that there is no new lane. Send `handoff` and verify it retains the work and next action. Send `captain handback epoch N`. Confirm the CLI shows Grok Bot again at a newer epoch and a command using the old epoch is rejected.
 7. After the pilot and live checks pass, Jeff can explicitly approve OpenClaw as primary for this scope. Repeat the fenced handoff and grant at the new epoch. Capture the live `captain status` and record the accepted scope and verified receipt in `STATUS.md`.
 
-## Take back control and roll back
+## Legacy Bobserver handback and rollback
 
 Send `captain pause epoch N` to stop new captain-lane submissions. A review already started can finish and remains visible in the handoff. Send `captain handback epoch N` to transfer the shared lease after the fence drains.
 

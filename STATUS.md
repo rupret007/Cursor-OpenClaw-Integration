@@ -236,4 +236,17 @@ The complete offline gate passed 1,123 Python tests and 22 skill tests. The focu
 
 The planned merge order is #33 → #36 → #37. Gateway activation, the timed Telegram cases, the supervised authority pilot, live rollback and verification of the live Cursor dashboard are Jeff's. The live features remain pending owner acceptance.
 
-READY_FOR_JEFF_INSTALL
+## Standalone Captain acceptance
+
+The current candidate supports Captain on the Mac Mini and Nuc. Bobserver is optional compute. [Draft PR #39](https://github.com/rupret007/Cursor-OpenClaw-Integration/pull/39) stages the independent gateway profiles and restricted Andrea route. In the isolated Nuc rehearsal, the guarded gateway used its configured Python, returned a synthetic Andrea digest in 1.98 seconds, and met the two-second acknowledgment target. The previous pinned build also proved the exact-head review, verified completion and duplicate receipt behavior through the isolated Telegram path. An earlier cold-start run missed the acknowledgment target. [Runtime candidate CI](https://github.com/rupret007/Cursor-OpenClaw-Integration/actions/runs/45014994365)
+
+The live Mac Mini reader check needs Jeff's interactive SSH sign-in. From the reviewed Nuc checkout, run:
+
+```bash
+nice -n 10 python3 -B first-officer/provision-andrea.py \
+  --mac-host jeffs-mac-mini --mac-user jeffstory --diagnose-live
+```
+
+The command reports counts from the scoped reader. Keep the approved thread comparison private. Native Mac and Nuc Telegram acceptance, peer transfer and rollback remain open. Follow [LIVE-TEST.md](LIVE-TEST.md) with Bobserver unavailable and use the test Telegram account. Production activation remains pending.
+
+BLOCKED: Live Mac Mini sign-in and standalone Telegram acceptance are pending.

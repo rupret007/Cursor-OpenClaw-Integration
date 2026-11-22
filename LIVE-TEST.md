@@ -19,9 +19,9 @@ Send `@andrea` on its own to check the add-on help, then send `gate status` to c
 
 The candidate's acknowledgment budget is 1.5 seconds. The 2 second stopwatch above includes Telegram delivery.
 
-A timeout, unavailable source, stale sample or missing reply is a failed live case even when the bot reports it correctly. For a past-due check, record whether typing appeared, whether the acknowledgment arrived, whether a final reply arrived and which source was unavailable. Avoid copying replies, contacts or activity details into the report.
+A timeout, unavailable required source, stale sample or missing reply is a failed live case even when the bot reports it correctly. For a past-due check, record whether typing appeared, whether the acknowledgment arrived, whether a final reply arrived and which source was unavailable. Avoid copying replies, contacts or activity details into the report.
 
-This checklist also applies to each standalone host after its approved cutover. For standalone tests, keep Bobserver unavailable. The fleet check should report the active host from its live kernel sample and show Bobserver as unavailable if no fresh remote sample exists.
+For each standalone host, run the checklist using the approved test Telegram account with Bobserver unavailable. Verify measured local load, the observation time and tracked process counts on the active host. For remote nodes without a fresh sample, verify that the reply reports the gap. The gate and quota checks must use the active host’s local sources.
 
 For `@andrea summarize my texts`, confirm a known pending question or request produces a useful `May need your reply` line. Verify a conversation with a later visible outgoing message stays out of that list. The summary can only assess the previews Andrea can read.
 

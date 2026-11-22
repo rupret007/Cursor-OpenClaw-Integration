@@ -107,11 +107,17 @@ class Controller:
             save(PRIVATE / "handoff.json", view)
             return view
 
+    @staticmethod
+    def submitted_message(data, owner, message):
+        return any(row["owner"] == owner and row.get("message") == message for row in data["jobs"])
+
     def block(self, req):
         if req["reason"] not in BLOCKERS or type(req["pr"]) is not int or not 1 <= req["pr"] <= 99_999_999:
             raise ValueError("Invalid captain blocker")
         with self.locked(write=True) as data:
             grant = data["grant"]
+            if self.submitted_message(data, req["owner"], req["message"]):
+                return {"recorded": False}
             if (self.matches(self.fence.status(), req["epoch"]) and grant and grant["epoch"] == req["epoch"]
                     and grant["owner"] == req["owner"] and not grant["paused"]
                     and type(req["message"]) is int and req["message"] > grant["message"]):
@@ -175,13 +181,14 @@ class Controller:
                 pending = data.get("blocked", {})
                 if (pending.get("message"), pending.get("head"), pending.get("reason")) != (message, head, "ci-pending"):
                     return {"result": "stale"}
-            if any(row["lane"] == lane for row in data["jobs"]):
+            if self.submitted_message(data, req["owner"], message) or any(row["lane"] == lane for row in data["jobs"]):
                 return {"result": "duplicate"}
             if any(row["state"] in ("launching", "running") for row in data["jobs"]):
                 return {"result": "active"}
 
             job = {"lane": lane, "pr": pr, "head": head, "ci": ci, "epoch": epoch,
-                   "state": "launching", "started": int(time.time()), "delivery": None, "owner": req["owner"]}
+                   "state": "launching", "started": int(time.time()), "delivery": None,
+                   "owner": req["owner"], "message": message}
             data["jobs"].append(job)
             if data.get("blocked", {}).get("pr") == pr:
                 del data["blocked"]

@@ -73,6 +73,31 @@ def test_scope_deduplicates_launch_and_rejects_pause_stale_epoch_and_changed_own
     assert reopened.view()["active"]["pr"] == 33
 
 
+def test_replayed_telegram_update_cannot_launch_again_after_the_pr_head_changes(captain, monkeypatch):
+    module, _, watchdog = captain
+    launched = []
+
+    def launch(command, **_kwargs):
+        launched.append(command)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(module.subprocess, "run", launch)
+    controller = module.Controller(watchdog)
+    grant = {"message": 100, "epoch": 11, "owner": "123456"}
+    controller.control("grant", grant)
+    request = {**grant, "message": 101, "pr": 33, "head": "a" * 40, "ci": "passing"}
+    first = controller.submit(request)
+    assert first["result"] == "running"
+    controller.finish({"lane": first["job"]["lane"], "state": "verified"})
+
+    restarted = module.Controller(watchdog)
+    new_head = {**request, "head": "b" * 40}
+    assert restarted.submit(new_head) == {"result": "duplicate"}
+    assert len(launched) == 1
+    assert restarted.submit({**new_head, "message": 102})["result"] == "running"
+    assert len(launched) == 2
+
+
 def test_failed_launch_is_persisted_through_a_restart_and_cannot_be_replayed(captain, monkeypatch):
     module, _, watchdog = captain
     monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=1))

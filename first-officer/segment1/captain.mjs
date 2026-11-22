@@ -156,7 +156,7 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
       owner: turn.owner, message: Number(turn.ctx.messageId), epoch: lease.epoch, pr, head: result.head, ci: result.ci,
       resumePending: Boolean(pending),
     });
-    if (placed.result === 'duplicate') return 'This exact PR head already has a captain lane. Ask for “handoff” to see the receipt.';
+    if (placed.result === 'duplicate') return 'This review request already has a captain lane. Ask for “handoff” to see the receipt.';
     if (placed.result === 'active') return 'Another captain lane is active. Ask for “handoff” to see it.';
     if (placed.result === 'stale') return 'The epoch or approval changed before dispatch. No lane was launched.';
     if (placed.result !== 'running') return 'The runner did not confirm launch. OpenClaw will reconcile the local receipt.';

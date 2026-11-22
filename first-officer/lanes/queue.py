@@ -202,7 +202,7 @@ def post(opener, url, headers, payload, timeout):
     return response_json(opener, request, timeout)
 
 
-def response_json(opener, request, timeout):
+def response_json(opener, request, timeout, expected_type=dict):
     try:
         response = opener.open(request, timeout=timeout)
     except HTTPError as error:
@@ -238,7 +238,7 @@ def response_json(opener, request, timeout):
         body = json.loads(raw)
     except (ValueError, RecursionError):
         raise Uncertain("The queue returned an unreadable response") from None
-    if not isinstance(body, dict):
+    if not isinstance(body, expected_type):
         raise Uncertain("The queue returned an unexpected response")
     return body
 
@@ -508,7 +508,10 @@ def reconcile_restate(config, request, ledger, timeout=TIMEOUT):
 
 
 def load_config(path):
-    config = json.loads(Path(path).read_text(encoding="utf-8"))
+    return validate_config(json.loads(Path(path).read_text(encoding="utf-8")))
+
+
+def validate_config(config):
     if not isinstance(config, dict) or set(config) != {"hatchet", "restate"}:
         raise ValueError("The queue policy names its Hatchet primary and its Restate fallback")
     expected = {"hatchet": HATCHET_FIELDS, "restate": RESTATE_FIELDS}

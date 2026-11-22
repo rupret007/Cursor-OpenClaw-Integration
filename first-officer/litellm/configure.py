@@ -82,8 +82,8 @@ def candidate_config(original, plan):
         raise ValueError("Expected a static LiteLLM model catalog")
     catalog = {name for row in deployments if isinstance(name := row.get("model_name"), str)}
     fallbacks, lanes = plan["fallbacks"], plan["lanes"]
-    if not isinstance(fallbacks, dict) or not fallbacks or not isinstance(lanes, dict) or not lanes:
-        raise ValueError("The plan must contain fallback routes and budgeted lanes")
+    if not isinstance(fallbacks, dict) or not isinstance(lanes, dict) or not lanes:
+        raise ValueError("The plan must contain a fallback map and budgeted lanes")
     for primary, targets in fallbacks.items():
         targets = set(model_names(targets))
         if primary not in catalog or primary in targets or not targets <= catalog:

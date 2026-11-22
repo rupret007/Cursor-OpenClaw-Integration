@@ -8,9 +8,9 @@ import { test } from 'node:test';
 import { budgets, classifyRequest, createDispatch } from '../../first-officer/segment1/dispatch.mjs';
 import { answerSimple, fastModelRef, routeOwnerModel, standaloneSimple } from '../../first-officer/segment1/model-router.mjs';
 import { registerSegmentOne } from '../../first-officer/segment1/register.mjs';
-import { fleetStatus, openPullRequests, readFleetSnapshot, summarizeAndrea } from '../../first-officer/segment1/tools.mjs';
+import { fleetStatus, openPullRequests, readFleetSnapshot, standaloneGateStatus, standaloneQuotaStatus, summarizeAndrea } from '../../first-officer/segment1/tools.mjs';
 import { andreaCommand, parseAndreaSummary } from '../../first-officer/segment1/andrea-ssh.mjs';
-import { runMacAndrea } from '../../first-officer/segment1/andrea-mac.mjs';
+import { readMacAndrea, runMacAndrea } from '../../first-officer/segment1/andrea-mac.mjs';
 
 const fixtures = [
   ["what's running / load on each machine", 'fleet'],
@@ -33,6 +33,13 @@ const intentHooks = {
   isControl: () => false,
   isSimple: (text) => standaloneSimple(text, short, {}),
 };
+
+test('the Captain overlay loads through OpenClaw’s synchronous module loader', () => {
+  const script = 'const overlay = require("./first-officer/segment1/register.mjs");' +
+    'if (typeof overlay.registerSegmentOne !== "function") process.exitCode = 1;';
+  const result = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+});
 
 test('natural requests identify the live route and map memory to a stable topic', () => {
   for (const [text, kind] of fixtures) assert.equal(classifyRequest(text, intentHooks)?.kind, kind);
@@ -110,7 +117,7 @@ test('timeouts cancel hung calls and keep the turn claimed with an explicit fail
   assert.equal(warnings.length, 2);
 });
 
-test('all Segment 1 handlers are registered on the private inbound hook', async () => {
+test('all Segment 1 handlers are registered on the private inbound hook', async (t) => {
   const owner = '7';
   const config = { channels: { telegram: {} } };
   const events = [];
@@ -188,6 +195,31 @@ test('all Segment 1 handlers are registered on the private inbound hook', async 
   assert.equal(events.filter((event) => event === 'ack').length, 10);
   assert.equal(events.filter((event) => event === 'typing').length, 10);
   assert.equal(events.some((event) => event.includes('synthetic transport detail')), false);
+
+  t.mock.method(services, 'createAndreaReader', () => assert.fail('The Mac should use its local reader'));
+  const priorNode = process.env.FO_LOCAL_NODE;
+  process.env.FO_LOCAL_NODE = 'mac-mini';
+  try {
+    services.readMacAndrea = (signal) => readMacAndrea(signal, async (command) => {
+      assert.equal(command, andreaCommand);
+      return {
+        version: 1,
+        groupSummary: 'Andrea · activity in approved group chats from the last 48 hours.\n2 incoming, 1 outgoing across 1 recent conversations.',
+        activity: {
+          topics: ['scheduling'], developments: ['question'],
+          latest: { intent: 'ask-time', topic: 'scheduling', reply: 'earlier' },
+        },
+      };
+    });
+    const reply = (await dispatchOwner('@andrea summarize my texts')).text;
+    assert.match(reply, /Latest incoming · asks about timing/);
+    assert.match(reply, /after your last outgoing message/);
+    services.readMacAndrea = async () => { throw new Error('synthetic Mac transport detail'); };
+    assert.match((await dispatchOwner('@andrea summarize my texts')).text, /live read through Andrea failed/);
+  } finally {
+    if (priorNode === undefined) delete process.env.FO_LOCAL_NODE;
+    else process.env.FO_LOCAL_NODE = priorNode;
+  }
 });
 
 test('short answers use the configured flash model with bounded context and skip the slow fallback probe', async () => {
@@ -252,6 +284,57 @@ test('fleet refuses old remote readings and keeps independent local evidence', a
   assert.match(await fleetStatus({ node: 'mac-mini' }, {
     read: async () => { throw new Error('unavailable'); }, now: () => now,
   }), /Mac Mini · current load and tracked jobs unavailable/);
+});
+
+test('a Nuc Captain never presents its local load or a legacy snapshot as Bobserver evidence', async () => {
+  const now = Date.parse('2026-11-20T04:00:00Z');
+  const read = async () => ({ ts: now / 1000, host: { heavy_jobs: 2 }, lane_counts: { running: 1 } });
+  const options = { read, load: () => [1, 2, 3], now: () => now, local: 'nucbox' };
+  const result = await fleetStatus({}, options);
+  assert.match(result, /NucBox · 1\.00 \/ 2\.00 \/ 3\.00.*job count unavailable/);
+  assert.match(result, /Bobserver · current load and tracked jobs unavailable/);
+  assert.doesNotMatch(result, /2 heavy jobs|1 running/);
+  const localRequest = classifyRequest('load', { ...intentHooks, legacyStatus: () => 'load' });
+  const localResult = await fleetStatus(localRequest, options);
+  assert.match(localResult, /NucBox/);
+  assert.doesNotMatch(localResult, /Bobserver/);
+  const localSnapshot = async () => ({
+    ts: now / 1000, host: { node: 'nucbox', heavy_jobs: 1 }, lane_counts: { running: 1 },
+  });
+  assert.match(await fleetStatus({}, { ...options, read: localSnapshot }), /NucBox.*1 heavy jobs/);
+  const capacity = async () => ({ node: 'nucbox', observed: now / 1000, used: 2, limit: 3 });
+  assert.match(await fleetStatus({}, { ...options, capacity }), /NucBox.*2\/3 tracked heavy processes/);
+  const unavailable = await fleetStatus({}, { ...options, read: localSnapshot,
+    capacity: async () => { throw new Error('unavailable'); } });
+  assert.match(unavailable, /NucBox.*job count unavailable/);
+  assert.doesNotMatch(unavailable, /1 heavy jobs/);
+});
+
+test('standalone gate status requires current evidence from the active host', async () => {
+  const ts = 1_800_000_000;
+  const base = { observed: ts, node: 'mac-mini', hold: true, running: false };
+  const options = { now: () => ts * 1000, local: 'mac-mini' };
+  assert.match(await standaloneGateStatus({ ...options, read: async () => base }), /HOLD is active/);
+  await assert.rejects(standaloneGateStatus({ ...options, local: 'nucbox', read: async () => base }), /unavailable/);
+  await assert.rejects(standaloneGateStatus({ ...options, read: async () => ({ ...base, observed: ts - 301 }) }),
+    /unavailable/);
+  await assert.rejects(standaloneGateStatus({ ...options, read: async () => ({ ...base, hold: undefined }) }), /unavailable/);
+});
+
+test('standalone quota rejects an expired window before reporting usage', async () => {
+  const observed = 1_800_000_000;
+  const receipt = { observed, session: { used: 15, reset: observed + 1800 },
+    weekly: { used: 31, reset: observed + 5000 } };
+  const now = () => observed * 1000;
+  assert.match(await standaloneQuotaStatus({ read: async () => receipt, now }), /5-hour · 15% used/);
+  const weeklyOnly = await standaloneQuotaStatus({ read: async () => ({ observed, weekly: receipt.weekly }), now });
+  assert.match(weeklyOnly, /5-hour · unavailable/);
+  assert.match(weeklyOnly, /weekly · 31% used/);
+  await assert.rejects(standaloneQuotaStatus({ read: async () => ({ observed }), now }), /windows are unavailable/);
+  await assert.rejects(standaloneQuotaStatus({ read: async () => ({ ...receipt, observed: observed - 61 }), now }),
+    /evidence is unavailable/);
+  await assert.rejects(standaloneQuotaStatus({ read: async () => ({ ...receipt, session: { used: 15, reset: observed } }), now }),
+    /windows are unavailable/);
 });
 
 test('GitHub uses one live query and binds CI to the exact visible head', async () => {
@@ -476,4 +559,24 @@ test('the shared status publisher is accepted by the fleet reader', async () => 
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+
+test('the approved LiteLLM alias can serve simple turns from an independent local proxy', async () => {
+  const alias = 'qwen-local-fast';
+  const reference = 'litellm/' + alias;
+  const routeFor = () => ({ reason: 'short-chat' });
+  const config = {
+    plugins: { entries: { 'first-officer-conductor': { llm: { allowedCompletionModels: [reference] } } } },
+    models: { providers: { litellm: { models: [{ id: alias }] } } },
+  };
+  const requests = [];
+  const runtime = { llm: { complete: async ({ model }) => {
+    requests.push(model);
+    return { text: 'A fixture answer.', stopReason: 'stop' };
+  } } };
+  assert.equal(routeOwnerModel({ prompt: 'define a branch' }, config, routeFor).model, alias);
+  await answerSimple(runtime, 'define a branch', new AbortController().signal, config);
+  await answerSimple(runtime, 'define a branch', new AbortController().signal, { ...config, models: {} });
+  assert.deepEqual(requests, [reference, fastModelRef]);
 });

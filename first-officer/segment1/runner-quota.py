@@ -10,24 +10,58 @@ import tempfile
 import time
 
 
+def quota_snapshot(result):
+    return (result.get("rateLimitsByLimitId") or {}).get("codex") or result["rateLimits"]
+
+
+def quota_window(window, duration, now):
+    if not isinstance(window, dict):
+        raise ValueError("Incomplete lane quota")
+    used, reset = window.get("usedPercent"), window.get("resetsAt")
+    if (type(used) not in (int, float) or not 0 <= used <= 100 or type(reset) is not int
+            or reset <= now or window.get("windowDurationMins") != duration):
+        raise ValueError("Incomplete lane quota")
+    return {"used": used, "reset": reset}
+
+
 def quota_windows(result, account, now):
     observed_account = result.get("accountId")
     if observed_account not in (None, account):
         raise ValueError("Lane quota account changed")
-    snapshot = (result.get("rateLimitsByLimitId") or {}).get("codex") or result["rateLimits"]
-    limits = {}
-    for label, key, duration in (("session", "primary", 300), ("weekly", "secondary", 10080)):
-        window = snapshot[key]
-        used, reset = window["usedPercent"], window["resetsAt"]
-        if (type(used) not in (int, float) or not 0 <= used <= 100 or type(reset) is not int
-                or reset <= now or window["windowDurationMins"] != duration):
-            raise ValueError("Incomplete lane quota")
-        limits[label] = {"used": used, "reset": reset}
+    snapshot = quota_snapshot(result)
+    limits = {
+        "session": quota_window(snapshot.get("primary"), 300, now),
+        "weekly": quota_window(snapshot.get("secondary"), 10080, now),
+    }
     credits = snapshot.get("credits") or {}
     limits["allowed"] = (result.get("ordinaryUsageAllowed") is not False and
                          not snapshot.get("rateLimitReachedType") and
                          not credits.get("hasCredits") and not credits.get("unlimited") and
                          all(limits[key]["used"] < 90 for key in ("session", "weekly")))
+    return limits
+
+
+def local_quota_windows(result, now):
+    # Standalone accounts can expose a single weekly window in the primary slot.
+    snapshot = quota_snapshot(result)
+    limits = {}
+    for key in ("primary", "secondary"):
+        window = snapshot.get(key)
+        if window is None:
+            continue
+        if not isinstance(window, dict):
+            raise ValueError("Incomplete local quota")
+        duration = window.get("windowDurationMins")
+        if type(duration) is not int:
+            raise ValueError("Incomplete local quota")
+        label = {300: "session", 10080: "weekly"}.get(duration)
+        if label is None:
+            continue
+        if label in limits:
+            raise ValueError("Ambiguous local quota windows")
+        limits[label] = quota_window(window, duration, now)
+    if not limits:
+        raise ValueError("The local quota windows are unavailable")
     return limits
 
 
@@ -66,6 +100,23 @@ def quota_rpc(proc, timeout=5):
         send({"method": "initialized"})
         send({"id": 2, "method": "account/rateLimits/read"})
         return receive(2)
+
+
+def read_local_quota(binary):
+    """Query the standalone host's signed-in local CLI without copying credentials."""
+    path = Path(binary)
+    if not path.is_absolute() or path.name != "codex" or not os.access(path, os.X_OK) or not path.is_file():
+        raise ValueError("The approved standalone Codex CLI is unavailable")
+    with subprocess.Popen(
+        ["/usr/bin/nice", "-n", "10", str(path), "app-server", "--listen", "stdio://"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    ) as proc:
+        try:
+            result = quota_rpc(proc)
+            now = time.time()
+            return {**local_quota_windows(result, now), "observed": int(now)}
+        finally:
+            proc.kill()
 
 
 def read_runner_quota(runner):

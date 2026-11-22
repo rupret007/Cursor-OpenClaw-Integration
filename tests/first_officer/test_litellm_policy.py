@@ -325,3 +325,18 @@ def test_a_failed_local_write_does_not_leave_a_second_active_key(tmp_path):
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_single_model_lane_has_no_fallback_or_unmetered_route():
+    original = {"model_list": [{
+        "model_name": "nuc-local-fast",
+        "litellm_params": {"model": "openai/local", "input_cost_per_token": 0.01,
+                           "output_cost_per_token": 0.01},
+    }]}
+    plan = {"fallbacks": {}, "lanes": {
+        "gateway": {"models": ["nuc-local-fast"], "max_budget": 1, "budget_duration": "1d"},
+    }}
+    config = configure.candidate_config(original, plan)
+    assert config["router_settings"]["fallbacks"] == []
+    assert config["general_settings"]["fail_closed_budget_enforcement"]
+    assert config["general_settings"]["enforce_fallback_model_access"]

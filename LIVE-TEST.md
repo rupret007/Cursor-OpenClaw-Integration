@@ -19,6 +19,12 @@ Send `@andrea` on its own to check the add-on help, then send `gate status` to c
 
 The candidate's acknowledgment budget is 1.5 seconds. The 2 second stopwatch above includes Telegram delivery.
 
-A timeout, unavailable source, stale sample or missing reply is a failed live case even when the bot reports it correctly. For a past-due check, record whether typing appeared, whether the acknowledgment arrived, whether a final reply arrived and which source was unavailable. Avoid copying replies, contacts or activity details into the report.
+A timeout, unavailable required source, stale sample or missing reply is a failed live case even when the bot reports it correctly. For a past-due check, record whether typing appeared, whether the acknowledgment arrived, whether a final reply arrived and which source was unavailable. Avoid copying replies, contacts or activity details into the report.
 
-The loopback status page, the local trace collector, the lane queue and the review archive stay off this check. Do not open a public port, use Tailscale Funnel, or roll the gateway back from here. A live rollback uses the private backup printed by activation and is a separate approval.
+For each standalone host, run the checklist using the approved test Telegram account with Bobserver unavailable. Verify measured local load, the observation time and tracked process counts on the active host. For remote nodes without a fresh sample, verify that the reply reports the gap. The gate and quota checks must use the active host’s local sources.
+
+For `@andrea summarize my texts`, confirm a known pending question or request produces a useful `May need your reply` line. Verify a conversation with a later visible outgoing message stays out of that list. The summary can only assess the previews Andrea can read.
+
+On each standalone host, check `captain status` before and after a guarded gateway restart. Send the agreed synthetic review request, then repeat it and check `handoff`. Require one accepted job and a separate exact-head worker result. Exercise peer transfer and rollback while preserving the prior receipts. The old host must remain parked after restart and must refuse a stale epoch.
+
+The loopback status page, the local trace collector and the review archive stay off this check. Do not open a public port, use Tailscale Funnel, or roll the gateway back from here. A live rollback uses the private backup printed by activation and is a separate approval.

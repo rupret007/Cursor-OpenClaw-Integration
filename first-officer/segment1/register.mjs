@@ -1,11 +1,12 @@
 import { homedir } from 'node:os';
 import { isIP } from 'node:net';
 import { join } from 'node:path';
+import { readMacAndrea } from './andrea-mac.mjs';
 import { sshAndreaSummary } from './andrea-ssh.mjs';
-import { createCaptain } from './captain.mjs';
+import { createCaptain, localState, resolveCaptainStateScript } from './captain.mjs';
 import { classifyRequest, createDispatch } from './dispatch.mjs';
 import { answerSimple, standaloneSimple } from './model-router.mjs';
-import { fleetStatus, openPullRequests, summarizeAndrea } from './tools.mjs';
+import { fleetStatus, localFleetNode, openPullRequests, readIntegrationGithub, standaloneGateStatus, standaloneQuotaStatus, summarizeAndrea } from './tools.mjs';
 
 const account = 'default';
 const expectedGithubAccount = 'rupret007';
@@ -88,12 +89,16 @@ function andreaReader(signal, { readPrivateConfig, createAndreaReader }) {
   });
 }
 
-function toolRegistry(api, commands, liveConfig, services) {
-  const { gateStatus, quotaStatus, githubReply, redacted } = services;
+function toolRegistry(api, commands, liveConfig, services, state) {
+  const { quotaStatus, githubReply, redacted } = services;
+  const statusFleet = (request) => fleetStatus(request, {
+    capacity: localFleetNode() === 'bobserver' ? undefined : () => state('local-capacity'),
+  });
+  const gateStatus = () => localFleetNode() === 'bobserver' ? services.gateStatus() : standaloneGateStatus({ read: () => state('local-gate') });
   const memory = (request, turn) => memoryReply(api, commands, liveConfig, request, turn);
   return {
     fleet: {
-      run: async (request) => plain(await fleetStatus(request)),
+      run: async (request) => plain(await statusFleet(request)),
       failure: 'The live fleet status check failed. Current load and jobs are unavailable.',
     },
     gate: {
@@ -102,7 +107,7 @@ function toolRegistry(api, commands, liveConfig, services) {
     },
     overview: {
       run: async () => {
-        const [fleet, gate] = await Promise.allSettled([fleetStatus({}), gateStatus()]);
+        const [fleet, gate] = await Promise.allSettled([statusFleet({}), gateStatus()]);
         return plain([
           fleet.status === 'fulfilled' ? fleet.value : 'The live fleet status check failed.',
           gate.status === 'fulfilled' ? gate.value : 'The live gate status check failed.',
@@ -112,6 +117,7 @@ function toolRegistry(api, commands, liveConfig, services) {
     },
     quota: {
       run: async () => {
+        if (localFleetNode() !== 'bobserver') return plain(await standaloneQuotaStatus({ read: () => state('local-quota') }));
         let profile = 0;
         return plain((await quotaStatus()).replace(/^Codex [^·\r\n]+·/gm, () => 'Codex profile ' + ++profile + ' ·'));
       },
@@ -134,16 +140,22 @@ function toolRegistry(api, commands, liveConfig, services) {
     remember: { run: memory, failure: 'The private memory request failed. The fact wasn’t confirmed as saved.' },
     recall: { run: memory, failure: 'The private memory lookup failed. I couldn’t verify a saved fact.' },
     texts: {
-      run: async (_, { signal }) => plain(await sshAndreaSummary(signal) ??
-        await summarizeAndrea(andreaReader(signal, services))),
+      run: async (_, { signal }) => {
+        const local = localFleetNode();
+        if (local === 'mac-mini') return plain(await (services.readMacAndrea ?? readMacAndrea)(signal));
+        const summary = await sshAndreaSummary(signal);
+        if (summary !== undefined) return plain(summary);
+        if (local === 'nucbox') throw new Error('The local Andrea reader route is unavailable');
+        return plain(await summarizeAndrea(andreaReader(signal, services)));
+      },
       failure: 'The live read through Andrea failed. Your recent text activity is unavailable.',
     },
     'andrea-help': {
       run: () => plain('Andrea’s messaging access here is read-only. Try “@andrea summarize my texts” for recent activity in your approved chats.'),
     },
     simple: {
-      run: async ({ prompt }, { signal }) => {
-        const answer = redacted(await answerSimple(api.runtime, prompt, signal), 1250);
+      run: async ({ prompt }, { signal, owner }) => {
+        const answer = redacted(await answerSimple(api.runtime, prompt, signal, liveConfig(owner)), 1250);
         if (!answer) throw new Error('Fast answer unavailable');
         return plain(answer);
       },
@@ -160,9 +172,12 @@ export function registerSegmentOne(api, commands, services) {
     if (telegramOwner(cfg, account) !== owner) throw new Error('Private owner is unavailable');
     return cfg;
   };
-  const registry = toolRegistry(api, commands, liveConfig, services);
+  const script = resolveCaptainStateScript(currentConfig());
+  const state = (operation, data) => localState(operation, data, script);
+  const registry = toolRegistry(api, commands, liveConfig, services, state);
   if (services.getGithub) {
-    const captain = createCaptain({ registry, get: services.getGithub });
+    const readCI = localFleetNode() === 'bobserver' ? services.getGithub : readIntegrationGithub;
+    const captain = createCaptain({ registry, get: readCI, state });
     registry.captain = {
       run: async (request, turn) => plain(await captain.run(request, turn)),
       failure: 'Captain state or evidence is unavailable. Check “captain status” before retrying.',

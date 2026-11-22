@@ -236,4 +236,54 @@ The complete offline gate passed 1,123 Python tests and 22 skill tests. The focu
 
 The planned merge order is #33 → #36 → #37. Gateway activation, the timed Telegram cases, the supervised authority pilot, live rollback and verification of the live Cursor dashboard are Jeff's. The live features remain pending owner acceptance.
 
-READY_FOR_JEFF_INSTALL
+## Standalone Captain acceptance
+
+The current candidate supports Captain on the Mac Mini and Nuc. Bobserver is optional compute. [PR #39](https://github.com/rupret007/Cursor-OpenClaw-Integration/pull/39) stages the independent gateway profiles and restricted Andrea route. In the isolated Nuc rehearsal, the guarded gateway used its configured Python, returned a synthetic Andrea digest in 1.98 seconds, and met the two-second acknowledgment target. The previous pinned build also proved the exact-head review, verified completion and duplicate receipt behavior through the isolated Telegram path. An earlier cold-start run missed the acknowledgment target. [Runtime candidate CI](https://github.com/rupret007/Cursor-OpenClaw-Integration/actions/runs/45014994365)
+
+Jeff signed into the Mac Mini and approved the Nuc's dedicated key. Live loopback checks showed the scope and chat cache exceeded four seconds. The fixed reader gives those calls one shared nine-second budget and uses bounded provider history only after Andrea confirms the allowlist. The diagnostic verified recent approved history with no read failures. The Nuc key was installed and the forced read-only command verified successfully.
+
+The native Mac Mini and Nuc rehearsals ran the packaged OpenClaw 2026.11.6 with local Telegram test endpoints and the real Mac reader. Andrea returned a digest in 5.02 seconds on the guarded Mac and 5.26 seconds on the guarded Nuc. Both met the acknowledgment target. The native Mac reports its staged Captain epoch and refuses to start with a parked lease. The Mac's existing OpenClaw installation is older than the rehearsed version, and the temporary rehearsal left the existing gateway unchanged.
+
+Jeff paired a separate Telegram test bot. The guarded Nuc answered Captain status and returned a useful Andrea digest through actual Telegram, with the digest visible within seven seconds. Signed handoff moved the same test bot to the Mac at epoch 4. The Mac answered Captain status and returned a useful digest within 14 seconds. Signed rollback parked the Mac and restored the Nuc at epoch 5, verified in Telegram. These are upper bounds from checking the desktop chat. The acknowledgment was visible for both Andrea replies. The desktop chat did not provide direct timestamps for acknowledgment or typing.
+
+On the restored Nuc, Telegram returned the live GitHub query, local fleet load, the test gate's kernel lock state, and a private memory confirmation card. The memory confirmation and recall passed in the loopback rehearsal and a later real Telegram run. The Nuc's signed-in Codex account returns a weekly-only quota, which the previous renderer rejected. The rebuilt gateway showed current weekly quota and correctly marked the five-hour window unavailable in actual Telegram. [Runtime quota CI](https://github.com/rupret007/Cursor-OpenClaw-Integration/actions/runs/45018345712)
+
+A second real Telegram run timed the guarded Nuc from update receipt to Bot API acceptance. Captain typing, acknowledgment, and final reply took 1.44, 1.47, and 2.33 seconds. Andrea took 1.02, 1.04, and 4.26 seconds. The synthetic memory card arrived in 2.25 seconds. The measurement excludes delivery before the gateway receives the update and display on the client. A fresh real Telegram memory test clicked the inline Remember button and verified the same synthetic fact in a separate recall reply. The confirmation and recall were accepted in 1.19 and 2.09 seconds, respectively, measured from update receipt.
+
+The isolated test gateways are stopped. The separate test bot remains paired on the Nuc. The copied test credential and config were removed from the Mac. Bobserver and production authority remained outside the exercise.
+
+Jeff chose the Nuc first. Its private gateway and LiteLLM systemd definitions validate. The local model, LiteLLM and PostgreSQL use loopback. The standalone gateway used a separate budgeted lane to answer a simple question in 3.35 seconds through the packaged OpenClaw path. The first cold-start attempt exceeded the acknowledgment target, and the repeat met it. The pinned LiteLLM acceptance test also verified fallback and budget exhaustion with synthetic providers. The temporary user service reached readiness and stopped cleanly.
+
+The Nuc's private gate lock, capacity policy and live weekly Codex quota also passed. The production queue routes still need configuration. The Mac Mini was unavailable for the production Andrea check. The production Telegram account remains disabled in the staged Nuc config.
+
+## Nuc daily-use cutover rehearsal
+
+The separate Telegram test bot is running through the Nuc user service. Dependencies include OpenClaw 2026.11.6, Node 24.16.0, LiteLLM 1.110.2, PostgreSQL 18.6, llama.cpp b12633 with Qwen2.5 0.5B Instruct, Hatchet Lite 0.120.19, and Restate 1.8.1. [Reviewed runtime CI](https://github.com/rupret007/Cursor-OpenClaw-Integration/actions/runs/45041510156)
+
+The Mac Mini returned a live Andrea digest through the restricted reader. Hatchet verified the exact head of the selected PR with zero model calls. Telegram delivered the result. Repeating the request left one receipt. Restate accepted the authenticated scoped fallback lookup without a second review submission. Captain, LiteLLM, and the queue restarted and reached readiness. The verified receipt survived. After restarting, the bot answered Captain status in 2.14 seconds, the simple question in 3.03 seconds, and Andrea in 4.07 seconds.
+
+Actual Telegram Bot API timings from gateway update receipt, in seconds:
+
+| Case | Typing | Acknowledgment | Reply |
+| --- | ---: | ---: | ---: |
+| Simple local model | 1.06 | 1.06 | 2.41 |
+| Nuc fleet load | 0.99 | 1.05 | 2.00 |
+| Local gate | 1.04 | 1.05 | 2.05 |
+| GitHub PRs and CI | 1.03 | 1.05 | 2.06 |
+| Local quota | 1.03 | 1.08 | 2.38 |
+| Andrea | 1.01 | 1.05 | 3.82 |
+| Exact-head review | 1.04 | 1.05 | 4.15 accepted, 9.05 verified |
+| Repeat review | 1.12 | 1.12 | 2.90 |
+| Fresh memory card after restart | 1.23 | 1.25 | 2.24 |
+
+An isolated Mac-route outage test on the real test bot returned the live Andrea failure in 2.06 seconds. A simple local question still answered in 2.54 seconds. Restoring the test route returned a live Andrea digest in 5.34 seconds. The Mac and its authorized key were untouched.
+
+The timings exclude delivery before the gateway receives the update and final display on the client. Windows monitor capture blocked automation of the fresh memory confirmation in this run. The bot recalled the previously confirmed synthetic fact after the Nuc service restart, verifying persistence in real Telegram. The earlier real Telegram save and recall are recorded above.
+
+The [production switch and rollback](JEFF-ACTIONS.md#production-switch-and-rollback-on-the-nuc) is approved after the fresh memory check and proof that the incumbent consumer has stopped. The Nuc production draft has a separate LiteLLM lane and reviewed queue settings. Bobserver and the production Telegram account remained outside the rehearsal.
+
+The exact staged production unit was exercised with an isolated parked lease and exited before starting Telegram.
+
+An approved read-only check found the incumbent Bobserver gateway running. The Mac standby plist validated with Telegram disabled. The paired release and production handoff keys passed a signed transfer, rollback, and replay rejection in separate scratch homes. Production authority remains uninitialized on the Nuc and Mac.
+
+BLOCKED: Approved private production credential staging and verified incumbent shutdown remain pending.

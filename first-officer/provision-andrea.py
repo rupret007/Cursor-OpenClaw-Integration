@@ -18,10 +18,12 @@ import tempfile
 
 
 KEY_LABEL = "openclaw-firstofficer-andrea-read"
+LOCAL_KEY_LABEL = "openclaw-firstofficer-andrea-nuc-read"
 READER_COMMAND = "first-officer-andrea-summary-v1"
 MODULES = ("andrea-mac.mjs", "andrea-ssh.mjs", "tools.mjs")
 HISTORY_SOURCES = {"cache", "live-provider", "provider-unconfigured", "no-authorized-chats", "scope-unverified"}
 STATE = Path.home() / ".ssh/openclaw-fo-andrea"
+LOCAL_STATE = STATE.with_name("openclaw-fo-andrea-nuc")
 PUBLIC_KEY = re.compile(r"ssh-ed25519 [A-Za-z0-9+/]{60,120}={0,2}")
 HOST = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]{0,126}")
 ACCOUNT = re.compile(r"[A-Za-z_][A-Za-z0-9_-]{0,59}")
@@ -116,13 +118,14 @@ def public_key(text):
     return key
 
 
-def make_key():
-    private_dir(STATE)
-    identity = STATE / "id_ed25519"
-    with (STATE / "setup.lock").open("ab") as lock:
+def make_key(label=KEY_LABEL):
+    state = LOCAL_STATE if label == LOCAL_KEY_LABEL else STATE
+    private_dir(state)
+    identity = state / "id_ed25519"
+    with (state / "setup.lock").open("ab") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         if not identity.exists() and not identity.is_symlink():
-            quiet_run(["/usr/bin/ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", KEY_LABEL, "-f", str(identity)])
+            quiet_run(["/usr/bin/ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", label, "-f", str(identity)])
         private_file(identity)
         key = quiet_run(["/usr/bin/ssh-keygen", "-y", "-f", str(identity)])
     return {"public": public_key(key)}
@@ -133,7 +136,7 @@ def quiet_run(args, *, env=None, timeout=20):
                           env=env, check=True, timeout=timeout).stdout
 
 
-def add_restriction(entry=None, mode="install"):
+def add_restriction(entry=None, mode="install", label=KEY_LABEL):
     directory = Path.home() / ".ssh"
     directory.mkdir(mode=0o700, exist_ok=True)
     info = directory.lstat()
@@ -144,10 +147,10 @@ def add_restriction(entry=None, mode="install"):
     lock_fd = os.open(STATE / "authorized-keys.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     with os.fdopen(lock_fd, "rb") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        update_authorized_keys(path, entry, mode)
+        update_authorized_keys(path, entry, mode, label)
 
 
-def update_authorized_keys(path, entry, mode):
+def update_authorized_keys(path, entry, mode, label=KEY_LABEL):
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | (os.O_CREAT if mode == "install" else 0), 0o600)
     with os.fdopen(fd, "rb") as file:
         info = os.fstat(file.fileno())
@@ -157,20 +160,22 @@ def update_authorized_keys(path, entry, mode):
         if len(current) > 1024 * 1024:
             raise ValueError("The Mac authorized keys file exceeds the size limit")
         rows = current.splitlines(keepends=True)
-        matches = [line.rstrip(b"\r\n") for line in rows if line.rstrip(b"\r\n").endswith(b" " + KEY_LABEL.encode())]
+        matches = [line.rstrip(b"\r\n") for line in rows if line.rstrip(b"\r\n").endswith(b" " + label.encode())]
         if mode == "restore":
             if len(matches) != 1:
                 raise ValueError("The existing restricted reader key could not be verified")
             try:
                 entry = private_file(reader_backup_path(matches[0]))
             except FileNotFoundError:
+                if label != KEY_LABEL:
+                    raise ValueError("The previous restricted reader is unavailable") from None
                 entry = private_file(STATE / "reader.previous")
         if matches == [entry]:
             if mode != "install":
-                restricted_key(entry)
+                restricted_key(entry, label)
             return
         if matches:
-            if mode == "install" or len(matches) != 1 or restricted_key(matches[0]) != restricted_key(entry):
+            if mode == "install" or len(matches) != 1 or restricted_key(matches[0], label) != restricted_key(entry, label):
                 raise ValueError("An existing First Officer reader key needs operator review")
             updated = b"".join(entry + b"\n" if line.rstrip(b"\r\n") == matches[0] else line for line in rows)
         else:
@@ -208,9 +213,9 @@ def update_authorized_keys(path, entry, mode):
                 staged.unlink(missing_ok=True)
 
 
-def restricted_key(line):
+def restricted_key(line, label=KEY_LABEL):
     match = re.fullmatch(rb'restrict,command="([^"\r\n]+)" (ssh-ed25519 [A-Za-z0-9+/=]+) ' +
-                         KEY_LABEL.encode(), line)
+                         label.encode(), line)
     if not match:
         raise ValueError("Expected the dedicated restricted reader line")
     argv = shlex.split(match[1].decode())
@@ -313,6 +318,7 @@ def diagnose_mac(payload):
 
 
 def prepare_mac(payload):
+    label = LOCAL_KEY_LABEL if payload.get("local_client") is True else KEY_LABEL
     key = public_key(payload["public"])
     pin = public_key(Path("/etc/ssh/ssh_host_ed25519_key.pub").read_text())
     node = mac_node()
@@ -339,27 +345,29 @@ def prepare_mac(payload):
     target = shlex.join([node, main]).replace("\\", "\\\\").replace('"', '\\"')
     if "\n" in target or "\r" in target:
         raise ValueError("Mac reader command path is invalid")
-    entry = f'restrict,command="{target}" {key} {KEY_LABEL}'.encode()
+    entry = f'restrict,command="{target}" {key} {label}'.encode()
     if refresh and not re.search(r"\n\d+ incoming, \d+ outgoing across [1-4] recent conversations\.", summary):
         raise ValueError("The candidate reader still finds no recent text previews")
-    add_restriction(entry, "refresh" if refresh else "install")
+    add_restriction(entry, "refresh" if refresh else "install", label)
     return {"pin": pin}
 
 
-def restore_mac():
-    add_restriction(mode="restore")
+def restore_mac(payload=None):
+    label = LOCAL_KEY_LABEL if (payload or {}).get("local_client") is True else KEY_LABEL
+    add_restriction(mode="restore", label=label)
     return {"restored": True}
 
 
-def verify_from_bobserver(payload):
+def verify_from_client(payload):
     host, user = payload["host"], payload["user"]
     if not HOST.fullmatch(host) or not ACCOUNT.fullmatch(user):
         raise ValueError("Invalid Mac SSH destination")
     pin = public_key(payload["pin"])
-    private_dir(STATE)
-    private_file(STATE / "id_ed25519")
-    write_once(STATE / "known_hosts", f"{host} {pin}\n".encode())
-    write_once(STATE / "route.json", (json.dumps({"host": host, "user": user}) + "\n").encode())
+    state = LOCAL_STATE if payload.get("local_client") is True else STATE
+    private_dir(state)
+    private_file(state / "id_ed25519")
+    write_once(state / "known_hosts", f"{host} {pin}\n".encode())
+    write_once(state / "route.json", (json.dumps({"host": host, "user": user}) + "\n").encode())
     encoded = base64.b64encode(payload["client"].encode()).decode("ascii")
     verification = (
         r"if (!/\n\d+ incoming, \d+ outgoing across [1-4] recent conversations?\./.test(summary ?? '')) process.exit(1);"
@@ -373,7 +381,8 @@ def verify_from_bobserver(payload):
         "const summary = await m.sshAndreaSummary(AbortSignal.timeout(15000));"
         + verification
     )
-    quiet_run(["node", "--input-type=module", "-e", code])
+    env = {**os.environ, "FO_LOCAL_NODE": "nucbox"} if payload.get("local_client") is True else os.environ
+    quiet_run(["node", "--input-type=module", "-e", code], env=env)
     return {"verified": True}
 
 
@@ -428,7 +437,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mac-host", required=True)
     parser.add_argument("--mac-user", required=True)
-    parser.add_argument("--bob-host", default="bobserver")
+    client = parser.add_mutually_exclusive_group()
+    client.add_argument("--bob-host", default="bobserver")
+    client.add_argument("--local-client", action="store_true", help="Use a separate restricted Nuc key from this Linux shell")
     action = parser.add_mutually_exclusive_group()
     action.add_argument("--diagnose", action="store_true", help="Print only counts and freshness from the Mac reader")
     action.add_argument("--diagnose-sync", action="store_true", help="Print only the Mac reader's upstream sync status")
@@ -459,24 +470,32 @@ def main():
         return 0
     if args.restore_reader:
         try:
-            if run_on_host(mac, "remote-restore", {}, source) != {"restored": True}:
+            if run_on_host(mac, "remote-restore", {"local_client": True} if args.local_client else {}, source) != {"restored": True}:
                 raise ValueError("Mac reader rollback could not be verified")
         except (OSError, ValueError, subprocess.SubprocessError):
             print("Andrea Mac reader rollback failed.", file=sys.stderr)
             return 1
         print("Previous restricted Mac reader restored.")
         return 0
-    phase = "Bobserver reader key"
+    client_name = "the local Captain host" if args.local_client else "bobserver"
+    phase = "local reader key" if args.local_client else "Bobserver reader key"
     try:
-        identity = run_on_host(args.bob_host, "remote-key", {}, source)
+        identity = make_key(LOCAL_KEY_LABEL) if args.local_client else run_on_host(args.bob_host, "remote-key", {}, source)
         phase = "Mac Mini reader and restricted key"
         print("SSH may ask for the Mac Mini password.", flush=True)
-        target = run_on_host(mac, "remote-mac", {**identity, "files": files, "refresh": args.refresh_reader}, source)
-        phase = "Bobserver-to-Mac reader verification"
-        result = run_on_host(args.bob_host, "remote-verify", {
+        mac_payload = {**identity, "files": files, "refresh": args.refresh_reader}
+        if args.local_client:
+            mac_payload["local_client"] = True
+        target = run_on_host(mac, "remote-mac", mac_payload, source)
+        phase = "local-to-Mac reader verification" if args.local_client else "Bobserver-to-Mac reader verification"
+        verification = {
             "host": args.mac_host, "user": args.mac_user, "pin": target["pin"], "client": files["andrea-ssh.mjs"],
             "require_recent": args.refresh_reader,
-        }, source)
+        }
+        if args.local_client:
+            result = verify_from_client({**verification, "local_client": True})
+        else:
+            result = run_on_host(args.bob_host, "remote-verify", verification, source)
         if result != {"verified": True}:
             raise ValueError("The reader did not verify")
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
@@ -486,7 +505,7 @@ def main():
         elif isinstance(error, subprocess.TimeoutExpired):
             print("The SSH or reader request timed out.", file=sys.stderr)
         return 1
-    print("Andrea reader verified from bobserver.")
+    print(f"Andrea reader verified from {client_name}.")
     return 0
 
 
@@ -499,8 +518,8 @@ if __name__ == "__main__":
                 "remote-key": lambda: make_key(),
                 "remote-mac": lambda: prepare_mac(REMOTE_PAYLOAD),
                 "remote-diagnose": lambda: diagnose_mac(REMOTE_PAYLOAD),
-                "remote-restore": restore_mac,
-                "remote-verify": lambda: verify_from_bobserver(REMOTE_PAYLOAD),
+                "remote-restore": lambda: restore_mac(REMOTE_PAYLOAD),
+                "remote-verify": lambda: verify_from_client(REMOTE_PAYLOAD),
             }[mode]()
             print(json.dumps(result))
         except DiagnosticError as error:

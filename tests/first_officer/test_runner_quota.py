@@ -40,3 +40,39 @@ for expected in ('initialize', 'initialized', 'account/rateLimits/read'):
     with subprocess.Popen([sys.executable, "-c", simulator], stdin=subprocess.PIPE, stdout=subprocess.PIPE) as proc:
         assert quota.quota_rpc(proc) == {"method": "account/rateLimits/read"}
         assert proc.wait(timeout=1) == 0
+
+
+def test_standalone_quota_uses_only_the_selected_local_cli(tmp_path):
+    local_cli = tmp_path / "codex"
+    simulator = """
+import json, sys, time
+assert sys.argv[1:] == ["app-server", "--listen", "stdio://"]
+for expected in ("initialize", "initialized", "account/rateLimits/read"):
+    request = json.loads(sys.stdin.readline())
+    assert request["method"] == expected
+    if "id" in request:
+        now = int(time.time())
+        result = {"accountId": "fixture", "rateLimits": {
+          "primary": {"usedPercent": 12, "resetsAt": now + 3000, "windowDurationMins": 300},
+          "secondary": {"usedPercent": 40, "resetsAt": now + 6000, "windowDurationMins": 10080},
+        }} if expected == "account/rateLimits/read" else {}
+        print(json.dumps({"id": request["id"], "result": result}), flush=True)
+"""
+    local_cli.write_text(f"#!{sys.executable}\n" + simulator)
+    local_cli.chmod(0o700)
+    result = quota.read_local_quota(local_cli)
+    assert result["session"]["used"] == 12
+    assert result["weekly"]["used"] == 40
+    assert result["observed"] < result["session"]["reset"]
+    assert "accountId" not in result
+    with pytest.raises(ValueError, match="standalone Codex CLI is unavailable"):
+        quota.read_local_quota("codex")
+
+
+def test_standalone_accepts_a_weekly_only_subscription():
+    response = {"rateLimits": {
+        "primary": {"usedPercent": 30, "resetsAt": 1_900_000_000, "windowDurationMins": 10080},
+        "secondary": None,
+    }}
+    result = quota.local_quota_windows(response, 1_800_000_000)
+    assert result == {"weekly": {"used": 30, "reset": 1_900_000_000}}

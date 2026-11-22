@@ -5,7 +5,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
-import { andreaCommand } from './andrea-ssh.mjs';
+import { andreaCommand, parseAndreaSummary } from './andrea-ssh.mjs';
 import { describeAndreaActivity, formatAndreaSummary, inspectAndrea } from './tools.mjs';
 
 const execute = promisify(execFile);
@@ -14,6 +14,7 @@ const chatId = /^bb:[^\s\x00-\x1f\x7f]{1,220}$/u;
 const directGuid = /^(?:iMessage|SMS|RCS);-;[^;\s\x00-\x1f\x7f]{1,190}$/i;
 const groupGuid = /^(?:iMessage|SMS|RCS);\+;[^;\s\x00-\x1f\x7f]{1,190}$/i;
 const messageLimit = 20;
+const controlBudget = 9000;
 
 function selfThreads(settings) {
   return new Set([settings.BLUEBUBBLES_CANONICAL_SELF_THREAD_JID,
@@ -84,10 +85,25 @@ async function getJson(url, transport, options) {
   }
 }
 
-export function createMacAndreaReader(settings, transport = fetch, counts) {
+function approvedThreads(settings) {
+  const configured = [settings.BLUEBUBBLES_ALLOWED_CHAT_GUIDS, settings.BLUEBUBBLES_ALLOWED_CHAT_GUID]
+    .filter((value) => typeof value === 'string');
+  if (!configured.length) return null;
+  const excluded = selfThreads(settings);
+  const selfHandles = new Set([...excluded]
+    .filter((id) => id.startsWith('bb:') && directGuid.test(id.slice(3)))
+    .map((id) => directHandle(id.slice(3))));
+  return new Set(configured.join(',').split(',').map((value) => value.trim())
+    .filter((guid) => !excluded.has('bb:' + guid) &&
+      (groupGuid.test(guid) || (directGuid.test(guid) && !selfHandles.has(directHandle(guid))))));
+}
+
+export function createMacAndreaReader(settings, transport = fetch, counts, signal) {
   const token = settings.BLUEBUBBLES_CONTROL_TOKEN;
   const owner = settings.BLUEBUBBLES_CANONICAL_SELF_THREAD_JID;
   const excluded = selfThreads(settings);
+  const approved = approvedThreads(settings);
+  const allowed = (id) => chatId.test(id) && !excluded.has(id) && (!approved || approved.has(id.slice(3)));
   const base = new URL(settings.BLUEBUBBLES_CONTROL_BASE_URL ||
     'http://localhost:' + (settings.BLUEBUBBLES_CONTROL_PORT || '4315'));
   if (base.protocol !== 'http:' || !loopback(base) ||
@@ -98,7 +114,7 @@ export function createMacAndreaReader(settings, transport = fetch, counts) {
 
   function get(path) {
     return getJson(new URL(path, base), transport, {
-      signal: AbortSignal.timeout(4000), headers: { Authorization: 'Bearer ' + token },
+      signal: signal ?? AbortSignal.timeout(controlBudget), headers: { Authorization: 'Bearer ' + token },
     });
   }
 
@@ -114,10 +130,10 @@ export function createMacAndreaReader(settings, transport = fetch, counts) {
       }
       return { complete: chats.length < 100, chats: chats.filter((row) =>
         row?.isGroup === false && typeof row.chatJid === 'string' &&
-        chatId.test(row.chatJid) && !excluded.has(row.chatJid)) };
+        allowed(row.chatJid)) };
     },
     async messages(id) {
-      if (typeof id !== 'string' || !chatId.test(id) || excluded.has(id)) throw new Error('Andrea chat was excluded');
+      if (typeof id !== 'string' || !allowed(id)) throw new Error('Andrea chat was excluded');
       const { messages } = await get('/v1/bluebubbles/chats/' + encodeURIComponent(id) + '/messages?limit=20');
       if (!Array.isArray(messages) || messages.length > 20) throw new Error('Andrea message list was invalid');
       if (counts) {
@@ -132,14 +148,7 @@ export function createMacAndreaReader(settings, transport = fetch, counts) {
 }
 
 function providerPlan(settings) {
-  const excluded = selfThreads(settings);
-  const selfHandles = new Set([...excluded]
-    .filter((id) => id.startsWith('bb:') && directGuid.test(id.slice(3)))
-    .map((id) => directHandle(id.slice(3))));
-  const allowed = new Set([settings.BLUEBUBBLES_ALLOWED_CHAT_GUIDS, settings.BLUEBUBBLES_ALLOWED_CHAT_GUID]
-    .filter(Boolean).join(',').split(',').map((value) => value.trim())
-    .filter((guid) => !excluded.has('bb:' + guid) &&
-      (groupGuid.test(guid) || (directGuid.test(guid) && !selfHandles.has(directHandle(guid))))));
+  const allowed = approvedThreads(settings) ?? new Set();
   const password = settings.BLUEBUBBLES_PASSWORD;
   const bases = [settings.BLUEBUBBLES_BASE_URL, ...(settings.BLUEBUBBLES_BASE_URL_CANDIDATES ?? '').split(',')]
     .filter((value) => URL.canParse(value ?? '')).map((value) => new URL(value))
@@ -173,24 +182,28 @@ function providerRows(body, guid) {
 }
 
 async function inspectMacHistory(settings, transport, now) {
-  const local = createMacAndreaReader(settings, transport);
+  const local = createMacAndreaReader(settings, transport, undefined, AbortSignal.timeout(controlBudget));
   const plan = providerPlan(settings);
   const list = local.chats();
-  // Overlap the scope proof with the cache reads and retain the same time
-  // budget even when four live history reads are needed.
+  // Fetch the scope proof and cache in parallel under one control API budget.
   const status = plan?.allowed.size ? local.status().then((result) => result?.status).catch(() => null) : null;
-  const cached = await inspectAndrea({ chats: () => list, messages: local.messages }, now);
-  if (cached.counts.recentTextPreviews) return { view: cached, source: 'cache' };
-  if (!plan) return { view: cached, source: 'provider-unconfigured' };
-  if (!plan.allowed.size) return { view: cached, source: 'no-authorized-chats' };
+  const cache = await inspectAndrea({ chats: () => list, messages: local.messages }, now)
+    .then((view) => ({ view }), (error) => ({ error }));
+  function cacheResult(source) {
+    if (cache.error) throw cache.error;
+    return { view: cache.view, source };
+  }
+  if (cache.view?.counts.recentTextPreviews) return cacheResult('cache');
+  if (!plan) return cacheResult('provider-unconfigured');
+  if (!plan.allowed.size) return cacheResult('no-authorized-chats');
   const active = await status;
-  if (active?.chatScope !== 'allowlist') return { view: cached, source: 'scope-unverified' };
+  if (active?.chatScope !== 'allowlist') return cacheResult('scope-unverified');
   const declared = active.activeBaseUrl;
   const base = typeof declared === 'string' && URL.canParse(declared)
     ? plan.bases.find((url) => url.href === new URL(declared).href)
     : plan.bases[0];
-  if (!base) return { view: cached, source: 'provider-unconfigured' };
-  const indexed = new Map((await list).chats.map((chat) => [chat.chatJid, chat]));
+  if (!base) return cacheResult('provider-unconfigured');
+  const indexed = new Map((await list.catch(() => ({ chats: [] }))).chats.map((chat) => [chat.chatJid, chat]));
   // Exact direct GUIDs from the existing allowlist are sufficient for a
   // point read. The bounded cache list can omit a cold or newly synced chat.
   const direct = [...plan.allowed].filter((guid) => directGuid.test(guid));
@@ -212,6 +225,10 @@ async function inspectMacHistory(settings, transport, now) {
       return providerRows(await getJson(url, transport, { signal: AbortSignal.timeout(3000) }), guid);
     },
   }, now);
+  const cached = cache.view ?? (grouped ? await inspectAndrea({
+    chats: () => ({ chats: [], complete: false }),
+    messages: local.messages,
+  }, now) : undefined);
   return { view, source: 'live-provider', grouped, cached };
 }
 
@@ -223,8 +240,16 @@ export async function runMacAndrea(command, readSettings = loadSettings, transpo
   const result = grouped ? { version: 1, summary: formatAndreaSummary(cached, { allowEmpty: true }), source,
     groupSummary: formatAndreaSummary(view, { grouped: true }) } :
     { version: 1, summary: formatAndreaSummary(view), source };
-  if (view.counts.recentTextPreviews) result.activity = describeAndreaActivity(view.groups);
+  if (view.counts.recentTextPreviews) Object.assign(result, describeAndreaActivity(view.groups));
   return result;
+}
+
+export async function readMacAndrea(signal, read = runMacAndrea) {
+  signal.throwIfAborted();
+  const result = await read(andreaCommand, undefined, (url, options) =>
+    fetch(url, { ...options, signal: AbortSignal.any([signal, options.signal]) }));
+  signal.throwIfAborted();
+  return parseAndreaSummary(JSON.stringify(result));
 }
 
 async function diagnosticRead(readSettings, transport, read, counts) {
@@ -283,7 +308,7 @@ async function diagnoseLiveMacAndrea() {
     recentTextPreviews: view.counts.recentTextPreviews };
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+async function main() {
   const option = process.argv[2];
   const localDiagnostic = process.env.SSH_ORIGINAL_COMMAND === undefined &&
     process.argv.length === 3 && ['--diagnose', '--diagnose-sync', '--diagnose-live'].includes(option);
@@ -300,4 +325,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     }
     process.exitCode = 1;
   }
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  void main();
 }

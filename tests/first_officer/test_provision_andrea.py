@@ -17,6 +17,7 @@ def provision(tmp_path, monkeypatch):
     spec.loader.exec_module(module)
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setattr(module, "STATE", tmp_path / ".ssh/openclaw-fo-andrea")
+    monkeypatch.setattr(module, "LOCAL_STATE", tmp_path / ".ssh/openclaw-fo-andrea-nuc")
     return module, tmp_path
 
 
@@ -27,6 +28,39 @@ def test_reader_key_creation_can_be_retried(provision):
     assert a == b
     assert module.PUBLIC_KEY.fullmatch(a["public"])
     assert (module.STATE / "id_ed25519").stat().st_mode & 0o077 == 0
+
+
+def test_local_client_uses_its_own_key_and_talks_only_to_the_mac(provision, monkeypatch, capsys):
+    module, home = provision
+    incumbent = module.make_key()["public"]
+    calls = []
+
+    def remote(host, action, payload, _source):
+        calls.append((host, action))
+        assert (host, action) == ("operator@fixture", "remote-mac")
+        assert payload["local_client"] is True
+        assert payload["public"] != incumbent
+        entry = f'restrict,command="fixture-local-read-only" {payload["public"]} {module.LOCAL_KEY_LABEL}'.encode()
+        module.add_restriction(entry, label=module.LOCAL_KEY_LABEL)
+        return {"pin": incumbent}
+
+    def verified(payload):
+        assert payload["local_client"] is True
+        assert (module.LOCAL_STATE / "id_ed25519").is_file()
+        return {"verified": True}
+
+    entry = f'restrict,command="fixture-incumbent-read-only" {incumbent} {module.KEY_LABEL}'.encode()
+    module.add_restriction(entry)
+    monkeypatch.setattr(module, "run_on_host", remote)
+    monkeypatch.setattr(module, "verify_from_client", verified)
+    monkeypatch.setattr(sys, "argv", ["provision-andrea.py", "--mac-host", "fixture", "--mac-user",
+                                     "operator", "--local-client"])
+    assert module.main() == 0
+    assert calls == [("operator@fixture", "remote-mac")]
+    keys = (home / ".ssh/authorized_keys").read_bytes().splitlines()
+    assert keys[0] == entry
+    assert keys[1].endswith(b" " + module.LOCAL_KEY_LABEL.encode())
+    assert "Andrea reader verified from the local Captain host." in capsys.readouterr().out
 
 
 def test_mac_setup_appends_only_its_restricted_key_and_preserves_existing_keys(provision):
@@ -114,14 +148,14 @@ def test_bobserver_refresh_verifies_singular_and_plural_activity_and_rejects_emp
     ):
         summary = f"Andrea · fixture history.\n{activity}\n2 incoming, 1 outgoing across {count} recent {noun}."
         source = "export const sshAndreaSummary = () => " + json.dumps(summary)
-        assert module.verify_from_bobserver({**payload, "client": source}) == {"verified": True}
+        assert module.verify_from_client({**payload, "client": source}) == {"verified": True}
     for summary in (
         "Andrea returned no recent previews.",
         "Andrea · fixture history.\n2 incoming, 1 outgoing across 2 recent conversations.",
     ):
         source = "export const sshAndreaSummary = () => " + json.dumps(summary)
         with pytest.raises(subprocess.CalledProcessError):
-            module.verify_from_bobserver({**payload, "client": source})
+            module.verify_from_client({**payload, "client": source})
 
 
 @pytest.mark.parametrize(

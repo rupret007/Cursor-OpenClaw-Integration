@@ -21,9 +21,22 @@ ANDREA_SUMMARY = "61ff4565dd5638a886effefbd720c92a17b7388acbc6eeaffb7779f78d3f1b
 SUPPORTED_BASES = (BASELINE, SEGMENT1, CAPTAIN, ANDREA_SUMMARY)
 ROLLBACK_SLOT = "4759047e8a16d1691499d55c4b6656882e67bc2275a3297d2283aa9b01538753"
 RUNTIME = Path("round6/runtime")
-MODULES = ("andrea-ssh.mjs", "captain.mjs", "captain-state.py", "dispatch.mjs",
-           "model-router.mjs", "register.mjs", "runner-quota.py", "tools.mjs")
+MODULES = ("andrea-mac.mjs", "andrea-ssh.mjs", "captain.mjs", "captain-state.py", "dispatch.mjs",
+           "model-router.mjs", "register.mjs", "review-worker.mjs", "runner-quota.py", "tools.mjs")
 OVERLAY = Path(__file__).resolve().parent / "segment1"
+QUEUE_MODULES = {
+    "queue-runtime/lanes/queue.py": "lanes/queue.py",
+    "queue-runtime/pinhttp.py": "pinhttp.py",
+    "queue-runtime/workers/hatchet-review.py": "workers/hatchet-review.py",
+    "queue-runtime/workers/restate-review.mjs": "workers/restate-review.mjs",
+}
+
+
+def overlay_sources():
+    return {
+        **{name: OVERLAY / name for name in MODULES},
+        **{name: OVERLAY.parent / source for name, source in QUEUE_MODULES.items()},
+    }
 INVENTORY = "SHA256SUMS"
 SAFE_NAME = re.compile(r"[a-zA-Z0-9_.-]+(?:/[a-zA-Z0-9_.-]+)*")
 COMMIT = re.compile(r"[0-9a-f]{40}")
@@ -246,7 +259,8 @@ def _reviewed_overlay(head):
         raise ValueError("The checkout does not match the reviewed head")
     if git("status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none"):
         raise ValueError("The reviewed checkout must be clean")
-    return {name: git("show", f"{head}:{(OVERLAY / name).relative_to(repo).as_posix()}") for name in MODULES}
+    return {name: git("show", f"{head}:{path.relative_to(repo).as_posix()}")
+            for name, path in overlay_sources().items()}
 
 
 def stage_release(baseline, destination, *, reviewed_head=None):
@@ -259,7 +273,7 @@ def stage_release(baseline, destination, *, reviewed_head=None):
         raise ValueError("Choose a verified First Officer bundle from a supported release")
     verify_inventory(baseline, pin)
     sources = (_reviewed_overlay(reviewed_head) if reviewed_head is not None else
-               {name: (OVERLAY / name).read_text(encoding="utf-8") for name in MODULES})
+               {name: path.read_text(encoding="utf-8") for name, path in overlay_sources().items()})
     with tempfile.TemporaryDirectory(prefix=".fo-stage-", dir=destination) as temp:
         working = Path(temp) / "bundle"
         shutil.copytree(baseline, working, symlinks=True)
@@ -268,6 +282,7 @@ def stage_release(baseline, destination, *, reviewed_head=None):
         install.mkdir(exist_ok=True)
         for name, source in sources.items():
             target = install / name
+            target.parent.mkdir(exist_ok=True, parents=True)
             if target.exists():
                 write_source(target, source)
             else:

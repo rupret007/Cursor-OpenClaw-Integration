@@ -16,9 +16,21 @@ export function standaloneSimple(text, routeFor, event) {
     );
 }
 
+function configuredFastModel(config) {
+  const allowed = config?.plugins?.entries?.['first-officer-conductor']?.llm?.allowedCompletionModels;
+  if (!Array.isArray(allowed) || allowed.length !== 1) return fastModelRef;
+  const [reference] = allowed;
+  if (typeof reference !== 'string' || !/^litellm\/[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(reference)) {
+    return fastModelRef;
+  }
+  const models = config?.models?.providers?.[fastProvider]?.models;
+  if (!Array.isArray(models) || !models.some((model) => reference === fastProvider + '/' + model?.id)) return fastModelRef;
+  return reference;
+}
+
 export function routeOwnerModel(event, config, routeFor) {
   const route = routeFor(event.prompt, event.attachments);
-  if (route.reason === 'short-chat') return { ...route, model: fastModel, fallbacks: [] };
+  if (route.reason === 'short-chat') return { ...route, model: configuredFastModel(config).slice(fastProvider.length + 1), fallbacks: [] };
   const prefix = fastProvider + '/';
   const primary = prefix + route.model;
   const aliases = new Set((config?.models?.providers?.[fastProvider]?.models ?? []).map((model) => model.id));
@@ -29,11 +41,11 @@ export function routeOwnerModel(event, config, routeFor) {
   return { ...route, fallbacks };
 }
 
-export async function answerSimple(runtime, prompt, signal) {
+export async function answerSimple(runtime, prompt, signal, config) {
   signal.throwIfAborted();
   if (typeof runtime.llm?.complete !== 'function') throw new Error('Gateway completion API unavailable');
   const result = await runtime.llm.complete({
-    model: fastModelRef, purpose: 'first-officer.quick-answer',
+    model: configuredFastModel(config), purpose: 'first-officer.quick-answer',
     systemPrompt: quickPrompt, messages: [{ role: 'user', content: prompt }],
     maxTokens: 384, temperature: 0.2, signal,
   });

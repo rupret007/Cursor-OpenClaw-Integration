@@ -126,8 +126,10 @@ def test_release_build_only_packs_a_clean_reviewed_overlay(tmp_path, monkeypatch
     privacy.mkdir()
     shutil.copyfile(ROOT / "first-officer/privacy/scan.py", privacy / "scan.py")
     injected = "// sk-" + "reviewfixtureunsafe\n"
-    for module in stage.MODULES:
-        (overlay / module).write_text("// reviewed overlay\n", encoding="utf-8")
+    monkeypatch.setattr(stage, "OVERLAY", overlay)
+    for source in stage.overlay_sources().values():
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("// reviewed overlay\n", encoding="utf-8")
     changed = overlay / stage.MODULES[0]
     if variant == "sensitive-overlay":
         changed.write_text(injected, encoding="utf-8")
@@ -155,7 +157,6 @@ def test_release_build_only_packs_a_clean_reviewed_overlay(tmp_path, monkeypatch
     manifest = f"{stage.digest(prior_source.read_bytes())}  {prior_source.name}\n".encode()
     (baseline / stage.INVENTORY).write_bytes(manifest)
     monkeypatch.setattr(stage, "SUPPORTED_BASES", (stage.digest(manifest),))
-    monkeypatch.setattr(stage, "OVERLAY", overlay)
     staging = tmp_path / "staging"
     staging.mkdir()
 

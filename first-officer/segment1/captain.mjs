@@ -1,8 +1,9 @@
 import { execFile } from 'node:child_process';
 import { loadavg } from 'node:os';
+import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bounded } from './dispatch.mjs';
-import { readFleetSnapshot } from './tools.mjs';
+import { fleetSnapshotIsLocal, readFleetSnapshot, validLocalCapacity } from './tools.mjs';
 
 const stateScript = fileURLToPath(new URL('./captain-state.py', import.meta.url));
 const repo = 'repos/rupret007/Cursor-OpenClaw-Integration';
@@ -28,10 +29,21 @@ const terminal = {
   'ci-unavailable': 'GitHub could not verify the worker result against the current head. Recheck CI before using the result.',
 };
 
-function localState(operation, payload = {}) {
+export function resolveCaptainStateScript(config) {
+  const paths = config?.plugins?.load?.paths;
+  const pinnedConductor = /\/first-officer-[a-f0-9]{64}\/round6\/runtime\/first-officer-conductor\.mjs$/;
+  const matches = Array.isArray(paths) ? paths.filter((path) =>
+    typeof path === 'string' && isAbsolute(path) && pinnedConductor.test(path)) : [];
+  if (matches.length > 1) throw new Error('Ambiguous pinned Captain release');
+  // OpenClaw can load JavaScript from a capture that omits the packaged Python queue runtime.
+  return matches.length ? join(dirname(matches[0]), 'segment1', 'captain-state.py') : stateScript;
+}
+
+export function localState(operation, payload = {}, script = stateScript) {
+  const python = process.env.FO_CAPTAIN_PYTHON || '/usr/bin/python3';
   return new Promise((resolve, reject) => {
-    const child = execFile('/usr/bin/nice', ['-n', '10', '/usr/bin/python3', '-I', '-B', stateScript, operation],
-      { maxBuffer: 32 * 1024, ...(operation === 'submit' ? {} : { timeout: operation === 'runner-quota' ? 7000 : 2500 }) },
+    const child = execFile('/usr/bin/nice', ['-n', '10', python, '-I', '-B', script, operation],
+      { maxBuffer: 32 * 1024, ...(operation === 'submit' ? {} : { timeout: ['runner-quota', 'local-quota'].includes(operation) ? 7000 : 2500 }) },
       (error, stdout) => {
         if (error) return reject(new Error('Captain state unavailable'));
         try { resolve(JSON.parse(stdout)); } catch { reject(new Error('Invalid captain state')); }
@@ -63,19 +75,32 @@ export async function integrationCI(pr, read) {
   return { head, ci: statuses.every((result) => result === 'success') ? 'passing' : 'failing' };
 }
 
-async function fleetAdmission() {
+async function fleetAdmission(_signal, standalone, readState) {
+  if (standalone) {
+    const load = loadavg()[0];
+    const capacity = await readState('local-capacity');
+    if (!validLocalCapacity(capacity, standalone, Date.now()) || !Number.isFinite(load)) {
+      return 'Local capacity evidence is unavailable.';
+    }
+    return load > 16 || capacity.used >= capacity.limit ? 'The Captain host is at its lane capacity.' : undefined;
+  }
   const snapshot = await readFleetSnapshot();
   const clock = Date.now() - snapshot.ts * 1000;
   const gate = snapshot.host.locks?.find((row) => row.slot === 'fullgate');
-  if (clock < -30_000 || clock > 300_000 || typeof gate?.held !== 'boolean' ||
-      !Array.isArray(snapshot.gates) || !Number.isSafeInteger(snapshot.host.heavy_jobs) ||
-      !Number.isSafeInteger(snapshot.host.heavy_max)) return 'Fleet or gate evidence is stale or unavailable.';
+  if (!fleetSnapshotIsLocal(snapshot) || clock < -30_000 || clock > 300_000 ||
+      !Number.isSafeInteger(snapshot.host.heavy_jobs) || !Number.isSafeInteger(snapshot.host.heavy_max)) {
+    return 'Fleet capacity evidence is stale or unavailable.';
+  }
+  if (typeof gate?.held !== 'boolean' || !Array.isArray(snapshot.gates)) return 'Gate evidence is unavailable.';
   if (gate.held || snapshot.gates.some((row) => row.gate === 'running')) return 'The gate is busy.';
-  if (loadavg()[0] > 16 || snapshot.host.heavy_jobs >= snapshot.host.heavy_max) return 'Bobserver is at its lane capacity.';
+  if (loadavg()[0] > 16 || snapshot.host.heavy_jobs >= snapshot.host.heavy_max) return 'The Captain host is at its lane capacity.';
 }
 
 function role(view) {
   const { lease, armed, grant } = view;
+  if (view.standalone && lease.state === 'parked') {
+    return 'Captain · this host is parked · epoch ' + lease.epoch + '.';
+  }
   const holder = lease.holder === 'first-officer' ? 'OpenClaw' : lease.holder === 'captain' ? 'Grok Bot' : 'unknown';
   const scoped = grant?.epoch === lease.epoch && holder === 'OpenClaw';
   return [
@@ -89,6 +114,11 @@ function jobText(job) {
   const identity = 'Integration PR #' + job.pr + ' · ' + job.head.slice(0, 8) + ' · ' + job.lane + '.';
   if (active.has(job.state) && job.overtime) return identity +
     'The runner exceeded its deadline and remains active. Jeff can inspect the local lane.';
+  if (active.has(job.state) && job.queuePhase && job.queuePhase !== 'queued') {
+    return identity + ' Queue acceptance is unresolved' + (job.backend ? ' on ' + job.backend : '') + '.';
+  }
+  if (active.has(job.state) && job.backend) return identity + ' Accepted by ' + job.backend +
+    ' ' + Math.max(0, Math.floor(Date.now() / 1000) - job.acceptedAt) + 's ago. Awaiting worker completion.';
   if (active.has(job.state)) return identity + ' Runner active. OpenClaw is checking for a terminal receipt.';
   return identity + ' ' + terminal[job.state];
 }
@@ -122,7 +152,7 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
         grant?.epoch !== lease.epoch || grant.paused) return 'Dispatch is paused until Jeff grants OpenClaw this scope at the current epoch.';
     if (view.active) return jobText(view.active);
     const [fleet, gate, quota, result] = await Promise.all([
-      bounded(4500, admit).catch(() => 'Fleet or gate evidence is unavailable.'),
+      bounded(4500, (signal) => admit(signal, view.standalone, state)).catch(() => 'Fleet or gate evidence is unavailable.'),
       status('gate', turn),
       runnerQuota(),
       bounded(9500, () => integrationCI(pr, get)).catch(() => ({ ci: 'unavailable' })),
@@ -143,7 +173,7 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
       return blocked('ci-pending', blockers['ci-pending'], result.head);
     }
     if (fleet) return blocked('fleet', fleet + ' No lane was launched.');
-    if (gate === registry.gate.failure || /HOLD is active|couldn’t verify/i.test(gate ?? '')) {
+    if (gate === registry.gate.failure || /HOLD is active|full gate is running|couldn’t verify/i.test(gate ?? '')) {
       return blocked('gate', gate + '\nNo lane was launched.');
     }
     if (quota?.allowed !== true) {
@@ -156,11 +186,19 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
       owner: turn.owner, message: Number(turn.ctx.messageId), epoch: lease.epoch, pr, head: result.head, ci: result.ci,
       resumePending: Boolean(pending),
     });
-    if (placed.result === 'duplicate') return 'This exact PR head already has a captain lane. Ask for “handoff” to see the receipt.';
+    if (placed.result === 'duplicate') return 'This review request already has a captain lane. Ask for “handoff” to see the receipt.';
     if (placed.result === 'active') return 'Another captain lane is active. Ask for “handoff” to see it.';
     if (placed.result === 'stale') return 'The epoch or approval changed before dispatch. No lane was launched.';
-    if (placed.result !== 'running') return 'The runner did not confirm launch. OpenClaw will reconcile the local receipt.';
-    return 'I delegated one exact-head CI review to the existing Bobserver runner. ' + jobText(placed.job);
+    if (placed.result === 'gate-unavailable') return 'The live gate could not be verified when submitting. No review was sent.';
+    if (placed.result === 'capacity-unavailable') return 'Live local capacity could not be verified. No review was sent.';
+    if (placed.result === 'capacity-blocked') return 'The Captain host is at its lane capacity. No review was sent.';
+    if (placed.result === 'gate-blocked') return 'The gate is running or on hold. No review was sent.';
+    if (placed.result === 'runner-unconfigured') return 'The standalone queue runner is unavailable. No review was submitted.';
+    if (placed.result !== 'running') return placed.job?.queuePhase
+      ? jobText(placed.job)
+      : 'The runner did not confirm launch. OpenClaw will reconcile the local receipt.';
+    return (placed.job.backend ? 'The queue accepted one exact-head CI review. ' :
+      'I delegated one exact-head CI review to the configured runner. ') + jobText(placed.job);
   }
 
   async function run(request, turn) {
@@ -171,6 +209,7 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
         owner: turn.owner, epoch: request.epoch, message: Number(turn.ctx.messageId),
       });
       if (outcome.result === 'stale') return 'The epoch, takeover state, or owner approval changed. Check “captain status”.';
+      if (outcome.result === 'operator-transfer') return 'Use the operator handoff to transfer standalone Captain authority.';
       if (outcome.result === 'no-grant') return 'OpenClaw has no active scope grant to pause.';
       return {
         grant: 'Jeff approved Integration PR CI reviews for this epoch.',
@@ -187,7 +226,8 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
       return [view ? role(view) + '\n' + decisions(view).split('\n')[0] +
         (view.active ? '\n' + jobText(view.active) : '') :
         'Captain authority and decisions are unavailable.', ...evidence,
-        quota ? 'Captain runner quota · ' + quota.session.used + '% of 5-hour window · ' + quota.weekly.used + '% of weekly window.'
+        quota?.modelFree ? 'Captain CI review uses a model-free worker.' :
+          quota ? 'Captain runner quota · ' + quota.session.used + '% of 5-hour window · ' + quota.weekly.used + '% of weekly window.'
           : 'The captain runner’s subscription quota is unavailable.'].join('\n\n');
     }
     const view = await viewPromise;
@@ -221,7 +261,7 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
     }
     const receipt = await state('poll', { lane: job.lane });
     const expired = now() - job.started * 1000 > 20 * 60_000;
-    if (receipt.worker === 'running') {
+    if (receipt.worker === 'running' || receipt.worker === 'unresolved') {
       if (expired && !job.overtime) {
         const notice = await state('overtime', { lane: job.lane });
         if (notice.job) await deliver(jobText(notice.job), notice.job.owner);

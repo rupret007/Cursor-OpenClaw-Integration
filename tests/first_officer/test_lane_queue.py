@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+import fcntl
 import importlib.util
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -704,3 +705,90 @@ def test_dispatch_refuses_untrusted_lock_directory(tmp_path, tokens):
     with pytest.raises(ValueError, match="lock directory must be private"):
         dispatch(policy("http://localhost", "http://localhost"), ledger)
     assert not ledger.exists()
+
+
+@pytest.mark.parametrize("backend", ["hatchet", "restate", "lost"])
+def test_standalone_captain_queue_requires_exact_worker_output_and_never_resends(tmp_path, tokens, backend, monkeypatch):
+    spec = importlib.util.spec_from_file_location("captain_state", ROOT / "first-officer/segment1/captain-state.py")
+    captain = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(captain)
+    authority_root = tmp_path / "authority"
+    authority_root.mkdir(mode=0o700)
+    authority = captain.StandaloneAuthority("nucbox", authority_root)
+    captain.save(authority.path, {"node": "nucbox", "epoch": 3, "active": True})
+    reviews = captain.Controller(authority, private=authority_root / "reviews")
+    gate = tmp_path / "fullgate.lock"
+    gate.touch(mode=0o600)
+    captain.save(authority_root / "gate.json", {"directory": str(tmp_path), "lock": gate.name, "hold": "HOLD"})
+    monkeypatch.setattr(captain.os, "getloadavg", lambda: (0.0, 0.0, 0.0))
+    captain.save(authority_root / "capacity.json", {"commands": ["testloadfixture"], "limit": 1})
+
+    run = "hatchet_run" if backend == "hatchet" else "inv_restate_run"
+    hatchet_status = f"/api/v1/stable/workflow-runs/{run}/status"
+    hatchet_results = hatchet_status.removesuffix("/status")
+    restate_send = "/restate/scope/review/send/CaptainReview/verify"
+    restate_status = f"/restate/status/{run}"
+    restate_results = f"/restate/output/{run}"
+    primary = ({"body": {"run": {"metadata": {"id": run}}}} if backend == "hatchet" else
+               {"status": 503 if backend == "lost" else 429})
+    hatchet = serve({HATCHET_PATH: primary, hatchet_status: {"body": "RUNNING"}})
+    restate = serve({
+        restate_send: {"body": {"status": "Accepted", "invocationId": run}},
+        restate_status: {"body": {"stage": "started"}},
+    })
+    try:
+        config = policy(urls(hatchet), urls(restate))
+        config["hatchet"]["workflow"] = "fo-captain-review"
+        config["restate"].update(service="CaptainReview", handler="verify", scope="review")
+        captain.save(reviews.queue.policy, config)
+        grant = {"message": 100, "epoch": 3, "owner": "123456"}
+        assert reviews.control("grant", grant) == {"result": "grant"}
+        req = {**grant, "pr": 33, "head": HEAD, "ci": "passing", "message": 101}
+        with gate.open("rb") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            assert reviews.gate.read()["running"]
+            assert reviews.submit(req) == {"result": "gate-blocked"}
+        marker = tmp_path / "HOLD"
+        marker.touch(mode=0o600)
+        assert reviews.gate.read()["hold"]
+        assert reviews.submit(req) == {"result": "gate-blocked"}
+        marker.unlink()
+        assert not hatchet.seen and not restate.seen
+        assert not reviews.gate.read()["running"]
+        placed = reviews.submit(req)
+        job = placed["job"]
+        assert job["backend"] == ("hatchet" if backend == "lost" else backend)
+
+        restarted = captain.Controller(authority, private=authority_root / "reviews")
+        assert restarted.submit(req) == {"result": "duplicate"}
+        assert [call["path"] for call in hatchet.seen] == [HATCHET_PATH]
+        if backend == "lost":
+            assert placed["result"] == "launching"
+            assert restarted.view()["active"]["queuePhase"] == "uncertain"
+            assert restarted.poll(job["lane"])["worker"] == "unresolved"
+            assert not restate.seen
+            return
+
+        assert placed["result"] == "running"
+        assert restarted.poll(job["lane"])["worker"] == "running"
+        output = {key: job[key] for key in ("lane", "pr", "head", "ci")}
+
+        def worker_output(receipt):
+            if backend == "hatchet":
+                hatchet.routes[hatchet_status] = {"body": "COMPLETED"}
+                hatchet.routes[hatchet_results] = {"body": {"run": {"metadata": {"id": run}, "output": receipt}}}
+            else:
+                restate.routes[restate_status] = {"body": {"stage": "completed"}}
+                restate.routes[restate_results] = {"body": receipt}
+
+        worker_output({**output, "head": OTHER})
+        assert restarted.poll(job["lane"])["worker"] == "invalid-result"
+        worker_output(output)
+        completed = restarted.poll(job["lane"])
+        assert completed["accepted"] and completed["backend"] == backend
+        assert (completed["worker"], completed["head"], completed["ci"]) == ("settled", HEAD, "passing")
+        assert sum(call["method"] == "POST" for call in hatchet.seen) == 1
+        assert sum(call["method"] == "POST" for call in restate.seen) == (backend == "restate")
+    finally:
+        stop(hatchet)
+        stop(restate)

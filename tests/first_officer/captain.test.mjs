@@ -1,10 +1,38 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
-import { createCaptain, integrationCI } from '../../first-officer/segment1/captain.mjs';
+import { createCaptain, integrationCI, localState, resolveCaptainStateScript } from '../../first-officer/segment1/captain.mjs';
+import { verifyReview } from '../../first-officer/segment1/review-worker.mjs';
 import { classifyRequest } from '../../first-officer/segment1/dispatch.mjs';
 import { diagnoseMacAndrea, diagnoseMacAndreaSync, runMacAndrea } from '../../first-officer/segment1/andrea-mac.mjs';
 import { andreaCommand, parseAndreaSummary } from '../../first-officer/segment1/andrea-ssh.mjs';
 import { summarizeAndrea } from '../../first-officer/segment1/tools.mjs';
+
+test('Captain state uses the original pinned release instead of plugin-capture siblings', () => {
+  const runtime = '/opt/openclaw-fo/first-officer-' + 'a'.repeat(64) + '/round6/runtime';
+  const conductor = runtime + '/first-officer-conductor.mjs';
+  const config = (...paths) => ({ plugins: { load: { paths } } });
+  assert.equal(resolveCaptainStateScript(config('/another/plugin.mjs', conductor)), runtime + '/segment1/captain-state.py');
+  assert.throws(() => resolveCaptainStateScript(config(conductor, conductor.replace('/opt/', '/other/'))),
+    /Ambiguous pinned Captain release/);
+  assert.match(resolveCaptainStateScript(config(conductor.slice(1))), /\/first-officer\/segment1\/captain-state\.py$/);
+});
+
+test('local Captain probes use the interpreter selected by the guarded launcher', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'captain-python-'));
+  const python = join(directory, 'standalone python');
+  const original = process.env.FO_CAPTAIN_PYTHON;
+  t.after(async () => {
+    if (original === undefined) delete process.env.FO_CAPTAIN_PYTHON;
+    else process.env.FO_CAPTAIN_PYTHON = original;
+    await rm(directory, { recursive: true });
+  });
+  await writeFile(python, '#!/bin/sh\n[ "$4" = view ] || exit 1\ncat\n', { mode: 0o700 });
+  process.env.FO_CAPTAIN_PYTHON = python;
+  assert.deepEqual(await localState('view', { fixture: true }), { fixture: true });
+});
 
 const head = 'a'.repeat(40);
 const other = 'b'.repeat(40);
@@ -36,6 +64,14 @@ test('captain CI proof rejects an old tested head and a PR that changes mid-read
   assert.deepEqual(await integrationCI(33, readFixture({ latest: other })), { head, ci: 'changed' });
   assert.deepEqual(await integrationCI(33, readFixture({ tested: other })), { head, ci: 'unavailable' });
   assert.deepEqual(await integrationCI(33, readFixture({ conclusion: 'failure' })), { head, ci: 'failing' });
+});
+
+test('the queue worker independently verifies the queued PR head', async () => {
+  const request = { lane: 'fo-ci-' + 'a'.repeat(24), head, pull_request: 33 };
+  assert.deepEqual(await verifyReview(request, { read: readFixture() }),
+    { lane: request.lane, pr: 33, head, ci: 'passing' });
+  await assert.rejects(verifyReview(request, { read: readFixture({ latest: other }) }), /terminal evidence/);
+  await assert.rejects(verifyReview({ ...request, execution: 'deploy' }, { read: readFixture() }), /Invalid Captain/);
 });
 
 test('captain brief uses live tools and a paused or stale grant cannot reach submission', async () => {
@@ -193,15 +229,18 @@ test('the Andrea reader returns a separate approved-group aggregate and preserve
     BLUEBUBBLES_PASSWORD: 'fixture-password',
     BLUEBUBBLES_ALLOWED_CHAT_GUIDS: group + ',SMS;-;OWNER',
   };
-  const read = async (url, options) => {
+  const read = async (url, options, scope = 'allowlist') => {
     assert.equal(options.method, 'GET');
-    if (url.pathname.endsWith('/status')) return Response.json({ status: { chatScope: 'allowlist' } });
-    if (url.pathname.endsWith('/chats')) return Response.json({ chats: [] });
+    if (url.pathname.endsWith('/status')) return Response.json({ status: { chatScope: scope } });
+    if (url.pathname.endsWith('/chats')) throw new Error('Fixture cache timeout');
     assert.equal(decodeURIComponent(url.pathname), '/api/v1/chat/' + group + '/message');
     return Response.json({ data: [{ guid: 'fixture-group-row', text: 'Meet tomorrow at the demonstration library',
       dateCreated: now, isFromMe: false, chats: [{ guid: group, isGroup: true }] }] });
   };
+  await assert.rejects(runMacAndrea(andreaCommand, () => settings,
+    (url, options) => read(url, options, 'contacts_only'), now), { code: 'api-unreachable' });
   const result = await runMacAndrea(andreaCommand, () => settings, read, now);
+  assert.equal(result.source, 'live-provider');
   assert.match(result.summary, /one-to-one.*\nAndrea returned no recent previews/);
   assert.match(result.groupSummary, /approved group chats.*\n1 incoming/);
   const rendered = parseAndreaSummary(JSON.stringify(result));
@@ -209,4 +248,46 @@ test('the Andrea reader returns a separate approved-group aggregate and preserve
   assert.match(rendered, /1 incoming, 0 outgoing across 1 recent conversation\./);
   assert.doesNotMatch(JSON.stringify(result), /approved-group|demonstration library|fixture-password/);
   assert.throws(() => parseAndreaSummary(JSON.stringify({ ...result, groupSummary: result.summary })), /invalid/);
+});
+
+
+test('Andrea flags distinct possible follow-ups from approved recent chats', async () => {
+  const now = Date.parse('2026-11-20T15:00:00Z');
+  const alpha = 'bb:iMessage;-;fixture-alpha';
+  const bravo = 'bb:iMessage;-;fixture-bravo';
+  const charlie = 'bb:iMessage;-;fixture-charlie';
+  const excluded = 'bb:iMessage;-;fixture-excluded';
+  const chats = [alpha, bravo, charlie, excluded].map((chatJid) => ({ chatJid, isGroup: false }));
+  const row = (chatJid, offset, preview, isFromMe = false) => ({
+    chatJid, timestamp: new Date(now - offset * 60_000).toISOString(), preview, isFromMe, isBotMessage: false,
+  });
+  const messages = new Map([
+    [alpha, [row(alpha, 1, 'What time should we meet?'), row(alpha, 2, 'Which day would work?')]],
+    [bravo, [row(bravo, 3, 'Could you confirm the meeting?')]],
+    [charlie, [row(charlie, 4, 'Where should we meet?'), row(charlie, 2, 'Sounds good', true)]],
+  ]);
+  const settings = {
+    BLUEBUBBLES_CONTROL_BASE_URL: 'http://localhost:4315',
+    BLUEBUBBLES_CONTROL_TOKEN: 'fixture-control-input',
+    BLUEBUBBLES_CANONICAL_SELF_THREAD_JID: 'bb:iMessage;-;fixture-self',
+    BLUEBUBBLES_ALLOWED_CHAT_GUIDS: [alpha, bravo, charlie].map((id) => id.slice(3)).join(','),
+  };
+  const reads = [];
+  const result = await runMacAndrea(andreaCommand, async () => settings, async (url) => {
+    if (url.pathname.endsWith('/chats')) return Response.json({ chats });
+    const chat = decodeURIComponent(url.pathname.split('/').at(-2));
+    reads.push(chat);
+    return Response.json({ messages: messages.get(chat) });
+  }, now);
+  assert.deepEqual(new Set(reads), new Set([alpha, bravo, charlie]));
+  assert.deepEqual(result.followUps, [
+    { intent: 'ask-time', conversations: 1 }, { intent: 'ask-confirmation', conversations: 1 },
+  ]);
+  const reply = parseAndreaSummary(JSON.stringify(result));
+  assert.match(reply, /May need your reply · timing questions in 1 conversation, confirmation requests in 1 conversation/);
+  assert.doesNotMatch(reply, /What time should we meet|fixture-alpha|location questions/);
+  const injected = { ...result, followUps: [{ intent: 'free text must not pass', conversations: 1 }] };
+  assert.doesNotMatch(parseAndreaSummary(JSON.stringify(injected)), /free text must not pass|May need your reply/);
+  const exaggerated = { ...result, followUps: [{ intent: 'ask-time', conversations: 4 }] };
+  assert.doesNotMatch(parseAndreaSummary(JSON.stringify(exaggerated)), /May need your reply/);
 });

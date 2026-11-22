@@ -17,7 +17,7 @@ from pathlib import Path
 import sys
 
 
-NODES = ("mac-mini", "nucbox", "macbook-pro")
+NODES = ("bobserver", "mac-mini", "nucbox", "macbook-pro")
 COUNTS = ("running", "active", "queued", "stalled")
 MAX_BYTES = 3000
 FRESH_S = 300
@@ -57,11 +57,28 @@ def build(evidence, now):
     if SECRET.search(json.dumps(evidence, default=str)):
         alerts.append("redacted")
     document = {"alerts": alerts, "generated_at": _stamp(now), "host": {}, "ts": now, "v": 1}
+    if "local_node" in evidence:
+        if evidence["local_node"] not in NODES:
+            raise ValueError("The local status host is unknown")
+        document["host"]["node"] = evidence["local_node"]
     heavy = evidence.get("heavy_jobs", None)
     if heavy is not None:
         if not _natural(heavy, 100):
             raise ValueError("The heavy-job count is unusable")
         document["host"]["heavy_jobs"] = heavy
+    if "heavy_max" in evidence:
+        maximum = evidence["heavy_max"]
+        if not _natural(maximum, 100) or maximum == 0:
+            raise ValueError("The heavy-job limit is unusable")
+        document["host"]["heavy_max"] = maximum
+    if "gate" in evidence:
+        gate = evidence["gate"]
+        if (not isinstance(gate, dict) or gate.keys() != {"hold", "running"}
+                or any(type(value) is not bool for value in gate.values())):
+            raise ValueError("The local gate evidence is unusable")
+        document["gate"] = gate
+        document["host"]["locks"] = [{"slot": "fullgate", "held": gate["running"]}]
+        document["gates"] = [{"gate": "running"}] if gate["running"] else []
     counts = evidence.get("lane_counts", {})
     if counts is None:
         counts = {}

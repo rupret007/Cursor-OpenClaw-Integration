@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { constants } from 'node:fs';
-import { open } from 'node:fs/promises';
+import { access, open } from 'node:fs/promises';
 import { homedir, loadavg } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -43,19 +43,69 @@ export async function readFleetSnapshot(path = join(homedir(), 'work/status/STAT
   }
 }
 
-export async function fleetStatus({ node }, { read = readFleetSnapshot, load = loadavg, now = Date.now } = {}) {
+export function localFleetNode(value = process.env.FO_LOCAL_NODE ?? 'bobserver') {
+  if (!nodes.has(value)) throw new Error('Unknown local fleet host');
+  return value;
+}
+
+export function fleetSnapshotIsLocal(snapshot, local = localFleetNode()) {
+  return Boolean(snapshot?.host) && (snapshot.host.node ?? 'bobserver') === local;
+}
+
+export async function standaloneGateStatus({ read, now = Date.now, local = localFleetNode() }) {
+  const gate = await read();
+  if (gate?.node !== local || !recent(gate.observed * 1000, now()) ||
+      typeof gate.hold !== 'boolean' || typeof gate.running !== 'boolean') {
+    throw new Error('Current local gate evidence is unavailable');
+  }
+  const state = gate.hold ? 'HOLD is active' : gate.running ? 'Full gate is running' : 'Gate is idle';
+  return state + ' · observed ' + stamp(gate.observed * 1000) + '.';
+}
+
+export async function standaloneQuotaStatus({ read, now = Date.now }) {
+  const quota = await read();
+  const time = now();
+  if (!recent(quota?.observed * 1000, time, 60_000)) throw new Error('Local quota evidence is unavailable');
+  if (!quota.session && !quota.weekly) throw new Error('Local quota windows are unavailable');
+  const windows = [['5-hour', quota.session], ['weekly', quota.weekly]].map(([label, window]) => {
+    if (window === undefined) return label + ' · unavailable';
+    if (!Number.isFinite(window?.used) || window.used < 0 || window.used > 100 ||
+        !Number.isSafeInteger(window.reset) || window.reset * 1000 <= time) {
+      throw new Error('Local quota windows are unavailable');
+    }
+    return label + ' · ' + window.used + '% used · resets ' + stamp(window.reset * 1000);
+  });
+  return ['Local Codex quota · checked ' + stamp(quota.observed * 1000) + '.', ...windows,
+    'Other provider quota windows are unavailable from this local check.'].join('\\n');
+}
+
+export function validLocalCapacity(reading, local, now) {
+  return reading?.node === local && recent(reading.observed * 1000, now, 60_000) && natural(reading.used) &&
+    Number.isSafeInteger(reading.limit) && reading.limit >= 1 && reading.limit <= 100;
+}
+
+export async function fleetStatus({ node, localOnly }, {
+  read = readFleetSnapshot, load = loadavg, now = Date.now, local = localFleetNode(), capacity,
+} = {}) {
   // Local load and remote collector availability are independent.
-  const snapshot = await read().catch(() => undefined);
+  const [snapshot, live] = await Promise.all([
+    read().catch(() => undefined), capacity?.().catch(() => undefined),
+  ]);
   const checkedAt = now();
   const fresh = recent(snapshot?.ts * 1000, checkedAt);
+  const localEvidence = fresh && fleetSnapshotIsLocal(snapshot, local);
+  if (localOnly) node = local;
   const lines = ['Fleet load (1 / 5 / 15 minutes) and tracked work'];
   for (const [id, name] of nodes) {
     if (node && node !== id) continue;
-    if (id === 'bobserver') {
+    if (id === local) {
       const loads = load();
-      const jobs = fresh && natural(snapshot.host?.heavy_jobs)
-        ? snapshot.host.heavy_jobs + ' heavy jobs as of ' + stamp(snapshot.ts * 1000)
-        : 'job count unavailable';
+      let jobs = 'job count unavailable';
+      if (capacity && validLocalCapacity(live, local, checkedAt)) {
+        jobs = live.used + '/' + live.limit + ' tracked heavy processes as of ' + stamp(live.observed * 1000);
+      } else if (!capacity && localEvidence && natural(snapshot.host?.heavy_jobs)) {
+        jobs = snapshot.host.heavy_jobs + ' heavy jobs as of ' + stamp(snapshot.ts * 1000);
+      }
       lines.push(validLoads(loads)
         ? name + ' · ' + formatLoad(loads) + ' at ' + stamp(checkedAt) + ' · ' + jobs
         : name + ' · live load unavailable · ' + jobs);
@@ -77,7 +127,7 @@ export async function fleetStatus({ node }, { read = readFleetSnapshot, load = l
   }
   if (!node) {
     const counts = ['running', 'active', 'queued', 'stalled'].flatMap((state) =>
-      fresh && natural(snapshot.lane_counts?.[state]) ? [snapshot.lane_counts[state] + ' ' + state] : [],
+      localEvidence && natural(snapshot.lane_counts?.[state]) ? [snapshot.lane_counts[state] + ' ' + state] : [],
     );
     lines.push(counts.length ? 'Lane counts at ' + stamp(snapshot.ts * 1000) + ' · ' + counts.join(', ') :
       'Current lane counts unavailable.');
@@ -107,14 +157,35 @@ const checks = new Map([
   ['PENDING', 'pending'], ['EXPECTED', 'expected checks pending'],
 ]);
 
-async function queryGithub(query, signal) {
+async function githubCli(args, signal) {
+  const candidates = process.platform === 'darwin'
+    ? ['/opt/homebrew/bin/gh', '/usr/local/bin/gh']
+    : ['/usr/bin/gh', join(homedir(), '.local/bin/gh')];
+  const installed = await Promise.all(candidates.map((path) =>
+    access(path, constants.X_OK).then(() => path, () => null)));
+  const github = installed.find(Boolean);
+  if (!github) throw new Error('The local GitHub CLI is unavailable');
   const { stdout } = await exec('/usr/bin/nice', [
-    '-n', '10', '/usr/bin/gh', 'api', 'graphql', '--hostname', 'github.com', '-f', 'query=' + query,
+    '-n', '10', github, 'api', ...args, '--hostname', 'github.com',
   ], {
     timeout: 8000, killSignal: 'SIGKILL', maxBuffer: 128 * 1024, signal,
     env: { HOME: homedir(), PATH: '/usr/bin:/bin', GH_PROMPT_DISABLED: '1' },
   });
   return JSON.parse(stdout);
+}
+
+function queryGithub(query, signal) {
+  return githubCli(['graphql', '-f', 'query=' + query], signal);
+}
+
+export function readIntegrationGithub(path, signal) {
+  const prefix = 'repos/rupret007/Cursor-OpenClaw-Integration/';
+  const route = path.slice(prefix.length);
+  if (!path.startsWith(prefix) ||
+      !/^(?:pulls\/[1-9]\d{0,7}|commits\/[a-f0-9]{40}\/check-runs\?per_page=100&filter=latest)$/.test(route)) {
+    throw new Error('The GitHub route is outside the CI review scope');
+  }
+  return githubCli([path], signal);
 }
 
 export async function openPullRequests(signal, { query = queryGithub, expectedLogin } = {}) {
@@ -188,6 +259,8 @@ const activityDevelopments = new Map([
   ['plan-confirmed', 'plan-confirmed'], ['share-item', 'shared-item'], ['share-update', 'update'],
 ]);
 
+const followUpIntents = new Set(['ask-time', 'ask-location', 'ask-confirmation', 'ask-question', 'request-action']);
+
 export function describeAndreaActivity(groups) {
   const messages = groups.flatMap((group, conversation) => group.map((row) => ({
     conversation, timestamp: Date.parse(row.timestamp), preview: row.preview, isFromMe: row.isFromMe,
@@ -196,6 +269,14 @@ export function describeAndreaActivity(groups) {
     .sort((a, b) => b.timestamp - a.timestamp);
   const topics = new Set();
   const developments = new Set();
+  const lastOutgoing = new Map();
+  for (const message of messages) {
+    if (message.isFromMe && !lastOutgoing.has(message.conversation)) {
+      lastOutgoing.set(message.conversation, message.timestamp);
+    }
+  }
+  const conversationsToCheck = new Set();
+  const followUps = new Map();
   let latest = null;
 
   for (const message of messages) {
@@ -212,16 +293,26 @@ export function describeAndreaActivity(groups) {
     const development = activityDevelopments.get(intent);
     if (development) developments.add(development);
 
-    if (latest === null && !message.isFromMe) {
-      const outgoing = messages.filter((candidate) => candidate.conversation === message.conversation && candidate.isFromMe);
-      // A later outgoing preview shows activity in the same chat, not which message it answered.
-      const reply = outgoing.some(({ timestamp }) => timestamp > message.timestamp) ? 'later' :
-        outgoing.some(({ timestamp }) => timestamp < message.timestamp) ? 'earlier' : 'none';
-      latest = { intent, topic: labels[0] ?? null, reply };
+    if (!message.isFromMe) {
+      const outgoing = lastOutgoing.get(message.conversation);
+      if (latest === null) {
+        const reply = outgoing > message.timestamp ? 'later' : outgoing < message.timestamp ? 'earlier' : 'none';
+        latest = { intent, topic: labels[0] ?? null, reply };
+      }
+      // Count at most one candidate per conversation. A later or tied outgoing
+      // preview leaves it unclear whether this request still needs attention.
+      if (followUpIntents.has(intent) && !(outgoing >= message.timestamp) &&
+          !conversationsToCheck.has(message.conversation)) {
+        conversationsToCheck.add(message.conversation);
+        followUps.set(intent, (followUps.get(intent) ?? 0) + 1);
+      }
     }
   }
 
-  return { topics: [...topics].slice(0, 4), developments: [...developments].slice(0, 3), latest };
+  return {
+    activity: { topics: [...topics].slice(0, 4), developments: [...developments].slice(0, 3), latest },
+    followUps: [...followUps].map(([intent, conversations]) => ({ intent, conversations })),
+  };
 }
 
 export async function inspectAndrea(reader, now = Date.now()) {

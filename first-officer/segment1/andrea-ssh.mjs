@@ -8,7 +8,7 @@ export const andreaCommand = 'first-officer-andrea-summary-v1';
 const execute = promisify(execFile);
 const title = 'Andrea · synced one-to-one text activity from the last 48 hours.';
 const groupTitle = 'Andrea · activity in approved group chats from the last 48 hours.';
-const countLine = /^\d{1,2} incoming, \d{1,2} outgoing across [1-4] recent conversations\.$/;
+const countLine = /^\d{1,2} incoming, \d{1,2} outgoing across ([1-4]) recent conversations\.$/;
 const lineFormats = [
   countLine,
   /^The latest message was incoming in [1-4] of those conversations\.$/,
@@ -38,6 +38,21 @@ const latestNotes = new Map([
   ['other', null],
 ]);
 
+const followUpLabels = new Map([
+  ['ask-time', 'timing questions'], ['ask-location', 'location questions'],
+  ['ask-confirmation', 'confirmation requests'], ['ask-question', 'questions'], ['request-action', 'action requests'],
+]);
+
+function formatFollowUps(items, conversationsRead) {
+  if (!Array.isArray(items) || items.length > 4 ||
+      !items.every((item) => exactKeys(item, ['intent', 'conversations']) && followUpLabels.has(item.intent) &&
+        Number.isInteger(item.conversations) && item.conversations >= 1 && item.conversations <= 4) ||
+      new Set(items.map((item) => item.intent)).size !== items.length ||
+      items.reduce((total, item) => total + item.conversations, 0) > conversationsRead) return '';
+  return items.map(({ intent, conversations }) => followUpLabels.get(intent) + ' in ' +
+    conversations + (conversations === 1 ? ' conversation' : ' conversations')).join(', ');
+}
+
 function exactKeys(value, keys) {
   return value && typeof value === 'object' && !Array.isArray(value) &&
     Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
@@ -57,7 +72,7 @@ function validActivity(activity) {
     (latest.topic === null || activityTopics.has(latest.topic)) && ['later', 'earlier', 'none'].includes(latest.reply));
 }
 
-function formatActivity(heading, lines, { topics, developments, latest }) {
+function formatActivity(heading, lines, { topics, developments, latest }, followUp) {
   const result = [heading];
   if (topics.length) result.push('Topics · ' + topics.map((key) => activityTopics.get(key)).join(', ') + '.');
   if (developments.length) {
@@ -74,6 +89,7 @@ function formatActivity(heading, lines, { topics, developments, latest }) {
       if (latest.reply === 'later') result.push('You posted in that conversation afterward.');
     }
   }
+  if (followUp) result.push('May need your reply · ' + followUp + '.');
   if (result.length === 1) result.push('The recent previews did not give Andrea a clear topic or request.');
   for (const line of lines) {
     if (line.startsWith('The latest message was incoming') || line.startsWith('Topics detected in previews')) continue;
@@ -83,7 +99,7 @@ function formatActivity(heading, lines, { topics, developments, latest }) {
 }
 
 export function parseAndreaSummary(payload) {
-  const { version, summary: directSummary, groupSummary, activity } = JSON.parse(payload) ?? {};
+  const { version, summary: directSummary, groupSummary, activity, followUps } = JSON.parse(payload) ?? {};
   const grouped = groupSummary !== undefined;
   const heading = grouped ? groupTitle : title;
   const summary = grouped ? groupSummary : directSummary;
@@ -92,12 +108,16 @@ export function parseAndreaSummary(payload) {
       lines.length > lineFormats.length || lines.some((line) => !lineFormats.some((format) => format.test(line)))) {
     throw new Error('Andrea summary response was invalid');
   }
-  if (countLine.test(lines[0]) && validActivity(activity)) return formatActivity(heading, lines, activity);
+  const counts = countLine.exec(lines[0]);
+  if (counts && validActivity(activity)) {
+    return formatActivity(heading, lines, activity, formatFollowUps(followUps, Number(counts[1])));
+  }
   return summary;
 }
 
 export async function sshAndreaSummary(signal, {
-  directory = join(homedir(), '.ssh/openclaw-fo-andrea'),
+  directory = join(homedir(), process.env.FO_LOCAL_NODE === 'nucbox'
+    ? '.ssh/openclaw-fo-andrea-nuc' : '.ssh/openclaw-fo-andrea'),
   run = execute,
 } = {}) {
   const folder = await lstat(directory).catch((error) => {

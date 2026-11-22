@@ -79,7 +79,7 @@ export function classifyRequest(input, { legacyStatus, legacyRequest, isControl,
     return { kind: 'gate' };
   }
   if (nodeIds.includes(subject)) return { kind: 'fleet', node: subject };
-  if (subject === 'load') return { kind: 'fleet', node: 'bobserver' };
+  if (subject === 'load') return { kind: 'fleet', localOnly: true };
   if (legacy?.kind === 'running' || ['cluster', 'lanes'].includes(subject) ||
       /^(?:what(?:'s| is) running|fleet status|fleet load|cluster load|current load)\b/.test(ask) ||
       question && /\b(?:machines?|nodes?|fleet|cluster|load average|cpu load)\b/.test(ask) &&

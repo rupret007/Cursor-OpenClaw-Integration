@@ -1,6 +1,6 @@
 # Install First Officer
 
-Jeff approves activation and runs the activation and rollback commands on bobserver. Start from the verified release currently pinned by the gateway. Keep the bundle and config backup in private storage.
+For a standalone Captain on the Mac Mini or Nuc, follow the [standalone setup in CAPTAIN.md](CAPTAIN.md#independent-mac-mini-and-nuc-profiles). The bundle preparation below applies to both standalone hosts. The Bobserver steps later on this page are for the legacy profile and wait for Jeff's approval. Keep the bundle and config backup in private storage.
 
 ## Stage on the Nuc
 
@@ -13,7 +13,7 @@ stage_dir="$(mktemp -d)"
 python3 -B first-officer/release.py build "$PRIOR_BUNDLE" "$stage_dir" --reviewed-head "$REVIEWED_HEAD"
 ```
 
-Pass the digest and the tar file to Jeff through a private channel. Put the tar file under `~/.openclaw/segment1-staged/` on bobserver and use the same PR checkout for the operator commands.
+Pass the digest and the tar file to Jeff through a private channel. For the approved legacy Bobserver install, put the tar file under `~/.openclaw/segment1-staged/` and use the same PR checkout for the operator commands.
 
 ## Connect Andrea on the Mac Mini
 
@@ -217,7 +217,7 @@ If the Andrea check fails, resolve it while the current gateway is running. For 
 
 ## Publish and activate the reviewed candidate
 
-`python3 -B first-officer/release.py activate` is the single activation command. It runs the sequence below, stops at the first failure, and records one private rollback. `--dry-run` prints the commands and runs none of them. The service pin continues to use the root-owned verifier and its existing fallback slot. The private backup records the exact prior config and pin for rollback.
+`python3 -B first-officer/release.py activate` is the single activation command. Use the [operator block in JEFF-ACTIONS.md](JEFF-ACTIONS.md#1-approve-and-activate-the-combined-release) for the complete invocation and preview. It runs the sequence below, stops at the first failure, and records one private rollback. `--dry-run` prints the commands and runs none of them. The service pin continues to use the root-owned verifier and its existing fallback slot. The private backup records the exact prior config and pin for rollback.
 
 ```bash
 archive="$HOME/.openclaw/segment1-staged/first-officer-$release.tar"
@@ -273,6 +273,6 @@ systemctl --user is-active --quiet openclaw-gateway.service
 
 If automatic recovery itself fails, use the config and pin in that private backup with the existing Round 13 recovery procedure. Keep those files private and preserve them until the restored service has passed its readiness check.
 
-If the Mac reader was refreshed for this upgrade, restore the prior restricted command using [the Captain rollback steps](CAPTAIN.md#take-back-control-and-roll-back).
+If the Mac reader was refreshed for this upgrade, restore the prior restricted command using [the Captain rollback steps](CAPTAIN.md#legacy-bobserver-handback-and-rollback).
 
 To revoke the dedicated Mac reader as well, remove only the key line labeled `openclaw-firstofficer-andrea-read` from the Mac account’s `~/.ssh/authorized_keys`. This revokes First Officer’s reader access while preserving other Mac SSH logins.

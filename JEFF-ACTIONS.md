@@ -1,5 +1,13 @@
 # What needs Jeff
 
+## Standalone Captain on the Mac Mini and Nuc
+
+[PR #39](https://github.com/rupret007/Cursor-OpenClaw-Integration/pull/39) contains the standalone Captain candidate. It is stacked on the queue-recovery branch. Review its full commit and checks before selecting a release. [STATUS.md](STATUS.md) records the actual Telegram and signed transfer results.
+
+For a first production cutover, choose the starting host and the approved Telegram account. The [standalone setup in CAPTAIN.md](CAPTAIN.md#independent-mac-mini-and-nuc-profiles) covers the private config, host-local gate, capacity and quota bindings, queue and LiteLLM routes, service rendering, and signed rollback. Run the [standalone Telegram checks](LIVE-TEST.md) with Bobserver unavailable. The staged Mac rehearsal used OpenClaw 2026.11.6.
+
+The numbered procedures below are the legacy Bobserver rollout. Use them only if Jeff chooses that rollout and approves activation. The standalone path has its own operator steps in CAPTAIN.md.
+
 [TEST-NOW.md](TEST-NOW.md) covers the offline checks. [PR #33](https://github.com/rupret007/Cursor-OpenClaw-Integration/pull/33) carries the original Segment 1 work. [PR #36](https://github.com/rupret007/Cursor-OpenClaw-Integration/pull/36) carries the combined release. [PR #37](https://github.com/rupret007/Cursor-OpenClaw-Integration/pull/37) follows #36 with the Cursor plan checks. The planned merge order is #33 → #36 → #37, with Jeff's approval before each merge to main. Use the full approved commit for both checkouts.
 
 ## 1. Approve and activate the combined release

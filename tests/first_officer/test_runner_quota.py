@@ -67,3 +67,12 @@ for expected in ("initialize", "initialized", "account/rateLimits/read"):
     assert "accountId" not in result
     with pytest.raises(ValueError, match="standalone Codex CLI is unavailable"):
         quota.read_local_quota("codex")
+
+
+def test_standalone_accepts_a_weekly_only_subscription():
+    response = {"rateLimits": {
+        "primary": {"usedPercent": 30, "resetsAt": 1_900_000_000, "windowDurationMins": 10080},
+        "secondary": None,
+    }}
+    result = quota.local_quota_windows(response, 1_800_000_000)
+    assert result == {"weekly": {"used": 30, "reset": 1_900_000_000}}

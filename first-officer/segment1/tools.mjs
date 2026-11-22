@@ -66,7 +66,9 @@ export async function standaloneQuotaStatus({ read, now = Date.now }) {
   const quota = await read();
   const time = now();
   if (!recent(quota?.observed * 1000, time, 60_000)) throw new Error('Local quota evidence is unavailable');
+  if (!quota.session && !quota.weekly) throw new Error('Local quota windows are unavailable');
   const windows = [['5-hour', quota.session], ['weekly', quota.weekly]].map(([label, window]) => {
+    if (window === undefined) return label + ' · unavailable';
     if (!Number.isFinite(window?.used) || window.used < 0 || window.used > 100 ||
         !Number.isSafeInteger(window.reset) || window.reset * 1000 <= time) {
       throw new Error('Local quota windows are unavailable');

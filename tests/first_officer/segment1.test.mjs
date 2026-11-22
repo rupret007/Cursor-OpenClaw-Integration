@@ -327,6 +327,10 @@ test('standalone quota rejects an expired window before reporting usage', async 
     weekly: { used: 31, reset: observed + 5000 } };
   const now = () => observed * 1000;
   assert.match(await standaloneQuotaStatus({ read: async () => receipt, now }), /5-hour · 15% used/);
+  const weeklyOnly = await standaloneQuotaStatus({ read: async () => ({ observed, weekly: receipt.weekly }), now });
+  assert.match(weeklyOnly, /5-hour · unavailable/);
+  assert.match(weeklyOnly, /weekly · 31% used/);
+  await assert.rejects(standaloneQuotaStatus({ read: async () => ({ observed }), now }), /windows are unavailable/);
   await assert.rejects(standaloneQuotaStatus({ read: async () => ({ ...receipt, observed: observed - 61 }), now }),
     /evidence is unavailable/);
   await assert.rejects(standaloneQuotaStatus({ read: async () => ({ ...receipt, session: { used: 15, reset: observed } }), now }),

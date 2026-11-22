@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 import importlib.util
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -28,12 +29,16 @@ TENANT = "b7e1c0de4a114c0e9a110c0ffee00001"
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
+    def do_GET(self):
+        self.do_POST()
+
     def do_POST(self):
         length = int(self.headers.get("Content-Length", "0") or "0")
         raw = self.rfile.read(length) if length else b""
         spec = self.server.routes.get(self.path, {"status": 404, "body": {}})
         self.server.seen.append({
             "path": self.path,
+            "method": self.command,
             "body": raw,
             "authorization": self.headers.get("Authorization"),
             "idempotency": self.headers.get("idempotency-key"),
@@ -51,7 +56,10 @@ class Handler(BaseHTTPRequestHandler):
             data = spec.get("raw", json.dumps(spec.get("body", {})).encode())
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Content-Length", str(len(data) + spec.get("short_by", 0)))
+            if spec.get("short_by"):
+                self.send_header("Connection", "close")
+                self.close_connection = True
             self.end_headers()
             self.wfile.write(data)
         except (BrokenPipeError, ConnectionResetError):
@@ -128,6 +136,7 @@ def test_primary_success_never_calls_restate_and_a_repeat_is_free(tmp_path, toke
     assert restate.seen == []
     body = json.loads(hatchet.seen[0]["body"])
     assert body["workflowName"] == "review-lane"
+    assert body["returnOnlyId"] is True
     assert body["input"] == REQUEST
     assert body["additionalMetadata"] == {"idempotencyKey": queue.idempotency_key(REQUEST)}
     assert hatchet.seen[0]["authorization"] == f"Bearer {HATCHET_TOKEN}"
@@ -521,3 +530,177 @@ def test_cli_prints_the_fallback_and_refuses_a_protected_outcome(tmp_path, token
     finally:
         stop(hatchet)
         stop(restate)
+
+
+def test_known_primary_refusal_is_resumed_without_reposting_to_hatchet(tmp_path, tokens, monkeypatch):
+    hatchet = serve({HATCHET_PATH: {"status": 429}})
+    restate = serve({RESTATE_PATH: {"body": {"invocationId": "inv_resumed", "status": "Accepted"}}})
+    ledger = tmp_path / "lanes.jsonl"
+    config = policy(urls(hatchet), urls(restate))
+    try:
+        monkeypatch.delenv("FO_RESTATE_LANE_TOKEN")
+        with pytest.raises(ValueError, match="missing from the environment"):
+            dispatch(config, ledger)
+        assert phases(ledger) == ["pending", "refused"]
+        monkeypatch.setenv("FO_RESTATE_LANE_TOKEN", RESTATE_TOKEN)
+        monkeypatch.delenv("FO_HATCHET_LANE_TOKEN")
+        assert dispatch(config, ledger)["run"] == "inv_resumed"
+        monkeypatch.delenv("FO_RESTATE_LANE_TOKEN")
+        assert dispatch(config, ledger)["reused"]
+        assert len(hatchet.seen) == len(restate.seen) == 1
+    finally:
+        stop(hatchet)
+        stop(restate)
+
+
+@pytest.mark.parametrize("spec", [
+    {"body": {"run": {"metadata": []}}},
+    {"body": {"run": {"metadata": {"id": "run_truncated"}}}, "short_by": 1},
+])
+def test_unusable_primary_receipts_stay_uncertain(tmp_path, tokens, spec):
+    hatchet = serve({HATCHET_PATH: spec})
+    restate = serve({})
+    ledger = tmp_path / "lanes.jsonl"
+    try:
+        with pytest.raises(ValueError, match="outcome is unknown"):
+            dispatch(policy(urls(hatchet), urls(restate)), ledger)
+        assert phases(ledger) == ["pending", "uncertain"]
+        assert restate.seen == []
+    finally:
+        stop(hatchet)
+        stop(restate)
+
+
+@pytest.mark.parametrize("scope", [None, "pilot-review"])
+def test_restate_lookup_recovers_only_positive_receipt_on_original_route(tmp_path, tokens, scope):
+    send_path = RESTATE_PATH if scope is None else f"/restate/scope/{scope}/send/LaneQueue/submit"
+    hatchet = serve({HATCHET_PATH: {"status": 429}})
+    restate = serve({send_path: {"raw": b"unreadable"}})
+    ledger = tmp_path / "lanes.jsonl"
+    config = policy(urls(hatchet), urls(restate))
+    if scope is not None:
+        config["restate"]["scope"] = scope
+    config_file = tmp_path / "queue.json"
+    config_file.write_text(json.dumps(config))
+    config = queue.load_config(config_file)
+    try:
+        with pytest.raises(ValueError, match="Restate outcome is unknown"):
+            dispatch(config, ledger)
+        original = ledger.read_bytes()
+        changed = policy(urls(hatchet), urls(restate))
+        changed["restate"]["handler"] = "alternate"
+        with pytest.raises(ValueError, match="original Restate destination"):
+            queue.reconcile_restate(changed, REQUEST, ledger)
+        if scope is not None:
+            changed["restate"].update(handler="submit", scope="other-scope")
+            with pytest.raises(ValueError, match="original Restate destination"):
+                queue.reconcile_restate(changed, REQUEST, ledger)
+        assert len(restate.seen) == 1
+        with pytest.raises(ValueError, match="remains unresolved"):
+            queue.reconcile_restate(config, REQUEST, ledger)
+        assert ledger.read_bytes() == original
+        restate.routes["/restate/lookup"] = {"body": {"invocationId": "inv_recovered"}}
+        status_path = "/restate/status/inv_recovered"
+        # A deterministic ID is returned even when the invocation was never accepted or was purged.
+        with pytest.raises(ValueError, match="remains unresolved"):
+            queue.reconcile_restate(config, REQUEST, ledger)
+        assert ledger.read_bytes() == original
+        restate.routes[status_path] = {"body": {"stage": "created"}}
+        receipt = queue.reconcile_restate(config, REQUEST, ledger)
+        assert receipt["run"] == "inv_recovered"
+        assert dispatch(config, ledger)["reused"]
+        assert [(call["method"], call["path"]) for call in restate.seen] == [
+            ("POST", send_path), ("POST", "/restate/lookup"),
+            ("POST", "/restate/lookup"), ("GET", status_path),
+            ("POST", "/restate/lookup"), ("GET", status_path),
+        ]
+        assert json.loads(restate.seen[-2]["body"]) == {
+            "target": "idempotentInvocation", "service": "LaneQueue", "handler": "submit",
+            "idempotencyKey": queue.idempotency_key(REQUEST),
+            **({"scope": scope} if scope is not None else {}),
+        }
+        assert len(hatchet.seen) == 1
+        assert phases(ledger) == ["pending", "refused", "pending", "uncertain", "queued"]
+    finally:
+        stop(hatchet)
+        stop(restate)
+
+
+def test_status_neither_creates_a_ledger_nor_reads_a_policy(tmp_path, capsys):
+    ledger = tmp_path / "absent.jsonl"
+    args = [str(tmp_path / "missing-policy.json"), str(ledger), "--lane", REQUEST["lane"],
+            "--head", HEAD, "--pull-request", str(REQUEST["pull_request"]), "--status"]
+    assert queue.main(args) == 0
+    assert json.loads(capsys.readouterr().out) == {"phase": "unseen"}
+    assert not ledger.exists()
+    ledger.write_text(json.dumps({"at": NOW, "backend": "hatchet", "head": HEAD,
+                                  "key": queue.idempotency_key(REQUEST), "lane": REQUEST["lane"],
+                                  "phase": "pending", "run": None}) + "\n")
+    ledger.chmod(0o600)
+    original = ledger.read_bytes()
+    assert queue.main(args) == 0
+    assert json.loads(capsys.readouterr().out) == {"phase": "pending", "backend": "hatchet", "run": None}
+    assert ledger.read_bytes() == original
+
+
+def test_slow_send_leaves_unrelated_dispatch_and_status_available(tmp_path, tokens, monkeypatch, capsys):
+    ledger = tmp_path / "lanes.jsonl"
+    config = policy("http://localhost", "http://localhost")
+    other = {**REQUEST, "head": OTHER}
+    assert queue.idempotency_key(REQUEST)[-1:] != queue.idempotency_key(other)[-1:]
+    entered = threading.Event()
+    release = threading.Event()
+
+    def post(_opener, _url, _headers, payload, _timeout):
+        if payload["input"]["head"] == HEAD:
+            entered.set()
+            assert release.wait(8)
+            return {"metadata": {"id": "run_slow"}}
+        return {"metadata": {"id": "run_independent"}}
+
+    monkeypatch.setattr(queue, "post", post)
+    with ThreadPoolExecutor(max_workers=3) as workers:
+        slow = workers.submit(dispatch, config, ledger)
+        try:
+            assert entered.wait(3)
+            status = workers.submit(queue.main, [
+                str(tmp_path / "unused-policy"), str(ledger),
+                "--lane", REQUEST["lane"], "--head", HEAD,
+                "--pull-request", str(REQUEST["pull_request"]), "--status",
+            ])
+            independent = workers.submit(dispatch, config, ledger, other)
+            assert status.result(timeout=3) == 0
+            assert json.loads(capsys.readouterr().out)["phase"] == "pending"
+            assert independent.result(timeout=3)["run"] == "run_independent"
+            assert not slow.done()
+        finally:
+            release.set()
+        assert slow.result(timeout=3)["run"] == "run_slow"
+
+
+def test_transition_never_overwrites_newer_receipt(tmp_path, tokens, monkeypatch):
+    ledger = tmp_path / "lanes.jsonl"
+    config = policy("http://localhost", "http://localhost")
+
+    def post(_opener, _url, _headers, _payload, _timeout):
+        with queue.locked_ledger(ledger) as file:
+            pending = queue.latest(file, queue.idempotency_key(REQUEST))
+            queue.append_entry(file, {**pending, "phase": "queued", "run": "run_existing"})
+        return {"metadata": {"id": "run_late"}}
+
+    monkeypatch.setattr(queue, "post", post)
+    with pytest.raises(ValueError, match="changed during dispatch"):
+        dispatch(config, ledger)
+    receipt = dispatch(config, ledger)
+    assert receipt["reused"] and receipt["run"] == "run_existing"
+    assert phases(ledger) == ["pending", "queued"]
+
+
+def test_dispatch_refuses_untrusted_lock_directory(tmp_path, tokens):
+    ledger = tmp_path / "lanes.jsonl"
+    lock_dir = ledger.with_name(ledger.name + ".locks")
+    lock_dir.mkdir()
+    lock_dir.chmod(0o755)
+    with pytest.raises(ValueError, match="lock directory must be private"):
+        dispatch(policy("http://localhost", "http://localhost"), ledger)
+    assert not ledger.exists()

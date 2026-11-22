@@ -68,14 +68,17 @@ The command exits `0` below the warning threshold, `3` once any window reaches 9
 
 Hatchet is the primary. Restate is the fallback, and only after Hatchet has definitely refused the lane. The dispatcher does not install either service and does not start a worker. Point it at a loopback HTTP listener, or at an HTTPS host listed in `FO_QUEUE_HOSTS` that resolves only to loopback or private addresses. An HTTPS address literal has to be on that same list. The check happens before a credential is sent. The request connects to those checked addresses, without resolving the name again or using a proxy. A public address, and any HTTPS name or address that is not on that list, is rejected. Loopback HTTP does not need the list. Put each token in the environment variable named by the policy, not in the policy file.
 
-The policy has two objects. `hatchet` carries `base_url`, `tenant`, `workflow` and `token_env`. `restate` carries `base_url`, `service`, `handler` and `token_env`. The ledger path is a private append-only file. The command creates it mode `0600` when it is missing.
+The policy has two objects. `hatchet` carries `base_url`, `tenant`, `workflow` and `token_env`. `restate` carries `base_url`, `service`, `handler` and `token_env`, plus optional `scope`. Set a scope if the deployment uses a scope-based concurrency rule. The ledger path is a private append-only file. The command creates it mode `0600` when it is missing. Keep the ledger and its private `.locks` directory together. Dispatch and reconciliation use one of sixteen locks selected by the request key. Requests on different locks and local status reads can make progress during a slow backend call. Treat an in-flight ledger update as pending until the attempt records its outcome.
 
 ```bash
 python3 first-officer/lanes/queue.py "$queue_policy" "$lane_ledger" \
   --lane review --head "$head" --pull-request "$number"
 ```
 
-Exit `0` means the lane is queued. The line is `Lane review is queued on hatchet as <run>.` or `Lane review is queued on restate as <invocation>.` The same command again prints `was already queued` and does not send a second time. Exit `1` means it was not queued. A timeout, HTTP 408, any 5xx, a dropped connection, a redirect, or any answer other than a connection refusal or HTTP 425 or 429 stays unknown and is not failed over. Hatchet and Restate do not share an idempotency check, so an ambiguous Hatchet answer never starts the same lane on Restate. An unknown or pending ledger row blocks a later send until the backend has been checked. A definite refusal from both backends can be retried. The command never pushes, merges or sends a message.
+Exit `0` confirms queue acceptance and returns the run identifier. Repeating the command reuses a saved receipt. Exit `1` requires checking the reported state. A durable Hatchet refusal resumes at Restate. A timeout, HTTP 408, 5xx, dropped response, redirect, or malformed receipt leaves the attempted backend unresolved. Connection refusal and HTTP 425 or 429 still allow failover under the reviewed ingress contract. When both backends refuse, the next dispatch starts on Hatchet again.
+
+Append `--status` to inspect the ledger without contacting either backend. For a pending or uncertain Restate attempt recorded with this version, append `--reconcile-restate` to the original command. This uses the original service, handler and scope with the existing idempotency key. Lookup computes the ID. The status endpoint must confirm the invocation exists before the dispatcher saves a receipt. Missing or expired invocation status and a changed destination leave the lane unresolved. For unresolved Hatchet attempts, inspect the original Hatchet run history using the lane idempotency key before deciding how to proceed.
+
 
 ## Send one trace to local Phoenix
 

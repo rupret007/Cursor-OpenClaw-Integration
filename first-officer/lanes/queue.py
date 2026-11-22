@@ -7,7 +7,7 @@ documented fallback ingress: ``POST /restate/send/{service}/{handler}`` with an
 any 5xx, a dropped connection, or any answer that is not a definite refusal stays on
 Hatchet and is never sent to Restate. The primary may already have accepted the lane.
 The private ledger is append-only. A pending or unknown row blocks a second send until
-an operator has checked the backend. The request connects to the addresses that passed
+the original backend can confirm acceptance. The request connects to the addresses that passed
 that check and does not resolve the name again. An HTTPS address literal has to be
 listed in ``FO_QUEUE_HOSTS`` the same way a name does. Loopback HTTP does not.
 """
@@ -17,6 +17,7 @@ from contextlib import contextmanager
 import errno
 import fcntl
 import hashlib
+import http.client
 import importlib.util
 import ipaddress
 import json
@@ -49,6 +50,7 @@ MAX_LEDGER = 4 * 1024 * 1024
 FAILOVER_STATUS = (425, 429)
 HATCHET_FIELDS = ("base_url", "tenant", "workflow", "token_env")
 RESTATE_FIELDS = ("base_url", "service", "handler", "token_env")
+RESTATE_SCOPE = re.compile(r"[A-Za-z0-9_.-]{1,36}")
 
 
 def _pinhttp():
@@ -197,6 +199,10 @@ def post(opener, url, headers, payload, timeout):
     """Return the decoded object, raise Refusal when nothing was accepted, or Uncertain."""
     request = Request(url, data=json.dumps(payload).encode(),
                       headers={"Content-Type": "application/json", **headers})
+    return response_json(opener, request, timeout)
+
+
+def response_json(opener, request, timeout):
     try:
         response = opener.open(request, timeout=timeout)
     except HTTPError as error:
@@ -212,7 +218,7 @@ def post(opener, url, headers, payload, timeout):
         if isinstance(error.reason, (ConnectionRefusedError, socket.gaierror)):
             raise Refusal("The queue was unreachable") from None
         raise Uncertain("The queue connection failed after the request was sent") from None
-    except OSError:
+    except (OSError, http.client.HTTPException):
         raise Uncertain("The queue connection failed after the request was sent") from None
     if response is None:
         raise Uncertain("The queue gave no answer")
@@ -220,13 +226,17 @@ def post(opener, url, headers, payload, timeout):
         if getattr(response, "status", 200) >= 300:
             raise Uncertain(f"The queue answered HTTP {response.status}")
         raw = response.read(MAX_BODY + 1)
+        if len(raw) <= MAX_BODY and getattr(response, "length", 0):
+            raise Uncertain("The queue response ended before its declared length")
+    except (OSError, http.client.HTTPException):
+        raise Uncertain("The queue response was interrupted") from None
     finally:
         response.close()
     if len(raw) > MAX_BODY:
         raise Uncertain("The queue returned an oversized response")
     try:
         body = json.loads(raw)
-    except ValueError:
+    except (ValueError, RecursionError):
         raise Uncertain("The queue returned an unreadable response") from None
     if not isinstance(body, dict):
         raise Uncertain("The queue returned an unexpected response")
@@ -239,55 +249,114 @@ def run_identifier(value):
     return value
 
 
-def hatchet(config, request, key, timeout, token):
-    base, opener = endpoint(config["base_url"])
-    tenant, workflow = config["tenant"], config["workflow"]
-    if not TENANT.fullmatch(tenant) or not NAME.fullmatch(workflow):
-        raise ValueError("The Hatchet lane queue needs a tenant and a workflow name")
-    body = post(opener, f"{base}/api/v1/stable/tenants/{quote(tenant)}/workflow-runs/trigger",
-                {"Authorization": "Bearer " + token},
-                {"workflowName": workflow, "input": request,
-                 "additionalMetadata": {"idempotencyKey": key}}, timeout)
-    run = body.get("run") if isinstance(body.get("run"), dict) else body
-    return run_identifier((run.get("metadata") or {}).get("id"))
-
-
-def restate(config, request, key, timeout, token):
-    base, opener = endpoint(config["base_url"])
+def restate_route(config):
+    """Build the send path and the matching idempotent lookup target."""
     service, handler = config["service"], config["handler"]
     if not NAME.fullmatch(service) or not NAME.fullmatch(handler):
         raise ValueError("The Restate lane queue needs a service and a handler")
-    body = post(opener, f"{base}/restate/send/{quote(service)}/{quote(handler)}",
-                {"Authorization": "Bearer " + token, "idempotency-key": key},
-                request, timeout)
-    if body.get("status") not in ("Accepted", "PreviouslyAccepted"):
-        raise Uncertain("Restate did not accept the lane")
-    return run_identifier(body.get("invocationId"))
+    target = {"target": "idempotentInvocation", "service": service, "handler": handler}
+    prefix = "/restate"
+    if "scope" in config:
+        scope = config["scope"]
+        if not isinstance(scope, str) or not RESTATE_SCOPE.fullmatch(scope):
+            raise ValueError("The Restate queue scope must be a valid scope name")
+        target["scope"] = scope
+        prefix += f"/scope/{scope}"
+    return f"{prefix}/send/{quote(service)}/{quote(handler)}", target
+
+
+def submission(backend, config, request, key):
+    """Validate the selected route and resolve its credential before reserving a send."""
+    if backend == "hatchet":
+        tenant, workflow = config["tenant"], config["workflow"]
+        if not TENANT.fullmatch(tenant) or not NAME.fullmatch(workflow):
+            raise ValueError("The Hatchet lane queue needs a tenant and a workflow name")
+        path = f"/api/v1/stable/tenants/{quote(tenant)}/workflow-runs/trigger"
+        # The ID is available before the workflow is replicated for status queries.
+        payload = {"workflowName": workflow, "input": request, "returnOnlyId": True,
+                   "additionalMetadata": {"idempotencyKey": key}}
+        extra_headers = {}
+    else:
+        path, _ = restate_route(config)
+        payload = request
+        extra_headers = {"idempotency-key": key}
+    token = secret(config["token_env"])
+    base, opener = endpoint(config["base_url"])
+    target = hashlib.sha256((base + path).encode()).hexdigest()
+    return (opener, base + path, {"Authorization": "Bearer " + token, **extra_headers}, payload), target
+
+
+def accepted_run(backend, body):
+    if backend == "restate":
+        if body.get("status") not in ("Accepted", "PreviouslyAccepted"):
+            raise Uncertain("Restate did not return an acceptance receipt")
+        return run_identifier(body.get("invocationId"))
+    run = body.get("run", body)
+    metadata = run.get("metadata") if isinstance(run, dict) else None
+    return run_identifier(metadata.get("id") if isinstance(metadata, dict) else None)
 
 
 def _check_ledger(info):
-    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_nlink != 1:
         raise ValueError("The lane ledger must be a private owner file")
     if info.st_size > MAX_LEDGER:
         raise ValueError("The lane ledger is too large to trust")
 
 
 @contextmanager
-def locked_ledger(path):
+def lane_lock(ledger, key):
+    """Serialize one request while allowing unrelated reservations to make progress."""
+    directory = Path(ledger).with_name(Path(ledger).name + ".locks")
+    directory.mkdir(mode=0o700, exist_ok=True)
+    root = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        handle = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        info = os.fstat(root)
+        if info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise ValueError("The lane lock directory must be private")
+        # One of 16 persistent locks keeps disk usage bounded across old lane keys.
+        handle = os.open(key[-1:], os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
+                         0o600, dir_fd=root)
+        try:
+            info = os.fstat(handle)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                    or info.st_mode & 0o077 or info.st_nlink != 1):
+                raise ValueError("The lane lock must be a private owner file")
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            if os.fstat(handle).st_nlink != 1:
+                raise ValueError("The lane lock was replaced")
+            yield
+        finally:
+            os.close(handle)
+    finally:
+        os.close(root)
+
+
+@contextmanager
+def locked_ledger(path, *, read_only=False):
+    try:
+        flags = os.O_RDONLY if read_only else os.O_RDWR | os.O_CREAT
+        handle = os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
     except OSError as error:
         if error.errno == errno.ELOOP:
             raise ValueError("The lane ledger must be a private owner file") from None
         raise
-    file = os.fdopen(handle, "r+", encoding="utf-8")
+    file = os.fdopen(handle, "r" if read_only else "r+", encoding="utf-8")
     try:
         info = os.fstat(file.fileno())
-        if stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_size == 0:
+        if not read_only and stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_size == 0 and info.st_nlink == 1:
             os.fchmod(file.fileno(), 0o600)
             info = os.fstat(file.fileno())
         _check_ledger(info)
-        fcntl.flock(file, fcntl.LOCK_EX)
+        fcntl.flock(file, fcntl.LOCK_SH if read_only else fcntl.LOCK_EX)
+        info = os.fstat(file.fileno())
+        _check_ledger(info)
+        if not read_only and info.st_size == 0:
+            # The first reservation also needs a durable directory entry.
+            directory = os.open(Path(path).parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
         yield file
     finally:
         file.close()
@@ -310,7 +379,10 @@ def latest(file, key):
 
 def append_entry(file, entry):
     file.seek(0, os.SEEK_END)
-    file.write(json.dumps(entry, sort_keys=True) + "\n")
+    line = json.dumps(entry, sort_keys=True) + "\n"
+    if file.tell() + len(line) > MAX_LEDGER:
+        raise ValueError("The lane ledger is too large to trust")
+    file.write(line)
     file.flush()
     os.fsync(file.fileno())
 
@@ -321,8 +393,30 @@ def _bounded_timeout(timeout):
     return timeout
 
 
+def queue_state(file, request, key):
+    state = latest(file, key)
+    if state is None:
+        return None
+    phase, backend, run = state.get("phase"), state.get("backend"), state.get("run")
+    if (state.get("head") != request["head"] or state.get("lane") != request["lane"]
+            or phase not in ("pending", "uncertain", "refused", "queued")
+            or backend not in ("hatchet", "restate")
+            or (phase == "queued" and (not isinstance(run, str) or not RUN_ID.fullmatch(run)))
+            or (phase != "queued" and run is not None)):
+        raise ValueError("The lane ledger has an invalid state")
+    return state
+
+
+def transition(ledger, request, key, expected, entry):
+    """Fsync a state change only while its predecessor is still current."""
+    with locked_ledger(ledger) as file:
+        if queue_state(file, request, key) != expected:
+            raise ValueError("The lane ledger changed during dispatch. Check its current state.")
+        append_entry(file, entry)
+
+
 def dispatch(config, request, ledger, now=None, timeout=TIMEOUT):
-    """Dispatch one lane once. Only a definite Hatchet refusal moves it to Restate."""
+    """Dispatch one lane once. Resume from a recorded primary refusal after interruption."""
     timeout = _bounded_timeout(timeout)
     if now is None:
         moment = int(time.time())
@@ -331,49 +425,85 @@ def dispatch(config, request, ledger, now=None, timeout=TIMEOUT):
     else:
         raise ValueError("The queue clock is unusable")
     key = idempotency_key(request)
-    primary, fallback = config["hatchet"], config["restate"]
-    # A missing credential is misconfiguration, not a refusal, so it must not fail over.
-    hatchet_token = secret(primary["token_env"])
-    restate_token = secret(fallback["token_env"])
-    with locked_ledger(ledger) as file:
-        state = latest(file, key)
-        if state and state.get("phase") == "queued" and state.get("run"):
+    with lane_lock(ledger, key):
+        with locked_ledger(ledger) as file:
+            state = queue_state(file, request, key)
+        if state and state["phase"] == "queued":
             return {**state, "reused": True}
-        if state and state.get("phase") != "refused":
+        if state and state["phase"] != "refused":
             raise ValueError("The earlier queue attempt has an unknown outcome. "
                              "The lane was not sent again.")
 
-        def note(phase, backend, run=None, detail=None):
+        def attempt(backend):
+            nonlocal state
+            args, target = submission(backend, config[backend], request, key)
             entry = {"at": moment, "backend": backend, "head": request["head"], "key": key,
-                     "lane": request["lane"], "phase": phase, "run": run}
-            if detail:
-                entry["detail"] = detail
-            append_entry(file, entry)
-            return entry
-
-        note("pending", "hatchet")
-        try:
-            run = hatchet(primary, request, key, timeout, hatchet_token)
-        except Uncertain as uncertain:
-            note("uncertain", "hatchet", detail=str(uncertain))
-            raise ValueError(f"Hatchet outcome is unknown: {uncertain}. "
-                             "The lane was not failed over.") from None
-        except Refusal as refusal:
-            note("refused", "hatchet", detail=str(refusal))
-            note("pending", "restate")
+                     "lane": request["lane"], "phase": "pending", "run": None, "target": target}
+            transition(ledger, request, key, state, entry)
             try:
-                run = restate(fallback, request, key, timeout, restate_token)
-            except Uncertain as uncertain:
-                note("uncertain", "restate", detail=str(uncertain))
-                raise ValueError(f"Hatchet refused the lane ({refusal}) and the Restate outcome "
-                                 f"is unknown: {uncertain}") from None
-            except Refusal as second:
-                note("refused", "restate", detail=str(second))
-                raise ValueError(f"Hatchet refused the lane ({refusal}) and Restate refused it "
-                                 f"({second}). The lane was not queued.") from None
-            entry = note("queued", "restate", run)
-            return {**entry, "reused": False}
-        entry = note("queued", "hatchet", run)
+                run = accepted_run(backend, post(*args, timeout))
+            except (Refusal, Uncertain) as error:
+                phase = "refused" if isinstance(error, Refusal) else "uncertain"
+                outcome = {**entry, "phase": phase, "detail": str(error)}
+                transition(ledger, request, key, entry, outcome)
+                state = outcome
+                raise
+            outcome = {**entry, "phase": "queued", "run": run}
+            transition(ledger, request, key, entry, outcome)
+            return {**outcome, "reused": False}
+
+        if not state or state["backend"] != "hatchet":
+            try:
+                return attempt("hatchet")
+            except Uncertain as error:
+                raise ValueError(f"Hatchet outcome is unknown: {error}. The lane was not failed over.") from None
+            except Refusal:
+                pass
+        try:
+            return attempt("restate")
+        except Uncertain as error:
+            raise ValueError(f"Hatchet refused the lane and the Restate outcome is unknown: {error}") from None
+        except Refusal as error:
+            raise ValueError(f"Hatchet refused the lane and Restate refused it ({error}). "
+                             "The lane was not queued.") from None
+
+
+def reconcile_restate(config, request, ledger, timeout=TIMEOUT):
+    """Record positive lookup evidence for the original Restate destination only."""
+    timeout = _bounded_timeout(timeout)
+    key = idempotency_key(request)
+    with lane_lock(ledger, key):
+        with locked_ledger(ledger) as file:
+            state = queue_state(file, request, key)
+        if state and state["phase"] == "queued":
+            return {**state, "reused": True}
+        if not state or state["backend"] != "restate" or state["phase"] not in ("pending", "uncertain"):
+            raise ValueError("The ledger has no unresolved Restate submission")
+        route = config["restate"]
+        base = route["base_url"].rstrip("/")
+        path, lookup_target = restate_route(route)
+        target = hashlib.sha256((base + path).encode()).hexdigest()
+        if state.get("target") != target:
+            raise ValueError("The ledger cannot verify this as the original Restate destination")
+        base, opener = endpoint(base)
+        payload = {**lookup_target, "idempotencyKey": key}
+        headers = {"Authorization": "Bearer " + secret(route["token_env"])}
+        deadline = time.monotonic() + timeout
+        try:
+            body = post(opener, f"{base}/restate/lookup", headers, payload, timeout)
+            run = run_identifier(body.get("invocationId"))
+            # Lookup computes an ID even for work that was never accepted or has expired.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise Uncertain("Restate lookup used up the reconciliation timeout")
+            status = response_json(opener, Request(f"{base}/restate/status/{run}", headers=headers), remaining)
+            if status.get("stage") not in ("created", "started", "completed"):
+                raise Uncertain("Restate returned no invocation stage")
+        except (Refusal, Uncertain):
+            raise ValueError("Restate lookup did not confirm acceptance. The lane remains unresolved.") from None
+        entry = {**state, "at": int(time.time()), "phase": "queued", "run": run}
+        entry.pop("detail", None)
+        transition(ledger, request, key, state, entry)
         return {**entry, "reused": False}
 
 
@@ -384,6 +514,8 @@ def load_config(path):
     expected = {"hatchet": HATCHET_FIELDS, "restate": RESTATE_FIELDS}
     for name, fields in expected.items():
         section = config[name]
+        if name == "restate" and isinstance(section, dict) and "scope" in section:
+            fields += ("scope",)
         if not isinstance(section, dict) or set(section) != set(fields):
             raise ValueError(f"The {name} queue policy is incomplete")
         if not all(isinstance(section[field], str) for field in fields):
@@ -393,8 +525,7 @@ def load_config(path):
             raise ValueError("A queue credential is named by an environment variable")
     if not TENANT.fullmatch(config["hatchet"]["tenant"]) or not NAME.fullmatch(config["hatchet"]["workflow"]):
         raise ValueError("The Hatchet lane queue needs a tenant and a workflow name")
-    if not NAME.fullmatch(config["restate"]["service"]) or not NAME.fullmatch(config["restate"]["handler"]):
-        raise ValueError("The Restate lane queue needs a service and a handler")
+    restate_route(config["restate"])
     return config
 
 
@@ -405,11 +536,28 @@ def main(argv=None):
     parser.add_argument("--lane", required=True)
     parser.add_argument("--head", required=True)
     parser.add_argument("--pull-request", type=int, required=True)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--status", action="store_true", help="Read local state without contacting either backend")
+    mode.add_argument("--reconcile-restate", action="store_true", help="Recover an existing Restate receipt without resending")
     args = parser.parse_args(argv)
     os.umask(0o077)
     try:
         request = {"lane": args.lane, "head": args.head, "pull_request": args.pull_request}
-        result = dispatch(load_config(args.policy), request, args.ledger)
+        if args.status:
+            key = idempotency_key(request)
+            try:
+                with locked_ledger(args.ledger, read_only=True) as file:
+                    state = queue_state(file, request, key)
+            except FileNotFoundError:
+                state = None
+            print(json.dumps({key: state[key] for key in ("phase", "backend", "run")} if state else
+                             {"phase": "unseen"}, sort_keys=True))
+            return 0
+        operation = reconcile_restate if args.reconcile_restate else dispatch
+        result = operation(load_config(args.policy), request, args.ledger)
+        if args.reconcile_restate:
+            print(f"Lane {result['lane']} has a verified {result['backend']} receipt.")
+            return 0
         verb = "was already queued on" if result["reused"] else "is queued on"
         print(f"Lane {result['lane']} {verb} {result['backend']} as {result['run']}.")
         return 0

@@ -1,0 +1,354 @@
+"""Check the isolated Hatchet and Restate servers with synthetic local effects."""
+import base64
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack, contextmanager
+from copy import deepcopy
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import importlib.util
+import json
+import os
+from pathlib import Path
+import secrets
+import signal
+import socket
+import sqlite3
+import subprocess
+from threading import Event, Thread
+import time
+from urllib.error import HTTPError
+from urllib.request import ProxyHandler, Request, build_opener
+
+QUEUE_DIR = Path(__file__).resolve().parents[3]
+spec = importlib.util.spec_from_file_location("queue", QUEUE_DIR / "first-officer/lanes/queue.py")
+queue = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(queue)
+
+HATCHET = "http://localhost:58888"
+RESTATE = "http://localhost:8080"
+ADMIN = "http://localhost:9070"
+SCOPE = "queue-pilot"
+LEDGER = Path(os.environ["PILOT_LEDGER"])
+EFFECTS = Path(os.environ["PILOT_EFFECTS"])
+OPENER = build_opener(ProxyHandler({}))
+
+
+def http(base, path, payload=None, headers=None, timeout=3):
+    request = Request(base + path, data=payload, headers=headers or {})
+    try:
+        response = OPENER.open(request, timeout=timeout)
+    except HTTPError as exc:
+        response = exc
+    with response:
+        return response.status, response.read()
+
+
+def api(base, path, payload=None, headers=None, timeout=3):
+    request_body = None if payload is None else json.dumps(payload).encode()
+    code, body = http(base, path, request_body, {"Content-Type": "application/json", **(headers or {})}, timeout)
+    return code, json.loads(body) if code < 300 else None
+
+
+def eventually(probe, label, timeout=20):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        result = probe()
+        if result:
+            return result
+        time.sleep(.15)
+    raise AssertionError(f"Timed out checking {label}")
+
+
+def request(lane="pilot"):
+    return {"lane": lane, "head": secrets.token_hex(20), "pull_request": 1}
+
+
+def state(job):
+    with queue.locked_ledger(LEDGER, read_only=True) as file:
+        return queue.queue_state(file, job, queue.idempotency_key(job))
+
+
+def effect(job):
+    with sqlite3.connect(EFFECTS) as db:
+        rows = db.execute("SELECT started, finished FROM effects WHERE lane=? AND head=? AND pr=?",
+                          (job["lane"], job["head"], job["pull_request"])).fetchall()
+    assert len(rows) < 2
+    return rows[0] if rows else None
+
+
+def expect_failure(call, detail):
+    try:
+        call()
+    except ValueError as exc:
+        assert detail in str(exc), str(exc)
+    else:
+        raise AssertionError(f"Expected {detail}")
+
+
+def log(message):
+    print(message, flush=True)
+
+
+@contextmanager
+def relay(target, mode):
+    """Inject loss before send or hold/drop the real backend reply."""
+    received = Event()
+    release = Event()
+    replies = []
+    requests = []
+    errors = []
+
+    class Relay(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.do_POST()
+
+        def do_POST(self):
+            requests.append(self.path)
+            try:
+                if mode == "drop-before" and "/send/" in self.path:
+                    self.connection.shutdown(socket.SHUT_RDWR)
+                    return
+                length = int(self.headers.get("Content-Length", 0))
+                code, data = http(
+                    target, self.path, self.rfile.read(length) if length else None,
+                    {"Content-Type": "application/json", "Authorization": self.headers["Authorization"],
+                     **({"Idempotency-Key": self.headers["Idempotency-Key"]} if "Idempotency-Key" in self.headers else {})},
+                )
+                replies.append((code, json.loads(data) if code < 300 else {}))
+                received.set()
+                if mode == "drop" and ("/send/" in self.path or "/trigger" in self.path):
+                    self.connection.shutdown(socket.SHUT_RDWR)
+                    return
+                if mode == "hold" and not release.wait(12):
+                    raise AssertionError("Real reply was never released")
+                self.send_response(code)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+            except Exception as exc:
+                errors.append(type(exc).__name__)
+                received.set()
+                self.send_error(502)
+
+        def log_message(self, *_args):
+            pass
+
+    with ThreadingHTTPServer(("localhost", 0), Relay) as server:
+        thread = Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            yield f"http://localhost:{server.server_port}", received, release, replies, requests
+        finally:
+            release.set()
+            server.shutdown()
+            thread.join()
+            assert not errors, errors
+
+
+def stop(process):
+    if process.poll() is None:
+        os.killpg(process.pid, signal.SIGTERM)
+        process.wait(timeout=10)
+
+
+def launch(stack, label, *args):
+    with (LEDGER.parent / label).open("a") as out:
+        process = subprocess.Popen(args, stdout=out, stderr=out, start_new_session=True)
+    stack.callback(stop, process)
+    return process
+
+
+def worker_done(backend, run, headers):
+    if backend == "hatchet":
+        _, result = api(HATCHET, f"/api/v1/stable/workflow-runs/{run}/status", headers=headers)
+        assert result not in ("FAILED", "CANCELLED"), result
+        return result == "COMPLETED"
+    try:
+        _, result = api(RESTATE, f"/restate/output/{run}")
+    except TimeoutError:
+        return False
+    return result == {"done": True}
+
+
+def acceptance(config, job):
+    started = time.monotonic()
+    receipt = queue.dispatch(config, job, LEDGER, timeout=5)
+    return receipt, round((time.monotonic() - started) * 1000)
+
+
+def check_workers(config, refused, headers):
+    for backend, policy in (("hatchet", config), ("restate", refused)):
+        jobs = [request("slow") for _ in range(3)]
+        admitted = []
+        for job in jobs:
+            before = time.time_ns() // 1_000_000
+            receipt, latency = acceptance(policy, job)
+            assert receipt["backend"] == backend
+            admitted.append((before, receipt["run"], latency))
+        intervals = []
+        for job, (before, run, latency) in zip(jobs, admitted, strict=True):
+            eventually(lambda: worker_done(backend, run, headers), f"{backend} worker completion")
+            started, finished = effect(job)
+            intervals.append((started, finished, before, latency))
+        intervals.sort()
+        assert all(a[1] <= b[0] for a, b in zip(intervals, intervals[1:])), intervals
+        log(f"{backend} slots=1: acceptance ms {[x[3] for x in intervals]}, submit-to-start ms "
+            f"{[max(0, x[0] - x[2]) for x in intervals]}, max observed concurrency 1")
+
+
+def main():
+    token = Path("hatchet-token").read_text().strip()
+    part = token.split(".")[1]
+    tenant = json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))["sub"]
+    headers = {"Authorization": "Bearer " + token}
+    os.environ.update(HATCHET_CLIENT_TOKEN=token, HATCHET_CLIENT_TLS_STRATEGY="none",
+                      HATCHET_CLIENT_HOST_PORT="localhost:57070",
+                      FO_HATCHET_PILOT=token, FO_RESTATE_PILOT="synthetic")
+    config = {
+        "hatchet": {"base_url": HATCHET, "tenant": tenant, "workflow": "queue-pilot", "token_env": "FO_HATCHET_PILOT"},
+        "restate": {"base_url": RESTATE, "service": "QueuePilot", "handler": "record",
+                    "scope": SCOPE, "token_env": "FO_RESTATE_PILOT"},
+    }
+    with sqlite3.connect(EFFECTS) as db:
+        db.execute("""CREATE TABLE effects (
+            lane TEXT, head TEXT, pr INTEGER, started INTEGER, finished INTEGER,
+            PRIMARY KEY(lane, head, pr)
+        )""")
+    with ExitStack() as stack:
+        # A bound non-listening loopback port guarantees the negative connect result.
+        listener = stack.enter_context(socket.socket())
+        listener.bind(("localhost", 0))
+        refused = deepcopy(config)
+        refused["hatchet"]["base_url"] = f"http://localhost:{listener.getsockname()[1]}"
+        hatchet_worker = launch(stack, "hatchet-worker.log", "hatchet-worker/bin/python", str(Path(__file__).with_name("hatchet_task.py")))
+        restate_worker = launch(stack, "restate-worker.log", "node", "restate-worker/restate-worker.mjs")
+        eventually(lambda: api(ADMIN, "/deployments", {"uri": "http://localhost:59080"})[0] < 300,
+                   "Restate registration")
+        restate_cli = next(Path.cwd().glob("restate-cli-*/restate"))
+        with (LEDGER.parent / "restate-rule.log").open("w") as logfile:
+            subprocess.run([restate_cli, "rules", "set", SCOPE, "--concurrency", "1"],
+                           check=True, stdout=logfile, stderr=logfile, timeout=15)
+        time.sleep(3)
+        assert hatchet_worker.poll() is None and restate_worker.poll() is None
+        check_workers(config, refused, headers)
+
+        job = request()
+        with relay(RESTATE, "pass") as (unused_restate, _, _, _, fallback_calls):
+            with relay(HATCHET, "drop") as (url, _, _, real, calls):
+                lost = deepcopy(config)
+                lost["hatchet"]["base_url"] = url
+                lost["restate"]["base_url"] = unused_restate
+                expect_failure(lambda: acceptance(lost, job), "Hatchet outcome is unknown")
+                run = queue.accepted_run("hatchet", real[0][1])
+                assert len(calls) == 1 and state(job)["backend"] == "hatchet" and state(job)["phase"] == "uncertain"
+                expect_failure(lambda: acceptance(lost, job), "was not sent again")
+                assert len(calls) == 1 and not fallback_calls
+                eventually(lambda: worker_done("hatchet", run, headers), "Hatchet accepted before lost reply")
+        trigger = f"/api/v1/stable/tenants/{tenant}/workflow-runs/trigger"
+        engine_log = Path("logs/hatchet")
+        collision_marker = "idempotency key collision"
+        previous_collisions = engine_log.read_text().lower().count(collision_marker)
+        collision, _ = api(HATCHET, trigger, {"workflowName": "queue-pilot", "input": job, "returnOnlyId": True,
+                                              "additionalMetadata": {"idempotencyKey": queue.idempotency_key(job)}}, headers)
+        assert collision == 500 and effect(job)
+        eventually(lambda: engine_log.read_text().lower().count(collision_marker) > previous_collisions,
+                   "Hatchet recorded the idempotency collision")
+        log(f"Hatchet dropped reply stayed on Hatchet and worker completed; duplicate key HTTP {collision}")
+
+        job = request()
+        with relay(RESTATE, "drop") as (url, _, _, real, calls):
+            lost = deepcopy(refused)
+            lost["restate"]["base_url"] = url
+            expect_failure(lambda: acceptance(lost, job), "Restate outcome is unknown")
+            assert state(job)["backend"] == "restate" and state(job)["phase"] == "uncertain"
+            alternate = deepcopy(lost)
+            alternate["restate"]["scope"] = "other-scope"
+            body = {"target": "idempotentInvocation", "scope": "other-scope", "service": "QueuePilot",
+                    "handler": "record", "idempotencyKey": queue.idempotency_key(job)}
+            nonexistent = api(RESTATE, "/restate/lookup", body)[1]["invocationId"]
+            assert nonexistent != queue.accepted_run("restate", real[0][1])
+            assert api(RESTATE, f"/restate/status/{nonexistent}")[0] == 404
+            expect_failure(lambda: queue.reconcile_restate(alternate, job, LEDGER), "original Restate destination")
+            assert len(calls) == 1
+            # Reconcile goes through the same relay URL; only the original send response is dropped.
+            receipt = queue.reconcile_restate(lost, job, LEDGER)
+            assert receipt["run"] == queue.accepted_run("restate", real[0][1])
+            assert calls[1:] == ["/restate/lookup", f"/restate/status/{receipt['run']}"]
+        send_path, _ = queue.restate_route(config["restate"])
+        code, duplicate = api(RESTATE, send_path, job, {"Idempotency-Key": queue.idempotency_key(job)})
+        assert code == 202 and duplicate["status"] == "PreviouslyAccepted"
+        assert duplicate["invocationId"] == receipt["run"]
+        log("Restate recovered the real invocation by scoped lookup and status; duplicate reused ID; other scope status HTTP 404")
+
+        job = request()
+        with relay(RESTATE, "drop-before") as (url, _, _, _, calls):
+            lost["restate"]["base_url"] = url
+            expect_failure(lambda: acceptance(lost, job), "Restate outcome is unknown")
+            expect_failure(lambda: queue.reconcile_restate(lost, job, LEDGER), "remains unresolved")
+            assert state(job)["phase"] == "uncertain" and len(calls) == 3
+        log("Restate returned a deterministic lookup ID even for a missing invocation; no receipt was recorded")
+
+        job = request()
+        with relay(RESTATE, "drop") as (url, _, _, real, _):
+            lost["restate"]["base_url"] = url
+            expect_failure(lambda: acceptance(lost, job), "Restate outcome is unknown")
+            run = queue.accepted_run("restate", real[0][1])
+            eventually(lambda: worker_done("restate", run, {}), "Restate completion before expiration")
+            key = queue.idempotency_key(job)
+            body.update(scope=SCOPE, idempotencyKey=key)
+            assert api(RESTATE, "/restate/lookup", body)[1]["invocationId"] == run
+            eventually(lambda: api(RESTATE, f"/restate/status/{run}")[0] == 404, "Restate receipt expiry", timeout=25)
+            expect_failure(lambda: queue.reconcile_restate(lost, job, LEDGER), "remains unresolved")
+            assert state(job)["phase"] == "uncertain"
+            expect_failure(lambda: acceptance(lost, job), "was not sent again")
+        log("Expired real Restate receipt left the original submission unresolved")
+
+        crash = request("crash")
+        receipt, _ = acceptance(refused, crash)
+        before = eventually(lambda: effect(crash), "commit before killing Restate worker")
+        restate_worker.kill()
+        restate_worker.wait(timeout=5)
+        launch(stack, "restate-worker.log", "node", "restate-worker/restate-worker.mjs")
+        eventually(lambda: worker_done("restate", receipt["run"], {}), "Restate replay after worker kill")
+        assert effect(crash) == before
+        log("Restate completed after worker restart with the original single committed effect")
+
+        job = request()
+        other = request("parallel")
+        while other["head"] == job["head"] or queue.idempotency_key(other)[-1] == queue.idempotency_key(job)[-1]:
+            other = request("parallel")
+        with relay(HATCHET, "hold") as (url, received, release, _, calls):
+            slow = deepcopy(config)
+            slow["hatchet"]["base_url"] = url
+            with ThreadPoolExecutor(max_workers=3) as workers:
+                first = workers.submit(acceptance, slow, job)
+                assert received.wait(5) and state(job)["phase"] == "pending"
+                duplicate = workers.submit(acceptance, slow, job)
+                receipt, elapsed = workers.submit(acceptance, config, other).result(timeout=4)
+                assert not first.done() and not duplicate.done()
+                release.set()
+                initial, _ = first.result(timeout=5)
+                repeat, _ = duplicate.result(timeout=5)
+            assert len(calls) == 1 and repeat["reused"] and initial["run"] == repeat["run"]
+            for run in (initial["run"], receipt["run"]):
+                eventually(lambda: worker_done("hatchet", run, headers), "Hatchet completion after overlapping dispatch")
+            assert effect(job) and effect(other)
+            log(f"Concurrent duplicate posted once; an unrelated admission finished in {elapsed} ms while the reply was held")
+
+        job = request()
+        with relay(HATCHET, "hold") as (url, received, release, real, _):
+            slow["hatchet"]["base_url"] = url
+            with ThreadPoolExecutor(max_workers=1) as workers:
+                sending = workers.submit(acceptance, slow, job)
+                assert received.wait(5)
+                pending = state(job)
+                run = queue.accepted_run("hatchet", real[0][1])
+                reconciled = {**pending, "run": run, "phase": "queued", "at": pending["at"] + 1}
+                queue.transition(LEDGER, job, pending["key"], pending, reconciled)
+                release.set()
+                expect_failure(lambda: sending.result(timeout=5), "ledger changed")
+            assert state(job) == reconciled
+            log("Late real Hatchet reply could not overwrite a newer durable receipt")
+
+
+if __name__ == "__main__":
+    main()

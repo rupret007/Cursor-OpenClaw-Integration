@@ -76,6 +76,9 @@ async function fleetAdmission() {
 
 function role(view) {
   const { lease, armed, grant } = view;
+  if (view.standalone && lease.state === 'parked') {
+    return 'Captain · this host is parked · epoch ' + lease.epoch + '.';
+  }
   const holder = lease.holder === 'first-officer' ? 'OpenClaw' : lease.holder === 'captain' ? 'Grok Bot' : 'unknown';
   const scoped = grant?.epoch === lease.epoch && holder === 'OpenClaw';
   return [
@@ -159,6 +162,7 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
     if (placed.result === 'duplicate') return 'This review request already has a captain lane. Ask for “handoff” to see the receipt.';
     if (placed.result === 'active') return 'Another captain lane is active. Ask for “handoff” to see it.';
     if (placed.result === 'stale') return 'The epoch or approval changed before dispatch. No lane was launched.';
+    if (placed.result === 'runner-unconfigured') return 'The standalone queue runner is unavailable. No review was submitted.';
     if (placed.result !== 'running') return 'The runner did not confirm launch. OpenClaw will reconcile the local receipt.';
     return 'I delegated one exact-head CI review to the configured runner. ' + jobText(placed.job);
   }
@@ -171,6 +175,7 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
         owner: turn.owner, epoch: request.epoch, message: Number(turn.ctx.messageId),
       });
       if (outcome.result === 'stale') return 'The epoch, takeover state, or owner approval changed. Check “captain status”.';
+      if (outcome.result === 'operator-transfer') return 'Use the operator handoff to transfer standalone Captain authority.';
       if (outcome.result === 'no-grant') return 'OpenClaw has no active scope grant to pause.';
       return {
         grant: 'Jeff approved Integration PR CI reviews for this epoch.',

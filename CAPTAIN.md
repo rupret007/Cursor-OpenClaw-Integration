@@ -21,7 +21,36 @@ nice -n 10 python3 -B first-officer/provision-andrea.py \\
 
 The local provisioning path connects only to the Mac. The Mac has separate restricted entries for the Nuc and the incumbent reader. The Nuc key can run one read-only summary command. Refreshes and restores on the Nuc use the same `--local-client` flag.
 
-Standalone cutover gates are still open. The current Captain controller loads the legacy conductor watchdog and launches its runner from the existing lane tree. The current release installer expects an existing Bobserver gateway pin. Both hosts need independent authority, a queue-backed runner, verified local gate and quota sources, and a clean-host installer. The Mac needs a launchd rehearsal and the Nuc needs a systemd user-service rehearsal. Exercise peer transfer with a fresh epoch, durable work receipts and exactly one Telegram account consumer. Verify that the former host cannot dispatch after transfer or restart.
+### Standalone authority rehearsal
+
+The supported standalone launcher checks the local lease and holds an exclusive lock for the lifetime of the gateway process. A transfer requires the releasing gateway to exit and its reviews to settle. The source parks before issuing a signed handoff. The recipient saves the existing work and replay history before accepting a newer epoch. Jeff grants the review scope again at that epoch. The same export can be recovered after an interrupted copy. A parked host refuses gateway startup. Rollback transfers authority in the reverse direction at a newer epoch.
+
+Rehearse with the [authority tests](tests/first_officer/test_captain.py). They use separate scratch directories and real OpenSSH Ed25519 signatures. The production launcher and operator commands below use the installed candidate, and require the approved two-host setup. Keep both host keys private and exchange only their verified public keys, saved as `peer.pub` with mode `0600`. Place each host's own key at `~/.local/state/openclaw-captain/handoff-key` inside a mode `0700` directory. After confirming the old production Telegram consumer has stopped and Jeff approves the transfer, initialize only the Mac Mini.
+
+```bash
+# Run from the Mac Mini under the intended gateway account.
+export FO_LOCAL_NODE=mac-mini
+printf '{}\\n' | python3 -I -B "$captain_state" local-initialize
+
+# The launchd or systemd service runs this command under its local account.
+python3 -I -B "$captain_state" local-run "$openclaw_bin"
+```
+
+Here `captain_state` is the candidate's `round6/runtime/segment1/captain-state.py` and `openclaw_bin` is the absolute path of the installed OpenClaw executable named `openclaw`. The service environment selects its own `FO_LOCAL_NODE`. Never launch the same bot account outside the guarded service. A lost or restored authority directory needs operator reconciliation with both hosts, because an offline peer cannot detect that the other host restored old state.
+
+For a planned transfer, pause and drain the review scope, stop the current gateway service, and obtain its exact epoch from the local authority view. Save the handoff as a private file and copy it to the paired host over a trusted connection. Keep it out of logs and source control.
+
+```bash
+umask 077
+printf '{}\\n' | python3 -I -B "$captain_state" view
+printf '{"epoch":%s}\\n' "$captain_epoch" |
+  python3 -I -B "$captain_state" local-release > "$private_handoff"
+
+# Run under the destination account with its own FO_LOCAL_NODE.
+python3 -I -B "$captain_state" local-import < "$private_handoff"
+```
+
+Standalone cutover gates are still open. Both hosts need a queue-backed review runner, verified local gate and quota sources, and a clean-host installer. The Mac needs a launchd rehearsal and the Nuc needs a systemd user-service rehearsal. Verify the guarded launcher and full Telegram suite on each host, including a peer transfer and rollback. The existing Bobserver install procedure serves the legacy profile.
 
 ## Daily commands
 

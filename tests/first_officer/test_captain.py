@@ -1,6 +1,10 @@
 from contextlib import contextmanager
 import importlib.util
+import os
 from pathlib import Path
+import subprocess
+import sys
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -112,3 +116,139 @@ def test_failed_launch_is_persisted_through_a_restart_and_cannot_be_replayed(cap
     finished = reopened.finish({"lane": job["lane"], "state": "worker-failed"})
     assert finished["job"]["delivery"] == "delivery-unverified"
     assert reopened.submit(plan) == {"result": "duplicate"}
+
+
+def test_standalone_handoff_signed_and_restart_safe(captain, tmp_path):
+    module, _, _ = captain
+    mac_root = tmp_path / "mac"
+    nuc_root = tmp_path / "nuc"
+
+    def prepared(root, node):
+        root.mkdir(mode=0o700)
+        subprocess.run(["/usr/bin/ssh-keygen", "-q", "-t", "ed25519", "-N", "",
+                        "-f", str(root / "handoff-key")], check=True, capture_output=True)
+        authority = module.StandaloneAuthority(node, root)
+        return authority, module.Controller(authority, private=root / "reviews")
+
+    mac, mac_reviews = prepared(mac_root, "mac-mini")
+    nuc, nuc_reviews = prepared(nuc_root, "nucbox")
+    for target, source in ((mac_root, nuc_root), (nuc_root, mac_root)):
+        (target / "peer.pub").write_bytes((source / "handoff-key.pub").read_bytes())
+        (target / "peer.pub").chmod(0o600)
+
+    with pytest.raises(ValueError, match="uninitialized Mac"):
+        nuc.initialize()
+    assert not nuc_reviews.view()["armed"]
+    assert mac.initialize() == {"epoch": 1}
+
+    owner = "123456"
+    grant = {"message": 100, "epoch": 1, "owner": owner}
+    assert mac_reviews.control("grant", grant) == {"result": "grant"}
+    assert mac_reviews.control("handback", {**grant, "message": 102}) == {"result": "operator-transfer"}
+
+    review = {"owner": owner, "message": 101, "lane": "fo-ci-" + "a" * 24,
+              "state": "running", "pr": 33, "head": "a" * 40, "epoch": 1, "ci": "passing"}
+    with mac_reviews.locked(write=True) as data:
+        data["jobs"].append(review)
+    with pytest.raises(ValueError, match="active review"):
+        mac.release(1, mac_reviews.locked)
+    assert mac_reviews.view()["armed"]
+
+    mac_reviews.finish({"lane": review["lane"], "state": "verified"})
+    receipt = mac.release(1, mac_reviews.locked)
+    assert mac_reviews.control("grant", {**grant, "message": 103}) == {"result": "stale"}
+    assert not mac_reviews.view()["armed"]
+    assert mac.release(1, mac_reviews.locked) == receipt
+    modified = {**receipt, "transfer": {**receipt["transfer"], "epoch": 3}}
+    with pytest.raises(subprocess.CalledProcessError):
+        nuc.accept(modified, nuc_reviews.file, nuc_reviews.locked)
+    assert not nuc_reviews.view()["armed"]
+    assert nuc.accept(receipt, nuc_reviews.file, nuc_reviews.locked) == {"epoch": 2}
+
+    restarted = module.StandaloneAuthority("nucbox", nuc_root)
+    nuc_reviews = module.Controller(restarted, private=nuc_root / "reviews")
+    view = nuc_reviews.view()
+    assert view["armed"] and view["lease"]["epoch"] == 2
+    assert view["jobs"][0]["state"] == "verified"
+    assert view["jobs"][0]["delivery"] == "delivery-unverified"
+    assert view["grant"] is None
+    assert nuc_reviews.control("grant", grant) == {"result": "stale"}
+    with pytest.raises(ValueError, match="stale"):
+        restarted.accept(receipt, nuc_reviews.file, nuc_reviews.locked)
+    assert not mac_reviews.view()["armed"]
+
+    rollback = restarted.release(2, nuc_reviews.locked)
+    assert mac.accept(rollback, mac_reviews.file, mac_reviews.locked) == {"epoch": 3}
+    assert mac_reviews.view()["armed"] and not nuc_reviews.view()["armed"]
+    with pytest.raises(ValueError, match="stale"):
+        restarted.accept(receipt, nuc_reviews.file, nuc_reviews.locked)
+    with pytest.raises(ValueError, match="uninitialized Mac"):
+        mac.initialize()
+
+
+def test_standalone_transfer_waits_for_gateway_child_after_supervisor_exit(captain, tmp_path):
+    module, _, _ = captain
+    root = tmp_path / "authority"
+    root.mkdir(mode=0o700)
+    for key in ("handoff-key", "peer"):
+        subprocess.run(["/usr/bin/ssh-keygen", "-q", "-t", "ed25519", "-N", "",
+                        "-f", str(root / key)], check=True, capture_output=True)
+    (root / "peer.pub").chmod(0o600)
+    authority = module.StandaloneAuthority("mac-mini", root)
+    controller = module.Controller(authority, private=root / "reviews")
+    gateway = tmp_path / "openclaw"
+    gateway.write_text(
+        f"#!{sys.executable}\n"
+        "import os, time\n"
+        "from pathlib import Path\n"
+        f"Path({str(tmp_path / 'pid')!r}).write_text(str(os.getpid()))\n"
+        "time.sleep(30)\n"
+    )
+    gateway.chmod(0o700)
+    with pytest.raises(ValueError, match="parked"):
+        authority.run_gateway(gateway)
+    authority.initialize()
+    launcher = (
+        "import importlib.util, sys; from pathlib import Path; "
+        "s = importlib.util.spec_from_file_location('captain_state', sys.argv[1]); "
+        "m = importlib.util.module_from_spec(s); s.loader.exec_module(m); "
+        "sys.exit(m.StandaloneAuthority('mac-mini', Path(sys.argv[2])).run_gateway(Path(sys.argv[3])))"
+    )
+    supervisor = subprocess.Popen([sys.executable, "-B", "-c", launcher, module.__file__, str(root), str(gateway)])
+    pid = None
+    try:
+        pid_path = tmp_path / "pid"
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                pid = int(pid_path.read_text())
+                break
+            except (FileNotFoundError, ValueError):
+                time.sleep(0.02)
+        assert pid is not None
+        with pytest.raises(BlockingIOError):
+            authority.release(1, controller.locked)
+        supervisor.kill()
+        supervisor.wait(timeout=5)
+        with pytest.raises(BlockingIOError):
+            authority.release(1, controller.locked)
+    finally:
+        if supervisor.poll() is None:
+            supervisor.kill()
+            supervisor.wait(timeout=5)
+        if pid is not None:
+            try:
+                os.kill(pid, 15)
+            except ProcessLookupError:
+                pass
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            assert authority.release(1, controller.locked)["transfer"]["epoch"] == 2
+            break
+        except BlockingIOError:
+            time.sleep(0.02)
+    else:
+        pytest.fail("Gateway child retained the handoff lock after exiting")
+    with pytest.raises(ValueError, match="parked"):
+        authority.run_gateway(gateway)

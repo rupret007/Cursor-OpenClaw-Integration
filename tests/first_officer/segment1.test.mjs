@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import { budgets, classifyRequest, createDispatch } from '../../first-officer/segment1/dispatch.mjs';
 import { answerSimple, fastModelRef, routeOwnerModel, standaloneSimple } from '../../first-officer/segment1/model-router.mjs';
 import { registerSegmentOne } from '../../first-officer/segment1/register.mjs';
-import { fleetStatus, openPullRequests, readFleetSnapshot, summarizeAndrea } from '../../first-officer/segment1/tools.mjs';
+import { fleetStatus, openPullRequests, readFleetSnapshot, standaloneGateStatus, summarizeAndrea } from '../../first-officer/segment1/tools.mjs';
 import { andreaCommand, parseAndreaSummary } from '../../first-officer/segment1/andrea-ssh.mjs';
 import { readMacAndrea, runMacAndrea } from '../../first-officer/segment1/andrea-mac.mjs';
 
@@ -302,6 +302,17 @@ test('a Nuc Captain never presents its local load or a legacy snapshot as Bobser
     ts: now / 1000, host: { node: 'nucbox', heavy_jobs: 1 }, lane_counts: { running: 1 },
   });
   assert.match(await fleetStatus({}, { ...options, read: localSnapshot }), /NucBox.*1 heavy jobs/);
+});
+
+test('standalone gate status requires current evidence from the active host', async () => {
+  const ts = 1_800_000_000;
+  const base = { ts, host: { node: 'mac-mini' }, gate: { hold: true, running: false } };
+  const options = { now: () => ts * 1000, local: 'mac-mini' };
+  assert.match(await standaloneGateStatus({ ...options, read: async () => base }), /HOLD is active/);
+  await assert.rejects(standaloneGateStatus({ ...options, local: 'nucbox', read: async () => base }), /unavailable/);
+  await assert.rejects(standaloneGateStatus({ ...options, read: async () => ({ ...base, ts: ts - 301 }) }),
+    /unavailable/);
+  await assert.rejects(standaloneGateStatus({ ...options, read: async () => ({ ...base, gate: {} }) }), /unavailable/);
 });
 
 test('GitHub uses one live query and binds CI to the exact visible head', async () => {

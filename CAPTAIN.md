@@ -50,7 +50,15 @@ printf '{"epoch":%s}\\n' "$captain_epoch" |
 python3 -I -B "$captain_state" local-import < "$private_handoff"
 ```
 
-Standalone cutover gates are still open. Both hosts need a queue-backed review runner, verified local gate and quota sources, and a clean-host installer. The Mac needs a launchd rehearsal and the Nuc needs a systemd user-service rehearsal. Verify the guarded launcher and full Telegram suite on each host, including a peer transfer and rollback. The existing Bobserver install procedure serves the legacy profile.
+### Standalone review queue
+
+The standalone review uses the same Hatchet and Restate dispatcher from the [isolated queue pilot](QUEUE-PILOT.md). It requires a mode `0600` `queue.json` file beside the standalone authority. Use the queue policy format in [INSTALL.md](INSTALL.md#queue-a-review-lane) and set the Hatchet workflow to `fo-captain-review`, the Restate service to `CaptainReview`, and the handler to `verify`. Use a dedicated scope with a concurrency limit of one for the Restate review worker. Load the ingress credentials in the gateway's private service environment.
+
+The packaged worker adapters are under `round6/runtime/segment1/queue-runtime/workers`. Point `FO_CAPTAIN_REVIEW_SCRIPT` at the absolute path of that release's `round6/runtime/segment1/review-worker.mjs`. Run the Hatchet adapter with `hatchet-sdk==2.0.0a6` in its own venv. Use `@restatedev/restate-sdk@1.15.0` beside a private copy of the Restate adapter and register its loopback endpoint with the local Restate node. The worker uses the local read-only GitHub CLI. Both adapters verify the exact queued head and return the lane, PR, head, and CI result. Neither uses a model. A queue acceptance receipt is shown while the worker runs. A missing or uncertain receipt stays visible and blocks a repeat dispatch or handoff until it is resolved.
+
+The standalone registry requires current local gate and capacity evidence. Publish a snapshot from the local collector with the correct `local_node`, actual `heavy_jobs` and configured `heavy_max`, plus the observed `gate.hold` and `gate.running` booleans. A missing or stale snapshot disables review admission. The snapshot publisher does not act as a collector.
+
+Standalone cutover gates still include the installed Mac launchd and Nuc systemd service definitions, live gate and quota collectors, and the full Telegram checklist on each host. Verify both peer transfer and rollback using those service definitions. The existing Bobserver install procedure serves the legacy profile.
 
 ## Daily commands
 

@@ -92,6 +92,11 @@ function jobText(job) {
   const identity = 'Integration PR #' + job.pr + ' · ' + job.head.slice(0, 8) + ' · ' + job.lane + '.';
   if (active.has(job.state) && job.overtime) return identity +
     'The runner exceeded its deadline and remains active. Jeff can inspect the local lane.';
+  if (active.has(job.state) && job.queuePhase && job.queuePhase !== 'queued') {
+    return identity + ' Queue acceptance is unresolved' + (job.backend ? ' on ' + job.backend : '') + '.';
+  }
+  if (active.has(job.state) && job.backend) return identity + ' Accepted by ' + job.backend +
+    ' ' + Math.max(0, Math.floor(Date.now() / 1000) - job.acceptedAt) + 's ago. Awaiting worker completion.';
   if (active.has(job.state)) return identity + ' Runner active. OpenClaw is checking for a terminal receipt.';
   return identity + ' ' + terminal[job.state];
 }
@@ -146,7 +151,7 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
       return blocked('ci-pending', blockers['ci-pending'], result.head);
     }
     if (fleet) return blocked('fleet', fleet + ' No lane was launched.');
-    if (gate === registry.gate.failure || /HOLD is active|couldn’t verify/i.test(gate ?? '')) {
+    if (gate === registry.gate.failure || /HOLD is active|full gate is running|couldn’t verify/i.test(gate ?? '')) {
       return blocked('gate', gate + '\nNo lane was launched.');
     }
     if (quota?.allowed !== true) {
@@ -163,8 +168,11 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
     if (placed.result === 'active') return 'Another captain lane is active. Ask for “handoff” to see it.';
     if (placed.result === 'stale') return 'The epoch or approval changed before dispatch. No lane was launched.';
     if (placed.result === 'runner-unconfigured') return 'The standalone queue runner is unavailable. No review was submitted.';
-    if (placed.result !== 'running') return 'The runner did not confirm launch. OpenClaw will reconcile the local receipt.';
-    return 'I delegated one exact-head CI review to the configured runner. ' + jobText(placed.job);
+    if (placed.result !== 'running') return placed.job?.queuePhase
+      ? jobText(placed.job)
+      : 'The runner did not confirm launch. OpenClaw will reconcile the local receipt.';
+    return (placed.job.backend ? 'The queue accepted one exact-head CI review. ' :
+      'I delegated one exact-head CI review to the configured runner. ') + jobText(placed.job);
   }
 
   async function run(request, turn) {
@@ -192,7 +200,8 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
       return [view ? role(view) + '\n' + decisions(view).split('\n')[0] +
         (view.active ? '\n' + jobText(view.active) : '') :
         'Captain authority and decisions are unavailable.', ...evidence,
-        quota ? 'Captain runner quota · ' + quota.session.used + '% of 5-hour window · ' + quota.weekly.used + '% of weekly window.'
+        quota?.modelFree ? 'Captain CI review uses a model-free worker.' :
+          quota ? 'Captain runner quota · ' + quota.session.used + '% of 5-hour window · ' + quota.weekly.used + '% of weekly window.'
           : 'The captain runner’s subscription quota is unavailable.'].join('\n\n');
     }
     const view = await viewPromise;
@@ -226,7 +235,7 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
     }
     const receipt = await state('poll', { lane: job.lane });
     const expired = now() - job.started * 1000 > 20 * 60_000;
-    if (receipt.worker === 'running') {
+    if (receipt.worker === 'running' || receipt.worker === 'unresolved') {
       if (expired && !job.overtime) {
         const notice = await state('overtime', { lane: job.lane });
         if (notice.job) await deliver(jobText(notice.job), notice.job.owner);

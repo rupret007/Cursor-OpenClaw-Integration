@@ -6,7 +6,7 @@ import { sshAndreaSummary } from './andrea-ssh.mjs';
 import { createCaptain } from './captain.mjs';
 import { classifyRequest, createDispatch } from './dispatch.mjs';
 import { answerSimple, standaloneSimple } from './model-router.mjs';
-import { fleetStatus, localFleetNode, openPullRequests, summarizeAndrea } from './tools.mjs';
+import { fleetStatus, localFleetNode, openPullRequests, readIntegrationGithub, standaloneGateStatus, summarizeAndrea } from './tools.mjs';
 
 const account = 'default';
 const expectedGithubAccount = 'rupret007';
@@ -90,7 +90,8 @@ function andreaReader(signal, { readPrivateConfig, createAndreaReader }) {
 }
 
 function toolRegistry(api, commands, liveConfig, services) {
-  const { gateStatus, quotaStatus, githubReply, redacted } = services;
+  const { quotaStatus, githubReply, redacted } = services;
+  const gateStatus = () => localFleetNode() === 'bobserver' ? services.gateStatus() : standaloneGateStatus();
   const memory = (request, turn) => memoryReply(api, commands, liveConfig, request, turn);
   return {
     fleet: {
@@ -169,7 +170,8 @@ export function registerSegmentOne(api, commands, services) {
   };
   const registry = toolRegistry(api, commands, liveConfig, services);
   if (services.getGithub) {
-    const captain = createCaptain({ registry, get: services.getGithub });
+    const readCI = localFleetNode() === 'bobserver' ? services.getGithub : readIntegrationGithub;
+    const captain = createCaptain({ registry, get: readCI });
     registry.captain = {
       run: async (request, turn) => plain(await captain.run(request, turn)),
       failure: 'Captain state or evidence is unavailable. Check “captain status” before retrying.',

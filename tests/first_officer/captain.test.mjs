@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createCaptain, integrationCI } from '../../first-officer/segment1/captain.mjs';
+import { verifyReview } from '../../first-officer/segment1/review-worker.mjs';
 import { classifyRequest } from '../../first-officer/segment1/dispatch.mjs';
 import { diagnoseMacAndrea, diagnoseMacAndreaSync, runMacAndrea } from '../../first-officer/segment1/andrea-mac.mjs';
 import { andreaCommand, parseAndreaSummary } from '../../first-officer/segment1/andrea-ssh.mjs';
@@ -36,6 +37,14 @@ test('captain CI proof rejects an old tested head and a PR that changes mid-read
   assert.deepEqual(await integrationCI(33, readFixture({ latest: other })), { head, ci: 'changed' });
   assert.deepEqual(await integrationCI(33, readFixture({ tested: other })), { head, ci: 'unavailable' });
   assert.deepEqual(await integrationCI(33, readFixture({ conclusion: 'failure' })), { head, ci: 'failing' });
+});
+
+test('the queue worker independently verifies the queued PR head', async () => {
+  const request = { lane: 'fo-ci-' + 'a'.repeat(24), head, pull_request: 33 };
+  assert.deepEqual(await verifyReview(request, { read: readFixture() }),
+    { lane: request.lane, pr: 33, head, ci: 'passing' });
+  await assert.rejects(verifyReview(request, { read: readFixture({ latest: other }) }), /terminal evidence/);
+  await assert.rejects(verifyReview({ ...request, execution: 'deploy' }, { read: readFixture() }), /Invalid Captain/);
 });
 
 test('captain brief uses live tools and a paused or stale grant cannot reach submission', async () => {

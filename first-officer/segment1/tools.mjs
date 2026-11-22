@@ -52,6 +52,17 @@ export function fleetSnapshotIsLocal(snapshot, local = localFleetNode()) {
   return Boolean(snapshot?.host) && (snapshot.host.node ?? 'bobserver') === local;
 }
 
+export async function standaloneGateStatus({ read = readFleetSnapshot, now = Date.now, local = localFleetNode() } = {}) {
+  const snapshot = await read();
+  const gate = snapshot?.gate;
+  if (!fleetSnapshotIsLocal(snapshot, local) || !recent(snapshot.ts * 1000, now()) ||
+      typeof gate?.hold !== 'boolean' || typeof gate?.running !== 'boolean') {
+    throw new Error('Current local gate evidence is unavailable');
+  }
+  const state = gate.hold ? 'HOLD is active' : gate.running ? 'Full gate is running' : 'Gate is idle';
+  return state + ' · observed ' + stamp(snapshot.ts * 1000) + '.';
+}
+
 export async function fleetStatus({ node, localOnly }, {
   read = readFleetSnapshot, load = loadavg, now = Date.now, local = localFleetNode(),
 } = {}) {
@@ -120,21 +131,35 @@ const checks = new Map([
   ['PENDING', 'pending'], ['EXPECTED', 'expected checks pending'],
 ]);
 
-async function queryGithub(query, signal) {
-  let github = '/usr/bin/gh';
-  if (process.platform === 'darwin') {
-    const candidates = ['/opt/homebrew/bin/gh', '/usr/local/bin/gh'];
-    const installed = await Promise.all(candidates.map((path) => access(path, constants.X_OK).then(() => path, () => null)));
-    github = installed.find(Boolean);
-    if (!github) throw new Error('The local GitHub CLI is unavailable');
-  }
+async function githubCli(args, signal) {
+  const candidates = process.platform === 'darwin'
+    ? ['/opt/homebrew/bin/gh', '/usr/local/bin/gh']
+    : ['/usr/bin/gh', join(homedir(), '.local/bin/gh')];
+  const installed = await Promise.all(candidates.map((path) =>
+    access(path, constants.X_OK).then(() => path, () => null)));
+  const github = installed.find(Boolean);
+  if (!github) throw new Error('The local GitHub CLI is unavailable');
   const { stdout } = await exec('/usr/bin/nice', [
-    '-n', '10', github, 'api', 'graphql', '--hostname', 'github.com', '-f', 'query=' + query,
+    '-n', '10', github, 'api', ...args, '--hostname', 'github.com',
   ], {
     timeout: 8000, killSignal: 'SIGKILL', maxBuffer: 128 * 1024, signal,
     env: { HOME: homedir(), PATH: '/usr/bin:/bin', GH_PROMPT_DISABLED: '1' },
   });
   return JSON.parse(stdout);
+}
+
+function queryGithub(query, signal) {
+  return githubCli(['graphql', '-f', 'query=' + query], signal);
+}
+
+export function readIntegrationGithub(path, signal) {
+  const prefix = 'repos/rupret007/Cursor-OpenClaw-Integration/';
+  const route = path.slice(prefix.length);
+  if (!path.startsWith(prefix) ||
+      !/^(?:pulls\/[1-9]\d{0,7}|commits\/[a-f0-9]{40}\/check-runs\?per_page=100&filter=latest)$/.test(route)) {
+    throw new Error('The GitHub route is outside the CI review scope');
+  }
+  return githubCli([path], signal);
 }
 
 export async function openPullRequests(signal, { query = queryGithub, expectedLogin } = {}) {

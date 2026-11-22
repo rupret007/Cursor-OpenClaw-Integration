@@ -15,6 +15,7 @@ import sys
 import tempfile
 import time
 from types import SimpleNamespace
+from urllib.request import Request
 
 
 HOME = Path.home()
@@ -246,6 +247,99 @@ class StandaloneAuthority:
         return {"epoch": bundle["epoch"]}
 
 
+class CaptainQueue:
+    """Use the reviewed dispatcher and its local receipt for standalone reviews."""
+
+    def __init__(self, root):
+        source = Path(__file__).with_name("queue-runtime") / "lanes/queue.py"
+        if not source.is_file():
+            source = Path(__file__).resolve().parents[1] / "lanes/queue.py"
+        spec = importlib.util.spec_from_file_location("fo_captain_queue", source)
+        self.queue = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.queue)
+        self.policy = root / "queue.json"
+        self.ledger = root / "queue-receipts.jsonl"
+
+    def config(self):
+        config = self.queue.validate_config(read_private(self.policy, 4096))
+        if (config["hatchet"]["workflow"], config["restate"]["service"], config["restate"]["handler"]) != (
+                "fo-captain-review", "CaptainReview", "verify"):
+            raise ValueError("Expected the reviewed, model-free Captain worker routes")
+        return config
+
+    @staticmethod
+    def request(job):
+        return {"lane": job["lane"], "head": job["head"], "pull_request": job["pr"]}
+
+    def start(self, job, config):
+        try:
+            return self.queue.dispatch(config, self.request(job), self.ledger, timeout=3)
+        except (OSError, ValueError):
+            return self.receipt(job)
+
+    def receipt(self, job):
+        request = self.request(job)
+        key = self.queue.idempotency_key(request)
+        try:
+            with self.queue.locked_ledger(self.ledger, read_only=True) as file:
+                return self.queue.queue_state(file, request, key)
+        except FileNotFoundError:
+            return None
+
+    def poll(self, job):
+        receipt = self.receipt(job)
+        if receipt is None:
+            return {"worker": "unresolved"}
+        backend, phase = receipt["backend"], receipt["phase"]
+        metadata = {"backend": backend, "accepted": phase == "queued",
+                    "age": max(0, int(time.time()) - receipt["at"])}
+        if phase != "queued":
+            result = "missing-result" if phase == "refused" and backend == "restate" else "unresolved"
+            return {"worker": result, **metadata}
+
+        try:
+            route = self.config()[backend]
+            args, target = self.queue.submission(backend, route, self.request(job), receipt["key"])
+            if target != receipt["target"]:
+                return {"worker": "unresolved", **metadata}
+            opener, _, headers, _ = args
+            base = route["base_url"].rstrip("/")
+            run = receipt["run"]
+            if backend == "hatchet":
+                status_url = f"{base}/api/v1/stable/workflow-runs/{run}"
+                status = self.queue.response_json(opener, Request(
+                    status_url + "/status", headers=headers), 1, str)
+                if status in ("QUEUED", "RUNNING"):
+                    return {"worker": "running", **metadata}
+                completed = status == "COMPLETED"
+                failed = status in ("FAILED", "CANCELLED")
+            else:
+                headers = {"Authorization": headers["Authorization"]}
+                status_url = f"{base}/restate/output/{run}"
+                status = self.queue.response_json(opener, Request(
+                    f"{base}/restate/status/{run}", headers=headers), 1)
+                if status.get("stage") in ("created", "started"):
+                    return {"worker": "running", **metadata}
+                failed = status.get("stage") == "completed" and "error" in status
+                completed = status.get("stage") == "completed" and not failed
+            if not completed:
+                return {"worker": "missing-result" if failed else "unresolved", **metadata}
+            result = self.queue.response_json(opener, Request(status_url, headers=headers), 1)
+        except (OSError, ValueError, self.queue.Refusal, self.queue.Uncertain):
+            return {"worker": "unresolved", **metadata}
+        if backend == "hatchet":
+            run_details = result.get("run")
+            run_metadata = run_details.get("metadata") if isinstance(run_details, dict) else None
+            if not isinstance(run_metadata, dict) or run_metadata.get("id") != run:
+                return {"worker": "invalid-result", **metadata}
+            result = run_details.get("output")
+        if not isinstance(result, dict) or result.keys() != {"lane", "pr", "head", "ci"}:
+            return {"worker": "invalid-result", **metadata}
+        if any(result[key] != job[key] for key in ("lane", "pr", "head")) or result["ci"] not in ("passing", "failing"):
+            return {"worker": "invalid-result", **metadata}
+        return {"worker": "settled", "head": result["head"], "ci": result["ci"], **metadata}
+
+
 class Controller:
     def __init__(self, watchdog, *, private=None):
         self.watchdog = watchdog
@@ -258,6 +352,7 @@ class Controller:
         if not private_directory(self.private):
             raise ValueError("Captain state is not private")
         self.file = self.private / "state.json"
+        self.queue = CaptainQueue(watchdog.AUTHORITY) if self.standalone else None
 
     @contextmanager
     def locked(self, write=False):
@@ -284,12 +379,19 @@ class Controller:
         record = self.fence.status()
         if not record:
             raise ValueError("No authority lease")
+        active = next((job for job in data["jobs"] if job["state"] in ("launching", "running")), None)
+        if self.queue is not None and active is not None:
+            receipt = self.queue.receipt(active)
+            phase = receipt["phase"] if receipt else "unseen"
+            active = {**active, "queuePhase": phase}
+            if receipt:
+                active.update(backend=receipt["backend"], acceptedAt=receipt["at"])
         return {"lease": {"holder": record.holder, "state": record.state, "epoch": record.epoch},
                 "armed": self.watchdog.enabled() and (not self.standalone or record.state == "held"),
                 "grant": data["grant"], "blocked": data.get("blocked"),
                 **({"standalone": self.watchdog.node} if self.standalone else {}),
                 "jobs": data["jobs"][-5:],
-                "active": next((job for job in data["jobs"] if job["state"] in ("launching", "running")), None)}
+                "active": active}
 
     def handoff(self):
         with self.locked(write=True) as data:
@@ -381,8 +483,11 @@ class Controller:
             if any(row["state"] in ("launching", "running") for row in data["jobs"]):
                 return {"result": "active"}
 
-            if self.standalone:
-                return {"result": "runner-unconfigured"}
+            if self.queue is not None:
+                try:
+                    queue_config = self.queue.config()
+                except (OSError, ValueError):
+                    return {"result": "runner-unconfigured"}
 
             job = {"lane": lane, "pr": pr, "head": head, "ci": ci, "epoch": epoch,
                    "state": "launching", "started": int(time.time()), "delivery": None,
@@ -393,6 +498,15 @@ class Controller:
             # Persist the reservation while holding the scope lock. A crash or
             # uncertain launch never causes a second spawn for this head.
             save(self.file, data)
+            if self.queue is not None:
+                receipt = self.queue.start(job, queue_config)
+                job["queuePhase"] = receipt["phase"] if receipt else "unseen"
+                if receipt:
+                    job["backend"] = receipt["backend"]
+                    job["acceptedAt"] = receipt["at"]
+                    if receipt["phase"] == "queued":
+                        job["state"] = "running"
+                return {"result": job["state"], "job": job}
             root = LANES / "first-officer-captain-prompts"
             root.mkdir(mode=0o700, exist_ok=True)
             info = root.lstat()
@@ -432,6 +546,10 @@ class Controller:
     def poll(self, lane):
         if not LANE.fullmatch(lane):
             raise ValueError("Invalid lane")
+        if self.queue is not None:
+            with self.locked() as data:
+                job = next((row for row in data["jobs"] if row["lane"] == lane), None)
+            return self.queue.poll(job) if job else {"worker": "unresolved"}
         directory = LANES / "first-officer-codex" / lane
         if directory.resolve() != directory or (directory / "workspace").resolve() != directory / "workspace":
             return {"worker": "invalid-result"}
@@ -520,7 +638,8 @@ def main():
         if entry == "local-import":
             return authority.accept(req, controller.file, controller.locked)
         if entry == "runner-quota":
-            raise ValueError("Standalone runner quota is unavailable")
+            controller.queue.config()
+            return {"allowed": True, "modelFree": True}
     else:
         sys.path.insert(0, str(RUNNER))
         import conductor_watchdog

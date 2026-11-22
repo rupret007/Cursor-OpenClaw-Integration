@@ -698,3 +698,60 @@ def test_rollback_restores_the_prior_pair_when_the_production_seal_is_required(t
     assert (config.read_bytes(), pin.read_bytes()) == original
     assert candidate[0] not in started
     assert all(payload == original[0] for payload in started)
+
+
+def test_standalone_service_pins_the_same_guard_on_both_hosts(tmp_path):
+    import hashlib
+    import plistlib
+    from types import SimpleNamespace
+
+    repo = Path(__file__).resolve().parents[2]
+    spec = importlib.util.spec_from_file_location("standalone_install", repo / "first-officer/standalone.py")
+    standalone = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(standalone)
+    files = {
+        standalone.RUNTIME: (repo / "first-officer/segment1/captain-state.py").read_bytes(),
+        "first-officer-exec-guard.mjs": b"fixture guard",
+        "round6/runtime/first-officer-conductor.mjs": b"fixture conductor",
+    }
+    inventory = "".join(f"{hashlib.sha256(data).hexdigest()}  {name}\n" for name, data in files.items()).encode()
+    release = tmp_path / ("first-officer-" + hashlib.sha256(inventory).hexdigest())
+    for name, data in files.items():
+        target = release / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+    (release / "SHA256SUMS").write_bytes(inventory)
+    config = tmp_path / "test config.json"
+    state = tmp_path / "test-state"
+    secrets = tmp_path / "gateway-env.json"
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    state.mkdir(mode=0o700)
+    for name in ("python3", "node", "openclaw"):
+        bin_path = runtime / name
+        bin_path.write_text("fixture")
+        bin_path.chmod(0o700)
+    config.write_text(json.dumps({"plugins": {"load": {"paths": [str(release / name) for name in files if name.endswith(".mjs")]}}}))
+    config.chmod(0o600)
+    secrets.write_text(json.dumps({"OPENCLAW_LITELLM_API_KEY": "fixture-setting"}))
+    secrets.chmod(0o600)
+
+    def validate(argv, **options):
+        assert argv == [str(runtime / "openclaw"), "config", "validate"]
+        assert options["env"]["OPENCLAW_CONFIG_PATH"] == str(config)
+        assert options["env"]["OPENCLAW_LITELLM_API_KEY"] == "fixture-setting"
+        return SimpleNamespace(returncode=0)
+
+    arguments = (release, runtime / "python3", runtime / "node", runtime / "openclaw", config, state, secrets, validate)
+    mac = standalone.prepare("mac-mini", *arguments)
+    nuc = standalone.prepare("nucbox", *arguments)
+    plist = plistlib.loads(mac)
+    assert plist["EnvironmentVariables"]["FO_LOCAL_NODE"] == "mac-mini"
+    assert plist["ProgramArguments"][3:] == [str(release / standalone.RUNTIME), "local-run",
+                                            str(runtime / "openclaw"), str(secrets)]
+    assert 'Environment="FO_LOCAL_NODE=nucbox"' in nuc.decode()
+    assert f'"{release / standalone.RUNTIME}" "local-run"' in nuc.decode()
+    assert b"fixture-setting" not in mac + nuc
+    secrets.write_text(json.dumps({"FO_LOCAL_NODE": "bobserver"}))
+    with pytest.raises(ValueError, match="environment file is invalid"):
+        standalone.prepare("nucbox", *arguments)

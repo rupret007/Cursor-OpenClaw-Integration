@@ -84,6 +84,20 @@ def check_epoch(epoch):
     return epoch
 
 
+class StandaloneParked(ValueError):
+    """The host has deliberately yielded authority."""
+
+
+def gateway_environment(path):
+    settings = read_private(path, 16 * 1024)
+    allowed = {"OPENCLAW_LITELLM_API_KEY", "FO_HATCHET_LANE_TOKEN", "FO_RESTATE_LANE_TOKEN", "FO_QUEUE_HOSTS"}
+    if not isinstance(settings, dict) or not settings.keys() <= allowed or any(
+            not isinstance(value, str) or not value or len(value) > 4096 or
+            any(character.isspace() for character in value) for value in settings.values()):
+        raise ValueError("The standalone gateway environment file is invalid")
+    return {**os.environ, **settings}
+
+
 class StandaloneAuthority:
     """Move authority with a signed handoff after parking the source host."""
 
@@ -117,15 +131,15 @@ class StandaloneAuthority:
     def _locked(self):
         return self._lock("authority.lock")
 
-    def run_gateway(self, executable):
+    def run_gateway(self, executable, environment=None):
         if not executable.is_absolute() or executable.name != "openclaw":
             raise ValueError("Expected the installed OpenClaw executable")
         with self._lock("gateway.lock") as lease_fd:
             if self.status().state != "held":
-                raise ValueError("This host is parked")
+                raise StandaloneParked("This host is parked")
 
             # The child retains the lock if the supervisor is interrupted.
-            child = subprocess.Popen([str(executable), "gateway", "run"], pass_fds=(lease_fd,))
+            child = subprocess.Popen([str(executable), "gateway", "run"], pass_fds=(lease_fd,), env=environment)
 
             def forward(signum, _frame):
                 if child.poll() is None:
@@ -619,10 +633,15 @@ def main():
     if node not in (*LOCAL_NODES, "bobserver"):
         raise ValueError("Unknown Captain host")
     if entry == "local-run":
-        if len(sys.argv) != 3:
-            raise ValueError("Expected an OpenClaw executable path")
+        if len(sys.argv) not in (3, 4):
+            raise ValueError("Expected an OpenClaw executable and optional private environment")
         authority = StandaloneAuthority(node, LOCAL_AUTHORITY)
-        raise SystemExit(authority.run_gateway(Path(sys.argv[2])))
+        environment = gateway_environment(Path(sys.argv[3])) if len(sys.argv) == 4 else None
+        try:
+            raise SystemExit(authority.run_gateway(Path(sys.argv[2]), environment))
+        except StandaloneParked:
+            print("Standalone Captain is parked.")
+            raise SystemExit(0) from None
     limit = TRANSFER_LIMIT if entry == "local-import" else 4096
     raw = sys.stdin.buffer.read(limit + 1)
     if len(raw) > limit:

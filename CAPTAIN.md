@@ -58,7 +58,43 @@ The packaged worker adapters are under `round6/runtime/segment1/queue-runtime/wo
 
 The standalone registry requires current local gate and capacity evidence. Publish a snapshot from the local collector with the correct `local_node`, actual `heavy_jobs` and configured `heavy_max`, plus the observed `gate.hold` and `gate.running` booleans. A missing or stale snapshot disables review admission. The snapshot publisher does not act as a collector.
 
-Standalone cutover gates still include the installed Mac launchd and Nuc systemd service definitions, live gate and quota collectors, and the full Telegram checklist on each host. Verify both peer transfer and rollback using those service definitions. The existing Bobserver install procedure serves the legacy profile.
+### Prepare the native service
+
+Render the unit or plist into private scratch before approval. Use a private, host-specific OpenClaw config that points to the pinned candidate, an empty mode `0700` gateway state directory for a clean-host rehearsal, and a mode `0600` JSON object for the service environment. The environment file accepts the gateway LiteLLM key, the two queue lane tokens, and the private queue host list. The service definition contains only the file path. Set the queue policy's `token_env` names to `FO_HATCHET_LANE_TOKEN` and `FO_RESTATE_LANE_TOKEN`.
+
+```bash
+umask 077
+python3 -B first-officer/standalone.py --node "$captain_node" \\
+  --release "$pinned_candidate" --python "$python_bin" --node-binary "$node_bin" \\
+  --openclaw "$openclaw_bin" --config "$private_gateway_config" \\
+  --state "$private_gateway_state" --environment "$private_gateway_environment" \\
+  > "$private_service_definition"
+```
+
+After the approved first-authority or import step, install the generated definition under the active host's user account. The Nuc uses its systemd user manager. The Mac Mini uses the GUI user's LaunchAgent. The Mac service can start when loaded. Keep both hosts assigned the same production bot account only under the guarded launcher. On transfer or rollback, stop the outgoing service before exporting its authority.
+
+```bash
+# Nuc first install and approved start.
+install -d -m 0700 "$HOME/.config/systemd/user"
+install -m 0600 "$private_service_definition" "$HOME/.config/systemd/user/openclaw-captain.service"
+systemctl --user daemon-reload
+systemctl --user start openclaw-captain.service
+
+# Nuc stop before transfer.
+systemctl --user stop openclaw-captain.service
+```
+
+```bash
+# Mac Mini first install and approved bootstrap.
+install -d -m 0700 "$HOME/Library/LaunchAgents"
+install -m 0600 "$private_service_definition" "$HOME/Library/LaunchAgents/local.openclaw.captain.plist"
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/local.openclaw.captain.plist"
+
+# Mac Mini unload before transfer.
+launchctl bootout "gui/$(id -u)/local.openclaw.captain"
+```
+
+Standalone cutover gates still include the native Mac service rehearsal, live gate and quota collectors, and the full Telegram checklist on each host. Verify both peer transfer and rollback through the generated services. The existing Bobserver install procedure serves the legacy profile.
 
 ## Daily commands
 

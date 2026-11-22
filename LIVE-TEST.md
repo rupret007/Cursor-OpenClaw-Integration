@@ -21,4 +21,8 @@ The candidate's acknowledgment budget is 1.5 seconds. The 2 second stopwatch abo
 
 A timeout, unavailable source, stale sample or missing reply is a failed live case even when the bot reports it correctly. For a past-due check, record whether typing appeared, whether the acknowledgment arrived, whether a final reply arrived and which source was unavailable. Avoid copying replies, contacts or activity details into the report.
 
-The loopback status page, the local trace collector, the lane queue and the review archive stay off this check. Do not open a public port, use Tailscale Funnel, or roll the gateway back from here. A live rollback uses the private backup printed by activation and is a separate approval.
+This checklist also applies to each standalone host after its approved cutover. For standalone tests, keep Bobserver unavailable. The fleet check should report the active host from its live kernel sample and show Bobserver as unavailable if no fresh remote sample exists.
+
+On each standalone host, check `captain status` before and after a guarded gateway restart. Send the agreed synthetic review request, then repeat it and check `handoff`. Require one accepted job and a separate exact-head worker result. Exercise peer transfer and rollback while preserving the prior receipts. The old host must remain parked after restart and must refuse a stale epoch.
+
+The loopback status page, the local trace collector and the review archive stay off this check. Do not open a public port, use Tailscale Funnel, or roll the gateway back from here. A live rollback uses the private backup printed by activation and is a separate approval.

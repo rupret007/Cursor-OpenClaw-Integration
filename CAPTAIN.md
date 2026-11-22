@@ -15,7 +15,7 @@ The independent reader route uses a dedicated Nuc key and a pinned Mac host key.
 ```bash
 read -r -p 'Mac Mini SSH host: ' mac_host
 read -r -p 'Mac Mini username: ' mac_user
-nice -n 10 python3 -B first-officer/provision-andrea.py \\
+nice -n 10 python3 -B first-officer/provision-andrea.py \
   --local-client --mac-host "$mac_host" --mac-user "$mac_user"
 ```
 
@@ -30,7 +30,7 @@ Rehearse with the [authority tests](tests/first_officer/test_captain.py). They u
 ```bash
 # Run from the Mac Mini under the intended gateway account.
 export FO_LOCAL_NODE=mac-mini
-printf '{}\\n' | python3 -I -B "$captain_state" local-initialize
+printf '{}\n' | python3 -I -B "$captain_state" local-initialize
 
 # The launchd or systemd service runs this command under its local account.
 python3 -I -B "$captain_state" local-run "$openclaw_bin"
@@ -42,8 +42,8 @@ For a planned transfer, pause and drain the review scope, stop the current gatew
 
 ```bash
 umask 077
-printf '{}\\n' | python3 -I -B "$captain_state" view
-printf '{"epoch":%s}\\n' "$captain_epoch" |
+printf '{}\n' | python3 -I -B "$captain_state" view
+printf '{"epoch":%s}\n' "$captain_epoch" |
   python3 -I -B "$captain_state" local-release > "$private_handoff"
 
 # Run under the destination account with its own FO_LOCAL_NODE.
@@ -66,10 +66,10 @@ Render the unit or plist into private scratch before approval. Use a private, ho
 
 ```bash
 umask 077
-python3 -B first-officer/standalone.py --node "$captain_node" \\
-  --release "$pinned_candidate" --python "$python_bin" --node-binary "$node_bin" \\
-  --openclaw "$openclaw_bin" --config "$private_gateway_config" \\
-  --state "$private_gateway_state" --environment "$private_gateway_environment" \\
+python3 -B first-officer/standalone.py --node "$captain_node" \
+  --release "$pinned_candidate" --python "$python_bin" --node-binary "$node_bin" \
+  --openclaw "$openclaw_bin" --config "$private_gateway_config" \
+  --state "$private_gateway_state" --environment "$private_gateway_environment" \
   > "$private_service_definition"
 ```
 

@@ -3,7 +3,7 @@ import { isIP } from 'node:net';
 import { join } from 'node:path';
 import { readMacAndrea } from './andrea-mac.mjs';
 import { sshAndreaSummary } from './andrea-ssh.mjs';
-import { createCaptain, localState } from './captain.mjs';
+import { createCaptain, localState, resolveCaptainStateScript } from './captain.mjs';
 import { classifyRequest, createDispatch } from './dispatch.mjs';
 import { answerSimple, standaloneSimple } from './model-router.mjs';
 import { fleetStatus, localFleetNode, openPullRequests, readIntegrationGithub, standaloneGateStatus, standaloneQuotaStatus, summarizeAndrea } from './tools.mjs';
@@ -89,12 +89,12 @@ function andreaReader(signal, { readPrivateConfig, createAndreaReader }) {
   });
 }
 
-function toolRegistry(api, commands, liveConfig, services) {
+function toolRegistry(api, commands, liveConfig, services, state) {
   const { quotaStatus, githubReply, redacted } = services;
   const statusFleet = (request) => fleetStatus(request, {
-    capacity: localFleetNode() === 'bobserver' ? undefined : () => localState('local-capacity'),
+    capacity: localFleetNode() === 'bobserver' ? undefined : () => state('local-capacity'),
   });
-  const gateStatus = () => localFleetNode() === 'bobserver' ? services.gateStatus() : standaloneGateStatus({ read: () => localState('local-gate') });
+  const gateStatus = () => localFleetNode() === 'bobserver' ? services.gateStatus() : standaloneGateStatus({ read: () => state('local-gate') });
   const memory = (request, turn) => memoryReply(api, commands, liveConfig, request, turn);
   return {
     fleet: {
@@ -117,7 +117,7 @@ function toolRegistry(api, commands, liveConfig, services) {
     },
     quota: {
       run: async () => {
-        if (localFleetNode() !== 'bobserver') return plain(await standaloneQuotaStatus({ read: () => localState('local-quota') }));
+        if (localFleetNode() !== 'bobserver') return plain(await standaloneQuotaStatus({ read: () => state('local-quota') }));
         let profile = 0;
         return plain((await quotaStatus()).replace(/^Codex [^·\r\n]+·/gm, () => 'Codex profile ' + ++profile + ' ·'));
       },
@@ -172,10 +172,12 @@ export function registerSegmentOne(api, commands, services) {
     if (telegramOwner(cfg, account) !== owner) throw new Error('Private owner is unavailable');
     return cfg;
   };
-  const registry = toolRegistry(api, commands, liveConfig, services);
+  const script = resolveCaptainStateScript(currentConfig());
+  const state = (operation, data) => localState(operation, data, script);
+  const registry = toolRegistry(api, commands, liveConfig, services, state);
   if (services.getGithub) {
     const readCI = localFleetNode() === 'bobserver' ? services.getGithub : readIntegrationGithub;
-    const captain = createCaptain({ registry, get: readCI });
+    const captain = createCaptain({ registry, get: readCI, state });
     registry.captain = {
       run: async (request, turn) => plain(await captain.run(request, turn)),
       failure: 'Captain state or evidence is unavailable. Check “captain status” before retrying.',

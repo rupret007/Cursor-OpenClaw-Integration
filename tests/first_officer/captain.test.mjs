@@ -1,11 +1,21 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createCaptain, integrationCI } from '../../first-officer/segment1/captain.mjs';
+import { createCaptain, integrationCI, resolveCaptainStateScript } from '../../first-officer/segment1/captain.mjs';
 import { verifyReview } from '../../first-officer/segment1/review-worker.mjs';
 import { classifyRequest } from '../../first-officer/segment1/dispatch.mjs';
 import { diagnoseMacAndrea, diagnoseMacAndreaSync, runMacAndrea } from '../../first-officer/segment1/andrea-mac.mjs';
 import { andreaCommand, parseAndreaSummary } from '../../first-officer/segment1/andrea-ssh.mjs';
 import { summarizeAndrea } from '../../first-officer/segment1/tools.mjs';
+
+test('Captain state uses the original pinned release instead of plugin-capture siblings', () => {
+  const runtime = '/opt/openclaw-fo/first-officer-' + 'a'.repeat(64) + '/round6/runtime';
+  const conductor = runtime + '/first-officer-conductor.mjs';
+  const config = (...paths) => ({ plugins: { load: { paths } } });
+  assert.equal(resolveCaptainStateScript(config('/another/plugin.mjs', conductor)), runtime + '/segment1/captain-state.py');
+  assert.throws(() => resolveCaptainStateScript(config(conductor, conductor.replace('/opt/', '/other/'))),
+    /Ambiguous pinned Captain release/);
+  assert.match(resolveCaptainStateScript(config(conductor.slice(1))), /\/first-officer\/segment1\/captain-state\.py$/);
+});
 
 const head = 'a'.repeat(40);
 const other = 'b'.repeat(40);

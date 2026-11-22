@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { loadavg } from 'node:os';
+import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bounded } from './dispatch.mjs';
 import { fleetSnapshotIsLocal, readFleetSnapshot, validLocalCapacity } from './tools.mjs';
@@ -28,9 +29,19 @@ const terminal = {
   'ci-unavailable': 'GitHub could not verify the worker result against the current head. Recheck CI before using the result.',
 };
 
-export function localState(operation, payload = {}) {
+export function resolveCaptainStateScript(config) {
+  const paths = config?.plugins?.load?.paths;
+  const pinnedConductor = /\/first-officer-[a-f0-9]{64}\/round6\/runtime\/first-officer-conductor\.mjs$/;
+  const matches = Array.isArray(paths) ? paths.filter((path) =>
+    typeof path === 'string' && isAbsolute(path) && pinnedConductor.test(path)) : [];
+  if (matches.length > 1) throw new Error('Ambiguous pinned Captain release');
+  // OpenClaw can load JavaScript from a capture that omits the packaged Python queue runtime.
+  return matches.length ? join(dirname(matches[0]), 'segment1', 'captain-state.py') : stateScript;
+}
+
+export function localState(operation, payload = {}, script = stateScript) {
   return new Promise((resolve, reject) => {
-    const child = execFile('/usr/bin/nice', ['-n', '10', '/usr/bin/python3', '-I', '-B', stateScript, operation],
+    const child = execFile('/usr/bin/nice', ['-n', '10', '/usr/bin/python3', '-I', '-B', script, operation],
       { maxBuffer: 32 * 1024, ...(operation === 'submit' ? {} : { timeout: ['runner-quota', 'local-quota'].includes(operation) ? 7000 : 2500 }) },
       (error, stdout) => {
         if (error) return reject(new Error('Captain state unavailable'));

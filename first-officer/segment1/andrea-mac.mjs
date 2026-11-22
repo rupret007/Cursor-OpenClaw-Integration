@@ -291,7 +291,7 @@ async function diagnoseLiveMacAndrea() {
     recentTextPreviews: view.counts.recentTextPreviews };
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+async function main() {
   const option = process.argv[2];
   const localDiagnostic = process.env.SSH_ORIGINAL_COMMAND === undefined &&
     process.argv.length === 3 && ['--diagnose', '--diagnose-sync', '--diagnose-live'].includes(option);
@@ -308,4 +308,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     }
     process.exitCode = 1;
   }
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  void main();
 }

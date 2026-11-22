@@ -34,6 +34,13 @@ const intentHooks = {
   isSimple: (text) => standaloneSimple(text, short, {}),
 };
 
+test('the Captain overlay loads through OpenClaw’s synchronous module loader', () => {
+  const script = 'const overlay = require("./first-officer/segment1/register.mjs");' +
+    'if (typeof overlay.registerSegmentOne !== "function") process.exitCode = 1;';
+  const result = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+});
+
 test('natural requests identify the live route and map memory to a stable topic', () => {
   for (const [text, kind] of fixtures) assert.equal(classifyRequest(text, intentHooks)?.kind, kind);
   assert.equal(classifyRequest(fixtures[4][0], intentHooks).args, 'test-marker: an orange triangle');

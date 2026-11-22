@@ -40,8 +40,9 @@ export function resolveCaptainStateScript(config) {
 }
 
 export function localState(operation, payload = {}, script = stateScript) {
+  const python = process.env.FO_CAPTAIN_PYTHON || '/usr/bin/python3';
   return new Promise((resolve, reject) => {
-    const child = execFile('/usr/bin/nice', ['-n', '10', '/usr/bin/python3', '-I', '-B', script, operation],
+    const child = execFile('/usr/bin/nice', ['-n', '10', python, '-I', '-B', script, operation],
       { maxBuffer: 32 * 1024, ...(operation === 'submit' ? {} : { timeout: ['runner-quota', 'local-quota'].includes(operation) ? 7000 : 2500 }) },
       (error, stdout) => {
         if (error) return reject(new Error('Captain state unavailable'));

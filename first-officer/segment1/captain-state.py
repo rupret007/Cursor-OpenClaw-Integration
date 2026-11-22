@@ -139,7 +139,8 @@ class StandaloneAuthority:
                 raise StandaloneParked("This host is parked")
 
             # The child retains the lock if the supervisor is interrupted.
-            child = subprocess.Popen([str(executable), "gateway", "run"], pass_fds=(lease_fd,), env=environment)
+            child_env = {**(os.environ if environment is None else environment), "FO_CAPTAIN_PYTHON": sys.executable}
+            child = subprocess.Popen([str(executable), "gateway", "run"], pass_fds=(lease_fd,), env=child_env)
 
             def forward(signum, _frame):
                 if child.poll() is None:

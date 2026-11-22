@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
-import { createCaptain, integrationCI, resolveCaptainStateScript } from '../../first-officer/segment1/captain.mjs';
+import { createCaptain, integrationCI, localState, resolveCaptainStateScript } from '../../first-officer/segment1/captain.mjs';
 import { verifyReview } from '../../first-officer/segment1/review-worker.mjs';
 import { classifyRequest } from '../../first-officer/segment1/dispatch.mjs';
 import { diagnoseMacAndrea, diagnoseMacAndreaSync, runMacAndrea } from '../../first-officer/segment1/andrea-mac.mjs';
@@ -15,6 +18,20 @@ test('Captain state uses the original pinned release instead of plugin-capture s
   assert.throws(() => resolveCaptainStateScript(config(conductor, conductor.replace('/opt/', '/other/'))),
     /Ambiguous pinned Captain release/);
   assert.match(resolveCaptainStateScript(config(conductor.slice(1))), /\/first-officer\/segment1\/captain-state\.py$/);
+});
+
+test('local Captain probes use the interpreter selected by the guarded launcher', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'captain-python-'));
+  const python = join(directory, 'standalone python');
+  const original = process.env.FO_CAPTAIN_PYTHON;
+  t.after(async () => {
+    if (original === undefined) delete process.env.FO_CAPTAIN_PYTHON;
+    else process.env.FO_CAPTAIN_PYTHON = original;
+    await rm(directory, { recursive: true });
+  });
+  await writeFile(python, '#!/bin/sh\n[ "$4" = view ] || exit 1\ncat\n', { mode: 0o700 });
+  process.env.FO_CAPTAIN_PYTHON = python;
+  assert.deepEqual(await localState('view', { fixture: true }), { fixture: true });
 });
 
 const head = 'a'.repeat(40);

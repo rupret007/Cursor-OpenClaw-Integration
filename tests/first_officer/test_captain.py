@@ -199,7 +199,8 @@ def test_standalone_transfer_waits_for_gateway_child_after_supervisor_exit(capta
     gateway = tmp_path / "openclaw"
     gateway.write_text(
         f"#!{sys.executable}\n"
-        "import os, time\n"
+        "import os, sys, time\n"
+        "assert os.environ['FO_CAPTAIN_PYTHON'] == sys.executable\n"
         "from pathlib import Path\n"
         f"Path({str(tmp_path / 'pid')!r}).write_text(str(os.getpid()))\n"
         "time.sleep(30)\n"

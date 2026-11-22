@@ -6,7 +6,7 @@ Work is on `codex-travis/fo-cursor-plan-20261122` in [PR #37](https://github.com
 
 [REVIEW-efa8cb0.md](REVIEW-efa8cb0.md) preserves the independent FAIL findings and records their fixes and final PASS. The new private receipt carries Jeff's opaque account binding. An unread or mismatched plan, enabled billing extras, and usage at 90 percent or above all block the fallback. CLI mode strips ambient credentials and runs one Composer 2.5 process. Read-only work uses Ask mode. The handoff commit changes only `HANDOFF.md` on the named lane. Repeated warning polls keep the same resume point.
 
-The combined focused gate passed 71 tests, the Segment 1 and captain gate passed 23, and the release and installer gate passed 58. The original offline baseline passed 1,083 Python and 22 skill tests with the installed Node directory on PATH. The [PR checks](https://github.com/rupret007/Cursor-OpenClaw-Integration/pull/37/checks) report all four jobs for the published head. [TEST-NOW.md](TEST-NOW.md) gives the local commands.
+The full offline gate passed 1,123 Python tests and 22 skill tests. The combined focused gate passed 71 tests, the Segment 1 and captain gate passed 23, and the release and installer gate passed 58. The original offline baseline passed 1,083 Python and 22 skill tests with the installed Node directory on PATH. The [PR checks](https://github.com/rupret007/Cursor-OpenClaw-Integration/pull/37/checks) report all four jobs for the published head. [TEST-NOW.md](TEST-NOW.md) gives the local commands.
 
 ## Prior work on the reviewed base
 

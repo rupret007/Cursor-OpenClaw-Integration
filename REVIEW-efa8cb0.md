@@ -46,6 +46,6 @@ Cursor documents Ask mode and explicit print mode for a read-only CLI invocation
 
 ## Final review verdict
 
-**PASS** on the reviewed source at `b833f6be4bedff6d4cf074e3b6b04c2c13925946`. The independent re-review passed 54 tracker tests and the four final wrapper regressions, with two receipt subtests. The combined focused gate passed 71 tests. Release and installer tests passed 58 tests. The WSL baseline first exposed Node missing from the shell path. The unchanged baseline gates passed after the existing Node directory was added to the path.
+**PASS** on the reviewed source at `b833f6be4bedff6d4cf074e3b6b04c2c13925946`. The independent re-review passed 54 tracker tests and the four final wrapper regressions, with two receipt subtests. The full offline gate passed 1,123 Python tests and 22 skill tests. The focused gate passed 71 tests, the Segment 1 and captain gate passed 23, and release and installer tests passed 58. The WSL baseline first exposed Node missing from the shell path. The unchanged baseline gates passed after the existing Node directory was added to the path.
 
 [PR #37 checks](https://github.com/rupret007/Cursor-OpenClaw-Integration/pull/37/checks) show the CI results on the published head. The review covers local and fixture evidence. Jeff checks the live Cursor profile and receipt, runs the timed Telegram checks and authority pilot, and verifies the live rollback. [Jeff's activation and validation guide](JEFF-ACTIONS.md)

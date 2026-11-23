@@ -361,8 +361,8 @@ print(json.dumps(response))
     return accepted
 
 
-def check_project_worker(stack, config, headers):
-    home = LEDGER.parent / "project-worker-home"
+def check_project_worker(stack, config, headers, restart_hatchet=None):
+    home = LEDGER.parent / ("server-restart-home" if restart_hatchet else "project-worker-home")
     authority = home / ".local/state/openclaw-captain"
     model = home / ".local/state/openclaw-nuc/litellm"
     checkout = home / "source"
@@ -378,7 +378,7 @@ def check_project_worker(stack, config, headers):
     git(checkout, "add", "review.mjs")
     git(checkout, "commit", "-qm", "Fixture base")
     head = git(checkout, "rev-parse", "HEAD").decode().strip()
-    identity = {"repository": "example/integration", "issue": 41, "head": head, "epoch": 2}
+    identity = {"repository": "example/integration", "issue": 42 if restart_hatchet else 41, "head": head, "epoch": 2}
     job = {**identity, "lane": queue.project_lane(**identity)}
     save(authority / "lease.json", {"node": "nucbox", "active": True, "epoch": 2})
     save(authority / "project-worker.json", {"request": identity, "checkout": str(checkout),
@@ -389,7 +389,7 @@ def check_project_worker(stack, config, headers):
         **identity, "branch": "main", "worker": "local-qwen", "expires": int(time.time()) + 120,
         "planSha256": fingerprint,
     })
-    joined = bool(os.environ.get("FO_PROJECT_WIRE_RELEASE"))
+    joined = restart_hatchet is None and bool(os.environ.get("FO_PROJECT_WIRE_RELEASE"))
     if not joined:
         save(authority / "reviews/state.json", {"projectJobs": [
             {"request": job, "branch": "main", "worker": "local-qwen", "state": "reserved", "planSha256": fingerprint},
@@ -402,12 +402,19 @@ def check_project_worker(stack, config, headers):
     save(model / "lane-policy.json", {"lanes": {"gateway": {"models": ["qwen-local-fast"]}}})
     (model / "gateway-lane.key").write_text("fixture-model-key")
     calls = []
+    model_started = Event()
+    release_model = Event()
 
     class ModelStub(BaseHTTPRequestHandler):
         def do_POST(self):
             payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             assert self.path == "/v1/chat/completions" and payload["model"] == "qwen-local-fast"
             calls.append(True)
+            if restart_hatchet:
+                model_started.set()
+                if not release_model.wait(18):
+                    self.send_error(503)
+                    return
             response = json.dumps({"choices": [{"message": {"content": '{"replacement":"Delivery is unconfirmed."}'}}]}).encode()
             self.send_response(200)
             self.send_header("Content-Length", str(len(response)))
@@ -425,7 +432,7 @@ def check_project_worker(stack, config, headers):
     python = Path("hatchet-worker/bin/python").absolute()
     interpreter = python
     interrupted = home / "worker-interrupted"
-    if not joined:
+    if not joined and not restart_hatchet:
         interpreter = home / "interrupt-project-worker"
         interpreter.write_text(f'''#!{python}
 import os
@@ -458,7 +465,15 @@ worker["main"]()
     coding["hatchet"]["workflow"] = queue.PROJECT_WORKFLOW
     receipt = (joined_project_rehearsal(stack, home, authority, identity, job, coding, headers)
                if joined else queue.dispatch(coding, job, LEDGER))
-    eventually(lambda: worker_done("hatchet", receipt["run"], headers), "scoped Hatchet coding worker")
+    if restart_hatchet:
+        try:
+            assert model_started.wait(10), "The coding worker did not start"
+            row = queue.read_project_run(coding, job, receipt, receipt["run"], 3)
+            assert row["status"] == "RUNNING"
+            restart_hatchet()
+        finally:
+            release_model.set()
+    eventually(lambda: worker_done("hatchet", receipt["run"], headers), "scoped Hatchet coding worker", timeout=40)
     row = queue.read_project_run(coding, job, receipt, receipt["run"], 3)
     result = row["output"]
     assert set(result) == {"lane", "head", "commit"} and result["lane"] == job["lane"] and result["head"] == head
@@ -466,15 +481,18 @@ worker["main"]()
     assert git(checkout, "show", result["commit"] + ":review.mjs") == b'const delivery = "Delivery is unconfirmed.";\n'
     assert (checkout / "review.mjs").read_text() == 'const delivery = "old";\n'
     if not joined:
-        assert interrupted.is_file()
         replay = queue.dispatch(coding, job, LEDGER)
         assert replay["reused"] and replay["run"] == receipt["run"]
-        log("Hatchet recovered the interrupted coding child within the original run")
+        if restart_hatchet:
+            log("Hatchet finished the original coding run after the server restarted")
+        else:
+            assert interrupted.is_file()
+            log("Hatchet recovered the interrupted coding child within the original run")
     assert len(calls) == 1
     log("The dedicated Hatchet coding worker made one isolated candidate commit from one loopback model call")
 
 
-def main():
+def run_pilot(restart_hatchet):
     token = Path("hatchet-token").read_text().strip()
     part = token.split(".")[1]
     tenant = json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))["sub"]
@@ -524,7 +542,7 @@ def main():
                 assert len(calls) == 1 and not fallback_calls
                 eventually(lambda: worker_done("hatchet", run, headers), "Hatchet accepted before lost reply")
         trigger = f"/api/v1/stable/tenants/{tenant}/workflow-runs/trigger"
-        engine_log = Path("logs/hatchet")
+        engine_log = LEDGER.parent / "hatchet-server.log"
         collision_marker = "idempotency key collision"
         previous_collisions = engine_log.read_text().lower().count(collision_marker)
         collision, _ = api(HATCHET, trigger, {"workflowName": "queue-pilot", "input": job, "returnOnlyId": True,
@@ -630,7 +648,45 @@ def main():
             log("Late real Hatchet reply could not overwrite a newer durable receipt")
 
         stop(hatchet_worker)
-        check_project_worker(stack, config, headers)
+        with ExitStack() as project:
+            check_project_worker(project, config, headers)
+        with ExitStack() as project:
+            check_project_worker(project, config, headers, restart_hatchet)
+
+
+def main():
+    binary = Path(os.environ["PILOT_HATCHET_BIN"])
+    config = Path("hatchet-config").absolute()
+
+    def ready():
+        try:
+            # The web UI can come up before the run-status API starts listening.
+            return (http(HATCHET, "/", timeout=1)[0] < 500
+                    and http("http://localhost:58889", "/", timeout=1)[0] < 300)
+        except OSError:
+            return False
+
+    with ExitStack() as services:
+        def start_server():
+            server = launch(services, "hatchet-server.log", "nice", "-n", "10",
+                            str(binary / "hatchet-lite"), "--config", str(config))
+            eventually(ready, "Hatchet listener", timeout=12)
+            assert server.poll() is None
+            return server
+
+        server = start_server()
+        with Path("hatchet-token").open("w") as token, (LEDGER.parent / "hatchet-token.log").open("w") as error:
+            subprocess.run([str(binary / "hatchet-admin"), "token", "create", "--config", str(config),
+                            "--name", "queue-pilot"], stdout=token, stderr=error, check=True, timeout=10)
+
+        def restart_hatchet():
+            nonlocal server
+            stop(server)
+            assert not ready(), "The original Hatchet listener remained active"
+            server = start_server()
+
+        log("Real Hatchet and Restate listeners started.")
+        run_pilot(restart_hatchet)
 
 
 if __name__ == "__main__":

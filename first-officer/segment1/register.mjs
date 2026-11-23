@@ -214,7 +214,8 @@ function toolRegistry(api, commands, liveConfig, services, state, chat) {
         if (!answer) throw new Error('Fast answer unavailable');
         return plain(answer);
       },
-      failure: 'The fast model didn’t return an answer in time or the request failed.',
+      failure: localFleetNode() === 'bobserver' ? 'The fast model didn’t return an answer in time or the request failed.' :
+        'The local Qwen route couldn’t answer. Check LiteLLM and the local model service.'
     },
   };
 }
@@ -297,7 +298,7 @@ export function registerSegmentOne(api, commands, services) {
       return { ...view, sharedProjectStatus: 'unavailable' };
     }
   };
-  const chat = createQuickChat(api.runtime, services.redacted);
+  const chat = createQuickChat(api.runtime, services.redacted, { requireLocal: localFleetNode() !== 'bobserver' });
   const registry = toolRegistry(api, commands, liveConfig, services, state, chat);
   if (stagedStandby) {
     registry.standby = { run: async () => plain(

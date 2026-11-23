@@ -136,6 +136,31 @@ def prepare(plan, request):
     return checkout, file, source
 
 
+def finish_candidate(slot, request, plan, result):
+    if (not isinstance(result, dict) or set(result) != {"lane", "head", "commit"}
+            or result["lane"] != request["lane"] or result["head"] != request["head"]
+            or not isinstance(result["commit"], str) or not SHA.fullmatch(result["commit"])):
+        raise ValueError("The existing worker receipt has a different identity")
+    worktree = slot / "candidate"
+    base, commit = result["head"], result["commit"]
+    common_dir = ("rev-parse", "--path-format=absolute", "--git-common-dir")
+    if (not worktree.is_dir() or worktree.is_symlink()
+            or git(worktree, *common_dir) != git(Path(plan["checkout"]), *common_dir)
+            or git(worktree, "rev-parse", "--abbrev-ref", "HEAD").strip() != b"HEAD"
+            or git(worktree, "rev-list", "--parents", "-n", "1", commit).split() != [commit.encode(), base.encode()]):
+        raise ValueError("The checkpoint does not belong to the isolated candidate")
+    head = git(worktree, "rev-parse", "HEAD").decode().strip()
+    if head == base:
+        try:
+            git(worktree, "update-ref", "HEAD", commit, base, "--no-deref")
+        except subprocess.CalledProcessError:
+            if git(worktree, "rev-parse", "HEAD").decode().strip() != commit:
+                raise
+    elif head != commit:
+        raise ValueError("The isolated candidate advanced beyond its checkpoint")
+    return result
+
+
 def run(root, request, respond=complete):
     queue["canonical"](request)
     plan = load_scope(root, request)
@@ -152,9 +177,7 @@ def run(root, request, respond=complete):
             previous = read_private(receipt, 4096)
         except FileNotFoundError:
             raise ValueError("A prior worker attempt is unresolved") from None
-        if previous.get("lane") != request["lane"] or previous.get("head") != request["head"]:
-            raise ValueError("The existing worker receipt has a different identity")
-        return previous
+        return finish_candidate(slot, request, plan, previous)
     checkout, file, source = prepare(plan, request)
     slot.mkdir(mode=0o700)
     worktree = slot / "candidate"
@@ -177,10 +200,12 @@ def run(root, request, respond=complete):
                  f"Captain candidate for issue #{request['issue']}").decode().strip()
     if not SHA.fullmatch(commit):
         raise ValueError("The candidate commit could not be verified")
-    git(worktree, "update-ref", "HEAD", commit, base)
     result = {"lane": request["lane"], "head": base, "commit": commit}
+    # Persist the exact commit before advancing HEAD so a restart can settle it once.
     save(receipt, result)
-    return result
+    if load_scope(root, request) != plan:
+        raise ValueError("The coding scope changed before finalizing the candidate")
+    return finish_candidate(slot, request, plan, result)
 
 
 def main():

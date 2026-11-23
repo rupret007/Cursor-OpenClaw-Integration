@@ -156,6 +156,51 @@ def test_worker_crash_preserves_reservation_and_refuses_a_second_model_call(prep
     assert worker["git"](checkout, "rev-parse", "HEAD").decode().strip() == request["head"]
 
 
+@pytest.mark.parametrize("when", ["before-ref", "after-ref"])
+def test_restart_finishes_the_same_checkpoint_without_calling_the_model(prepared, monkeypatch, when):
+    worker, root, checkout, _, request, _ = prepared
+    calls = []
+    original_git = worker["git"]
+
+    def model(prompt):
+        calls.append(prompt)
+        return "Delivery is unconfirmed"
+
+    def interrupt(worktree, *args, **kwargs):
+        if args[:2] == ("update-ref", "HEAD"):
+            if when == "after-ref":
+                original_git(worktree, *args, **kwargs)
+            raise SystemExit(19)
+        return original_git(worktree, *args, **kwargs)
+
+    with monkeypatch.context() as patched:
+        patched.setitem(worker["run"].__globals__, "git", interrupt)
+        with pytest.raises(SystemExit):
+            worker["run"](root, request, model)
+    restarted = runpy.run_path(str(SOURCE))
+    result = restarted["run"](root, request, model)
+    assert restarted["run"](root, request, model) == result
+    assert len(calls) == 1
+    candidate = root / "project-runs" / request["lane"] / "candidate"
+    assert original_git(candidate, "rev-parse", "HEAD").decode().strip() == result["commit"]
+    assert original_git(checkout, "rev-parse", "HEAD").decode().strip() == request["head"]
+    assert original_git(candidate, "rev-parse", "HEAD^").decode().strip() == request["head"]
+
+
+def test_restart_preserves_a_candidate_head_that_moved_past_the_checkpoint(prepared):
+    worker, root, _, _, request, _ = prepared
+    result = worker["run"](root, request, lambda _: "Delivery is unconfirmed")
+    git = worker["git"]
+    candidate = root / "project-runs" / request["lane"] / "candidate"
+    git(candidate, "commit", "--allow-empty", "-qm", "Independent change")
+    head = git(candidate, "rev-parse", "HEAD").decode().strip()
+    assert head != result["commit"]
+    restarted = runpy.run_path(str(SOURCE))
+    with pytest.raises(ValueError, match="advanced beyond its checkpoint"):
+        restarted["run"](root, request, lambda _: pytest.fail("Recovery must not call the model"))
+    assert git(candidate, "rev-parse", "HEAD").decode().strip() == head
+
+
 def test_worker_rechecks_scope_before_committing_a_model_result(prepared):
     worker, root, checkout, _, request, _ = prepared
 

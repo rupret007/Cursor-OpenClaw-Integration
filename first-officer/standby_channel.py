@@ -192,6 +192,10 @@ class LocalRequest(BaseHTTPRequestHandler):
                 if str(fields.get("chat_id")) != str(channel.owner):
                     raise ValueError("Invalid Telegram recipient")
                 result = channel.broker.project_status(channel.epoch)
+            elif method == "foProjectInspect":
+                if fields.keys() != {"chat_id", "request"} or str(fields["chat_id"]) != str(channel.owner):
+                    raise ValueError("Invalid coding request context")
+                result = channel.broker.inspect_project(channel.epoch, fields["request"])
             elif method == "foProjectSubmit":
                 result = channel.submit_project(fields)
             elif method == "foProgress":

@@ -397,6 +397,43 @@ def project_pr_checks(request, branch, candidate, verification):
     return "verified"
 
 
+def project_verification(root, request, candidate):
+    expected = {"repository": request["repository"], "issue": request["issue"], "commit": candidate}
+    try:
+        verification = read_private(root / "project-verification.json", 4096)
+    except FileNotFoundError:
+        return None
+    if not isinstance(verification, dict) or any(verification.get(key) != value for key, value in expected.items()):
+        return None
+    checks, pr = verification.get("checks"), verification.get("pr")
+    if (type(pr) is not int or not 0 < pr < 100_000_000 or not isinstance(checks, list) or
+            not 0 < len(checks) <= 6 or not all(isinstance(check, str) and 0 < len(check) <= 100 for check in checks) or
+            len(set(checks)) != len(checks)):
+        raise ValueError("The independent verification profile is invalid")
+    return verification
+
+
+def brokered_project_ci(root, evidence):
+    if not isinstance(evidence, dict) or evidence.keys() != {"request", "commit"} or not private_directory(root):
+        raise ValueError("Expected an exact brokered candidate")
+    request, commit = evidence["request"], evidence["commit"]
+    queue = CaptainQueue(root).queue
+    if not isinstance(request, dict) or request.keys() != queue.PROJECT_REQUEST:
+        raise ValueError("Expected an exact brokered project identity")
+    queue.canonical(request)
+    if not isinstance(commit, str) or not SHA.fullmatch(commit) or commit == request["head"]:
+        raise ValueError("Invalid brokered candidate commit")
+    verification = project_verification(root, request, commit)
+    if verification is None:
+        return {"state": "patch-ready"}
+    branch = verification.get("branch")
+    if (not isinstance(branch, str) or len(branch) > 150
+            or not re.fullmatch(r"[a-zA-Z0-9_-]+(?:[./-][a-zA-Z0-9_-]+)*", branch)):
+        raise ValueError("Brokered verification needs the exact approved base branch")
+    state = project_pr_checks(request, branch, commit, verification)
+    return {"state": state, "pr": verification["pr"]}
+
+
 def brokered_project_submit(home, queue, broker, epoch, repository, issue):
     root = home / ".local/state/openclaw-captain"
     try:
@@ -843,20 +880,11 @@ class Controller:
         if not current_project_evidence(request, job["branch"]):
             job.update(state="stale-base")
             return
-        try:
-            verification = read_private(self.watchdog.AUTHORITY / "project-verification.json", 4096)
-        except FileNotFoundError:
+        verification = project_verification(self.watchdog.AUTHORITY, request, commit)
+        if verification is None:
             return
-        expected = {"repository": request["repository"], "issue": request["issue"], "commit": job["commit"]}
-        if not isinstance(verification, dict) or any(verification.get(key) != value for key, value in expected.items()):
-            return
-        checks, pr = verification.get("checks"), verification.get("pr")
-        if (type(pr) is not int or not 0 < pr < 100_000_000 or not isinstance(checks, list) or
-                not 0 < len(checks) <= 6 or not all(isinstance(check, str) and 0 < len(check) <= 100 for check in checks) or
-                len(set(checks)) != len(checks)):
-            raise ValueError("The independent verification profile is invalid")
-        outcome = project_pr_checks(request, job["branch"], job["commit"], verification)
-        job.update(state=outcome, pr=pr, checks=checks, checked=int(time.time()))
+        outcome = project_pr_checks(request, job["branch"], commit, verification)
+        job.update(state=outcome, pr=verification["pr"], checks=verification["checks"], checked=int(time.time()))
 
     @staticmethod
     def submitted_message(data, owner, message):
@@ -1120,6 +1148,8 @@ def main():
             if entry == "handoff":
                 view["observed"] = int(time.time())
             return view
+        if entry == "verify-brokered-project":
+            return brokered_project_ci(LOCAL_AUTHORITY, req)
         if entry not in ("local-gate", "local-capacity", "local-quota", "local-projects",
                          "project-telegram-review", "record-project-recommendation"):
             raise ValueError("Brokered job state is unavailable in this gateway configuration")

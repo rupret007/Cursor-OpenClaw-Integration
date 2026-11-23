@@ -22,6 +22,7 @@ class FixtureBroker:
         self.message = None
         self.effects = []
         self.submissions = []
+        self.patch_ready = None
         self.completed = Event()
 
     def next_telegram_message(self, epoch):
@@ -31,10 +32,16 @@ class FixtureBroker:
 
     def project_status(self, epoch):
         assert epoch == 4
+        if self.patch_ready is not None:
+            return {"enabled": True, "jobs": [self.patch_ready]}
         return {"enabled": True, "jobs": [{
             "request": {"repository": "example/integration", "issue": 40, "head": "a" * 40, "epoch": 3},
             "state": "unresolved",
         }]}
+
+    def inspect_project(self, epoch, request):
+        assert epoch == 4 and request == self.patch_ready["request"]
+        return self.patch_ready
 
     def submit_project(self, epoch, request, plan):
         assert epoch == 4 and request["epoch"] == epoch
@@ -166,6 +173,15 @@ if route == "repos/example/integration/issues/41":
 elif route == "repos/example/integration/git/ref/heads/main":
     base = (Path.home() / "fixture-head").read_text().strip()
     value = {"ref": "refs/heads/main", "object": {"sha": base, "type": "commit"}}
+elif route == "repos/example/integration/pulls/13":
+    head = (Path.home() / "fixture-pr").read_text().strip()
+    value = {"number": 13, "state": "open", "head": {"sha": head},
+             "base": {"ref": "main", "repo": {"full_name": "example/integration"}}}
+elif route == "repos/example/integration/compare/" + "a"*40 + "..." + "c"*40:
+    value = {"status": "ahead", "merge_base_commit": {"sha": "a"*40}}
+elif route == "repos/example/integration/commits/" + "c"*40 + "/check-runs?per_page=100&filter=latest":
+    value = {"total_count": 1, "check_runs": [{"name": "fixture-ci", "status": "completed",
+             "conclusion": "success", "head_sha": "c"*40, "app": {"slug": "github-actions"}}]}
 else:
     sys.exit(2)
 print(json.dumps(value))
@@ -178,6 +194,18 @@ print(json.dumps(value))
             verify_turn(broker, 19, command, "Hatchet accepted the coding job", 30)
             assert len(broker.submissions) == 1 and broker.submissions[0][1] == fingerprint
             assert {key: value for key, value in broker.submissions[0][0].items() if key != "lane"} == identity
+            request = broker.submissions[0][0]
+            candidate = "c" * 40
+            broker.patch_ready = {"request": request, "commit": candidate, "state": "patch-ready"}
+            verify_turn(broker, 20, "handoff", "authorize publication", 30)
+            wire_test["write"](authority / "project-verification.json", {
+                "repository": identity["repository"], "issue": identity["issue"], "commit": candidate,
+                "branch": "main", "pr": 13, "checks": ["fixture-ci"],
+            })
+            (root / "fixture-pr").write_text(candidate)
+            verify_turn(broker, 21, "handoff", "matched all required CI checks", 30)
+            (root / "fixture-pr").write_text("d" * 40)
+            verify_turn(broker, 22, "handoff", "PR head or its base changed", 30)
             assert not (authority / "lease.json").exists()
         finally:
             gateway.stop()

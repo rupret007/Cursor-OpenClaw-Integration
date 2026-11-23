@@ -47,6 +47,7 @@ export function localState(operation, payload = {}, script = stateScript) {
         maxBuffer: 48 * 1024,
         ...(operation === 'submit' ? {} : {
           timeout: operation === 'inspect-project' ? 30_000 : operation === 'dispatch-project' ? 15_000 :
+            operation === 'verify-brokered-project' ? 10_000 :
             ['runner-quota', 'local-quota'].includes(operation) ? 7000 : 2500,
         }),
       },
@@ -152,6 +153,7 @@ function projectWork(job) {
     running: 'Hatchet accepted the coding job. Awaiting its outcome.',
     'patch-ready': 'The worker returned a candidate. Jeff can review the patch and authorize publication for exact-commit CI.',
     'ci-pending': 'Independent CI evidence is pending for the candidate.',
+    'ci-unavailable': 'I couldn’t verify current GitHub CI for the candidate.',
     'ci-failed': 'The last verification found a failing required check. Review CI before another attempt.',
     verified: 'The last verification matched all required CI checks.',
     refused: 'Hatchet refused the job. Check the coding worker.',
@@ -162,7 +164,7 @@ function projectWork(job) {
     'stale-candidate': 'The PR head or its base changed. Review the candidate against current GitHub evidence.',
   };
   return [identity, job.commit ? 'Candidate ' + job.commit.slice(0, 8) + '.' : '',
-    status[job.state] ?? 'Coding submission is unresolved. Check the original Hatchet receipt before another attempt.'].filter(Boolean).join(' ');
+    job.pr ? 'PR #' + job.pr + '.' : '', status[job.state] ?? 'Coding submission is unresolved. Check the original Hatchet receipt before another attempt.'].filter(Boolean).join(' ');
 }
 
 function decisions(view, currentDelivery) {

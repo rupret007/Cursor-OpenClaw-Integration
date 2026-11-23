@@ -256,6 +256,18 @@ export function registerSegmentOne(api, commands, services) {
     });
   }
   const script = resolveCaptainStateScript(currentConfig());
+  const verifyBrokerCandidate = async (job, owner) => {
+    try {
+      const current = await telegramDirect(owner, liveConfig, 'foProjectInspect', { request: job.request }, AbortSignal.timeout(4000));
+      if (current?.request?.lane !== job.request.lane) throw new Error('Candidate identity changed');
+      if (current.state !== 'patch-ready') return current;
+      if (current.commit !== job.commit) return { ...job, state: 'invalid-artifact' };
+      const result = await localState('verify-brokered-project', { request: current.request, commit: current.commit }, script);
+      return { ...current, ...result };
+    } catch {
+      return { ...job, state: 'ci-unavailable' };
+    }
+  };
   const state = async (operation, data, turn) => {
     if (stagedStandby && operation === 'dispatch-project') {
       return telegramDirect(turn.owner, liveConfig, 'foProjectSubmit', {
@@ -268,7 +280,13 @@ export function registerSegmentOne(api, commands, services) {
       const owner = telegramOwner(currentConfig(), account);
       const status = await telegramDirect(owner, liveConfig, 'foProjectStatus', {}, AbortSignal.timeout(2500));
       if (typeof status?.enabled !== 'boolean' || !Array.isArray(status?.jobs)) throw new Error('Unknown shared coding status');
-      return { ...view, activeProjectJobs: status.jobs, sharedProjectStatus: status.enabled ? 'ready' : 'disabled' };
+      let jobs = status.jobs;
+      if (operation === 'handoff') {
+        const targets = jobs.filter((job) => job.state === 'patch-ready').slice(0, 2);
+        const verified = await Promise.all(targets.map((job) => verifyBrokerCandidate(job, owner)));
+        jobs = jobs.map((job) => verified.find((item) => item.request.lane === job.request.lane) ?? job);
+      }
+      return { ...view, activeProjectJobs: jobs, sharedProjectStatus: status.enabled ? 'ready' : 'disabled' };
     } catch {
       return { ...view, sharedProjectStatus: 'unavailable' };
     }

@@ -503,8 +503,11 @@ worker["main"]()
         else:
             assert interrupted.is_file()
             log("Hatchet recovered the interrupted coding child within the original run")
-    assert len(calls) == 1
-    log("The dedicated Hatchet coding worker made one isolated candidate commit from one loopback model call")
+    assert len(calls) == (2 if brokered else 1)
+    if brokered:
+        log("The brokered worker used one loopback model call per approved job across retirement and replay.")
+    else:
+        log("The dedicated Hatchet coding worker made one isolated candidate commit from one loopback model call")
 
 
 def run_pilot(restart_hatchet):

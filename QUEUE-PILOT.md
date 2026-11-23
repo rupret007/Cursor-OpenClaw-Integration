@@ -40,6 +40,8 @@ Three jobs per backend used a 1.5-second synthetic slow dependency. The interval
 | Hatchet | 1,098 / 1,050 / 1,047 ms | 61 / 523 / 1,045 ms | 1 |
 | Restate | 38 / 34 / 32 ms | 45 / 1,535 / 3,038 ms | 1 |
 
+The brokered follow-up at runtime `4e2c0a7` closed the first real Hatchet run under a fixture completion approval. A repeated Telegram command reused that receipt. A second approved issue in the same fixture repository received a distinct run and candidate. Each run called the loopback model once. The broker restarted against the same journal and preserved the archived run, the new reservation, and the recovery lease fence. Its initial and second admission replies took 2.423 s and 1.327 s. Telegram and GitHub used local fixtures.
+
 ## Limits and remaining risks
 
 - Hatchet owned the pilot’s single worker slot. Add workflow-level concurrency in Hatchet when multiple workers need to share a downstream cap. Restate owned the limit of one invocation inside the pilot scope. Each scope has its own budget. Use downstream admission control if both backends need a shared cap.

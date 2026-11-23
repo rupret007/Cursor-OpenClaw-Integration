@@ -69,6 +69,19 @@ When neither gateway has polled the broker in the last two seconds, the broker c
 
 Run `tests/first_officer/standby-joined.py` in a loopback-only Linux namespace with a supported First Officer bundle and the installed Node and OpenClaw executables. It runs both packaged launchers with separate certificates, uses the real 90-second deadline, and checks a queued command and stale-host rejection. This exercises the broker, native gateway and durable inbox. Physical Mac startup and real Telegram delivery require the BobTestesBot rehearsal before production. Verify a brief Nuc outage keeps the current epoch. Then test a Nuc outage exceeding 90 seconds, an isolated Nuc that can still reach Telegram, a returning Nuc with an old epoch, an unavailable witness, and a Mac reboot to the login window. Interrupt a reply and a queued job during transfer. Require one Telegram consumer, no duplicate job, and a correct Mac reply within the two-minute target without a local login, SSH password, or Bobserver. Record measured takeover and recovery times. Roll back by disabling promotion, parking the Mac and confirming its fence is closed before restoring the Nuc as the sole consumer. Automatic promotion remains pending.
 
+### Plan a holder change on a stopped broker
+
+A planned holder change is bound to the last stored source host and epoch. This command is an offline journal operation. Use it only after parking the source gateway, stopping the sole broker, and disabling automatic restart during the procedure. The journal lock refuses a broker on the same state directory. It provides no protection against starting two brokers on separate state copies.
+
+From the pinned release, run as the broker account. Set `broker_state`, `current_epoch`, and `release` to the verified private state path, last lease epoch, and release path.
+
+```bash
+python3 -I -B "$release/round6/runtime/segment1/queue-runtime/standby.py" \
+  --state "$broker_state" --source mac-mini --epoch "$current_epoch" --destination nucbox
+```
+
+A successful plan reserves the next claim for the named host. The broker still observes the 90-second recovery wait on startup. A repeated command before promotion preserves the existing plan. To undo a plan before it is consumed, run the command against the same stopped journal and source epoch with the original host as the destination and the previous destination supplied in `--replace-target`. After a successful claim, use the new epoch for any further handoff. The operation leaves effect receipts intact. Cross-host broker movement and service fencing require a separate transfer procedure.
+
 ### Start the broker at boot on an independent Linux host
 
 The systemd template at `first-officer/systemd/openclaw-captain-broker@.service` starts the pinned broker at boot under the dedicated `openclaw-broker` system account. Confirm the host has systemd, Python 3, and local persistent storage before choosing it. The broker must be reachable from both Captain hosts while either one is offline. Keep the SQLite state under `/var/lib/openclaw-captain-broker` on the broker’s own disk.

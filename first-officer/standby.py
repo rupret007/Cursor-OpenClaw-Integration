@@ -4,6 +4,7 @@ The broker owns this store and calls it from one thread. Its local disk and
 upstream credentials stay with the broker. Gateways authenticate to the broker,
 which supplies the node identity and owns the outbound effect callbacks.
 """
+import argparse
 from contextlib import ExitStack, closing
 from dataclasses import dataclass
 import fcntl
@@ -91,6 +92,11 @@ class StandbyAuthority:
                     node TEXT NOT NULL,
                     epoch INTEGER NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS planned_holder (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    epoch INTEGER NOT NULL,
+                    node TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS effects (
                     kind TEXT NOT NULL,
                     operation TEXT NOT NULL,
@@ -115,6 +121,28 @@ class StandbyAuthority:
     def _valid_grant(self, now):
         return self._grant if self._deadline is not None and now < self._deadline else None
 
+    def _planned_holder(self):
+        row = self._db.execute("SELECT node, epoch FROM planned_holder WHERE id = 1").fetchone()
+        return Grant(*row) if row else None
+
+    def plan_handoff(self, expected, destination, *, replaces=None):
+        """Set the next holder while exclusively opening a stopped broker's journal."""
+        if destination not in (PRIMARY, STANDBY) or replaces not in (None, PRIMARY, STANDBY):
+            raise ValueError("Unknown Captain host")
+        if expected is None or self._grant is not None or self._last_grant() != expected:
+            raise LeaseRejected("Handoff requires a stopped broker and the current source epoch")
+
+        pending = self._planned_holder()
+        if pending == Grant(destination, expected.epoch):
+            return "planned"
+        previous = Grant(replaces, expected.epoch) if replaces is not None else None
+        if pending != previous:
+            raise LeaseRejected("Handoff target changed")
+        with self._db:
+            self._db.execute("INSERT OR REPLACE INTO planned_holder VALUES (1, ?, ?)",
+                             (expected.epoch, destination))
+        return "planned"
+
     def claim(self, node):
         if node not in (PRIMARY, STANDBY):
             raise ValueError("Unknown Captain host")
@@ -124,16 +152,22 @@ class StandbyAuthority:
         grant = self._valid_grant(now)
         if grant is not None:
             return grant if node == grant.node else None
-        # The Nuc cannot race the Mac once its renewal window has closed.
-        # Handback is a separate operation outside this automatic path.
         last = self._last_grant()
-        eligible = PRIMARY if last is None else STANDBY
+        pending = self._planned_holder()
+        if pending is not None:
+            if last is None or pending.epoch != last.epoch:
+                raise LeaseRejected("Planned holder does not match the last epoch")
+            eligible = pending.node
+        else:
+            # The Nuc cannot race the Mac once its renewal window has closed.
+            eligible = PRIMARY if last is None else STANDBY
         if node != eligible:
             return None
         grant = Grant(node, 1 if last is None else last.epoch + 1)
         with self._db:
             self._db.execute("INSERT OR REPLACE INTO holder (id, node, epoch) VALUES (1, ?, ?)",
                              (grant.node, grant.epoch))
+            self._db.execute("DELETE FROM planned_holder WHERE id = 1")
         self._grant = grant
         self._deadline = self._clock() + LEASE_SECONDS
         return grant
@@ -198,3 +232,25 @@ class StandbyAuthority:
     def require_grant(self, grant):
         if grant is None or grant != self._valid_grant(self._clock()):
             raise LeaseRejected("Captain lease expired or superseded")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Plan the next lease on a stopped Captain broker.")
+    parser.add_argument("--state", type=Path, required=True)
+    parser.add_argument("--source", choices=(PRIMARY, STANDBY), required=True)
+    parser.add_argument("--epoch", type=int, required=True)
+    parser.add_argument("--destination", choices=(PRIMARY, STANDBY), required=True)
+    parser.add_argument("--replace-target", choices=(PRIMARY, STANDBY))
+    args = parser.parse_args()
+    try:
+        with open_private(args.state, "authority.sqlite", create=False), StandbyAuthority(args.state) as authority:
+            authority.plan_handoff(Grant(args.source, args.epoch), args.destination, replaces=args.replace_target)
+    except BlockingIOError:
+        parser.exit(1, "Captain broker journal is in use.\n")
+    except (OSError, ValueError, sqlite3.Error):
+        parser.exit(1, "Captain handoff could not be planned. Check the private journal and expected lease.\n")
+    print("Captain handoff planned.")
+
+
+if __name__ == "__main__":
+    main()

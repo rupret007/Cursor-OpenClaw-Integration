@@ -1,5 +1,13 @@
 # First Officer Segment 1 status
 
+## Planned maintenance work in progress
+
+The maintenance worktree starts from `5513419`. GitHub shows draft PR #43 open with four successful checks on that exact baseline. The Nuc OpenClaw, LiteLLM, and Captain queue user services showed no loaded instances in the current systemd query. The production Telegram consumer and Mac runtime remain unknown.
+
+The offline handoff command records a pending holder against the last exact lease epoch while the broker journal is exclusively locked. After the standard recovery wait, only the named host can claim the next epoch. A stale source epoch, a conflicting target, or a running broker blocks the command. Retrying the same target before it claims is safe. An explicit correction must name the previous target. The tests verify that an unconfirmed effect survives handback without a second send. The focused standby, broker, and host suite passed 23 tests on the Nuc.
+
+The journal command covers lease planning. Moving the broker between machines still requires a transfer that fences local service restarts and preserves every inbox, job, and receipt journal. Physical maintenance in both directions and unattended Mac takeover remain unverified.
+
 ## Current Captain candidate
 
 The Nuc Captain, local LiteLLM, and Captain queue user units were inactive at the latest read-only check. The evidence below includes earlier deployment observations and isolated rehearsals. The current production Telegram consumer remains unverified.

@@ -57,6 +57,10 @@ test('captain routing claims exact phrases before legacy control and never sends
   assert.deepEqual(classifyRequest('Handoff', hooks), { kind: 'captain', action: 'handoff' });
   assert.deepEqual(classifyRequest('captain this: verify CI for PR #33', hooks), { kind: 'captain', action: 'task', pr: 33 });
   assert.deepEqual(classifyRequest('captain this: deploy', hooks), { kind: 'captain', action: 'help' });
+  assert.deepEqual(classifyRequest('captain this: advance Example/Integration #40', hooks),
+    { kind: 'captain', action: 'advance-project', repository: 'example/integration', issue: 40 });
+  assert.deepEqual(classifyRequest('captain this: advance Example/Integration #40 and publish it', hooks),
+    { kind: 'captain', action: 'help' });
 });
 
 test('captain CI proof rejects an old tested head and a PR that changes mid-read', async () => {

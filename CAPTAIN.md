@@ -126,6 +126,38 @@ Set the profile mode to `0600` and its authority directory to `0700`. Dependenci
 
 The read-only profile can recommend work. It does not grant worker dispatch. The ledger stores the last 50 changed recommendations with the issue, action, observed commit when available, and lease epoch. Signed handoff carries the ledger. Each host loads its own operator-provided profile. To roll back the briefing on an approved test host, move its `projects.json` to a private backup on the same host. The next request uses the existing Captain briefing. Restoring the file restores the project view.
 
+### Isolated coding admission
+
+Use a private test authority and a dedicated test Hatchet workflow. The coordinator requires one `project-grant.json` in the authority directory. Its fields are `repository` in lowercase, `issue`, `head` as a full commit, `epoch`, `branch`, `worker` set to `local-qwen`, `planSha256` of the exact worker plan bytes, and `expires` as Unix time within the next hour. Keep grant and policy files at mode `0600`. A separately reviewed `project-queue.json` selects the dedicated `fo-captain-project` workflow.
+
+The private `project-worker.json` contains `request` with the four identity fields, an approved local `checkout`, one tracked `file`, its exact `before` text, the operator-reviewed `prefix` and `suffix`, and the short model `prompt`. The worker quotes the model's replacement as one string literal inside that approved template. Keep worker plans and scratch worktrees private. Use the plan digest from `sha256sum project-worker.json` for the grant. The reviewed adapter uses `FO_PROJECT_PYTHON` for the pinned local-model environment and registers the coding workflow in the isolated Hatchet instance.
+
+In the private owner conversation, use `captain this: advance owner/repo #40` for the exact approved issue. Operators can also pass the four identity fields as JSON to the state script's `submit-project` operation. The coordinator checks the live GitHub issue and branch head, local gate and capacity, current authority, and exact grant before saving the reservation or contacting Hatchet. One unresolved reservation blocks a second coding job for the repo and blocks standby transfer. The briefing can still recommend eligible work in another project.
+
+After independently identifying an accepted Hatchet run, use `reconcile-project` with the original four identity fields and `run`. This checks the original queue receipt and restores the coordinator's running state without submitting again.
+
+The project monitor inspects one eligible job at a time. The worker returns the lane, approved base, and candidate commit. Jeff reviews the isolated patch and decides whether to publish it. An operator who has an authorized PR can place a private `project-verification.json` beside the lease with the lowercase `repository`, `issue`, full candidate `commit`, `pr`, and `checks` of required GitHub Actions job names. Set mode `0600`. The verifier checks candidate ancestry, rechecks the open issue and base, and confirms the PR head both before and after reading exact-commit checks. Use `inspect-project` with the four identity fields to refresh the receipt on demand. The handoff labels a saved verdict as the last verification. The isolated worker creates its candidate commit in the lane's private worktree using Git plumbing. Review the committed file by comparing the candidate with the approved base. Leave the reservation in place while a queue outcome is unresolved. For rollback on a test host, remove the exact grant from the test authority after recovering active work, then stop the isolated coding worker. Keep the private receipt and candidate for review.
+
+### Inspect a coding submission after interruption
+
+The coding queue boundary uses a stable lane ID derived from the normalized repository, issue number, exact commit, and lease epoch. Only the dedicated Hatchet coding workflow can accept this payload. A refused coding submission needs an operator decision. A submission with unknown acceptance stays reserved while the original outcome is checked. Existing review lanes retain their Restate route.
+
+Inspect a private test ledger without contacting the queue:
+
+```bash
+nice -n 10 python3 -B first-officer/lanes/queue.py "$test_policy" "$private_ledger" \
+  --status --project-repository "$repository" --project-issue "$issue" \
+  --head "$full_commit" --project-epoch "$epoch"
+```
+
+If the receipt shows `pending`, the status command establishes only what the local journal knows. Identify the original run in Hatchet and repeat the command with `--reconcile-project-run "$hatchet_run"` in place of `--status`. This uses the original private queue policy to read the run and checks its tenant, workflow, idempotency key, repository, issue, commit, and epoch before adopting the receipt. A mismatch leaves the run pending. The scoped coding worker and Telegram recovery rehearsal are separate acceptance gates.
+
+### Daily read-only project briefing
+
+Enable the daily pilot on an isolated authority by placing `{"enabled":true}` in a private `project-daily.json` beside the lease and supplying its approved `projects.json`. The active Captain checks once per minute and generates the first eligible briefing at or after 07:00 Central Time. A restart after 07:00 can catch up. The saved day and observation time travel in the signed authority handoff.
+
+The snapshot saves repository and issue identities, the recommendation, and the exact CI commit if available. No message is sent by the timer. Use **brief me** to refresh evidence on demand and **handoff** to see the date of the last saved briefing. To roll back the daily pilot, set the private profile's `enabled` value to `false`. Existing receipts stay available.
+
 ### Compare Captain performance
 
 Use the same scoped task, initial GitHub state, and acceptance checks for each assistant. Use private fixtures for write and fault cases. Collect wall time from prompt receipt to the first correct actionable answer, the number of separate Jeff interventions, and the number of milestones with verified receipts. Record unrun cases as unverified.

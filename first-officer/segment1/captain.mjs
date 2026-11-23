@@ -43,7 +43,13 @@ export function localState(operation, payload = {}, script = stateScript) {
   const python = process.env.FO_CAPTAIN_PYTHON || '/usr/bin/python3';
   return new Promise((resolve, reject) => {
     const child = execFile('/usr/bin/nice', ['-n', '10', python, '-I', '-B', script, operation],
-      { maxBuffer: 32 * 1024, ...(operation === 'submit' ? {} : { timeout: ['runner-quota', 'local-quota'].includes(operation) ? 7000 : 2500 }) },
+      {
+        maxBuffer: 48 * 1024,
+        ...(operation === 'submit' ? {} : {
+          timeout: operation === 'inspect-project' ? 30_000 : operation === 'dispatch-project' ? 15_000 :
+            ['runner-quota', 'local-quota'].includes(operation) ? 7000 : 2500,
+        }),
+      },
       (error, stdout) => {
         if (error) return reject(new Error('Captain state unavailable'));
         try { resolve(JSON.parse(stdout)); } catch { reject(new Error('Invalid captain state')); }
@@ -129,6 +135,32 @@ function jobText(job) {
 
 const noDecisions = 'No captain decisions are waiting for Jeff.';
 
+function dailyProjectText(receipt) {
+  if (!receipt) return '';
+  const next = receipt.recommended;
+  return 'Last saved project briefing · ' + receipt.date + ' CT' +
+    (next ? ' · ' + next.repository + ' #' + next.issue + ' · ' + next.action : '') + '.';
+}
+
+function projectWork(job) {
+  const { repository, issue, head } = job.request;
+  const identity = repository + ' #' + issue + ' · ' + head.slice(0, 8) + '.';
+  const status = {
+    running: 'Hatchet accepted the coding job. Awaiting its outcome.',
+    'patch-ready': 'The worker returned a candidate. Jeff can review the patch and authorize publication for exact-commit CI.',
+    'ci-pending': 'Independent CI evidence is pending for the candidate.',
+    'ci-failed': 'The last verification found a failing required check. Review CI before another attempt.',
+    verified: 'The last verification matched all required CI checks.',
+    refused: 'Hatchet refused the job. Check the coding worker.',
+    'worker-failed': 'Hatchet reports that the worker failed or was cancelled. Check the worker before authorizing another attempt.',
+    'invalid-artifact': 'The worker returned an invalid or inconsistent artifact. Inspect the isolated worktree.',
+    'stale-base': 'The issue or approved base changed. Review the current scope.',
+    'stale-candidate': 'The PR head or its base changed. Review the candidate against current GitHub evidence.',
+  };
+  return [identity, job.commit ? 'Candidate ' + job.commit.slice(0, 8) + '.' : '',
+    status[job.state] ?? 'Coding submission is unresolved. Check the original Hatchet receipt before another attempt.'].filter(Boolean).join(' ');
+}
+
 function decisions(view) {
   const needs = [];
   if (view.lease.holder === 'first-officer' && view.lease.state === 'held' &&
@@ -137,6 +169,12 @@ function decisions(view) {
   }
   if (view.lease.state === 'handback-pending') needs.push('Wait for the shared fence to finish transferring authority.');
   if (view.active?.overtime) needs.push(jobText(view.active));
+  for (const job of view.activeProjectJobs ?? []) {
+    if (job.state !== 'running' && job.state !== 'ci-pending') needs.push(projectWork(job));
+  }
+  for (const job of view.recentProjectResults ?? []) {
+    if (job.state !== 'verified') needs.push(projectWork(job));
+  }
   if (view.blocked && view.blocked.reason !== 'ci-pending') needs.push('Last blocked review · Integration PR #' + view.blocked.pr + '. ' +
     blockers[view.blocked.reason]);
   for (const job of view.jobs) {
@@ -149,7 +187,8 @@ function decisions(view) {
   return needs.length ? needs.join('\n') : noDecisions;
 }
 
-export function createCaptain({ registry, get, state = localState, admit = fleetAdmission, now = Date.now, projectBrief = async () => null }) {
+export function createCaptain({ registry, get, state = localState, admit = fleetAdmission, now = Date.now,
+  projectBrief = async () => null, dailyProjects = false }) {
   const runnerQuota = () => state('runner-quota').catch(() => null);
   async function status(kind, turn) {
     const source = registry[kind];
@@ -215,6 +254,25 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
   async function run(request, turn) {
     const action = request.action;
     if (action === 'help') return 'Use “captain status”, “brief me”, “what needs me?”, “handoff”, or “captain this: verify CI for PR #33”.';
+    if (action === 'advance-project') {
+      turn.signal.throwIfAborted();
+      const placed = await state('dispatch-project', { repository: request.repository, issue: request.issue });
+      if (placed.result === 'duplicate') return 'This approved coding run already has a receipt. ' + projectWork(placed.job);
+      if (placed.job) return projectWork(placed.job);
+      const blocker = {
+        'scope-denied': 'Jeff needs to approve the exact issue, base commit, and authority epoch.',
+        stale: 'The Captain authority epoch changed. Check “captain status”.',
+        'stale-github': 'The approved issue or base commit changed. Check GitHub before requesting a fresh grant.',
+        'github-unavailable': 'Live GitHub evidence is unavailable. The run did not start.',
+        active: 'This repository already has an active coding job. Ask for “handoff”.',
+        'runner-unconfigured': 'The scoped coding worker or Hatchet policy is unavailable.',
+        'admission-unavailable': 'The local gate or capacity could not be verified.',
+        'admission-blocked': 'The local gate or capacity is blocking the run.',
+        'existing-queue-receipt': 'Hatchet already has a receipt. Verify it before requesting another run.',
+        'ledger-full': 'Jeff needs to review the full project ledger before dispatch.',
+      };
+      return blocker[placed.result] ?? 'The project admission result is unavailable. Check “handoff” before retrying.';
+    }
     if (['grant', 'pause', 'handback'].includes(action)) {
       const outcome = await state(action, {
         owner: turn.owner, epoch: request.epoch, message: Number(turn.ctx.messageId),
@@ -230,7 +288,8 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
     }
     const viewPromise = state(action === 'handoff' ? 'handoff' : 'view');
     const projectEvidence = () => bounded(11_000, (signal) =>
-      projectBrief(AbortSignal.any([signal, turn.signal])))
+      viewPromise.catch(() => null).then((view) =>
+        projectBrief(AbortSignal.any([signal, turn.signal]), view?.activeProjectJobs ?? [])))
       .catch(() => ({ summary: 'Project evidence is unavailable.', decisions: ['Project decisions could not be verified.'] }));
     if (action === 'brief') {
       const [view, quota, projects, ...evidence] = await Promise.all([
@@ -239,10 +298,12 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
       ]);
       return [view ? role(view) + '\n' + decisions(view).split('\n')[0] +
         (view.active ? '\n' + jobText(view.active) : '') :
-        'Captain authority and decisions are unavailable.', ...(projects ? [projects.summary] : []), ...evidence,
+        'Captain authority and decisions are unavailable.',
+        ...(view?.activeProjectJobs ?? []).filter((job) => ['running', 'ci-pending'].includes(job.state)).map(projectWork),
+        ...(projects ? [projects.summary] : []), dailyProjectText(view?.lastProjectDaily), ...evidence,
         quota?.modelFree ? 'Captain CI review uses a model-free worker.' :
           quota ? 'Captain runner quota · ' + quota.session.used + '% of 5-hour window · ' + quota.weekly.used + '% of weekly window.'
-          : 'The captain runner’s subscription quota is unavailable.'].join('\n\n');
+          : 'The captain runner’s subscription quota is unavailable.'].filter(Boolean).join('\n\n');
     }
     if (action === 'decisions') {
       const [view, projects] = await Promise.all([viewPromise, projectEvidence()]);
@@ -260,6 +321,9 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
         recommendation.issue + ' · ' + recommendation.action + ' · epoch ' + recommendation.epoch + '.' : '',
       view.blocked?.reason === 'ci-pending' ? 'Integration PR #' + view.blocked.pr + ' · ' +
         view.blocked.head.slice(0, 8) + ' · awaiting required CI.' : '',
+      ...(view.activeProjectJobs ?? []).filter((job) => ['running', 'ci-pending'].includes(job.state)).map(projectWork),
+      ...(view.recentProjectResults ?? []).filter((job) => job.state === 'verified').map(projectWork),
+      dailyProjectText(view.lastProjectDaily),
       ...view.jobs.map(jobText)].filter(Boolean).join('\n');
     return task(request.pr, view, turn);
   }
@@ -308,5 +372,36 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
       await state('reported', { lane: job.lane });
     }
   }
-  return { run, tick };
+  let lastDailyCheck = -Infinity;
+  async function saveDailyProject(view) {
+    const started = now();
+    if (!dailyProjects || started - lastDailyCheck < 60_000) return;
+    lastDailyCheck = started;
+    const due = await state('project-daily-due');
+    if (!due) return;
+    const projects = await bounded(11_000, (signal) => projectBrief(signal, view.activeProjectJobs ?? []));
+    if (projects?.snapshot) await state('save-project-daily', { ...due, snapshot: projects.snapshot });
+  }
+
+  let checkingProject = false;
+  async function tickProject() {
+    if (checkingProject) return;
+    checkingProject = true;
+    try {
+      const view = await state('view');
+      if (view.lease?.holder !== 'first-officer' || view.lease.state !== 'held') return;
+      const jobs = (view.activeProjectJobs ?? []).filter((job) =>
+        ['running', 'patch-ready', 'ci-pending'].includes(job.state));
+      const ready = jobs.filter((job) => now() / 1000 - (job.observed ?? 0) >= 30)
+        .sort((a, b) => (a.observed ?? 0) - (b.observed ?? 0));
+      if (ready.length) {
+        const { repository, issue, head, epoch } = ready[0].request;
+        await state('inspect-project', { repository, issue, head, epoch });
+      }
+      await saveDailyProject(view);
+    } finally {
+      checkingProject = false;
+    }
+  }
+  return { run, tick, tickProject };
 }

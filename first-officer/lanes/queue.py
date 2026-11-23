@@ -37,6 +37,9 @@ NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 HOST = re.compile(
     r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*")
 SHA = re.compile(r"[0-9a-f]{40}")
+PROJECT_WORKFLOW = "fo-captain-project"
+PROJECT_REQUEST = {"lane", "head", "repository", "issue", "epoch"}
+REPOSITORY = re.compile(r"[a-z0-9][a-z0-9_.-]{0,99}/[a-z0-9_-][a-z0-9_.-]{0,99}")
 TENANT = re.compile(r"[0-9a-fA-F-]{8,64}")
 ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
 RUN_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
@@ -77,12 +80,26 @@ class NoRedirect(HTTPRedirectHandler):
         raise HTTPError(req.full_url, code, "The queue redirected the request", headers, fp)
 
 
+def project_lane(repository, issue, head, epoch):
+    identity = json.dumps([repository, issue, head, epoch], separators=(",", ":"))
+    return "fo-project-" + hashlib.sha256(identity.encode()).hexdigest()[:24]
+
+
 def canonical(request):
-    if set(request) != {"lane", "head", "pull_request"}:
-        raise ValueError("A lane request names its lane, head and pull request")
-    if not NAME.fullmatch(str(request["lane"])) or not SHA.fullmatch(str(request["head"])):
+    if not isinstance(request, dict) or set(request) not in (PROJECT_REQUEST, {"lane", "head", "pull_request"}):
+        raise ValueError("A lane request needs a known review or project scope")
+    if (not isinstance(request["lane"], str) or not NAME.fullmatch(request["lane"]) or
+            not isinstance(request["head"], str) or not SHA.fullmatch(request["head"])):
         raise ValueError("A lane request needs a lane name and a full head commit")
-    if type(request["pull_request"]) is not int or not 0 < request["pull_request"] < 1 << 31:
+    if set(request) == PROJECT_REQUEST:
+        repository = request["repository"]
+        if (not isinstance(repository, str) or not REPOSITORY.fullmatch(repository) or
+                type(request["issue"]) is not int or not 0 < request["issue"] < 100_000_000 or
+                type(request["epoch"]) is not int or not 0 < request["epoch"] < 1_000_000_000_000):
+            raise ValueError("A project lane needs an exact repository, issue, and authority epoch")
+        if request["lane"] != project_lane(repository, request["issue"], request["head"], request["epoch"]):
+            raise ValueError("A coding lane must use its stable issue, head and epoch identity")
+    elif type(request["pull_request"]) is not int or not 0 < request["pull_request"] < 1 << 31:
         raise ValueError("A lane request needs a pull request number")
     return json.dumps(request, sort_keys=True, separators=(",", ":"))
 
@@ -267,6 +284,9 @@ def restate_route(config):
 
 def submission(backend, config, request, key):
     """Validate the selected route and resolve its credential before reserving a send."""
+    project = set(request) == PROJECT_REQUEST
+    if project != (backend == "hatchet" and config.get("workflow") == PROJECT_WORKFLOW):
+        raise ValueError("Project coding lanes require the dedicated Hatchet workflow")
     if backend == "hatchet":
         tenant, workflow = config["tenant"], config["workflow"]
         if not TENANT.fullmatch(tenant) or not NAME.fullmatch(workflow):
@@ -401,6 +421,7 @@ def queue_state(file, request, key):
     if (state.get("head") != request["head"] or state.get("lane") != request["lane"]
             or phase not in ("pending", "uncertain", "refused", "queued")
             or backend not in ("hatchet", "restate")
+            or (set(request) == PROJECT_REQUEST and backend != "hatchet")
             or (phase == "queued" and (not isinstance(run, str) or not RUN_ID.fullmatch(run)))
             or (phase != "queued" and run is not None)):
         raise ValueError("The lane ledger has an invalid state")
@@ -425,11 +446,14 @@ def dispatch(config, request, ledger, now=None, timeout=TIMEOUT):
     else:
         raise ValueError("The queue clock is unusable")
     key = idempotency_key(request)
+    project = set(request) == PROJECT_REQUEST
     with lane_lock(ledger, key):
         with locked_ledger(ledger) as file:
             state = queue_state(file, request, key)
         if state and state["phase"] == "queued":
             return {**state, "reused": True}
+        if state and state["phase"] == "refused" and project:
+            raise ValueError("Hatchet refused this coding run. Check the worker before authorizing a new attempt.")
         if state and state["phase"] != "refused":
             raise ValueError("The earlier queue attempt has an unknown outcome. "
                              "The lane was not sent again.")
@@ -458,7 +482,8 @@ def dispatch(config, request, ledger, now=None, timeout=TIMEOUT):
             except Uncertain as error:
                 raise ValueError(f"Hatchet outcome is unknown: {error}. The lane was not failed over.") from None
             except Refusal:
-                pass
+                if project:
+                    raise ValueError("Hatchet refused the coding lane. No other worker was contacted.") from None
         try:
             return attempt("restate")
         except Uncertain as error:
@@ -468,8 +493,62 @@ def dispatch(config, request, ledger, now=None, timeout=TIMEOUT):
                              "The lane was not queued.") from None
 
 
+def read_project_run(config, request, state, run, timeout):
+    if set(request) != PROJECT_REQUEST or not isinstance(run, str) or not RUN_ID.fullmatch(run):
+        raise ValueError("Expected a coding lane and original Hatchet run ID")
+    key = idempotency_key(request)
+    route = config["hatchet"]
+    (opener, url, headers, _), target = submission("hatchet", route, request, key)
+    if state["target"] != target:
+        raise ValueError("The ledger cannot verify this as the original Hatchet destination")
+    base = url.split("/api/v1/stable/", 1)[0]
+    try:
+        result = response_json(opener, Request(
+            f"{base}/api/v1/stable/workflow-runs/{run}", headers=headers), timeout)
+    except (Refusal, Uncertain) as error:
+        raise ValueError(f"Hatchet could not confirm the original coding submission. {error}.") from None
+    row = result.get("run") or {}
+    metadata = row.get("metadata") if isinstance(row, dict) else None
+    extra = row.get("additionalMetadata") if isinstance(row, dict) else None
+    envelope = row.get("input") if isinstance(row, dict) else None
+    workflow = result.get("workflowConfig")
+    if (not isinstance(metadata, dict) or metadata.get("id") != run or
+            row.get("tenantId") != route["tenant"] or
+            not isinstance(workflow, dict) or workflow.get("Name") != PROJECT_WORKFLOW or
+            not isinstance(extra, dict) or extra.get("idempotencyKey") != key or
+            not isinstance(envelope, dict) or envelope.get("input") != request):
+        raise ValueError("Hatchet returned a different coding run. The receipt remains unresolved.")
+    return row
+
+
+def reconcile_project(config, request, ledger, run, timeout=TIMEOUT):
+    """Adopt an independently identified Hatchet run only after exact readback."""
+    timeout = _bounded_timeout(timeout)
+    key = idempotency_key(request)
+    if set(request) != PROJECT_REQUEST:
+        raise ValueError("Only a coding lane can use this Hatchet lookup")
+    if not isinstance(run, str) or not RUN_ID.fullmatch(run):
+        raise ValueError("Specify the original Hatchet run ID")
+    with lane_lock(ledger, key):
+        with locked_ledger(ledger) as file:
+            state = queue_state(file, request, key)
+        if state and state["backend"] == "hatchet" and state["phase"] == "queued":
+            if state["run"] != run:
+                raise ValueError("The ledger already names a different Hatchet run")
+            return {**state, "reused": True}
+        if not state or state["backend"] != "hatchet" or state["phase"] not in ("pending", "uncertain"):
+            raise ValueError("The ledger has no unresolved coding submission")
+        read_project_run(config, request, state, run, timeout)
+        entry = {**state, "at": int(time.time()), "phase": "queued", "run": run}
+        entry.pop("detail", None)
+        transition(ledger, request, key, state, entry)
+        return {**entry, "reused": False}
+
+
 def reconcile_restate(config, request, ledger, timeout=TIMEOUT):
     """Record positive lookup evidence for the original Restate destination only."""
+    if set(request) == PROJECT_REQUEST:
+        raise ValueError("The project coding workflow has no Restate destination")
     timeout = _bounded_timeout(timeout)
     key = idempotency_key(request)
     with lane_lock(ledger, key):
@@ -536,16 +615,29 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("policy", type=Path, help="Reviewed JSON queue policy")
     parser.add_argument("ledger", type=Path, help="Private append-only dispatch ledger")
-    parser.add_argument("--lane", required=True)
+    parser.add_argument("--lane")
     parser.add_argument("--head", required=True)
-    parser.add_argument("--pull-request", type=int, required=True)
+    parser.add_argument("--pull-request", type=int)
+    parser.add_argument("--project-repository")
+    parser.add_argument("--project-issue", type=int)
+    parser.add_argument("--project-epoch", type=int)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--status", action="store_true", help="Read local state without contacting either backend")
     mode.add_argument("--reconcile-restate", action="store_true", help="Recover an existing Restate receipt without resending")
+    mode.add_argument("--reconcile-project-run", help="Verify the original Hatchet coding run by ID without resending")
     args = parser.parse_args(argv)
     os.umask(0o077)
     try:
-        request = {"lane": args.lane, "head": args.head, "pull_request": args.pull_request}
+        project_args = (args.project_repository, args.project_issue, args.project_epoch)
+        if any(value is not None for value in project_args):
+            if (not (args.status or args.reconcile_project_run) or args.lane is not None or
+                    args.pull_request is not None or any(value is None for value in project_args)):
+                raise ValueError("Project receipt lookup needs repository, issue, head, and epoch in status or reconcile mode")
+            request = {"repository": args.project_repository, "issue": args.project_issue,
+                       "head": args.head, "epoch": args.project_epoch}
+            request["lane"] = project_lane(**request)
+        else:
+            request = {"lane": args.lane, "head": args.head, "pull_request": args.pull_request}
         if args.status:
             key = idempotency_key(request)
             try:
@@ -555,6 +647,10 @@ def main(argv=None):
                 state = None
             print(json.dumps({key: state[key] for key in ("phase", "backend", "run")} if state else
                              {"phase": "unseen"}, sort_keys=True))
+            return 0
+        if args.reconcile_project_run:
+            result = reconcile_project(load_config(args.policy), request, args.ledger, args.reconcile_project_run)
+            print(f"Lane {result['lane']} has a verified Hatchet receipt.")
             return 0
         operation = reconcile_restate if args.reconcile_restate else dispatch
         result = operation(load_config(args.policy), request, args.ledger)

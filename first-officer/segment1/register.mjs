@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { isIP } from 'node:net';
 import { join } from 'node:path';
@@ -6,7 +7,7 @@ import { sshAndreaSummary } from './andrea-ssh.mjs';
 import { createCaptain, localState, projectCI, resolveCaptainStateScript } from './captain.mjs';
 import { createProjectBrief } from './project-brief.mjs';
 import { classifyRequest, createDispatch } from './dispatch.mjs';
-import { answerSimple, standaloneSimple } from './model-router.mjs';
+import { createQuickChat, isLocalQuickChat, quickFollowUp, standaloneSimple } from './model-router.mjs';
 import { fleetStatus, localFleetNode, openPullRequests, readIntegrationGithub, readProjectGithub, standaloneGateStatus, standaloneQuotaStatus, summarizeAndrea } from './tools.mjs';
 
 const account = 'default';
@@ -90,8 +91,8 @@ function andreaReader(signal, { readPrivateConfig, createAndreaReader }) {
   });
 }
 
-function toolRegistry(api, commands, liveConfig, services, state) {
-  const { quotaStatus, githubReply, redacted } = services;
+function toolRegistry(api, commands, liveConfig, services, state, chat) {
+  const { quotaStatus, githubReply } = services;
   const statusFleet = (request) => fleetStatus(request, {
     capacity: localFleetNode() === 'bobserver' ? undefined : () => state('local-capacity'),
   });
@@ -155,14 +156,33 @@ function toolRegistry(api, commands, liveConfig, services, state) {
       run: () => plain('Andrea’s messaging access here is read-only. Try “@andrea summarize my texts” for recent activity in your approved chats.'),
     },
     simple: {
-      run: async ({ prompt }, { signal, owner }) => {
-        const answer = redacted(await answerSimple(api.runtime, prompt, signal, liveConfig(owner)), 1250);
+      run: async (request, turn) => {
+        const answer = await chat.answer(request, turn, liveConfig(turn.owner));
         if (!answer) throw new Error('Fast answer unavailable');
         return plain(answer);
       },
       failure: 'The fast model didn’t return an answer in time or the request failed.',
     },
   };
+}
+
+async function prepareTelegramSessionRecorder(api, cfg) {
+  try {
+    const agent = 'main';
+    const session = api.runtime.channel.session;
+    let failed = false;
+    await session.recordInboundSession({
+      storePath: session.resolveStorePath(cfg.session?.store, { agentId: agent }),
+      sessionKey: 'agent:main:fo-startup-' + randomUUID(),
+      ctx: {},
+      createIfMissing: false,
+      onRecordError() { failed = true; },
+    });
+    if (failed) throw new Error('Session startup preparation failed');
+    api.logger.info('First Officer Telegram session writer ready.');
+  } catch {
+    api.logger.warn('First Officer could not prepare the Telegram session writer during startup.');
+  }
 }
 
 export function registerSegmentOne(api, commands, services) {
@@ -173,9 +193,17 @@ export function registerSegmentOne(api, commands, services) {
     if (telegramOwner(cfg, account) !== owner) throw new Error('Private owner is unavailable');
     return cfg;
   };
+  const cfg = currentConfig();
+  if (localFleetNode() === 'nucbox' && isLocalQuickChat(cfg) &&
+      !cfg.agents?.list?.length && typeof api.registerService === 'function') {
+    api.registerService({
+      id: 'fo-telegram-session-prepare', start: () => prepareTelegramSessionRecorder(api, cfg), stop() {},
+    });
+  }
   const script = resolveCaptainStateScript(currentConfig());
   const state = (operation, data) => localState(operation, data, script);
-  const registry = toolRegistry(api, commands, liveConfig, services, state);
+  const chat = createQuickChat(api.runtime, services.redacted);
+  const registry = toolRegistry(api, commands, liveConfig, services, state, chat);
   if (services.getGithub) {
     const readCI = localFleetNode() === 'bobserver' ? services.getGithub : readIntegrationGithub;
     const projectBrief = localFleetNode() === 'bobserver' ? undefined : createProjectBrief({
@@ -188,7 +216,7 @@ export function registerSegmentOne(api, commands, services) {
           (path) => get(path.slice(repository.length + 1)));
       },
     });
-    const captain = createCaptain({ registry, get: readCI, state, projectBrief });
+    const captain = createCaptain({ registry, get: readCI, state, projectBrief, dailyProjects: Boolean(projectBrief) });
     registry.captain = {
       run: async (request, turn) => plain(await captain.run(request, turn)),
       failure: 'Captain state or evidence is unavailable. Check “captain status” before retrying.',
@@ -217,6 +245,20 @@ export function registerSegmentOne(api, commands, services) {
         monitor = undefined;
       },
     });
+    let projectMonitor;
+    api.registerService({
+      id: 'fo-captain-project-monitor',
+      start() {
+        if (projectMonitor) return;
+        projectMonitor = setInterval(() => captain.tickProject().catch(() =>
+          api.logger.warn('Project Captain could not verify the current worker result.')), 15_000);
+        projectMonitor.unref();
+      },
+      stop() {
+        clearInterval(projectMonitor);
+        projectMonitor = undefined;
+      },
+    });
   }
   const dispatch = createDispatch({
     authorize(event, ctx) {
@@ -225,10 +267,21 @@ export function registerSegmentOne(api, commands, services) {
         return telegramOwner(cfg, account);
       }
     },
-    classify: (text, event) => classifyRequest(text, {
-      legacyStatus: statusTopic, legacyRequest: parseRequest, isControl: controlIntent,
-      isSimple: (raw) => standaloneSimple(raw, routeFor, event),
-    }),
+    classify(text, event) {
+      let followUp = false;
+      const request = classifyRequest(text, {
+        legacyStatus: statusTopic, legacyRequest: parseRequest, isControl: controlIntent,
+        isSimple(raw) {
+          followUp = isLocalQuickChat(currentConfig()) && quickFollowUp(raw, routeFor, event);
+          return followUp || standaloneSimple(raw, routeFor, event);
+        },
+      });
+      if (request?.kind !== 'simple') {
+        chat.clear();
+        return request;
+      }
+      return { ...request, followUp };
+    },
     acknowledge: (owner, _, signal) => acknowledge(api, owner, liveConfig, signal),
     registry,
     warn: (line) => api.logger.warn(line),

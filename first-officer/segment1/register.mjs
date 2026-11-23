@@ -269,6 +269,11 @@ export function registerSegmentOne(api, commands, services) {
     }
   };
   const state = async (operation, data, turn) => {
+    if (stagedStandby && ['project-daily-due', 'save-project-daily'].includes(operation)) {
+      const owner = telegramOwner(currentConfig(), account);
+      const method = operation === 'project-daily-due' ? 'foProjectDailyDue' : 'foProjectDailySave';
+      return telegramDirect(owner, liveConfig, method, data ?? {}, AbortSignal.timeout(2500));
+    }
     if (stagedStandby && operation === 'dispatch-project') {
       return telegramDirect(turn.owner, liveConfig, 'foProjectSubmit', {
         ...data, fo_message_id: brokerMessage(turn.ctx),
@@ -286,7 +291,8 @@ export function registerSegmentOne(api, commands, services) {
         const verified = await Promise.all(targets.map((job) => verifyBrokerCandidate(job, owner)));
         jobs = jobs.map((job) => verified.find((item) => item.request.lane === job.request.lane) ?? job);
       }
-      return { ...view, activeProjectJobs: jobs, sharedProjectStatus: status.enabled ? 'ready' : 'disabled' };
+      return { ...view, activeProjectJobs: jobs, lastProjectDaily: status.lastDaily,
+        sharedProjectStatus: status.enabled ? 'ready' : 'disabled' };
     } catch {
       return { ...view, sharedProjectStatus: 'unavailable' };
     }
@@ -303,7 +309,7 @@ export function registerSegmentOne(api, commands, services) {
     const projectBrief = localFleetNode() === 'bobserver' ? undefined : createProjectBrief({
       config: () => state('local-projects'),
       read: readProjectGithub,
-      record: (recommendation) => state('record-project-recommendation', recommendation),
+      record: stagedStandby ? undefined : (recommendation) => state('record-project-recommendation', recommendation),
       check(project, get) {
         const repository = 'repos/' + project.repo;
         return projectCI(repository, project.pr, project.checks,
@@ -311,7 +317,7 @@ export function registerSegmentOne(api, commands, services) {
       },
     });
     const captain = createCaptain({
-      registry, get: readCI, state, projectBrief, dailyProjects: Boolean(projectBrief) && !stagedStandby,
+      registry, get: readCI, state, projectBrief, dailyProjects: Boolean(projectBrief), inspectProjectJobs: !stagedStandby,
     });
     registry.captain = {
       run: async (request, turn) => plain(await captain.run(request, turn)),
@@ -345,8 +351,7 @@ export function registerSegmentOne(api, commands, services) {
     api.registerService({
       id: 'fo-captain-project-monitor',
       start() {
-        // The independent broker refreshes these receipts in standby mode.
-        if (projectMonitor || stagedStandby) return;
+        if (projectMonitor) return;
         projectMonitor = setInterval(() => captain.tickProject().catch(() =>
           api.logger.warn('Project Captain could not verify the current worker result.')), 15_000);
         projectMonitor.unref();

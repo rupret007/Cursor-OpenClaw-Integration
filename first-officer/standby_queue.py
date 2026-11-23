@@ -1,9 +1,11 @@
 """Broker-owned review and coding queues using Captain's existing dispatcher."""
 
 from contextlib import closing
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import re
+import runpy
 import sqlite3
 from threading import Lock
 import time
@@ -28,6 +30,53 @@ class ProjectScopeRejected(ValueError):
 
 class ProjectBusy(ValueError):
     pass
+
+
+class DailyBriefing:
+    def __init__(self, directory, *, clock=time.time):
+        self.directory, self.clock = directory, clock
+        self.database = directory / "project-daily.sqlite"
+        source = Path(__file__).resolve().parents[1] / "captain-state.py"
+        if not source.is_file():
+            source = Path(__file__).resolve().with_name("segment1") / "captain-state.py"
+        helpers = runpy.run_path(str(source))
+        self.date = helpers["project_daily_date"]
+        self.validate = helpers["validate_project_snapshot"]
+        with open_private(directory, self.database.name), closing(sqlite3.connect(self.database)) as db:
+            db.execute("CREATE TABLE IF NOT EXISTS briefing (day TEXT PRIMARY KEY, receipt TEXT NOT NULL)")
+
+    def current_date(self):
+        return self.date(self.directory, datetime.fromtimestamp(self.clock(), timezone.utc))
+
+    def due(self, authority, grant):
+        authority.require_grant(grant)
+        day = self.current_date()
+        if day is None:
+            return None
+        with closing(sqlite3.connect(self.database)) as db:
+            exists = db.execute("SELECT 1 FROM briefing WHERE day = ?", (day,)).fetchone()
+        return None if exists else {"date": day, "epoch": grant.epoch}
+
+    def latest(self):
+        with closing(sqlite3.connect(self.database)) as db:
+            row = db.execute("SELECT receipt FROM briefing ORDER BY day DESC LIMIT 1").fetchone()
+        return json.loads(row[0]) if row else None
+
+    def save(self, authority, grant, day, snapshot):
+        authority.require_grant(grant)
+        projects, recommendation = self.validate(snapshot)
+        if day is None or day != self.current_date():
+            return {"result": "stale"}
+        if any(row["action"] == "refresh" for row in projects):
+            return {"result": "evidence-unavailable"}
+        payload = {"date": day, "epoch": grant.epoch, "observed": int(self.clock()),
+                   "projects": projects, "recommended": recommendation}
+        with closing(sqlite3.connect(self.database)) as db, db:
+            authority.require_grant(grant)
+            added = db.execute("INSERT OR IGNORE INTO briefing VALUES (?, ?)", (day, json.dumps(payload))).rowcount
+            if added:
+                db.execute("DELETE FROM briefing WHERE day NOT IN (SELECT day FROM briefing ORDER BY day DESC LIMIT 14)")
+        return {"result": "saved" if added else "duplicate"}
 
 
 class BrokerQueue:

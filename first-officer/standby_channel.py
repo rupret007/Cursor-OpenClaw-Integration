@@ -192,6 +192,16 @@ class LocalRequest(BaseHTTPRequestHandler):
                 if str(fields.get("chat_id")) != str(channel.owner):
                     raise ValueError("Invalid Telegram recipient")
                 result = channel.broker.project_status(channel.epoch)
+            elif method in ("foProjectDailyDue", "foProjectDailySave"):
+                if str(fields.get("chat_id")) != str(channel.owner):
+                    raise ValueError("Invalid daily briefing context")
+                if method == "foProjectDailyDue" and fields.keys() == {"chat_id"}:
+                    result = channel.broker.project_daily_due(channel.epoch)
+                elif (method == "foProjectDailySave" and fields.keys() == {"chat_id", "date", "epoch", "snapshot"}
+                      and type(fields["epoch"]) is int and fields["epoch"] == channel.epoch):
+                    result = channel.broker.save_project_daily(channel.epoch, fields["date"], fields["snapshot"])
+                else:
+                    raise ValueError("Invalid daily briefing request")
             elif method == "foProjectInspect":
                 if fields.keys() != {"chat_id", "request"} or str(fields["chat_id"]) != str(channel.owner):
                     raise ValueError("Invalid coding request context")

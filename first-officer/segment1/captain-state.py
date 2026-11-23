@@ -397,6 +397,39 @@ def project_pr_checks(request, branch, candidate, verification):
     return "verified"
 
 
+def project_daily_date(root, instant):
+    try:
+        enabled = read_private(root / "project-daily.json", 1024)
+    except FileNotFoundError:
+        return None
+    if not isinstance(enabled, dict) or enabled.keys() != {"enabled"} or type(enabled["enabled"]) is not bool:
+        raise ValueError("Invalid daily project profile")
+    local = instant.astimezone(ZoneInfo("America/Chicago"))
+    return local.date().isoformat() if enabled["enabled"] and local.hour >= 7 else None
+
+
+def validate_project_snapshot(snapshot):
+    if not isinstance(snapshot, dict) or snapshot.keys() != {"projects", "recommended"}:
+        raise ValueError("Invalid daily snapshot")
+    projects, recommendation = snapshot["projects"], snapshot["recommended"]
+    if not isinstance(projects, list) or not 1 <= len(projects) <= 2:
+        raise ValueError("A daily snapshot needs verified project evidence")
+    for project in projects:
+        if (not isinstance(project, dict) or project.keys() not in (
+                {"repository", "issue", "action"}, {"repository", "issue", "action", "head", "ci"}) or
+                not isinstance(project["repository"], str) or not PROJECT_REPO.fullmatch(project["repository"]) or
+                type(project["issue"]) is not int or not 1 <= project["issue"] <= 99_999_999 or
+                project["action"] not in PROJECT_ACTIONS or
+                ("head" in project and (not isinstance(project["head"], str) or not SHA.fullmatch(project["head"]) or
+                 project["ci"] not in ("changed", "passing", "failing", "pending", "unavailable")))):
+            raise ValueError("The daily snapshot contains invalid evidence")
+    if (len({row["repository"] for row in projects}) != len(projects) or
+            recommendation is not None and (recommendation not in projects or
+                recommendation["action"] not in {"investigate", "fix", "verify"})):
+        raise ValueError("The daily recommendation is outside the current evidence")
+    return projects, recommendation
+
+
 def project_verification(root, request, candidate):
     expected = {"repository": request["repository"], "issue": request["issue"], "commit": candidate}
     try:
@@ -662,14 +695,7 @@ class Controller:
     def daily_project_date(self):
         if not self.standalone:
             return None
-        try:
-            enabled = read_private(self.watchdog.AUTHORITY / "project-daily.json", 1024)
-        except FileNotFoundError:
-            return None
-        if not isinstance(enabled, dict) or enabled.keys() != {"enabled"} or type(enabled["enabled"]) is not bool:
-            raise ValueError("Invalid daily project profile")
-        local = datetime.now(timezone.utc).astimezone(ZoneInfo("America/Chicago"))
-        return local.date().isoformat() if enabled["enabled"] and local.hour >= 7 else None
+        return project_daily_date(self.watchdog.AUTHORITY, datetime.now(timezone.utc))
 
     def daily_project_due(self):
         day = self.daily_project_date()
@@ -686,23 +712,7 @@ class Controller:
         day, epoch = req["date"], check_epoch(req["epoch"])
         if not isinstance(day, str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", day):
             raise ValueError("The daily snapshot date is invalid")
-        snapshot = req["snapshot"]
-        projects, recommendation = snapshot["projects"], snapshot["recommended"]
-        if not isinstance(projects, list) or not 1 <= len(projects) <= 2:
-            raise ValueError("A daily snapshot needs verified project evidence")
-        for project in projects:
-            if (not isinstance(project, dict) or project.keys() not in (
-                    {"repository", "issue", "action"}, {"repository", "issue", "action", "head", "ci"}) or
-                    not isinstance(project["repository"], str) or not PROJECT_REPO.fullmatch(project["repository"]) or
-                    type(project["issue"]) is not int or not 1 <= project["issue"] <= 99_999_999 or
-                    project["action"] not in PROJECT_ACTIONS or
-                    ("head" in project and (not isinstance(project["head"], str) or not SHA.fullmatch(project["head"]) or
-                     project["ci"] not in ("changed", "passing", "failing", "pending", "unavailable")))):
-                raise ValueError("The daily snapshot contains invalid evidence")
-        if (len({row["repository"] for row in projects}) != len(projects) or
-                recommendation is not None and (recommendation not in projects or
-                    recommendation["action"] not in {"investigate", "fix", "verify"})):
-            raise ValueError("The daily recommendation is outside the current evidence")
+        projects, recommendation = validate_project_snapshot(req["snapshot"])
         with self.locked(write=True) as data, self.fence._locked():
             if day != self.daily_project_date() or not self.matches(self.fence._read_unlocked(), epoch):
                 return {"result": "stale"}

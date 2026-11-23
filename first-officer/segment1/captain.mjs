@@ -199,7 +199,7 @@ function decisions(view, currentDelivery) {
 }
 
 export function createCaptain({ registry, get, state = localState, admit = fleetAdmission, now = Date.now,
-  projectBrief = async () => null, dailyProjects = false }) {
+  projectBrief = async () => null, dailyProjects = false, inspectProjectJobs = true }) {
   const runnerQuota = () => state('runner-quota').catch(() => null);
   async function status(kind, turn) {
     const source = registry[kind];
@@ -417,6 +417,10 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
     try {
       const view = await state('view');
       if (view.lease?.holder !== 'first-officer' || view.lease.state !== 'held') return;
+      if (!inspectProjectJobs) {
+        await saveDailyProject(view);
+        return;
+      }
       const check = (job, interval) => ({ job, due: (job.observed ?? job.checked ?? 0) + interval });
       const active = (view.activeProjectJobs ?? []).filter((job) =>
         ['running', 'patch-ready', 'ci-pending'].includes(job.state));

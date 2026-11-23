@@ -30,6 +30,10 @@ class FixtureBroker:
         self.polling.set()
         return self.message
 
+    def project_daily_due(self, epoch):
+        assert epoch == 4
+        return None
+
     def project_status(self, epoch):
         assert epoch == 4
         if self.patch_ready is not None:

@@ -130,6 +130,27 @@ test('Daily briefing saves one read-only snapshot and resumes from the persisted
 });
 
 
+test('brokered daily tick records the snapshot without inspecting local jobs', async () => {
+  const calls = [];
+  const project = { repository: 'fixture/integration', issue: 40, action: 'investigate' };
+  const snapshot = { projects: [project], recommended: project };
+  const captain = createCaptain({ dailyProjects: true, inspectProjectJobs: false,
+    projectBrief: async () => ({ snapshot }),
+    state: async (op, payload) => {
+      calls.push(op);
+      if (op === 'view') return { lease: { holder: 'first-officer', state: 'held', epoch: 2 },
+        activeProjectJobs: [{ state: 'running', request: { repository: 'fixture/dashboard' } }] };
+      if (op === 'project-daily-due') return { date: '2026-11-23', epoch: 2 };
+      assert.equal(op, 'save-project-daily');
+      assert.deepEqual(payload.snapshot, snapshot);
+      return { result: 'saved' };
+    },
+  });
+  await captain.tickProject();
+  assert.deepEqual(calls, ['view', 'project-daily-due', 'save-project-daily']);
+});
+
+
 test('Captain dispatch routes a scoped project identity and reports an explicit missing grant', async () => {
   const calls = [];
   const captain = createCaptain({ state: async (op, payload) => {

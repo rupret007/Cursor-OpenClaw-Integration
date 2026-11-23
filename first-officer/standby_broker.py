@@ -20,7 +20,7 @@ if __name__ == "__main__":
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from standby import EFFECT_KINDS, Grant, LeaseRejected, PRIMARY, STANDBY, StandbyAuthority, read_private_json
-from standby_queue import ProjectBusy, ProjectQueue, ProjectScopeRejected, ReviewQueue, ReviewScopeRejected
+from standby_queue import DailyBriefing, ProjectBusy, ProjectQueue, ProjectScopeRejected, ReviewQueue, ReviewScopeRejected
 from standby_telegram import BotAPI, POLL_TRANSPORT_SECONDS, TelegramInbox, TelegramPoll, reply_operation
 
 
@@ -117,6 +117,12 @@ class Client:
         return self.request("/v1/review/status", {"epoch": epoch, "request": request})["status"]
 
 
+    def project_daily_due(self, epoch):
+        return self.request("/v1/project/daily-due", {"epoch": epoch})["due"]
+
+    def save_project_daily(self, epoch, day, snapshot):
+        return self.request("/v1/project/daily-save", {"epoch": epoch, "date": day, "snapshot": snapshot})
+
     def project_status(self, epoch):
         return self.request("/v1/project/active", {"epoch": epoch})["status"]
 
@@ -148,7 +154,7 @@ def client_fingerprint(path):
 
 class Broker(HTTPServer):
     def __init__(self, address, authority, *, cert, key, ca, peers, effects=None, inbox=None, poll=None,
-                 review=None, project=None):
+                 review=None, project=None, daily=None):
         if set(peers.values()) != {PRIMARY, STANDBY} or len(peers) != 2:
             raise ValueError("Use distinct certificates for the two Captain hosts")
         self.authority = authority
@@ -161,6 +167,7 @@ class Broker(HTTPServer):
             poll.on_owner_update = self.notify_pending
         self.review = review
         self.project = project
+        self.daily = daily
         if self.effects.keys() - EFFECT_KINDS:
             raise ValueError("Unknown effect adapter")
         self.tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -311,10 +318,20 @@ class Request(BaseHTTPRequestHandler):
             receipt = (review.submit(authority, grant, request) if self.path == "/v1/review/submit"
                        else review.receipt(request))
             return 200, {"receipt": receipt}
+        if self.path == "/v1/project/daily-due" and body.keys() == {"epoch"}:
+            authority.require_grant(grant)
+            daily = self.server.daily
+            return 200, {"due": daily.due(authority, grant) if daily else None}
+        if self.path == "/v1/project/daily-save" and body.keys() == {"epoch", "date", "snapshot"}:
+            authority.require_grant(grant)
+            daily = self.server.daily
+            return 200, daily.save(authority, grant, body["date"], body["snapshot"]) if daily else {"result": "stale"}
         if self.path == "/v1/project/active" and body.keys() == {"epoch"}:
             authority.require_grant(grant)
             project = self.server.project
             status = {"enabled": project is not None, "jobs": project.active() if project else []}
+            if self.server.daily is not None:
+                status["lastDaily"] = self.server.daily.latest()
             authority.require_grant(grant)
             return 200, {"status": status}
         if self.path in ("/v1/project/submit", "/v1/project/receipt", "/v1/project/reconcile", "/v1/project/inspect",
@@ -403,7 +420,8 @@ def main():
             project = (ProjectQueue(args.state, read_private_json(args.project_queue_config))
                        if args.project_queue_config is not None else None)
             with Broker((str(args.listen), args.port), authority, cert=args.cert, key=args.key, ca=args.ca,
-                        peers=peers, effects=effects, inbox=inbox, poll=poll, review=review, project=project) as broker:
+                        peers=peers, effects=effects, inbox=inbox, poll=poll, review=review, project=project,
+                        daily=DailyBriefing(args.state)) as broker:
                 stop = Event()
                 tasks = [target for target in (poll.run if poll else None, project.refresh if project else None)
                          if target is not None]

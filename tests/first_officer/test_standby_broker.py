@@ -1,4 +1,5 @@
 from concurrent.futures import Future
+from datetime import datetime, timezone
 import http.client
 import importlib
 import json
@@ -15,6 +16,40 @@ import pytest
 
 
 from standby_fixture import certificates
+
+
+def test_daily_brief_survives_restart_and_fences_the_old_holder(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "first-officer"))
+    queue = importlib.import_module("standby_queue")
+    lease = importlib.import_module("standby")
+    wall = datetime(2026, 11, 23, 12, 59, tzinfo=timezone.utc).timestamp()
+    monotonic = 0
+    policy = tmp_path / "project-daily.json"
+    policy.touch(mode=0o600)
+    policy.write_text('{"enabled":true}')
+    first = {"repository": "fixture/integration", "issue": 40, "action": "investigate"}
+    second = {"repository": "fixture/dashboard", "issue": 18, "action": "investigate"}
+    snapshot = {"projects": [first, second], "recommended": first}
+    with lease.StandbyAuthority(tmp_path, clock=lambda: monotonic) as authority:
+        primary = authority.claim(lease.PRIMARY)
+        daily = queue.DailyBriefing(tmp_path, clock=lambda: wall)
+        assert daily.due(authority, primary) is None
+        wall += 60
+        due = daily.due(authority, primary)
+        assert due == {"epoch": 1, "date": "2026-11-23"}
+        incomplete = {"projects": [first, {**second, "action": "refresh"}], "recommended": first}
+        assert daily.save(authority, primary, due["date"], incomplete) == {"result": "evidence-unavailable"}
+        assert daily.latest() is None
+        assert daily.save(authority, primary, due["date"], snapshot) == {"result": "saved"}
+        monotonic += lease.LEASE_SECONDS
+        mac = authority.claim(lease.STANDBY)
+        assert daily.due(authority, mac) is None
+        with pytest.raises(lease.LeaseRejected):
+            daily.save(authority, primary, due["date"], snapshot)
+        assert daily.save(authority, mac, due["date"], snapshot) == {"result": "duplicate"}
+    reopened = queue.DailyBriefing(tmp_path, clock=lambda: wall)
+    assert reopened.latest()["epoch"] == 1 and reopened.latest()["recommended"] == first
+    assert reopened.latest()["projects"] == [first, second]
 
 
 def test_reviewed_project_releases_only_its_reservation_and_cannot_be_requeued(tmp_path, monkeypatch):

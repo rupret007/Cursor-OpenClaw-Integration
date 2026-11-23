@@ -13,6 +13,8 @@ Use the isolated Nuc gateway with the paired test account. Start with the coding
 
 The packaged wire rehearsal also verifies that an existing reserved request still returns its receipt after the gateway restarts. It uses a loopback Bot API fixture and a private gate. Run `tests/first_officer/project-telegram-wire.py` in a loopback-only namespace with the inventory-verified release directory, pinned Node executable, and OpenClaw entrypoint as its three arguments.
 
+For an autonomous outbound timing check, use `tests/first_officer/test-bot-outbound-relay.py` as the relay in the isolated test window. It verifies BobTestesBot, injects one synthetic scope request when a private `exercise-scope` marker is created, and accepts only the expected response to the paired owner. Keep the real command and relay separate from the production gateway. The result measures real Telegram delivery from synthetic ingress.
+
 ## Production owner acceptance
 
 Jeff runs these in the private owner chat after activation. Use a stopwatch from Send to the visible reply. Look for Telegram typing and the single `On it.` line within **2 seconds** of each message. Record only the case, elapsed times and pass or fail. The memory case has two messages and one confirmation tap.

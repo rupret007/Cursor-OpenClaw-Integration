@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import sqlite3
 import ssl
+from concurrent.futures import ThreadPoolExecutor
 from threading import Event, Thread
 import time
 
@@ -140,7 +141,7 @@ class Broker(HTTPServer):
         self.poll = poll
         self.last_telegram_pull = None
         if poll is not None and "telegram-reply" in self.effects:
-            poll.on_owner_update = self.acknowledge_pending
+            poll.on_owner_update = self.notify_pending
         self.review = review
         self.project = project
         if self.effects.keys() - EFFECT_KINDS:
@@ -152,17 +153,29 @@ class Broker(HTTPServer):
         self.tls.verify_mode = ssl.CERT_REQUIRED
         super().__init__(address, Request)
 
-    def acknowledge_pending(self, message_id, sent_at):
+    def notify_pending(self, message_id, sent_at):
         # A recent authenticated pull gives the active gateway its normal progress path.
         last_pull = self.last_telegram_pull
         if (last_pull is not None and time.monotonic() - last_pull < 2
                 or not -2 <= time.time() - sent_at <= 15):
             return
+        with ThreadPoolExecutor(max_workers=2) as progress:
+            acknowledgment = progress.submit(self.send_pending_progress, message_id, "ack")
+            self.send_pending_progress(message_id, "typing")
+            acknowledgment.result()
+
+    def send_pending_progress(self, message_id, phase):
         try:
-            _, send = self.effects["telegram-reply"]({"message_id": message_id, "phase": "ack"}, queued=True)
-            self.authority.acknowledge_queued_message(message_id, send)
+            if phase == "ack":
+                _, send = self.effects["telegram-reply"]({"message_id": message_id, "phase": "ack"}, queued=True)
+            else:
+                typing = self.effects.get("telegram-typing")
+                if typing is None:
+                    return
+                _, send = typing({"message_id": message_id})
+            self.authority.send_queued_progress(message_id, phase, send)
         except (OSError, ValueError, sqlite3.Error):
-            # An uncertain acknowledgment stays reserved. The pending turn can still run.
+            # Uncertain progress stays reserved and the pending turn can still run.
             pass
 
     def get_request(self):

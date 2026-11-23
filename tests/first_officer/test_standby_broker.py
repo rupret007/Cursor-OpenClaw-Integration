@@ -356,19 +356,30 @@ def test_broker_acknowledges_pending_owner_message_before_any_gateway_is_ready(t
     unrelated = telegram_update(2, 12, author=999)
     replay = telegram_update(3, 13)
     sends = []
+    typing = []
+    progress = threading.Barrier(2, timeout=1)
 
     def send(owner, text, message_id):
         assert inbox.pending(message_id)
+        if mode != "healthy" and not sends:
+            progress.wait()
         sends.append((owner, text, message_id))
         if mode == "uncertain":
             raise TimeoutError("The acknowledgment may have been delivered")
         return {"chat": {"id": owner}, "message_id": 411}
 
+    def send_typing(owner):
+        if mode != "healthy" and not typing:
+            progress.wait()
+        typing.append(owner)
+        return True
+
     def broker(authority):
         poll = telegram.TelegramPoll(inbox, lambda _offset: [fresh, unrelated, replay])
         return transport.Broker(("127.0.0.1", 0), authority, cert=tmp_path / "broker.pem", key=tmp_path / "broker.key",
                                 ca=tmp_path / "ca.pem", peers=peers,
-                                effects={"telegram-reply": inbox.reply_adapter(send)}, inbox=inbox, poll=poll)
+                                effects={"telegram-reply": inbox.reply_adapter(send),
+                                         "telegram-typing": inbox.typing_adapter(send_typing)}, inbox=inbox, poll=poll)
 
     now = 0
     with transport.StandbyAuthority(state, clock=lambda: now) as authority, broker(authority) as running:
@@ -385,12 +396,17 @@ def test_broker_acknowledges_pending_owner_message_before_any_gateway_is_ready(t
         assert authority.claim(transport.STANDBY) is None
         primary = authority.claim(transport.PRIMARY)
         if mode == "healthy":
-            assert sends == []
+            assert sends == [] and typing == []
             operation, delivery = inbox.reply_adapter(send)({"message_id": 11, "phase": "ack"})
             assert authority.perform(primary, "telegram-reply", operation, delivery) == "confirmed"
             assert sends == [(101, "On it.", 11)]
+            operation, delivery = inbox.typing_adapter(send_typing)({"message_id": 11})
+            assert authority.perform(primary, "telegram-typing", operation, delivery) == "confirmed"
         else:
             assert sends == [(101, "Queued. I’ll reply when the gateway is ready.", 11)]
+            assert typing == [101]
+            assert authority.perform(primary, "telegram-typing", "message:11:typing",
+                                     lambda: pytest.fail("The gateway must reuse the typing receipt")) == "confirmed"
             expected = "unconfirmed" if mode == "uncertain" else "confirmed"
             assert authority.effect_status(primary, "telegram-reply", "message:11:ack") == expected
             assert authority.perform(primary, "telegram-reply", "message:11:ack",
@@ -399,6 +415,7 @@ def test_broker_acknowledges_pending_owner_message_before_any_gateway_is_ready(t
     with transport.StandbyAuthority(state, clock=lambda: now) as authority, broker(authority) as running:
         running.poll.step()
         assert len(sends) == 1
+        assert typing == [101]
 
 
 def test_slow_valid_telegram_poll_still_commits_the_owner_update(tmp_path, monkeypatch):

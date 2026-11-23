@@ -166,11 +166,12 @@ class StandbyAuthority:
         send()
         return confirm_effect(self._db, kind, operation)
 
-    def acknowledge_queued_message(self, message_id, send):
-        """Use the same receipt as the gateway, with a separate poll-thread connection."""
-        if type(message_id) is not int or not 0 < message_id < 2**63 - 1:
-            raise ValueError("Invalid queued message")
-        kind, operation = "telegram-reply", f"message:{message_id}:ack"
+    def send_queued_progress(self, message_id, phase, send):
+        """Use the gateway’s receipt for typing or acknowledgment."""
+        if type(message_id) is not int or not 0 < message_id < 2**63 - 1 or phase not in ("ack", "typing"):
+            raise ValueError("Invalid queued message progress")
+        kind = "telegram-typing" if phase == "typing" else "telegram-reply"
+        operation = f"message:{message_id}:{phase}"
         path = self._database
         with open_private(path.parent, path.name, create=False), closing(sqlite3.connect(path, timeout=0.25)) as db:
             state = reserve_effect(db, kind, operation)

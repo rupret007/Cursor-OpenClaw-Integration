@@ -9,6 +9,7 @@ from pathlib import Path
 from queue import Empty, Queue
 import runpy
 import secrets
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -22,6 +23,29 @@ def write(path, value):
     temp = path.with_suffix(".tmp")
     temp.write_text(json.dumps(value))
     temp.replace(path)
+
+
+def forward_test_bot(wire, method, data):
+    if not wire.admission_bridge:
+        return True
+    if str(data.get("chat_id")) != str(wire.chat["id"]):
+        return False
+    if method == "sendChatAction" and data.get("action") == "typing":
+        phase = "typing"
+    elif data.get("text") == "On it.":
+        phase = "ack"
+    elif "Hatchet accepted the coding job" in data.get("text", ""):
+        phase = "admitted"
+    else:
+        return False
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as relay:
+            relay.settimeout(6)
+            relay.connect(wire.admission_bridge)
+            relay.sendall((phase + "\n").encode())
+            return relay.recv(16) == b"ok\n"
+    except OSError:
+        return False
 
 
 class BotApi(BaseHTTPRequestHandler):
@@ -63,8 +87,14 @@ class BotApi(BaseHTTPRequestHandler):
             except Empty:
                 result = []
         elif method == "sendChatAction":
+            if not forward_test_bot(wire, method, data):
+                self.send_error(502)
+                return
             wire.typing.append(time.monotonic())
         elif method == "sendMessage":
+            if not forward_test_bot(wire, method, data):
+                self.send_error(502)
+                return
             text = data.get("text", "")
             wire.replies.append((time.monotonic(), text))
             if wire.drop_project_final and "Handoff recorded" in text:
@@ -159,6 +189,7 @@ def configure(wire, root, release):
     wire.updates, wire.polling, wire.replies, wire.typing = Queue(), Event(), [], []
     wire.model_calls = 0
     wire.drop_project_final = False
+    wire.admission_bridge = None
     owner = 123456
     wire.bot = {"id": 234567, "is_bot": True, "first_name": "Fixture", "username": "project_rehearsal_bot"}
     wire.chat = {"id": owner, "type": "private", "first_name": "Fixture"}

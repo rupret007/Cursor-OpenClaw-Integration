@@ -323,7 +323,11 @@ print(json.dumps(response))
             db.close()
 
     with wire["gateway"](node, cli, home, config, roster, env):
-        assert wire["exercise"](roster, "Admitted coding", 100, command, "Hatchet accepted the coding job", 30)
+        roster.admission_bridge = os.environ.get("FO_PROJECT_BOT_SOCKET")
+        try:
+            assert wire["exercise"](roster, "Admitted coding", 100, command, "Hatchet accepted the coding job", 30)
+        finally:
+            roster.admission_bridge = None
         with queue.locked_ledger(ledger, read_only=True) as stored:
             accepted = queue.queue_state(stored, job, queue.idempotency_key(job))
         assert accepted and accepted["phase"] == "queued"

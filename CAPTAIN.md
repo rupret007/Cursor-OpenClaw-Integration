@@ -158,6 +158,10 @@ The queue pilot can drive the packaged gateway through a private Telegram Bot AP
 
 The rehearsal waits for the native outbox to settle before a normal restart. When a send is interrupted and the remote receipt is unknown, treat delivery as unresolved and inspect the original outcome before repeating the request. Telegram final-text recovery can resend a reply after a lost acknowledgment. The scoped job reservation still fences worker execution. [OpenClaw Telegram recovery](https://docs.openclaw.ai/channels/telegram/troubleshooting)
 
+### Verify an admitted reply on BobTestesBot
+
+With an authorized test window, run `tests/first_officer/queue-pilot/test-bot-bridge.py` outside the fixture network namespace. Give it a Unix socket path inside a private scratch directory and the private BobTestesBot pairing file. Then set `FO_PROJECT_BOT_SOCKET` for the joined queue pilot. The bridge verifies the bot identity and accepts three fixed phases once each. Only the typing signal, acknowledgment, and synthetic job admission reach the paired chat. GitHub and model data stay inside the fixture. Record times from synthetic ingress. Stop the bridge after the run.
+
 ### Reconcile a Captain Telegram reply
 
 Explicit project advances and handoffs reserve their incoming message identity in the private authority journal before work or acknowledgment. The final reply uses one direct Telegram send to the paired owner. An interrupted response leaves an unconfirmed receipt. A restart preserves the receipt and a repeated input reuses its reservation.

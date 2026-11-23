@@ -38,6 +38,12 @@ The follow-on candidate uses a private durable receipt for project advances and 
 
 This protects the two Captain routes. Ordinary Telegram responses use native recovery. The preceding interrupted-send findings remain relevant to ordinary routes and the earlier draft.
 
+### Admitted coding delivery on BobTestesBot
+
+The Nuc rehearsed candidate `4e93384` with real Hatchet, the native gateway, and a scoped coding worker. The synthetic command, GitHub evidence, repository, and model response stayed in the isolated fixture. A phase-only bridge verified BobTestesBot and the paired test chat, then the real Telegram Bot API confirmed typing in 1.42 seconds, one acknowledgment in 1.32 seconds, and the admission reply in 2.53 seconds. The Captain journal stored a confirmed receipt.
+
+The isolated worker produced one candidate from one stub call. The native monitor recorded exact-head verification, the clean restart reused the same queue result, and a moved fixture head invalidated the verdict. The bridge forwarded only the admission phases. The verification and restart replies stayed in the fixture. The test consumed no provider quota and used no Bobserver service.
+
 ### Captain benchmark evidence
 
 The [ten-case protocol](CAPTAIN.md#compare-captain-performance) is ready for a matched run. The Nuc has no installed Grok CLI or Grok Agent CLI, and an eligible zero-extra-cost Grok session was unavailable. No Grok jobs were submitted. Its results and the comparison remain unverified. The Mac standby shell also requires interactive sign-in. This pilot used isolated state and the signed transfer fixture for standby evidence.
@@ -55,7 +61,7 @@ The [ten-case protocol](CAPTAIN.md#compare-captain-performance) is ready for a m
 | Duplicate delivery | Packaged wire fixture found the reserved coding request after restart | 1.60 s |
 | Approval required | Synthetic request, real BobTestesBot delivery, correct scope response | 2.40 s |
 
-Bob has one independently verified milestone. The #40 pilot needed three Jeff approvals. User-originated Telegram ingress after the startup fix, a real admitted coding job on BobTestesBot, the Mac standby run against this build, and a matched Grok trial remain open.
+Bob has one independently verified milestone. The #40 pilot needed three Jeff approvals. User-originated Telegram ingress after the startup fix, an admitted job using live GitHub from the test chat, the Mac standby run against this build, and a matched Grok trial remain open.
 
 The gateway snapshot pointed to Round 13. Its conductor intentionally removes all model tools from ordinary turns and rejects tool calls except a single exact, approved gate proposal. The Telegram handlers match a smaller set of phrases than Jeff uses. The pinned bundle reproduced the problem on “my open PRs and CI”. The request went unclaimed, and the ordinary model turn had zero tools.
 

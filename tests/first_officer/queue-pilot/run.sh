@@ -53,6 +53,13 @@ if [[ -n ${FO_PROJECT_WIRE_RELEASE:-} ]]; then
     : "${FO_PROJECT_WIRE_CLI:?Set the installed OpenClaw entrypoint}"
     project_wire=("FO_PROJECT_WIRE_RELEASE=$FO_PROJECT_WIRE_RELEASE"
                   "FO_PROJECT_WIRE_NODE=$FO_PROJECT_WIRE_NODE" "FO_PROJECT_WIRE_CLI=$FO_PROJECT_WIRE_CLI")
+    if [[ -n ${FO_PROJECT_BOT_SOCKET:-} ]]; then
+        [[ $FO_PROJECT_BOT_SOCKET = /* && -S $FO_PROJECT_BOT_SOCKET ]] || {
+            echo 'The test-bot bridge must be an existing private absolute socket.'
+            exit 1
+        }
+        project_wire+=("FO_PROJECT_BOT_SOCKET=$FO_PROJECT_BOT_SOCKET")
+    fi
 fi
 # The nested namespace maps the loopback namespace owner to a non-root UID for Postgres.
 env -i HOME="$HOME" PATH="$PATH" FO_QUEUE_PILOT_HOME="$scratch" "${project_wire[@]}" \

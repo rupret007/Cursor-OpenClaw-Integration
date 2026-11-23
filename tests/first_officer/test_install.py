@@ -773,6 +773,30 @@ def test_standalone_service_pins_the_same_guard_on_both_hosts(tmp_path, monkeypa
         with pytest.raises(ValueError, match="unprivileged Mac gateway account"):
             standalone.prepare("mac-mini", *arguments, mac_launch_daemon=True)
     assert b"fixture-setting" not in mac + nuc + daemon_bytes
+    broker_dir = tmp_path / "broker-config"
+    broker_dir.mkdir(mode=0o700)
+    for name in ("ca.pem", "broker.pem", "broker.key", "nuc.pem", "mac.pem", "telegram.json"):
+        fixture = broker_dir / name
+        fixture.write_text("fixture-broker-setting")
+        fixture.chmod(0o600)
+    listen = standalone.ipaddress.IPv4Address("127.0.0.1")
+    rendered = standalone.prepare_mac_broker(release, runtime / "python3", state, broker_dir, listen)
+    broker = plistlib.loads(rendered)
+    assert broker["Label"] == "local.openclaw.captain-broker"
+    assert broker["UserName"] == "gateway"
+    assert broker["WorkingDirectory"] == str(state)
+    assert broker["RunAtLoad"] is True and broker["Umask"] == 0o077
+    assert broker["ProgramArguments"][:4] == [str(runtime / "python3"), "-I", "-B",
+                                             str(release / standalone.BROKER)]
+    assert broker["ProgramArguments"][broker["ProgramArguments"].index("--telegram-config") + 1] == str(
+        broker_dir / "telegram.json")
+    assert b"fixture-broker-setting" not in rendered
+    with pytest.raises(ValueError, match="private broker interface"):
+        standalone.prepare_mac_broker(release, runtime / "python3", state, broker_dir,
+                                      standalone.ipaddress.IPv4Address("0.0.0.0"))
+    (broker_dir / "broker.key").chmod(0o644)
+    with pytest.raises(ValueError, match="private local configuration"):
+        standalone.prepare_mac_broker(release, runtime / "python3", state, broker_dir, listen)
     settings = json.loads(config.read_bytes())
     settings["channels"] = {"telegram": {"enabled": True, "dmPolicy": "allowlist", "allowFrom": [123456],
                                            "execApprovals": {"approvers": [123456]}}}

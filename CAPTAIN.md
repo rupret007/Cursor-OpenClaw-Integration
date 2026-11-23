@@ -54,7 +54,7 @@ python3 -I -B "$captain_state" local-import < "$private_handoff"
 
 The Nuc is primary. The Mac Mini can take over after **90 consecutive seconds without a valid Nuc renewal**. Renew every 15 seconds. Measure expiry on the authority service's clock. A standby with verified dependencies should answer a test command within two minutes of the Nuc going down. The Mac stays Captain when the Nuc returns. Handback uses the planned transfer.
 
-Before enabling automatic promotion, establish an independent authority and side-effect fence on an always-on device. Check whether the existing NAS can host it independently of either Captain host. Bobserver is optional compute. The fence must handle these conditions.
+For the two-host topology, run the independent broker service on the Mac Mini and run the primary Captain on the Nuc. The Mini can then take over during an unplanned Nuc outage. Move the broker to the Nuc before planned Mini maintenance. An unplanned Mini or broker outage pauses Telegram and queue dispatch until ownership is safe. The NAS holds backups and Bobserver supplies optional compute. The fence must handle these conditions.
 
 - Grant one active host a monotonically increasing epoch. A missed renewal makes the Mac eligible to ask for authority. The Mac can act only after the fence issues a new epoch. If the fence is unreachable, stop admitting new side effects.
 - Put the production Telegram token and polling cursor behind one relay. Deliver updates only to the current holder. Check its epoch before forwarding replies and preserve uncertain send receipts. Remove direct Telegram access from both gateway instances before enabling promotion.
@@ -104,9 +104,52 @@ python3 -I -B "$release/round6/runtime/segment1/queue-runtime/standby.py" \
 
 The import checks the manifest, the matching export seal, and the destination's prior epoch. A destination with an interrupted import stays fenced. Resume with the same snapshot and transfer ID. A repeat of an already applied import leaves the live journal untouched. A source journal and a received snapshot both remain sealed. Only the installed destination journal can open for service.
 
-Point the gateway profiles at the destination broker's verified private endpoint and restart the intended gateway and broker after import succeeds. The existing 90-second broker recovery window applies. Verify the exact next epoch and a test-bot reply before taking the former broker host offline. Handback after a successful claim uses a fresh export and import at the now-current epoch. Rollback before the first destination claim and physical service orchestration still require verification. Keep production on its current setup until the live test rehearsals and rollback pass.
+Point the gateway profiles at the destination broker's verified private endpoint and restart the intended gateway and broker after import succeeds. The existing 90-second broker recovery window applies. Verify the exact next epoch and a test-bot reply before taking the former broker host offline. Handback after a successful claim uses a fresh export and import at the now-current epoch. Keep production on its current setup until the live test rehearsals and rollback pass.
 
-### Start the broker at boot on an independent Linux host
+### Return a transfer after failed activation
+
+If the new gateway never claimed a lease, stop and disable the destination broker and gateway. Keep the former source disabled. On the stopped destination, use the same expected source lease and original snapshot, a fresh return transfer ID, and the intended return owner. If the destination import was interrupted, resume it before attempting the return.
+
+```bash
+python3 -I -B "$release/round6/runtime/segment1/queue-runtime/standby.py" \
+  --state "$broker_state" --source "$lease_owner" --epoch "$current_epoch" \
+  --destination "$return_owner" --rollback-from "$snapshot" \
+  --export-path "$return_snapshot" --transfer-id "$return_transfer_id"
+```
+
+The command verifies the original installed transfer, advances the epoch, and seals the destination without starting a live lease. Import the return snapshot on the former source using the source node and epoch printed by the command, the chosen return owner, and the return transfer ID. If export is interrupted after sealing, resume with the same parameters. After import, restart only the return broker and intended gateway, then check the new epoch and a test-bot reply. If the failed host did claim a lease, the rollback command refuses the old epoch. Use an ordinary fresh handback from the latest known holder in that case. If the destination is unreachable after import, keep the former source fenced until you can verify and transfer ownership back.
+
+### Prepare the Mac standby broker as a system service
+
+The Mac broker and gateway use separate LaunchDaemons. Run the broker renderer as the unprivileged broker account with a pinned Python executable, locally staged release, fixed private state directory, and private TLS and test-bot settings directory. Prepare the Nuc and Mac gateway profiles with the broker endpoint and separate client certificates. Verify that the broker certificate covers the chosen private endpoint. Keep the installed release and interpreter protected from modification by the service account.
+
+```bash
+umask 077
+plist=local.openclaw.captain-broker.plist
+python3 -I -B first-officer/standalone.py mac-broker --release "$release" \
+  --python "$broker_python" --state "$broker_state" --config-dir "$broker_config" \
+  --listen "$private_listen" > "$plist" &&
+  /usr/bin/plutil -lint "$plist"
+```
+
+On an approved isolated test installation, with the previous consumer stopped and the destination import verified, install and load the system plist.
+
+```bash
+sudo install -o root -g wheel -m 0644 "$plist" /Library/LaunchDaemons/
+sudo launchctl enable system/local.openclaw.captain-broker
+sudo launchctl bootstrap system "/Library/LaunchDaemons/$plist"
+```
+
+To fence the Mac broker during an approved transfer, disable its system service, boot it out, and verify the process has exited before exporting. Treat service stop errors or an ambiguous observation as a failed preflight.
+
+```bash
+sudo launchctl disable system/local.openclaw.captain-broker
+sudo launchctl bootout system/local.openclaw.captain-broker
+```
+
+The rendered broker service starts leases and the Telegram relay. Queue adapters and credentials require separate private service configuration before verifying queue reconciliation on the Mini. Use BobTestesBot through the macOS login window to verify operation without an active desktop session. A preboot FileVault unlock is a separate condition. [Apple launchd guide](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html)
+
+### Start the broker at boot on a Linux host
 
 The systemd template at `first-officer/systemd/openclaw-captain-broker@.service` starts the pinned broker at boot under the dedicated `openclaw-broker` system account. Confirm the host has systemd, Python 3, and local persistent storage before choosing it. The broker must be reachable from both Captain hosts while either one is offline. Keep the SQLite state under `/var/lib/openclaw-captain-broker` on the broker’s own disk.
 

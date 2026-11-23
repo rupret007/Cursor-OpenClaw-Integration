@@ -2,6 +2,7 @@
 """Validate a pinned standalone Captain and render a service definition."""
 import argparse
 import importlib.util
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -14,10 +15,12 @@ import sys
 from tempfile import TemporaryDirectory
 
 LABEL = "local.openclaw.captain"
+BROKER_LABEL = "local.openclaw.captain-broker"
 UNIT = "openclaw-captain.service"
 ROOT = Path(__file__).resolve().parent
 RUNTIME = "round6/runtime/segment1/captain-state.py"
 STANDBY = "round6/runtime/segment1/queue-runtime/standby_launch.py"
+BROKER = "round6/runtime/segment1/queue-runtime/standby_broker.py"
 
 
 def systemd_quote(value):
@@ -106,6 +109,49 @@ def check_telegram_owner(config):
         raise ValueError("Use the same single Telegram owner and approver")
 
 
+def verify_release(release):
+    absolute(release)
+    pin = re.fullmatch(r"first-officer-([a-f0-9]{64})", release.name)
+    if not pin or release.resolve() != release:
+        raise ValueError("Expected the pinned candidate release path")
+    stage = load_module("fo_standalone_stage", ROOT / "stage.py")
+    stage.verify_inventory(release, pin.group(1))
+
+
+def prepare_mac_broker(release, python, state, config, listen):
+    if os.getuid() == 0 or os.getuid() != os.geteuid():
+        raise ValueError("Prepare the broker as its unprivileged service account")
+    for path in (state, config):
+        absolute(path)
+        info = path.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077):
+            raise ValueError("Use a private broker state and configuration directory")
+    executable(python)
+    verify_release(release)
+    if not (release / BROKER).is_file():
+        raise ValueError("Pinned release is missing the broker")
+    if listen.is_global or listen.is_unspecified or listen.is_multicast:
+        raise ValueError("Select a specific private broker interface")
+    key, telegram = config / "broker.key", config / "telegram.json"
+    for path in (key, telegram):
+        private_config(path)
+    certificates = {name: config / filename for name, filename in (
+        ("ca", "ca.pem"), ("cert", "broker.pem"), ("nuc-cert", "nuc.pem"), ("mac-cert", "mac.pem"),
+    )}
+    for path in certificates.values():
+        if not path.is_file() or path.is_symlink() or not os.access(path, os.R_OK):
+            raise ValueError("Missing broker TLS material")
+    command = [str(python), "-I", "-B", str(release / BROKER), "--listen", str(listen), "--state", str(state),
+               "--key", str(key), "--telegram-config", str(telegram)]
+    for flag, path in certificates.items():
+        command.extend(("--" + flag, str(path)))
+    return plistlib.dumps({
+        "Label": BROKER_LABEL, "ProgramArguments": command, "UserName": pwd.getpwuid(os.getuid()).pw_name,
+        "WorkingDirectory": str(state), "RunAtLoad": True, "KeepAlive": {"SuccessfulExit": False},
+        "ThrottleInterval": 15, "Umask": 0o077,
+    })
+
+
 def prepare(node, release, python, node_binary, openclaw, config, state, secrets,
             check=subprocess.run, *, mac_launch_daemon=False, standby_profile=None):
     mac_account = None
@@ -121,11 +167,7 @@ def prepare(node, release, python, node_binary, openclaw, config, state, secrets
     executable(openclaw)
     if node_binary.name != "node" or openclaw.name != "openclaw":
         raise ValueError("The guarded launcher expects the installed OpenClaw executable")
-    pin = re.fullmatch(r"first-officer-([a-f0-9]{64})", release.name)
-    if not pin or release.resolve() != release:
-        raise ValueError("Expected the pinned candidate release path")
-    stage = load_module("fo_standalone_stage", ROOT / "stage.py")
-    stage.verify_inventory(release, pin.group(1))
+    verify_release(release)
     config_data = json.loads(private_config(config))
     check_telegram_owner(config_data)
     plugin_paths = config_data["plugins"]["load"]["paths"]
@@ -166,7 +208,24 @@ def prepare(node, release, python, node_binary, openclaw, config, state, secrets
     return render(node, command, environment, mac_account=mac_account)
 
 
+def mac_broker_main(argv):
+    parser = argparse.ArgumentParser(description="Render the separate Mac Captain broker LaunchDaemon.")
+    for name in ("release", "python", "state", "config-dir"):
+        parser.add_argument("--" + name, type=Path, required=True)
+    parser.add_argument("--listen", type=ipaddress.IPv4Address, required=True)
+    args = parser.parse_args(argv)
+    try:
+        definition = prepare_mac_broker(args.release, args.python, args.state, args.config_dir, args.listen)
+    except (OSError, ValueError):
+        print("Broker preflight failed. Check the release, interface and private service paths.", file=sys.stderr)
+        return 1
+    sys.stdout.buffer.write(definition)
+    return 0
+
+
 def main():
+    if sys.argv[1:2] == ["mac-broker"]:
+        return mac_broker_main(sys.argv[2:])
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--node", choices=("mac-mini", "nucbox"), required=True)
     for name in ("release", "python", "node-binary", "openclaw", "config", "state", "environment"):

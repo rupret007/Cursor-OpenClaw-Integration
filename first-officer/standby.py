@@ -150,6 +150,32 @@ class StandbyAuthority:
             raise LeaseRejected("Broker journal is sealed for a different destination")
         self.plan_handoff(expected, destination, transfer_id=transfer_id)
 
+    def seal_rollback(self, source, failed_owner, imported_digest, destination, transfer_id):
+        """Advance the fence without starting a broker or claiming a live lease."""
+        if destination not in (PRIMARY, STANDBY) or failed_owner not in (PRIMARY, STANDBY):
+            raise ValueError("Unknown Captain host")
+        if not re.fullmatch(r"[0-9a-f]{32}", transfer_id) or source.epoch >= 2**63 - 1:
+            raise ValueError("Invalid rollback identity")
+        if self._grant is not None or read_imported(self._db) != (imported_digest,):
+            raise LeaseRejected("Rollback requires the installed transfer on a stopped destination")
+
+        fence = Grant(failed_owner, source.epoch + 1)
+        sealed = self._export_id()
+        if sealed is not None:
+            if (sealed != transfer_id or self._last_grant() != fence
+                    or self._planned_holder() != Grant(destination, fence.epoch)):
+                raise LeaseRejected("Destination is already sealed for a different return")
+            return fence
+        if self._last_grant() != source or self._planned_holder() != Grant(failed_owner, source.epoch):
+            raise LeaseRejected("Destination already claimed or changed its planned lease")
+
+        with self._db:
+            self._db.execute("UPDATE holder SET node = ?, epoch = ? WHERE id = 1", (fence.node, fence.epoch))
+            self._db.execute("UPDATE planned_holder SET node = ?, epoch = ? WHERE id = 1",
+                             (destination, fence.epoch))
+            self._db.execute("INSERT INTO broker_export VALUES (1, ?)", (transfer_id,))
+        return fence
+
     def _planned_holder(self):
         row = self._db.execute("SELECT node, epoch FROM planned_holder WHERE id = 1").fetchone()
         return Grant(*row) if row else None
@@ -378,6 +404,31 @@ def snapshot_manifest(directory, source, destination, transfer_id):
     return expected
 
 
+def manifest_digest(manifest):
+    return hashlib.sha256(json.dumps(manifest, sort_keys=True).encode()).hexdigest()
+
+
+def rollback_snapshot(authority, state, original, output, source, destination, transfer_id):
+    private_directory(original)
+    metadata = read_private_json(original / "transfer.json")
+    if not isinstance(metadata, dict) or metadata.get("destination") not in (PRIMARY, STANDBY):
+        raise ValueError("Use the original verified import snapshot")
+    incoming_id = metadata.get("transfer")
+    if not isinstance(incoming_id, str) or not re.fullmatch(r"[0-9a-f]{32}", incoming_id) or incoming_id == transfer_id:
+        raise ValueError("Rollback requires a new transfer ID")
+    if original.resolve() == output.resolve():
+        raise ValueError("Keep the original import snapshot separate from the return snapshot")
+
+    failed_owner = metadata["destination"]
+    manifest = snapshot_manifest(original, source, failed_owner, incoming_id)
+    private_directory(output.parent)
+    if output.resolve().is_relative_to(state.resolve()) or state.resolve().is_relative_to(output.resolve()):
+        raise ValueError("Keep the export outside the broker state")
+    fence = authority.seal_rollback(source, failed_owner, manifest_digest(manifest), destination, transfer_id)
+    export_snapshot(authority, state, output, fence, destination, transfer_id)
+    print(f"Captain return snapshot ready. Import source {fence.node}, epoch {fence.epoch}.")
+
+
 def read_imported(db):
     table = db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'broker_import'").fetchone()
     return db.execute("SELECT digest FROM broker_import WHERE id = 1").fetchone() if table else None
@@ -411,7 +462,7 @@ def import_snapshot(state, snapshot, source, destination, transfer_id):
     if not re.fullmatch(r"[0-9a-f]{32}", transfer_id):
         raise ValueError("Expected a 32-character hex transfer ID")
     manifest = snapshot_manifest(snapshot, source, destination, transfer_id)
-    digest = hashlib.sha256(json.dumps(manifest, sort_keys=True).encode()).hexdigest()
+    digest = manifest_digest(manifest)
     pending = state / IMPORT_PENDING
     with open_private(state, "authority.lock") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -477,10 +528,13 @@ def main():
     transfer.add_argument("--export-path", type=Path)
     transfer.add_argument("--import-path", type=Path)
     parser.add_argument("--transfer-id")
+    parser.add_argument("--rollback-from", type=Path, help="Return a transfer before its destination claims a lease")
     args = parser.parse_args()
     transferring = args.export_path is not None or args.import_path is not None
     if transferring != (args.transfer_id is not None) or (transferring and args.replace_target):
         parser.error("A transfer requires a snapshot path and transfer ID, independent of target replacement")
+    if args.rollback_from is not None and args.export_path is None:
+        parser.error("Rollback requires a return export path and a new transfer ID")
     source = Grant(args.source, args.epoch)
     try:
         private_directory(args.state)
@@ -490,6 +544,10 @@ def main():
             return
         with (open_private(args.state, "authority.sqlite", create=False),
               StandbyAuthority(args.state, export_id=args.transfer_id) as authority):
+            if args.rollback_from:
+                rollback_snapshot(authority, args.state, args.rollback_from, args.export_path,
+                                  source, args.destination, args.transfer_id)
+                return
             if args.export_path:
                 export_snapshot(authority, args.state, args.export_path, source, args.destination, args.transfer_id)
             else:

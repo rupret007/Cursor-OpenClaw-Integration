@@ -325,3 +325,57 @@ def test_interrupted_destination_is_fenced_and_same_import_resumes(tmp_path, mon
     assert not install(destination, snapshot, grant, STANDBY, transfer)
     with Authority(destination):
         pass
+
+
+@pytest.mark.parametrize("already_claimed", [False, True])
+def test_failed_activation_returns_authority_with_fresh_fence(tmp_path, already_claimed):
+    source, destination = (tmp_path / name for name in ("source", "destination"))
+    source.mkdir(mode=0o700)
+    destination.mkdir(mode=0o700)
+    snapshot, returned = (tmp_path / name for name in ("outbound", "return"))
+    initial_id, return_id = "ab" * 16, "cd" * 16
+    original_effect = "message:42:final"
+    with Authority(source) as broker:
+        prior = broker.claim(PRIMARY)
+        assert broker.perform(prior, "telegram-reply", original_effect, lambda: None) == "confirmed"
+    with Authority(source, export_id=initial_id) as journal:
+        standby["export_snapshot"](journal, source, snapshot, prior, STANDBY, initial_id)
+    install = standby["import_snapshot"]
+    assert install(destination, snapshot, prior, STANDBY, initial_id)
+
+    command = [sys.executable, "-I", "-B", str(STANDBY_SCRIPT), "--state", str(destination),
+               "--source", PRIMARY, "--epoch", str(prior.epoch), "--destination", PRIMARY,
+               "--export-path", str(returned), "--transfer-id", return_id, "--rollback-from", str(snapshot)]
+
+    def rollback():
+        return subprocess.run(command, check=False, capture_output=True, text=True, timeout=3)
+
+    now = 0
+    with Authority(destination, clock=lambda: now) as broker:
+        assert rollback().returncode == 1
+        if already_claimed:
+            now = 90
+            assert broker.claim(STANDBY).epoch == prior.epoch + 1
+    if already_claimed:
+        assert rollback().returncode == 1
+        assert not returned.exists()
+        return
+
+    result = rollback()
+    assert result.returncode == 0, result.stderr
+    assert f"Import source {STANDBY}, epoch {prior.epoch + 1}." in result.stdout
+    assert rollback().returncode == 0
+    with pytest.raises(LeaseRejected, match="sealed"):
+        Authority(destination)
+    with pytest.raises(LeaseRejected, match="newer"):
+        install(destination, snapshot, prior, STANDBY, initial_id)
+    with pytest.raises(LeaseRejected, match="sealed"):
+        Authority(source)
+
+    fence = standby["Grant"](STANDBY, prior.epoch + 1)
+    assert install(source, returned, fence, PRIMARY, return_id)
+    with Authority(source, clock=lambda: now) as broker:
+        now += 90
+        resumed = broker.claim(PRIMARY)
+        assert resumed.epoch == prior.epoch + 2
+        assert broker.perform(resumed, "telegram-reply", original_effect, pytest.fail) == "confirmed"

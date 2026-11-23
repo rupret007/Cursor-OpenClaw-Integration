@@ -134,6 +134,9 @@ function jobText(job) {
 }
 
 const noDecisions = 'You don’t need to do anything right now.';
+const activeProjectPollSeconds = 30;
+const recentVerdictPollSeconds = 300;
+const needsVerdictCheck = (job) => ['verified', 'ci-failed'].includes(job?.state);
 
 function dailyProjectText(receipt) {
   if (!receipt) return '';
@@ -256,13 +259,26 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
       'I delegated one exact-head CI review to the configured runner. ') + jobText(placed.job);
   }
 
+  function inspectProject(job) {
+    const { repository, issue, head, epoch } = job.request;
+    return state('inspect-project', { repository, issue, head, epoch });
+  }
+
   async function run(request, turn) {
     const action = request.action;
     if (action === 'help') return 'Use “captain status”, “brief me”, “what needs me?”, “handoff”, or “captain this: verify CI for PR #33”.';
     if (action === 'advance-project') {
       turn.signal.throwIfAborted();
       const placed = await state('dispatch-project', { repository: request.repository, issue: request.issue });
-      if (placed.result === 'duplicate') return 'This approved coding run already has a receipt. ' + projectWork(placed.job);
+      if (placed.result === 'duplicate') {
+        const prefix = 'This approved coding run already has a receipt. ';
+        if (!needsVerdictCheck(placed.job)) return prefix + projectWork(placed.job);
+        const current = await bounded(6500, () => inspectProject(placed.job)).catch(() => null);
+        if (!current?.job || current.result !== current.job.state) {
+          return prefix + 'I couldn’t verify the current PR head and CI. Check GitHub before using the previous result.';
+        }
+        return prefix + projectWork(current.job);
+      }
       if (placed.job) return projectWork(placed.job);
       const blocker = {
         'scope-denied': 'Jeff needs to approve the exact issue, base commit, and authority epoch.',
@@ -395,14 +411,15 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
     try {
       const view = await state('view');
       if (view.lease?.holder !== 'first-officer' || view.lease.state !== 'held') return;
-      const jobs = (view.activeProjectJobs ?? []).filter((job) =>
+      const check = (job, interval) => ({ job, due: (job.observed ?? job.checked ?? 0) + interval });
+      const active = (view.activeProjectJobs ?? []).filter((job) =>
         ['running', 'patch-ready', 'ci-pending'].includes(job.state));
-      const ready = jobs.filter((job) => now() / 1000 - (job.observed ?? 0) >= 30)
-        .sort((a, b) => (a.observed ?? 0) - (b.observed ?? 0));
-      if (ready.length) {
-        const { repository, issue, head, epoch } = ready[0].request;
-        await state('inspect-project', { repository, issue, head, epoch });
-      }
+      const recent = (view.recentProjectResults ?? []).filter(needsVerdictCheck);
+      const [next] = [
+        ...active.map((job) => check(job, activeProjectPollSeconds)),
+        ...recent.map((job) => check(job, recentVerdictPollSeconds)),
+      ].sort((left, right) => left.due - right.due);
+      if (next && next.due <= now() / 1000) await inspectProject(next.job);
       await saveDailyProject(view);
     } finally {
       checkingProject = false;

@@ -140,17 +140,27 @@ test('Captain dispatch routes a scoped project identity and reports an explicit 
     { signal: AbortSignal.timeout(2000) });
   assert.match(result, /approve the exact issue, base commit, and authority epoch/);
   assert.deepEqual(calls, [['dispatch-project', { repository: 'example/integration', issue: 40 }]]);
-  const verified = createCaptain({ state: async (op) => {
-    assert.equal(op, 'dispatch-project');
-    return { result: 'duplicate', job: {
-      request: { repository: 'example/integration', issue: 40, head: 'a'.repeat(40) },
-      state: 'verified', commit: 'b'.repeat(40),
-    } };
+  const job = {
+    request: { repository: 'example/integration', issue: 40, head: 'a'.repeat(40), epoch: 2 },
+    state: 'verified', commit: 'b'.repeat(40),
+  };
+  const verified = createCaptain({ state: async (op, payload) => {
+    if (op === 'dispatch-project') return { result: 'duplicate', job };
+    assert.equal(op, 'inspect-project');
+    assert.deepEqual(payload, job.request);
+    return { result: 'stale-candidate', job: { ...job, state: 'stale-candidate' } };
   } });
   const repeat = await verified.run({ action: 'advance-project', repository: 'example/integration', issue: 40 },
     { signal: AbortSignal.timeout(2000) });
   assert.match(repeat, /already has a receipt/);
-  assert.match(repeat, /last verification matched all required CI checks/);
+  assert.match(repeat, /PR head or its base changed/);
+  assert.doesNotMatch(repeat, /matched all required CI checks/);
+  const unavailable = createCaptain({ state: async (op) => op === 'dispatch-project'
+    ? { result: 'duplicate', job } : { result: 'verification-unavailable', job } });
+  const unknown = await unavailable.run({ action: 'advance-project', repository: 'example/integration', issue: 40 },
+    { signal: AbortSignal.timeout(2000) });
+  assert.match(unknown, /couldn’t verify the current PR head and CI/);
+  assert.doesNotMatch(unknown, /matched all required CI checks/);
 });
 
 test('The background monitor checks one admitted job and reports a candidate as an approval decision', async () => {
@@ -177,6 +187,31 @@ test('The background monitor checks one admitted job and reports a candidate as 
   assert.match(text, /Jeff can review the patch and authorize publication/);
 });
 
+
+test('the monitor revisits a past verdict once it is due and reports a moved PR head', async () => {
+  const request = { repository: 'example/integration', issue: 40, head: 'a'.repeat(40), epoch: 2, lane: 'fixture' };
+  const job = { request, state: 'verified', commit: 'b'.repeat(40), checked: 100 };
+  const view = { lease: { epoch: 2, holder: 'first-officer', state: 'held' },
+                 grant: { epoch: 2 }, armed: true, jobs: [], recentProjectResults: [job] };
+  const calls = [];
+  let clock = 399_000;
+  const captain = createCaptain({ state: async (op, payload) => {
+    if (op === 'view') return view;
+    assert.equal(op, 'inspect-project');
+    calls.push(payload);
+    job.state = 'stale-candidate';
+    job.observed = 400;
+    return { result: job.state, job };
+  }, now: () => clock });
+  await captain.tickProject();
+  assert.deepEqual(calls, []);
+  clock = 400_000;
+  await captain.tickProject();
+  await captain.tickProject();
+  assert.deepEqual(calls, [{ repository: request.repository, issue: 40, head: request.head, epoch: 2 }]);
+  const decisions = await captain.run({ action: 'decisions' }, { signal: AbortSignal.timeout(1500) });
+  assert.match(decisions, /PR head or its base changed/);
+});
 
 test('Stale PR heads cannot be recommended and private Captain replies expose project decisions', async () => {
   const projectBrief = createProjectBrief({

@@ -700,7 +700,7 @@ def test_rollback_restores_the_prior_pair_when_the_production_seal_is_required(t
     assert all(payload == original[0] for payload in started)
 
 
-def test_standalone_service_pins_the_same_guard_on_both_hosts(tmp_path):
+def test_standalone_service_pins_the_same_guard_on_both_hosts(tmp_path, monkeypatch):
     import hashlib
     import plistlib
     from types import SimpleNamespace
@@ -714,6 +714,9 @@ def test_standalone_service_pins_the_same_guard_on_both_hosts(tmp_path):
         "first-officer-exec-guard.mjs": b"fixture guard",
         "round6/runtime/first-officer-conductor.mjs": b"fixture conductor",
     }
+    stage = standalone.load_module("standby_stage_fixture", repo / "first-officer/stage.py")
+    files.update({f"round6/runtime/segment1/{name}": (repo / "first-officer" / source).read_bytes()
+                  for name, source in stage.QUEUE_MODULES.items()})
     inventory = "".join(f"{hashlib.sha256(data).hexdigest()}  {name}\n" for name, data in files.items()).encode()
     release = tmp_path / ("first-officer-" + hashlib.sha256(inventory).hexdigest())
     for name, data in files.items():
@@ -751,7 +754,25 @@ def test_standalone_service_pins_the_same_guard_on_both_hosts(tmp_path):
                                             str(runtime / "openclaw"), str(secrets)]
     assert 'Environment="FO_LOCAL_NODE=nucbox"' in nuc.decode()
     assert f'"{release / standalone.RUNTIME}" "local-run"' in nuc.decode()
-    assert b"fixture-setting" not in mac + nuc
+    assert "UserName" not in plist
+    assert "RunAtLoad" not in plist
+    monkeypatch.setattr(standalone.pwd, "getpwuid",
+                        lambda uid: SimpleNamespace(pw_name="gateway", pw_dir=str(tmp_path)))
+    daemon_bytes = standalone.prepare("mac-mini", *arguments, mac_launch_daemon=True)
+    daemon = plistlib.loads(daemon_bytes)
+    assert daemon["UserName"] == "gateway"
+    assert daemon["WorkingDirectory"] == str(tmp_path)
+    assert daemon["EnvironmentVariables"]["HOME"] == str(tmp_path)
+    assert daemon["RunAtLoad"] is True
+    assert daemon["ProgramArguments"] == plist["ProgramArguments"]
+    assert daemon["KeepAlive"] == {"SuccessfulExit": False}
+    with pytest.raises(ValueError, match="unprivileged Mac gateway account"):
+        standalone.prepare("nucbox", *arguments, mac_launch_daemon=True)
+    with monkeypatch.context() as privileged:
+        privileged.setattr(standalone.os, "getuid", lambda: 0)
+        with pytest.raises(ValueError, match="unprivileged Mac gateway account"):
+            standalone.prepare("mac-mini", *arguments, mac_launch_daemon=True)
+    assert b"fixture-setting" not in mac + nuc + daemon_bytes
     settings = json.loads(config.read_bytes())
     settings["channels"] = {"telegram": {"enabled": True, "dmPolicy": "allowlist", "allowFrom": [123456],
                                            "execApprovals": {"approvers": [123456]}}}
@@ -769,3 +790,41 @@ def test_standalone_service_pins_the_same_guard_on_both_hosts(tmp_path):
     secrets.write_text(json.dumps({"FO_LOCAL_NODE": "bobserver"}))
     with pytest.raises(ValueError, match="environment file is invalid"):
         standalone.prepare("nucbox", *arguments)
+
+    secrets.write_text(json.dumps({"OPENCLAW_LITELLM_API_KEY": "fixture-setting"}))
+    settings["gateway"] = {"mode": "local", "bind": "loopback", "port": 43000}
+    settings["channels"]["telegram"]["groupPolicy"] = "disabled"
+    settings["messages"] = {"inbound": {"debounceMs": 300, "byChannel": {"telegram": 300, "slack": 500}}}
+    config.write_text(json.dumps(settings))
+    profile = tmp_path / "broker.json"
+    key = tmp_path / "fixture.key"
+    key.touch(mode=0o600)
+    profile.write_text(json.dumps({"hostname": "broker.invalid", "port": 4372, "bot_id": 234567,
+                                   "key": str(key), "cert": str(key), "ca": str(key)}))
+    profile.chmod(0o600)
+
+    def validate_standby(argv, **options):
+        assert argv == [str(runtime / "openclaw"), "config", "validate"]
+        checked = json.loads(Path(options["env"]["OPENCLAW_CONFIG_PATH"]).read_bytes())
+        telegram = checked["channels"]["telegram"]
+        assert telegram["apiRoot"] == "http://127.0.0.1:1"
+        assert telegram["replyToMode"] == "all"
+        assert checked["messages"]["inbound"] == {"debounceMs": 300, "byChannel": {"telegram": 0, "slack": 500}}
+        assert json.loads(config.read_bytes())["messages"]["inbound"]["byChannel"]["telegram"] == 300
+        assert telegram["botToken"].startswith("234567:")
+        assert options["env"]["OPENCLAW_LITELLM_API_KEY"] == "fixture-setting"
+        return SimpleNamespace(returncode=0)
+
+    standby_args = (*arguments[:-1], validate_standby)
+    boot = standalone.prepare("mac-mini", *standby_args, mac_launch_daemon=True, standby_profile=profile)
+    systemd = standalone.prepare("nucbox", *standby_args, standby_profile=profile)
+    plist = plistlib.loads(boot)
+    assert plist["UserName"] == "gateway" and plist["RunAtLoad"] is True
+    assert plist["ProgramArguments"][3:] == [str(release / standalone.STANDBY), str(runtime / "openclaw"),
+                                            str(config), str(secrets), str(profile)]
+    assert str(release / standalone.STANDBY) in systemd.decode()
+    assert b"fixture-setting" not in boot + systemd
+    settings["channels"]["telegram"]["botToken"] = "fixture-token"
+    config.write_text(json.dumps(settings))
+    with pytest.raises(ValueError, match="token-free"):
+        standalone.prepare("nucbox", *standby_args, standby_profile=profile)

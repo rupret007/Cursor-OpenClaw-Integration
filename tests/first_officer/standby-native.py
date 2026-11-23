@@ -1,0 +1,222 @@
+"""Run the packaged OpenClaw gateway through the standby launcher in isolation."""
+from http.server import ThreadingHTTPServer
+import hashlib
+import json
+import os
+from pathlib import Path
+import runpy
+import shlex
+import subprocess
+import sys
+import tarfile
+from tempfile import TemporaryDirectory
+from threading import Event, Thread
+import time
+
+TESTS = Path(__file__).resolve().parent
+
+
+class FixtureBroker:
+    def __init__(self):
+        self.polling = Event()
+        self.message = None
+        self.effects = []
+        self.submissions = []
+        self.patch_ready = None
+        self.completed = Event()
+
+    def next_telegram_message(self, epoch):
+        assert epoch == 4
+        self.polling.set()
+        return self.message
+
+    def project_daily_due(self, epoch):
+        assert epoch == 4
+        return None
+
+    def project_status(self, epoch):
+        assert epoch == 4
+        if self.patch_ready is not None:
+            return {"enabled": True, "jobs": [self.patch_ready]}
+        return {"enabled": True, "jobs": [{
+            "request": {"repository": "example/integration", "issue": 40, "head": "a" * 40, "epoch": 3},
+            "state": "unresolved",
+        }]}
+
+    def inspect_project(self, epoch, request):
+        assert epoch == 4 and request == self.patch_ready["request"]
+        return self.patch_ready
+
+    def submit_project(self, epoch, request, plan):
+        assert epoch == 4 and request["epoch"] == epoch
+        self.submissions.append((request, plan))
+        return {"phase": "queued", "run": "fixture-job"}
+
+    def telegram_progress(self, epoch, message_id):
+        return {"typing": self.telegram_typing(epoch, message_id),
+                "ack": self.send_telegram_reply(epoch, message_id, "ack", "On it.")}
+
+    def telegram_typing(self, epoch, message_id):
+        assert epoch == 4 and self.message["message_id"] == message_id
+        self.effects.append(("typing", time.monotonic(), None))
+        return "confirmed"
+
+    def send_telegram_reply(self, epoch, message_id, phase, text):
+        assert epoch == 4 and self.message["message_id"] == message_id
+        self.effects.append((phase, time.monotonic(), text))
+        return "confirmed"
+
+    def complete_telegram_message(self, epoch, message_id):
+        assert epoch == 4 and self.message["message_id"] == message_id
+        self.message = None
+        self.completed.set()
+        return "confirmed"
+
+
+def verify_turn(broker, message_id, text, expected, final_limit):
+    broker.completed.clear()
+    broker.effects.clear()
+    started = time.monotonic()
+    broker.message = {"message_id": message_id, "date": int(time.time()), "text": text}
+    if not broker.completed.wait(final_limit):
+        phases = [phase for phase, _, _ in broker.effects]
+        raise AssertionError(f"Native brokered reply did not settle. Observed phases {phases}.")
+    observed = {name: (moment - started, reply) for name, moment, reply in broker.effects}
+    assert sorted(name for name, _, _ in broker.effects) == ["ack", "final", "typing"]
+    assert expected.casefold() in observed["final"][1].casefold()
+    assert observed["ack"][0] < 2 and observed["typing"][0] < 2
+    print(json.dumps({"case": message_id, **{name: round(timing, 2)
+                      for name, (timing, _) in observed.items()}}))
+
+
+def main():
+    baseline, node, cli = (Path(arg).resolve(strict=True) for arg in sys.argv[1:])
+    links = json.loads(subprocess.check_output(["/usr/sbin/ip", "-j", "link", "show"], timeout=4))
+    if {row["ifname"] for row in links} != {"lo"}:
+        raise SystemExit("Use a loopback-only network namespace.")
+    os.umask(0o077)
+    wire_test = runpy.run_path(str(TESTS / "project-telegram-wire.py"))
+    broker = FixtureBroker()
+
+    with TemporaryDirectory(prefix="fo-standby-native-") as directory, ThreadingHTTPServer(
+            ("127.0.0.1", 0), wire_test["BotApi"]) as model:
+        root = Path(directory)
+        if baseline.is_file() and baseline.suffix == ".tar":
+            with tarfile.open(baseline, "r") as archive:
+                archive.extractall(root, filter="data")
+            baseline = root / baseline.stem
+        staging = root / "staged"
+        staging.mkdir(mode=0o700)
+        stage = runpy.run_path(str(TESTS.parents[1] / "first-officer/stage.py"))["stage_release"]
+        release = staging / ("first-officer-" + stage(baseline, staging))
+        launch = runpy.run_path(str(release / "round6/runtime/segment1/queue-runtime/standby_launch.py"))
+        authority = root / ".local/state/openclaw-captain"
+        (authority / "reviews").mkdir(parents=True, mode=0o700)
+        gate = root / "gate"
+        gate.mkdir()
+        (gate / "fullgate.lock").touch()
+        wire_test["write"](authority / "gate.json", {"directory": str(gate), "lock": "fullgate.lock", "hold": "HOLD"})
+        config = wire_test["configure"](model, root, release)
+        settings = json.loads(config.read_bytes())
+        for key in ("apiRoot", "botToken"):
+            del settings["channels"]["telegram"][key]
+        wire_test["write"](config, settings)
+        template, owner = launch["template_from"](config)
+        executable = root / "openclaw"
+        executable.write_text("#!/bin/sh\nexec " + shlex.join([str(node), str(cli)]) + ' "$@"\n')
+        executable.chmod(0o700)
+        state = root / "gateway-state"
+        state.mkdir(mode=0o700)
+        environment = {"HOME": str(root), "PATH": f"{node.parent}:/usr/bin:/bin", "LANG": "C.UTF-8",
+                       "FO_LOCAL_NODE": "nucbox", "OPENCLAW_STATE_DIR": str(state)}
+        thread = Thread(target=model.serve_forever, daemon=True)
+        thread.start()
+        startup = time.monotonic()
+        gateway = launch["BrokeredGateway"](broker, 4, owner, 234567, executable, template, environment, state)
+        try:
+            assert broker.polling.wait(20) and not gateway.exited(), "The packaged child did not reach the loopback bridge"
+            while not gateway.ready():
+                assert not gateway.exited() and time.monotonic() - startup < 20, "The packaged child did not become ready"
+                time.sleep(0.05)
+            print(json.dumps({"gateway_ready_seconds": round(time.monotonic() - startup, 2)}))
+            for message_id, text, expected, final_limit in (
+                    (10, "captain status", "epoch 4", 30),
+                    (11, "gate status", "gate", 30),
+                    (12, "what is a branch?", "line of development", 15),
+                    (13, "captain grant integration-ci epoch 4", "dispatch need", 30),
+                    (14, "what needs me?", "coding submission is unresolved", 30),
+                    (15, "handoff", "coding submission is unresolved", 30),
+            ):
+                verify_turn(broker, message_id, text, expected, final_limit)
+            assert any(phase == "final" and "Brokered handoff checked at" in text
+                       for phase, _, text in broker.effects)
+            command = "captain this: advance example/integration #41"
+            verify_turn(broker, 16, command, "approve the exact issue", 30)
+            assert not broker.submissions
+            identity = {"repository": "example/integration", "issue": 41, "epoch": 4, "head": "a" * 40}
+            plan = authority / "project-worker.json"
+            wire_test["write"](plan, {"request": identity})
+            fingerprint = hashlib.sha256(plan.read_bytes()).hexdigest()
+            wire_test["write"](authority / "project-grant.json", {**identity, "branch": "main",
+                                "expires": int(time.time()) + 120, "planSha256": fingerprint, "worker": "local-qwen"})
+            wire_test["write"](authority / "capacity.json", {"commands": ["fixture-coding-capacity"], "limit": 1})
+            (gate / "HOLD").touch()
+            verify_turn(broker, 17, command, "capacity is blocking", 30)
+            assert not broker.submissions
+            (gate / "HOLD").unlink()
+            assert not Path("/usr/bin/gh").exists(), "The loopback fixture needs the private GitHub CLI override"
+            gh = root / ".local/bin/gh"
+            gh.parent.mkdir(parents=True)
+            gh.write_text("""#!/usr/bin/python3
+import json
+from pathlib import Path
+import sys
+route = sys.argv[4]
+if route == "repos/example/integration/issues/41":
+    value = {"number": 41, "state": "open", "repository_url": "https://api.github.com/repos/example/integration"}
+elif route == "repos/example/integration/git/ref/heads/main":
+    base = (Path.home() / "fixture-head").read_text().strip()
+    value = {"ref": "refs/heads/main", "object": {"sha": base, "type": "commit"}}
+elif route == "repos/example/integration/pulls/13":
+    head = (Path.home() / "fixture-pr").read_text().strip()
+    value = {"number": 13, "state": "open", "head": {"sha": head},
+             "base": {"ref": "main", "repo": {"full_name": "example/integration"}}}
+elif route == "repos/example/integration/compare/" + "a"*40 + "..." + "c"*40:
+    value = {"status": "ahead", "merge_base_commit": {"sha": "a"*40}}
+elif route == "repos/example/integration/commits/" + "c"*40 + "/check-runs?per_page=100&filter=latest":
+    value = {"total_count": 1, "check_runs": [{"name": "fixture-ci", "status": "completed",
+             "conclusion": "success", "head_sha": "c"*40, "app": {"slug": "github-actions"}}]}
+else:
+    sys.exit(2)
+print(json.dumps(value))
+""")
+            gh.chmod(0o700)
+            (root / "fixture-head").write_text("b" * 40)
+            verify_turn(broker, 18, command, "base commit changed", 30)
+            assert not broker.submissions
+            (root / "fixture-head").write_text("a" * 40)
+            verify_turn(broker, 19, command, "Hatchet accepted the coding job", 30)
+            assert len(broker.submissions) == 1 and broker.submissions[0][1] == fingerprint
+            assert {key: value for key, value in broker.submissions[0][0].items() if key != "lane"} == identity
+            request = broker.submissions[0][0]
+            candidate = "c" * 40
+            broker.patch_ready = {"request": request, "commit": candidate, "state": "patch-ready"}
+            verify_turn(broker, 20, "handoff", "authorize publication", 30)
+            wire_test["write"](authority / "project-verification.json", {
+                "repository": identity["repository"], "issue": identity["issue"], "commit": candidate,
+                "branch": "main", "pr": 13, "checks": ["fixture-ci"],
+            })
+            (root / "fixture-pr").write_text(candidate)
+            verify_turn(broker, 21, "handoff", "matched all required CI checks", 30)
+            (root / "fixture-pr").write_text("d" * 40)
+            verify_turn(broker, 22, "handoff", "PR head or its base changed", 30)
+            assert not (authority / "lease.json").exists()
+        finally:
+            gateway.stop()
+            model.shutdown()
+            thread.join(5)
+        assert not list(state.glob(".broker-gateway-*"))
+
+
+if __name__ == "__main__":
+    main()

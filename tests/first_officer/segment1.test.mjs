@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { test } from 'node:test';
 import { budgets, classifyRequest, createDispatch } from '../../first-officer/segment1/dispatch.mjs';
-import { answerSimple, fastModelRef, routeOwnerModel, standaloneSimple } from '../../first-officer/segment1/model-router.mjs';
+import { answerSimple, createQuickChat, fastModelRef, routeOwnerModel, standaloneSimple } from '../../first-officer/segment1/model-router.mjs';
 import { registerSegmentOne } from '../../first-officer/segment1/register.mjs';
 import { fleetStatus, openPullRequests, readFleetSnapshot, standaloneGateStatus, standaloneQuotaStatus, summarizeAndrea } from '../../first-officer/segment1/tools.mjs';
 import { andreaCommand, parseAndreaSummary } from '../../first-officer/segment1/andrea-ssh.mjs';
@@ -561,6 +561,38 @@ test('the shared status publisher is accepted by the fleet reader', async () => 
   }
 });
 
+
+test('standalone quick chat fails closed when the local model route cannot be verified', async () => {
+  const alias = 'qwen-local-fast';
+  const reference = 'litellm/' + alias;
+  const config = {
+    agents: { defaults: { model: { primary: reference, fallbacks: [] } } },
+    plugins: { entries: { 'first-officer-conductor': { llm: { allowedCompletionModels: [reference] } } } },
+    models: { providers: { litellm: { baseUrl: 'http://127.0.0.1:41502/v1', models: [{ id: alias }] } } },
+  };
+  const calls = [];
+  const runtime = { llm: { complete: async ({ model }) => {
+    calls.push(model);
+    return { text: 'A fixture answer.', stopReason: 'stop' };
+  } } };
+  const turn = { owner: 'fixture-owner', signal: new AbortController().signal };
+  const chat = createQuickChat(runtime, (value) => value, { requireLocal: true });
+  for (const invalid of [
+    { ...config, models: {} },
+    { ...config, agents: { defaults: { model: { primary: reference, fallbacks: [fastModelRef] } } } },
+    { ...config, models: { providers: { litellm: { ...config.models.providers.litellm, baseUrl: 'https://example.invalid/v1' } } } },
+  ]) await assert.rejects(chat.answer({ prompt: 'define a branch' }, turn, invalid), /local Qwen/i);
+  assert.deepEqual(calls, []);
+  assert.equal(await chat.answer({ prompt: 'define a branch' }, turn, config), 'A fixture answer.');
+  assert.deepEqual(calls, [reference]);
+
+  const classify = () => ({ reason: 'deliberate-task', model: 'minimax-m3',
+    fallbacks: [fastModelRef, 'litellm/gemini-3.1-pro'] });
+  const context = { prompt: 'Explain the longer context', attachments: [] };
+  const selection = routeOwnerModel(context, config, classify);
+  assert.equal(selection.model, alias);
+  assert.deepEqual(selection.fallbacks, []);
+});
 
 test('the approved LiteLLM alias can serve simple turns from an independent local proxy', async () => {
   const alias = 'qwen-local-fast';

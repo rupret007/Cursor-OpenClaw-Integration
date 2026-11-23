@@ -121,11 +121,20 @@ export async function bounded(ms, work) {
   }
 }
 
-export function createDispatch({ authorize, classify, acknowledge, registry, warn, timing = budgets }) {
+export function createDispatch({ authorize, classify, acknowledge, registry, warn, projectDelivery, timing = budgets }) {
   return async (event, ctx) => {
     const owner = authorize(event, ctx);
     if (!owner || typeof event.content !== 'string' || !event.content.trim()) return;
     const request = classify(event.content, event, ctx);
+    let delivery;
+    if (projectDelivery && request?.kind === 'captain' && ['advance-project', 'handoff'].includes(request.action)) {
+      try {
+        delivery = await projectDelivery.reserve(owner, ctx);
+      } catch {
+        warn('Project Captain delivery reservation could not be verified.');
+      }
+      if (!delivery) return { handled: true };
+    }
     // Ack and work start together. Only the ack deadline can delay a fast result.
     const ack = bounded(timing.acknowledgment, (signal) => acknowledge(owner, ctx, signal))
       .catch(() => warn('First Officer Telegram acknowledgment failed or timed out.'));
@@ -135,17 +144,22 @@ export function createDispatch({ authorize, classify, acknowledge, registry, war
     }
 
     const entry = registry[request.kind];
-    if (!entry) {
-      await ack;
-      return { handled: true, text: 'The First Officer tool for this request is unavailable.' };
-    }
     const deadline = request.kind === 'simple' ? timing.simple : timing.status;
-    const final = await bounded(deadline, (signal) => entry.run(request, { owner, ctx, signal }))
-      .catch(() => {
+    const final = entry
+      ? await bounded(deadline, (signal) => entry.run(request, { owner, ctx, signal, delivery })).catch(() => {
         warn('First Officer request failed or timed out (' + request.kind + ').');
         return { text: entry.failure ?? 'The live First Officer request failed.' };
-      });
+      })
+      : { text: 'The First Officer tool for this request is unavailable.' };
     await ack;
+    if (delivery) {
+      try {
+        await projectDelivery.deliver(delivery, owner, final.text, ctx);
+      } catch {
+        warn('Project Captain final delivery could not be confirmed. Check the original receipt.');
+      }
+      return { handled: true };
+    }
     return { handled: true, ...final };
   };
 }

@@ -1,0 +1,30 @@
+[Unit]
+Description=OpenClaw Captain standby broker
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=60s
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=openclaw-broker
+Group=openclaw-broker
+UMask=0077
+StateDirectory=openclaw-captain-broker
+StateDirectoryMode=0700
+WorkingDirectory=/opt/openclaw-fo/first-officer-%i
+EnvironmentFile=/etc/openclaw-captain-broker/broker.env
+ExecStartPre=/usr/bin/python3 -I -B -c "import hashlib, pathlib, sys; sys.exit(hashlib.sha256(pathlib.Path('SHA256SUMS').read_bytes()).hexdigest() != sys.argv[1])" %i
+ExecStartPre=/usr/bin/sha256sum --check --strict --status SHA256SUMS
+ExecStart=/usr/bin/python3 -I -B /opt/openclaw-fo/first-officer-%i/round6/runtime/segment1/queue-runtime/standby_broker.py --listen ${BROKER_LISTEN} --state /var/lib/openclaw-captain-broker --ca /etc/openclaw-captain-broker/ca.pem --cert /etc/openclaw-captain-broker/broker.pem --key /etc/openclaw-captain-broker/broker.key --nuc-cert /etc/openclaw-captain-broker/nuc.pem --mac-cert /etc/openclaw-captain-broker/mac.pem --telegram-config /etc/openclaw-captain-broker/telegram.json
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

@@ -29,5 +29,5 @@ test('verified CI preserves the verdict and calls out unconfirmed final delivery
 });
 
 test('a confirmed completion does not create a delivery decision', async () => {
-  assert.match(await ask('reported'), /No captain decisions are waiting for Jeff/);
+  assert.match(await ask('reported'), /You don’t need to do anything right now/);
 });

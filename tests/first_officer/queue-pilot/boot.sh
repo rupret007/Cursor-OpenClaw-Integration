@@ -49,11 +49,8 @@ for _ in $(seq 1 70); do
 done
 nice -n 10 "$hatchet/hatchet-migrate" >logs/migrate 2>&1 || { echo 'Hatchet migration failed'; exit 1; }
 nice -n 10 "$hatchet/hatchet-admin" quickstart --skip certs --generated-config-dir "$PWD/hatchet-config" --overwrite=false >logs/quickstart 2>&1 || { echo 'Hatchet quickstart failed'; exit 1; }
-start hatchet "$hatchet/hatchet-lite" --config "$PWD/hatchet-config"
+export PILOT_HATCHET_BIN="$hatchet"
 loopback=$(python3 -c 'import ipaddress; print(ipaddress.IPv4Address(2130706433))')
 start restate env RESTATE_DISABLE_TELEMETRY=true RESTATE_ROCKSDB_TOTAL_MEMORY_SIZE=128MiB "$server" -c "$run/restate.toml" --base-dir "$run/datastore" --node-name queue-pilot --default-num-partitions 1 --bind-ip "$loopback" --listen-mode tcp --no-logo
-poll "http://localhost:58889/" 'Hatchet'
 poll "http://localhost:9070/health" 'Restate'
-nice -n 10 "$hatchet/hatchet-admin" token create --config "$PWD/hatchet-config" --name queue-pilot >hatchet-token 2>logs/token || { echo 'Hatchet token creation failed'; exit 1; }
-echo 'Real Hatchet and Restate listeners started.'
 nice -n 10 python3 -B "$1/pilot.py"

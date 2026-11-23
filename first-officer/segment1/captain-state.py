@@ -17,7 +17,6 @@ import tempfile
 import time
 from types import SimpleNamespace
 from urllib.parse import quote
-from urllib.request import Request
 from zoneinfo import ZoneInfo
 
 
@@ -339,27 +338,29 @@ def local_capacity(authority):
     return {"node": authority.node, "observed": int(time.time()), "used": used, "limit": limit}
 
 
-def github_get(route):
-    candidates = (Path("/usr/bin/gh"), HOME / ".local/bin/gh", Path("/opt/homebrew/bin/gh"), Path("/usr/local/bin/gh"))
+def github_get(route, *, home=None):
+    home = HOME if home is None else home
+    candidates = (Path("/usr/bin/gh"), home / ".local/bin/gh", Path("/opt/homebrew/bin/gh"), Path("/usr/local/bin/gh"))
     binary = next((candidate for candidate in candidates if candidate.is_file() and os.access(candidate, os.X_OK)), None)
     if binary is None:
         raise ValueError("The approved GitHub CLI is unavailable")
     result = subprocess.run(
         ["/usr/bin/nice", "-n", "10", str(binary), "api", "--method", "GET", route, "--hostname", "github.com"],
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True, timeout=4,
-        env={"HOME": str(HOME), "PATH": "/usr/bin:/bin", "GH_PROMPT_DISABLED": "1"},
+        env={"HOME": str(home), "PATH": "/usr/bin:/bin", "GH_PROMPT_DISABLED": "1"},
     )
     return json.loads(result.stdout)
 
 
-def current_project_evidence(request, branch):
+def current_project_evidence(request, branch, read=None):
+    read = github_get if read is None else read
     root = f"repos/{request['repository']}"
-    issue = github_get(f"{root}/issues/{request['issue']}")
+    issue = read(f"{root}/issues/{request['issue']}")
     if (issue.get("number") != request["issue"] or "pull_request" in issue or
             str(issue.get("repository_url", "")).lower() != f"https://api.github.com/{root}" or
             issue.get("state") != "open"):
         return False
-    ref = github_get(f"{root}/git/ref/heads/{quote(branch, safe='/')}")
+    ref = read(f"{root}/git/ref/heads/{quote(branch, safe='/')}")
     target = ref.get("object")
     return (ref.get("ref") == f"refs/heads/{branch}" and isinstance(target, dict) and
             target.get("sha") == request["head"] and target.get("type") == "commit")
@@ -394,6 +395,131 @@ def project_pr_checks(request, branch, candidate, verification):
         if matched[0].get("conclusion") != "success":
             return "ci-failed"
     return "verified"
+
+
+def project_daily_date(root, instant):
+    try:
+        enabled = read_private(root / "project-daily.json", 1024)
+    except FileNotFoundError:
+        return None
+    if not isinstance(enabled, dict) or enabled.keys() != {"enabled"} or type(enabled["enabled"]) is not bool:
+        raise ValueError("Invalid daily project profile")
+    local = instant.astimezone(ZoneInfo("America/Chicago"))
+    return local.date().isoformat() if enabled["enabled"] and local.hour >= 7 else None
+
+
+def validate_project_snapshot(snapshot):
+    if not isinstance(snapshot, dict) or snapshot.keys() != {"projects", "recommended"}:
+        raise ValueError("Invalid daily snapshot")
+    projects, recommendation = snapshot["projects"], snapshot["recommended"]
+    if not isinstance(projects, list) or not 1 <= len(projects) <= 2:
+        raise ValueError("A daily snapshot needs verified project evidence")
+    for project in projects:
+        if (not isinstance(project, dict) or project.keys() not in (
+                {"repository", "issue", "action"}, {"repository", "issue", "action", "head", "ci"}) or
+                not isinstance(project["repository"], str) or not PROJECT_REPO.fullmatch(project["repository"]) or
+                type(project["issue"]) is not int or not 1 <= project["issue"] <= 99_999_999 or
+                project["action"] not in PROJECT_ACTIONS or
+                ("head" in project and (not isinstance(project["head"], str) or not SHA.fullmatch(project["head"]) or
+                 project["ci"] not in ("changed", "passing", "failing", "pending", "unavailable")))):
+            raise ValueError("The daily snapshot contains invalid evidence")
+    if (len({row["repository"] for row in projects}) != len(projects) or
+            recommendation is not None and (recommendation not in projects or
+                recommendation["action"] not in {"investigate", "fix", "verify"})):
+        raise ValueError("The daily recommendation is outside the current evidence")
+    return projects, recommendation
+
+
+def project_verification(root, request, candidate):
+    expected = {"repository": request["repository"], "issue": request["issue"], "commit": candidate}
+    try:
+        verification = read_private(root / "project-verification.json", 4096)
+    except FileNotFoundError:
+        return None
+    if not isinstance(verification, dict) or any(verification.get(key) != value for key, value in expected.items()):
+        return None
+    checks, pr = verification.get("checks"), verification.get("pr")
+    if (type(pr) is not int or not 0 < pr < 100_000_000 or not isinstance(checks, list) or
+            not 0 < len(checks) <= 6 or not all(isinstance(check, str) and 0 < len(check) <= 100 for check in checks) or
+            len(set(checks)) != len(checks)):
+        raise ValueError("The independent verification profile is invalid")
+    return verification
+
+
+def brokered_project_ci(root, evidence):
+    if not isinstance(evidence, dict) or evidence.keys() != {"request", "commit"} or not private_directory(root):
+        raise ValueError("Expected an exact brokered candidate")
+    request, commit = evidence["request"], evidence["commit"]
+    queue = CaptainQueue(root).queue
+    if not isinstance(request, dict) or request.keys() != queue.PROJECT_REQUEST:
+        raise ValueError("Expected an exact brokered project identity")
+    queue.canonical(request)
+    if not isinstance(commit, str) or not SHA.fullmatch(commit) or commit == request["head"]:
+        raise ValueError("Invalid brokered candidate commit")
+    verification = project_verification(root, request, commit)
+    if verification is None:
+        return {"state": "patch-ready"}
+    branch = verification.get("branch")
+    if (not isinstance(branch, str) or len(branch) > 150
+            or not re.fullmatch(r"[a-zA-Z0-9_-]+(?:[./-][a-zA-Z0-9_-]+)*", branch)):
+        raise ValueError("Brokered verification needs the exact approved base branch")
+    state = project_pr_checks(request, branch, commit, verification)
+    return {"state": state, "pr": verification["pr"]}
+
+
+def brokered_project_submit(home, queue, broker, epoch, repository, issue):
+    root = home / ".local/state/openclaw-captain"
+    try:
+        if not private_directory(root):
+            return {"result": "scope-denied"}
+        grant = read_private(root / "project-grant.json", 4096)
+        if not isinstance(grant, dict) or set(grant) != {
+                "repository", "issue", "head", "epoch", "worker", "branch", "expires", "planSha256"}:
+            return {"result": "scope-denied"}
+        identity = {"repository": repository, "issue": issue, "head": grant["head"], "epoch": epoch}
+        request = {**identity, "lane": queue.project_lane(**identity)}
+        queue.canonical(request)
+        branch, expires, plan_hash = grant["branch"], grant["expires"], grant["planSha256"]
+        if (any(type(grant[key]) is not type(value) or grant[key] != value for key, value in identity.items())
+                or grant["worker"] != "local-qwen" or type(expires) is not int
+                or not int(time.time()) < expires <= int(time.time()) + 3600
+                or not isinstance(branch, str) or len(branch) > 150
+                or not re.fullmatch(r"[a-zA-Z0-9_-]+(?:[./-][a-zA-Z0-9_-]+)*", branch)
+                or not isinstance(plan_hash, str) or not re.fullmatch(r"[a-f0-9]{64}", plan_hash)):
+            return {"result": "scope-denied"}
+        payload = private_bytes(root / "project-worker.json", 8192)
+        if digest(payload) != plan_hash or json.loads(payload).get("request") != identity:
+            return {"result": "scope-denied"}
+    except (OSError, ValueError, TypeError, AttributeError):
+        return {"result": "scope-denied"}
+
+    authority = SimpleNamespace(AUTHORITY=root, node="nucbox")
+    with ExitStack() as resources:
+        try:
+            gate = resources.enter_context(LiveGate(authority).open())
+            capacity = local_capacity(authority)
+            if gate["hold"] or gate["running"] or capacity["used"] >= capacity["limit"] or os.getloadavg()[0] > 16:
+                return {"result": "admission-blocked"}
+        except (OSError, KeyError, TypeError, ValueError, subprocess.SubprocessError):
+            return {"result": "admission-unavailable"}
+        try:
+            if not current_project_evidence(request, branch, lambda route: github_get(route, home=home)):
+                return {"result": "stale-github"}
+        except (OSError, ValueError, TypeError, AttributeError, subprocess.SubprocessError):
+            return {"result": "github-unavailable"}
+        try:
+            if (int(time.time()) >= expires or read_private(root / "project-grant.json", 4096) != grant
+                    or digest(private_bytes(root / "project-worker.json", 8192)) != plan_hash):
+                return {"result": "scope-denied"}
+        except (OSError, ValueError, TypeError):
+            return {"result": "scope-denied"}
+        receipt = broker.submit_project(epoch, request, plan_hash)
+
+    if receipt.get("retired") is True:
+        return {"result": "duplicate", "job": {"request": request, "state": "retired", "commit": receipt["commit"]}}
+    state = {"queued": "running", "refused": "refused"}.get(receipt["phase"], "unresolved")
+    result = "duplicate" if receipt.get("reused") else state
+    return {"result": result, "job": {"request": request, "state": state}}
 
 
 class CaptainQueue:
@@ -451,57 +577,7 @@ class CaptainQueue:
             return None
 
     def poll(self, job):
-        receipt = self.receipt(job)
-        if receipt is None:
-            return {"worker": "unresolved"}
-        backend, phase = receipt["backend"], receipt["phase"]
-        metadata = {"backend": backend, "accepted": phase == "queued",
-                    "age": max(0, int(time.time()) - receipt["at"])}
-        if phase != "queued":
-            result = "missing-result" if phase == "refused" and backend == "restate" else "unresolved"
-            return {"worker": result, **metadata}
-
-        try:
-            route = self.config()[backend]
-            args, target = self.queue.submission(backend, route, self.request(job), receipt["key"])
-            if target != receipt["target"]:
-                return {"worker": "unresolved", **metadata}
-            opener, _, headers, _ = args
-            base = route["base_url"].rstrip("/")
-            run = receipt["run"]
-            if backend == "hatchet":
-                status_url = f"{base}/api/v1/stable/workflow-runs/{run}"
-                status = self.queue.response_json(opener, Request(
-                    status_url + "/status", headers=headers), 1, str)
-                if status in ("QUEUED", "RUNNING"):
-                    return {"worker": "running", **metadata}
-                completed = status == "COMPLETED"
-                failed = status in ("FAILED", "CANCELLED")
-            else:
-                headers = {"Authorization": headers["Authorization"]}
-                status_url = f"{base}/restate/output/{run}"
-                status = self.queue.response_json(opener, Request(
-                    f"{base}/restate/status/{run}", headers=headers), 1)
-                if status.get("stage") in ("created", "started"):
-                    return {"worker": "running", **metadata}
-                failed = status.get("stage") == "completed" and "error" in status
-                completed = status.get("stage") == "completed" and not failed
-            if not completed:
-                return {"worker": "missing-result" if failed else "unresolved", **metadata}
-            result = self.queue.response_json(opener, Request(status_url, headers=headers), 1)
-        except (OSError, ValueError, self.queue.Refusal, self.queue.Uncertain):
-            return {"worker": "unresolved", **metadata}
-        if backend == "hatchet":
-            run_details = result.get("run")
-            run_metadata = run_details.get("metadata") if isinstance(run_details, dict) else None
-            if not isinstance(run_metadata, dict) or run_metadata.get("id") != run:
-                return {"worker": "invalid-result", **metadata}
-            result = run_details.get("output")
-        if not isinstance(result, dict) or result.keys() != {"lane", "pr", "head", "ci"}:
-            return {"worker": "invalid-result", **metadata}
-        if any(result[key] != job[key] for key in ("lane", "pr", "head")) or result["ci"] not in ("passing", "failing"):
-            return {"worker": "invalid-result", **metadata}
-        return {"worker": "settled", "head": result["head"], "ci": result["ci"], **metadata}
+        return self.queue.poll_review(self.config, self.request(job), self.receipt(job))
 
 
 class Controller:
@@ -561,6 +637,9 @@ class Controller:
                 "activeProjectJobs": [job for job in data.get("projectJobs", []) if job["state"] in ACTIVE_PROJECT],
                 "recentProjectResults": [job for job in data.get("projectJobs", []) if job["state"] not in ACTIVE_PROJECT][-5:],
                 "lastProjectDaily": next(reversed(data.get("projectDaily", [])), None),
+                "projectTelegramLedgerFull": len(data.get("projectTelegram", [])) >= 512,
+                "unconfirmedProjectDelivery": [row["key"] for row in data.get("projectTelegram", [])
+                                               if row["state"] in ("pending", "unverified")],
                 "active": active}
 
     def handoff(self):
@@ -572,17 +651,51 @@ class Controller:
             save(self.private / "handoff.json", view)
             return view
 
+    def project_telegram_review(self):
+        with self.locked() as data:
+            return {"unconfirmed": [row for row in data.get("projectTelegram", [])
+                                    if row["state"] in ("pending", "unverified")]}
+
+    def project_telegram(self, action, req):
+        if not self.standalone or not isinstance(req, dict):
+            raise ValueError("The project delivery journal requires standalone authority")
+        key = req.get("key")
+        if not isinstance(key, str) or not re.fullmatch(r"[0-9a-f]{64}", key):
+            raise ValueError("Invalid project delivery identity")
+        with self.locked(write=True) as data, self.fence._locked():
+            lease = self.fence._read_unlocked()
+            if not lease or not self.matches(lease, lease.epoch):
+                return {"result": "stale"}
+            journal = data.setdefault("projectTelegram", [])
+            existing = next((row for row in journal if row["key"] == key), None)
+            if action == "reserve":
+                if existing:
+                    return {"result": "duplicate"}
+                if len(journal) >= 512:
+                    return {"result": "ledger-full"}
+                journal.append({"key": key, "state": "pending", "epoch": lease.epoch, "at": int(time.time())})
+                return {"result": "reserved"}
+            if action == "finish":
+                outcome = req.get("outcome")
+                if outcome not in ("delivered", "unverified"):
+                    raise ValueError("Invalid project delivery outcome")
+                if not existing or existing["state"] != "pending" or existing["epoch"] != lease.epoch:
+                    return {"result": "stale"}
+            elif action == "resolve":
+                outcome = req.get("outcome")
+                if outcome not in ("delivered", "missing"):
+                    raise ValueError("Invalid observed project delivery outcome")
+                if not existing or existing["state"] not in ("pending", "unverified"):
+                    return {"result": "stale"}
+            else:
+                raise ValueError("Unknown project delivery action")
+            existing.update(state=outcome, settled=int(time.time()))
+            return {"result": outcome}
+
     def daily_project_date(self):
         if not self.standalone:
             return None
-        try:
-            enabled = read_private(self.watchdog.AUTHORITY / "project-daily.json", 1024)
-        except FileNotFoundError:
-            return None
-        if not isinstance(enabled, dict) or enabled.keys() != {"enabled"} or type(enabled["enabled"]) is not bool:
-            raise ValueError("Invalid daily project profile")
-        local = datetime.now(timezone.utc).astimezone(ZoneInfo("America/Chicago"))
-        return local.date().isoformat() if enabled["enabled"] and local.hour >= 7 else None
+        return project_daily_date(self.watchdog.AUTHORITY, datetime.now(timezone.utc))
 
     def daily_project_due(self):
         day = self.daily_project_date()
@@ -599,23 +712,7 @@ class Controller:
         day, epoch = req["date"], check_epoch(req["epoch"])
         if not isinstance(day, str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", day):
             raise ValueError("The daily snapshot date is invalid")
-        snapshot = req["snapshot"]
-        projects, recommendation = snapshot["projects"], snapshot["recommended"]
-        if not isinstance(projects, list) or not 1 <= len(projects) <= 2:
-            raise ValueError("A daily snapshot needs verified project evidence")
-        for project in projects:
-            if (not isinstance(project, dict) or project.keys() not in (
-                    {"repository", "issue", "action"}, {"repository", "issue", "action", "head", "ci"}) or
-                    not isinstance(project["repository"], str) or not PROJECT_REPO.fullmatch(project["repository"]) or
-                    type(project["issue"]) is not int or not 1 <= project["issue"] <= 99_999_999 or
-                    project["action"] not in PROJECT_ACTIONS or
-                    ("head" in project and (not isinstance(project["head"], str) or not SHA.fullmatch(project["head"]) or
-                     project["ci"] not in ("changed", "passing", "failing", "pending", "unavailable")))):
-                raise ValueError("The daily snapshot contains invalid evidence")
-        if (len({row["repository"] for row in projects}) != len(projects) or
-                recommendation is not None and (recommendation not in projects or
-                    recommendation["action"] not in {"investigate", "fix", "verify"})):
-            raise ValueError("The daily recommendation is outside the current evidence")
+        projects, recommendation = validate_project_snapshot(req["snapshot"])
         with self.locked(write=True) as data, self.fence._locked():
             if day != self.daily_project_date() or not self.matches(self.fence._read_unlocked(), epoch):
                 return {"result": "stale"}
@@ -787,30 +884,19 @@ class Controller:
 
     def review_project_candidate(self, job, output):
         request = job["request"]
-        if (not isinstance(output, dict) or set(output) != {"lane", "head", "commit"} or
-                output["lane"] != request["lane"] or output["head"] != request["head"] or
-                not isinstance(output["commit"], str) or not SHA.fullmatch(output["commit"]) or
-                output["commit"] == request["head"] or job.get("commit", output["commit"]) != output["commit"]):
+        commit = self.queue.queue.project_artifact(request, output, previous=job.get("commit"))
+        if commit is None:
             job.update(state="invalid-artifact")
             return
-        job.update(commit=output["commit"], state="patch-ready")
+        job.update(commit=commit, state="patch-ready")
         if not current_project_evidence(request, job["branch"]):
             job.update(state="stale-base")
             return
-        try:
-            verification = read_private(self.watchdog.AUTHORITY / "project-verification.json", 4096)
-        except FileNotFoundError:
+        verification = project_verification(self.watchdog.AUTHORITY, request, commit)
+        if verification is None:
             return
-        expected = {"repository": request["repository"], "issue": request["issue"], "commit": job["commit"]}
-        if not isinstance(verification, dict) or any(verification.get(key) != value for key, value in expected.items()):
-            return
-        checks, pr = verification.get("checks"), verification.get("pr")
-        if (type(pr) is not int or not 0 < pr < 100_000_000 or not isinstance(checks, list) or
-                not 0 < len(checks) <= 6 or not all(isinstance(check, str) and 0 < len(check) <= 100 for check in checks) or
-                len(set(checks)) != len(checks)):
-            raise ValueError("The independent verification profile is invalid")
-        outcome = project_pr_checks(request, job["branch"], job["commit"], verification)
-        job.update(state=outcome, pr=pr, checks=checks, checked=int(time.time()))
+        outcome = project_pr_checks(request, job["branch"], commit, verification)
+        job.update(state=outcome, pr=verification["pr"], checks=verification["checks"], checked=int(time.time()))
 
     @staticmethod
     def submitted_message(data, owner, message):
@@ -1062,6 +1148,23 @@ def main():
     if len(raw) > limit:
         raise ValueError("Captain request exceeded its limit")
     req = json.loads(raw)
+    broker_epoch = os.environ.get("FO_STANDBY_EPOCH")
+    if broker_epoch is not None:
+        epoch = check_epoch(int(broker_epoch))
+        if epoch == 0 or node not in LOCAL_NODES:
+            raise ValueError("Invalid brokered gateway epoch")
+        if entry in ("view", "handoff"):
+            view = {"lease": {"holder": "first-officer", "state": "held", "epoch": epoch},
+                    "armed": False, "grant": None, "blocked": None, "standalone": node,
+                    "jobs": [], "active": None}
+            if entry == "handoff":
+                view["observed"] = int(time.time())
+            return view
+        if entry == "verify-brokered-project":
+            return brokered_project_ci(LOCAL_AUTHORITY, req)
+        if entry not in ("local-gate", "local-capacity", "local-quota", "local-projects",
+                         "project-telegram-review", "record-project-recommendation"):
+            raise ValueError("Brokered job state is unavailable in this gateway configuration")
     if node in LOCAL_NODES:
         authority = StandaloneAuthority(node, LOCAL_AUTHORITY)
         if entry == "local-initialize":
@@ -1085,6 +1188,10 @@ def main():
             return controller.reconcile_project(req)
         if entry == "inspect-project":
             return controller.inspect_project(req)
+        if entry in ("reserve-project-telegram", "finish-project-telegram", "resolve-project-telegram"):
+            return controller.project_telegram(entry.split("-", 1)[0], req)
+        if entry == "project-telegram-review":
+            return controller.project_telegram_review()
         if entry == "project-daily-due":
             return controller.daily_project_due()
         if entry == "save-project-daily":

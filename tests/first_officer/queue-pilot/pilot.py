@@ -15,6 +15,7 @@ import signal
 import socket
 import sqlite3
 import subprocess
+import sys
 from threading import Event, Thread
 import time
 from urllib.error import HTTPError
@@ -240,8 +241,129 @@ def check_project_restart(config, headers):
             log("A killed coding submitter recovered one verified Hatchet effect using one trigger and one lookup")
 
 
-def check_project_worker(stack, config, headers):
-    home = LEDGER.parent / "project-worker-home"
+def joined_project_rehearsal(stack, home, authority, identity, job, coding, headers):
+    """Exercise real native gateway admission and exact verification with fixture evidence."""
+    assert not Path("/usr/bin/gh").exists(), "The joined fixture requires its private GitHub adapter"
+    wire = runpy.run_path(str(QUEUE_DIR / "tests/first_officer/project-telegram-wire.py"))
+    release, node, cli = (Path(os.environ[name]).resolve(strict=True) for name in
+                          ("FO_PROJECT_WIRE_RELEASE", "FO_PROJECT_WIRE_NODE", "FO_PROJECT_WIRE_CLI"))
+    gh = home / ".local/bin/gh"
+    gh.parent.mkdir(parents=True)
+    gh.write_text("""#!/usr/bin/python3
+import json
+from pathlib import Path
+import sys
+home = Path.home()
+data = json.loads((home / "github-fixture.json").read_text())
+base, candidate = data["base"], data["candidate"]
+route = sys.argv[4]
+root = "repos/example/integration/"
+if route == root + "issues/41":
+    response = {"number": 41, "state": "open", "repository_url": "https://api.github.com/" + root[:-1]}
+elif route == root + "git/ref/heads/main":
+    response = {"ref": "refs/heads/main", "object": {"sha": base, "type": "commit"}}
+elif candidate and route == root + "pulls/13":
+    response = {"number": 13, "state": "open", "head": {"sha": candidate},
+                "base": {"ref": "main", "repo": {"full_name": "example/integration"}}}
+elif candidate and route == root + "compare/" + base + "..." + candidate:
+    response = {"status": "ahead", "merge_base_commit": {"sha": base}}
+elif candidate and route == root + "commits/" + candidate + "/check-runs?per_page=100&filter=latest":
+    response = {"total_count": 1, "check_runs": [{"name": "independent-wire", "status": "completed",
+                 "conclusion": "success", "head_sha": candidate, "app": {"slug": "github-actions"}}]}
+else:
+    sys.exit(2)
+print(json.dumps(response))
+""")
+    gh.chmod(0o700)
+    save = wire["write"]
+    save(home / "github-fixture.json", {"base": identity["head"], "candidate": None})
+    gate = home / "gate"
+    gate.mkdir()
+    (gate / "fullgate.lock").touch()
+    save(authority / "gate.json", {"directory": str(gate), "lock": "fullgate.lock", "hold": "HOLD"})
+    save(authority / "capacity.json", {"commands": ["fixture-coding-capacity"], "limit": 1})
+    save(authority / "project-queue.json", coding)
+    ledger = authority / "project-queue-receipts.jsonl"
+    roster = stack.enter_context(ThreadingHTTPServer(("127.0.0.1", 0), wire["BotApi"]))
+    config = wire["configure"](roster, home, release)
+    thread = Thread(target=roster.serve_forever)
+    thread.start()
+    stack.callback(thread.join)
+    stack.callback(roster.shutdown)
+    env = {name: os.environ[name] for name in ("FO_HATCHET_PILOT", "FO_RESTATE_PILOT")}
+    command = "captain this: advance example/integration #41"
+    candidate_state = authority / "reviews/state.json"
+
+    def inspect_saved():
+        data = json.loads(candidate_state.read_text())
+        return data["projectJobs"][0] if data.get("projectJobs") else {}
+
+    def inspect_now():
+        env_state = {**env, "HOME": str(home), "PATH": "/usr/bin:/bin", "FO_LOCAL_NODE": "nucbox"}
+        result = subprocess.check_output(
+            [sys.executable, "-I", "-B", str(release / "round6/runtime/segment1/captain-state.py"), "inspect-project"],
+            input=json.dumps(identity).encode(), env=env_state, stderr=subprocess.DEVNULL, timeout=24,
+        )
+        return json.loads(result)["result"]
+
+    def project_deliveries_settled(expected):
+        journal = json.loads(candidate_state.read_text()).get("projectTelegram", [])
+        return len(journal) == expected and all(row["state"] == "delivered" for row in journal)
+
+    def outbox_settled():
+        state = list((home / "gateway-state").rglob("openclaw.sqlite"))
+        if len(state) != 1:
+            return False
+        db = sqlite3.connect(state[0].as_uri() + "?mode=ro", uri=True, timeout=.2)
+        try:
+            return db.execute("SELECT COUNT(*) FROM delivery_queue_entries").fetchone()[0] == 0
+        except sqlite3.OperationalError:
+            return False
+        finally:
+            db.close()
+
+    with wire["gateway"](node, cli, home, config, roster, env):
+        roster.admission_bridge = os.environ.get("FO_PROJECT_BOT_SOCKET")
+        try:
+            assert wire["exercise"](roster, "Admitted coding", 100, command, "Hatchet accepted the coding job", 30)
+        finally:
+            roster.admission_bridge = None
+        with queue.locked_ledger(ledger, read_only=True) as stored:
+            accepted = queue.queue_state(stored, job, queue.idempotency_key(job))
+        assert accepted and accepted["phase"] == "queued"
+        eventually(lambda: worker_done("hatchet", accepted["run"], headers), "joined Hatchet worker")
+        output = queue.read_project_run(coding, job, accepted, accepted["run"], 3)["output"]
+        eventually(lambda: project_deliveries_settled(1), "confirmed admission reply")
+        eventually(lambda: inspect_saved().get("state") == "patch-ready",
+                   "native monitor observed the candidate", timeout=40)
+        assert inspect_saved()["commit"] == output["commit"]
+        save(home / "github-fixture.json", {"base": identity["head"], "candidate": output["commit"]})
+        save(authority / "project-verification.json",
+             {"repository": identity["repository"], "issue": identity["issue"],
+              "commit": output["commit"], "pr": 13, "checks": ["independent-wire"]})
+        eventually(lambda: inspect_saved().get("state") == "verified",
+                   "native monitor verified the exact candidate", timeout=55)
+        assert wire["exercise"](roster, "Verified handoff", 101, "handoff", "all required CI checks", 30)
+        delivered = len(roster.replies)
+        eventually(lambda: project_deliveries_settled(2), "confirmed Captain handoff receipt")
+        eventually(outbox_settled, "verified native Telegram delivery checkpoint")
+        assert len(roster.replies) == delivered, "The first gateway sent an extra reply"
+    with wire["gateway"](node, cli, home, config, roster, env):
+        assert len(roster.replies) == delivered, "Restart replayed a confirmed Telegram reply"
+        assert wire["exercise"](roster, "Duplicate after restart", 102, command, "already has a receipt", 30)
+        eventually(lambda: project_deliveries_settled(3), "confirmed post-restart receipt")
+        save(home / "github-fixture.json", {"base": identity["head"], "candidate": "f" * 40})
+        assert inspect_now() == "stale-candidate"
+    entries = [json.loads(line) for line in ledger.read_text().splitlines()]
+    assert [entry["phase"] for entry in entries] == ["pending", "queued"]
+    assert roster.model_calls == 0, "The chat model was outside the coding path"
+    log("Native telegram admission, Hatchet, scoped edit, verification, replay and stale-head checks passed")
+    return accepted
+
+
+def check_project_worker(stack, config, headers, restart_hatchet=None, *, brokered=False):
+    directory = "brokered-project-home" if brokered else "server-restart-home" if restart_hatchet else "project-worker-home"
+    home = LEDGER.parent / directory
     authority = home / ".local/state/openclaw-captain"
     model = home / ".local/state/openclaw-nuc/litellm"
     checkout = home / "source"
@@ -249,6 +371,10 @@ def check_project_worker(stack, config, headers):
     model.mkdir(parents=True)
     checkout.mkdir()
     worker_source = QUEUE_DIR / "first-officer/workers"
+    if brokered:
+        release, node, cli = (Path(os.environ[key]).resolve(strict=True) for key in
+                              ("FO_PROJECT_WIRE_RELEASE", "FO_PROJECT_WIRE_NODE", "FO_PROJECT_WIRE_CLI"))
+        worker_source = release / "round6/runtime/segment1/queue-runtime/workers"
     worker = runpy.run_path(str(worker_source / "project-worker.py"))
     git, save = worker["git"], worker["save"]
     git(checkout, "init", "--quiet")
@@ -257,9 +383,11 @@ def check_project_worker(stack, config, headers):
     git(checkout, "add", "review.mjs")
     git(checkout, "commit", "-qm", "Fixture base")
     head = git(checkout, "rev-parse", "HEAD").decode().strip()
-    identity = {"repository": "example/integration", "issue": 41, "head": head, "epoch": 2}
+    issue = 43 if brokered else 42 if restart_hatchet else 41
+    identity = {"repository": "example/integration", "issue": issue, "head": head, "epoch": 1 if brokered else 2}
     job = {**identity, "lane": queue.project_lane(**identity)}
-    save(authority / "lease.json", {"node": "nucbox", "active": True, "epoch": 2})
+    if not brokered:
+        save(authority / "lease.json", {"node": "nucbox", "active": True, "epoch": identity["epoch"]})
     save(authority / "project-worker.json", {"request": identity, "checkout": str(checkout),
                                             "file": "review.mjs", "before": '"old"', "prefix": "",
                                             "suffix": "", "prompt": "Draft a neutral delivery status."})
@@ -268,9 +396,11 @@ def check_project_worker(stack, config, headers):
         **identity, "branch": "main", "worker": "local-qwen", "expires": int(time.time()) + 120,
         "planSha256": fingerprint,
     })
-    save(authority / "reviews/state.json", {"projectJobs": [
-        {"request": job, "branch": "main", "worker": "local-qwen", "state": "reserved", "planSha256": fingerprint},
-    ]})
+    joined = not brokered and restart_hatchet is None and bool(os.environ.get("FO_PROJECT_WIRE_RELEASE"))
+    if not joined and not brokered:
+        save(authority / "reviews/state.json", {"projectJobs": [
+            {"request": job, "branch": "main", "worker": "local-qwen", "state": "reserved", "planSha256": fingerprint},
+        ]})
     save(model / "litellm.yaml", {
         "model_list": [{"model_name": "qwen-local-fast",
                         "litellm_params": {"model": "openai/qwen-local-fast", "api_base": "http://127.0.0.1:41501/v1"}}],
@@ -279,12 +409,19 @@ def check_project_worker(stack, config, headers):
     save(model / "lane-policy.json", {"lanes": {"gateway": {"models": ["qwen-local-fast"]}}})
     (model / "gateway-lane.key").write_text("fixture-model-key")
     calls = []
+    model_started = Event()
+    release_model = Event()
 
     class ModelStub(BaseHTTPRequestHandler):
         def do_POST(self):
             payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             assert self.path == "/v1/chat/completions" and payload["model"] == "qwen-local-fast"
             calls.append(True)
+            if restart_hatchet:
+                model_started.set()
+                if not release_model.wait(18):
+                    self.send_error(503)
+                    return
             response = json.dumps({"choices": [{"message": {"content": '{"replacement":"Delivery is unconfirmed."}'}}]}).encode()
             self.send_response(200)
             self.send_header("Content-Length", str(len(response)))
@@ -300,24 +437,80 @@ def check_project_worker(stack, config, headers):
     stack.callback(thread.join)
     stack.callback(server.shutdown)
     python = Path("hatchet-worker/bin/python").absolute()
-    launch(stack, "hatchet-project-worker.log", str(python), str(worker_source / "hatchet-project.py"),
-           env={**os.environ, "HOME": str(home), "FO_PROJECT_PYTHON": str(python)})
-    time.sleep(3)
+    interpreter = python
+    interrupted = home / "worker-interrupted"
+    if not joined and not restart_hatchet and not brokered:
+        interpreter = home / "interrupt-project-worker"
+        interpreter.write_text(f'''#!{python}
+import os
+from pathlib import Path
+import runpy
+import signal
+import sys
+
+marker = Path({str(interrupted)!r})
+worker = runpy.run_path(sys.argv[-1])
+original_git = worker["git"]
+
+
+def interrupt_after_checkpoint(worktree, *args, **kwargs):
+    if args[:2] == ("update-ref", "HEAD") and not marker.exists():
+        assert (worktree.parent / "candidate.json").is_file()
+        marker.touch(exist_ok=False)
+        os.kill(os.getpid(), signal.SIGKILL)
+    return original_git(worktree, *args, **kwargs)
+
+
+worker["run"].__globals__["git"] = interrupt_after_checkpoint
+worker["main"]()
+''')
+        interpreter.chmod(0o700)
     coding = deepcopy(config)
     coding["hatchet"]["workflow"] = queue.PROJECT_WORKFLOW
-    receipt = queue.dispatch(coding, job, LEDGER)
-    eventually(lambda: worker_done("hatchet", receipt["run"], headers), "scoped Hatchet coding worker")
+    worker_env = {**os.environ, "HOME": str(home), "FO_PROJECT_PYTHON": str(interpreter)}
+    if brokered:
+        wire = runpy.run_path(str(QUEUE_DIR / "tests/first_officer/brokered-project-wire.py"))
+        profile, exercise = wire["setup"](stack, release, home, authority, job, coding, save)
+        worker_env["FO_PROJECT_BROKER_PROFILE"] = str(profile)
+    launch(stack, "hatchet-project-worker.log", str(python), str(worker_source / "hatchet-project.py"), env=worker_env)
+    time.sleep(3)
+    if brokered:
+        receipt = exercise(node, cli, eventually, lambda run: worker_done("hatchet", run, headers))
+    elif joined:
+        receipt = joined_project_rehearsal(stack, home, authority, identity, job, coding, headers)
+    else:
+        receipt = queue.dispatch(coding, job, LEDGER)
+    if restart_hatchet:
+        try:
+            assert model_started.wait(10), "The coding worker did not start"
+            row = queue.read_project_run(coding, job, receipt, receipt["run"], 3)
+            assert row["status"] == "RUNNING"
+            restart_hatchet()
+        finally:
+            release_model.set()
+    eventually(lambda: worker_done("hatchet", receipt["run"], headers), "scoped Hatchet coding worker", timeout=40)
     row = queue.read_project_run(coding, job, receipt, receipt["run"], 3)
     result = row["output"]
     assert set(result) == {"lane", "head", "commit"} and result["lane"] == job["lane"] and result["head"] == head
     assert git(checkout, "rev-parse", result["commit"] + "^").decode().strip() == head
     assert git(checkout, "show", result["commit"] + ":review.mjs") == b'const delivery = "Delivery is unconfirmed.";\n'
     assert (checkout / "review.mjs").read_text() == 'const delivery = "old";\n'
-    assert queue.dispatch(coding, job, LEDGER)["reused"] and len(calls) == 1
-    log("The dedicated Hatchet coding worker made one isolated candidate commit from one loopback model call")
+    if not joined and not brokered:
+        replay = queue.dispatch(coding, job, LEDGER)
+        assert replay["reused"] and replay["run"] == receipt["run"]
+        if restart_hatchet:
+            log("Hatchet finished the original coding run after the server restarted")
+        else:
+            assert interrupted.is_file()
+            log("Hatchet recovered the interrupted coding child within the original run")
+    assert len(calls) == (2 if brokered else 1)
+    if brokered:
+        log("The brokered worker used one loopback model call per approved job across retirement and replay.")
+    else:
+        log("The dedicated Hatchet coding worker made one isolated candidate commit from one loopback model call")
 
 
-def main():
+def run_pilot(restart_hatchet):
     token = Path("hatchet-token").read_text().strip()
     part = token.split(".")[1]
     tenant = json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))["sub"]
@@ -367,7 +560,7 @@ def main():
                 assert len(calls) == 1 and not fallback_calls
                 eventually(lambda: worker_done("hatchet", run, headers), "Hatchet accepted before lost reply")
         trigger = f"/api/v1/stable/tenants/{tenant}/workflow-runs/trigger"
-        engine_log = Path("logs/hatchet")
+        engine_log = LEDGER.parent / "hatchet-server.log"
         collision_marker = "idempotency key collision"
         previous_collisions = engine_log.read_text().lower().count(collision_marker)
         collision, _ = api(HATCHET, trigger, {"workflowName": "queue-pilot", "input": job, "returnOnlyId": True,
@@ -473,7 +666,48 @@ def main():
             log("Late real Hatchet reply could not overwrite a newer durable receipt")
 
         stop(hatchet_worker)
-        check_project_worker(stack, config, headers)
+        with ExitStack() as project:
+            check_project_worker(project, config, headers)
+        with ExitStack() as project:
+            check_project_worker(project, config, headers, restart_hatchet)
+        if os.environ.get("FO_PROJECT_WIRE_RELEASE"):
+            with ExitStack() as project:
+                check_project_worker(project, config, headers, brokered=True)
+
+
+def main():
+    binary = Path(os.environ["PILOT_HATCHET_BIN"])
+    config = Path("hatchet-config").absolute()
+
+    def ready():
+        try:
+            # The web UI can come up before the run-status API starts listening.
+            return (http(HATCHET, "/", timeout=1)[0] < 500
+                    and http("http://localhost:58889", "/", timeout=1)[0] < 300)
+        except OSError:
+            return False
+
+    with ExitStack() as services:
+        def start_server():
+            server = launch(services, "hatchet-server.log", "nice", "-n", "10",
+                            str(binary / "hatchet-lite"), "--config", str(config))
+            eventually(ready, "Hatchet listener", timeout=12)
+            assert server.poll() is None
+            return server
+
+        server = start_server()
+        with Path("hatchet-token").open("w") as token, (LEDGER.parent / "hatchet-token.log").open("w") as error:
+            subprocess.run([str(binary / "hatchet-admin"), "token", "create", "--config", str(config),
+                            "--name", "queue-pilot"], stdout=token, stderr=error, check=True, timeout=10)
+
+        def restart_hatchet():
+            nonlocal server
+            stop(server)
+            assert not ready(), "The original Hatchet listener remained active"
+            server = start_server()
+
+        log("Real Hatchet and Restate listeners started.")
+        run_pilot(restart_hatchet)
 
 
 if __name__ == "__main__":

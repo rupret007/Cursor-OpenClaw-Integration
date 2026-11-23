@@ -1,35 +1,41 @@
 #!/usr/bin/env python3
-"""Validate a pinned standalone Captain and render a user-service definition."""
+"""Validate a pinned standalone Captain and render a service definition."""
 import argparse
 import importlib.util
 import json
 import os
 from pathlib import Path
 import plistlib
+import pwd
 import re
 import stat
 import subprocess
 import sys
+from tempfile import TemporaryDirectory
 
 LABEL = "local.openclaw.captain"
 UNIT = "openclaw-captain.service"
 ROOT = Path(__file__).resolve().parent
 RUNTIME = "round6/runtime/segment1/captain-state.py"
+STANDBY = "round6/runtime/segment1/queue-runtime/standby_launch.py"
 
 
 def systemd_quote(value):
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def render(node, command, environment):
+def render(node, command, environment, *, mac_account=None):
     if node == "mac-mini":
-        return plistlib.dumps({
+        definition = {
             "Label": LABEL,
             "ProgramArguments": command,
             "EnvironmentVariables": environment,
             "KeepAlive": {"SuccessfulExit": False},
             "ThrottleInterval": 15,
-        })
+        }
+        if mac_account is not None:
+            definition.update(UserName=mac_account.pw_name, WorkingDirectory=mac_account.pw_dir, RunAtLoad=True)
+        return plistlib.dumps(definition)
     entries = "\n".join("Environment=" + systemd_quote(key + "=" + value) for key, value in environment.items())
     argv = " ".join(map(systemd_quote, command))
     return f"""[Unit]
@@ -100,7 +106,14 @@ def check_telegram_owner(config):
         raise ValueError("Use the same single Telegram owner and approver")
 
 
-def prepare(node, release, python, node_binary, openclaw, config, state, secrets, check=subprocess.run):
+def prepare(node, release, python, node_binary, openclaw, config, state, secrets,
+            check=subprocess.run, *, mac_launch_daemon=False, standby_profile=None):
+    mac_account = None
+    if mac_launch_daemon:
+        if node != "mac-mini" or os.getuid() == 0 or os.getuid() != os.geteuid():
+            raise ValueError("Prepare a Mac LaunchDaemon as the unprivileged Mac gateway account")
+        mac_account = pwd.getpwuid(os.getuid())
+        absolute(Path(mac_account.pw_dir))
     for path in (release, config, state, secrets):
         absolute(path)
     executable(python)
@@ -123,19 +136,34 @@ def prepare(node, release, python, node_binary, openclaw, config, state, secrets
     info = state.lstat()
     if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077):
         raise ValueError("Use a private standalone gateway state directory")
-    authority = load_module("fo_standalone_state", release / RUNTIME)
     absolute(secrets)
     environment = {
         "FO_LOCAL_NODE": node, "OPENCLAW_CONFIG_PATH": str(config), "OPENCLAW_STATE_DIR": str(state),
         "PATH": os.pathsep.join(dict.fromkeys((str(node_binary.parent), str(openclaw.parent), str(python.parent), "/usr/bin", "/bin"))),
     }
-    result = check([str(openclaw), "config", "validate"], check=False, timeout=30,
-                   env={**authority.gateway_environment(secrets), **environment},
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    if result.returncode:
-        raise ValueError("OpenClaw rejected the standalone gateway configuration")
-    command = [str(python), "-I", "-B", str(release / RUNTIME), "local-run", str(openclaw), str(secrets)]
-    return render(node, command, environment)
+    if mac_account is not None:
+        environment["HOME"] = mac_account.pw_dir
+    with TemporaryDirectory(prefix=".standalone-preflight-", dir=state) as scratch:
+        if standby_profile is None:
+            authority = load_module("fo_standalone_state", release / RUNTIME)
+            validation_env = {**authority.gateway_environment(secrets), **environment}
+            command = [str(python), "-I", "-B", str(release / RUNTIME), "local-run", str(openclaw), str(secrets)]
+        else:
+            absolute(standby_profile)
+            launcher = load_module("fo_standby_launch", release / STANDBY)
+            profile = launcher.profile_from(standby_profile)
+            template, _ = launcher.template_from(config)
+            checked_config = Path(scratch) / "gateway.json"
+            # Config validation needs a syntactically valid local token. This token cannot reach Telegram.
+            launcher.write_gateway_config(checked_config, template, 1, f"{profile['bot_id']}:" + "x" * 32)
+            validation_env = {**launcher.gateway_env(secrets), **environment, "OPENCLAW_CONFIG_PATH": str(checked_config)}
+            command = [str(python), "-I", "-B", str(release / STANDBY), str(openclaw),
+                       str(config), str(secrets), str(standby_profile)]
+        result = check([str(openclaw), "config", "validate"], check=False, timeout=30,
+                       env=validation_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if result.returncode:
+            raise ValueError("OpenClaw rejected the standalone gateway configuration")
+    return render(node, command, environment, mac_account=mac_account)
 
 
 def main():
@@ -143,10 +171,13 @@ def main():
     parser.add_argument("--node", choices=("mac-mini", "nucbox"), required=True)
     for name in ("release", "python", "node-binary", "openclaw", "config", "state", "environment"):
         parser.add_argument("--" + name, type=Path, required=True)
+    parser.add_argument("--mac-launch-daemon", action="store_true")
+    parser.add_argument("--standby-profile", type=Path)
     args = parser.parse_args()
     try:
         definition = prepare(args.node, args.release, args.python, args.node_binary, args.openclaw,
-                             args.config, args.state, args.environment)
+                             args.config, args.state, args.environment, mac_launch_daemon=args.mac_launch_daemon,
+                             standby_profile=args.standby_profile)
     except (OSError, KeyError, TypeError, ValueError, subprocess.SubprocessError):
         print("Standalone preflight failed. Check the pinned release, private paths and local OpenClaw config.",
               file=sys.stderr)

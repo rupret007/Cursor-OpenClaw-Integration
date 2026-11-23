@@ -27,8 +27,11 @@ The runner verifies the Hatchet Lite v0.120.19 amd64 image manifest and all laye
 | Reply lost after Restate accepted | The relay forwarded the job and withheld Restate’s accepted reply. Lookup and status recovered the same invocation on the original route and scope. A direct repeat on that scope returned the original ID. The same key under an alternate scope gave a different derived ID with HTTP 404 on status. |
 | Missing and expired invocation | A send dropped before forwarding and a completed invocation that aged out both produced deterministic lookup IDs. Status provided no acceptance evidence. The ledger stayed unresolved and the expired case rejected a repeated send. |
 | Restart after the side effect | The Restate worker was killed after committing its SQLite row and before acknowledging the durable step. The restarted worker completed the same invocation. The logical request still had one row, with the original timestamps. |
+| Hatchet coding child interrupted after checkpoint | The pilot killed the real project worker subprocess after it saved the candidate commit and before it advanced the isolated worktree. With one task retry, Hatchet completed the original run. The duplicate submission reused that run ID. The parent checkout stayed intact and the loopback model received one call. The Hatchet server stayed up for this exercise. |
+| Hatchet server restart during coding | The pilot confirmed the exact run was `RUNNING` while the loopback model request was open. It stopped Hatchet Lite, confirmed its listener was down, then started a fresh server against the same scratch PostgreSQL database. The original run returned one isolated commit from one model call. A duplicate submission reused that run ID. PostgreSQL and the SDK worker stayed up. |
 | Concurrent duplicate and unrelated lane | The duplicate waited while the first reply was held and reused the receipt. The relay saw one POST for the pair. The unrelated lane was accepted in 1,064 ms while the reply was held. Both jobs completed. |
 | Late reply | The pilot wrote the real acceptance receipt while the relay held the reply. The dispatcher refused the late transition and preserved the newer ledger row. |
+| Brokered Telegram admission | With `FO_PROJECT_WIRE_RELEASE` set, the native gateway admitted an exact, approved command through the packaged mutual-TLS broker to real Hatchet. The packaged worker checked the broker’s lease and plan receipt, then made one isolated commit from one loopback model call. A duplicate reused the same run and `handoff` showed the candidate. Acknowledgment took 1.079 s, 0.125 s, and 0.238 s for admission, replay, and handoff. Final replies took 2.362 s, 0.901 s, and 0.977 s. Telegram, GitHub, and the model used local fixtures. |
 
 Three jobs per backend used a 1.5-second synthetic slow dependency. The intervals record wall-clock time between submission and the start of the worker step. That includes ingress time and is an upper estimate of backend queue age. Acceptance times measure from dispatcher call to its receipt and include ledger writes and, for Restate, the refused primary connect.
 
@@ -36,6 +39,8 @@ Three jobs per backend used a 1.5-second synthetic slow dependency. The interval
 | --- | --- | --- | --- |
 | Hatchet | 1,098 / 1,050 / 1,047 ms | 61 / 523 / 1,045 ms | 1 |
 | Restate | 38 / 34 / 32 ms | 45 / 1,535 / 3,038 ms | 1 |
+
+The brokered follow-up at runtime `4e2c0a7` closed the first real Hatchet run under a fixture completion approval. A repeated Telegram command reused that receipt. A second approved issue in the same fixture repository received a distinct run and candidate. Each run called the loopback model once. The broker restarted against the same journal and preserved the archived run, the new reservation, and the recovery lease fence. Its initial and second admission replies took 2.423 s and 1.327 s. Telegram and GitHub used local fixtures.
 
 ## Limits and remaining risks
 

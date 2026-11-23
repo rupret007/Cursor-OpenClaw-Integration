@@ -50,6 +50,78 @@ printf '{"epoch":%s}\n' "$captain_epoch" |
 python3 -I -B "$captain_state" local-import < "$private_handoff"
 ```
 
+### Unattended Mac standby design
+
+The Nuc is primary. The Mac Mini can take over after **90 consecutive seconds without a valid Nuc renewal**. Renew every 15 seconds. Measure expiry on the authority service's clock. A standby with verified dependencies should answer a test command within two minutes of the Nuc going down. The Mac stays Captain when the Nuc returns. Handback uses the planned transfer.
+
+Before enabling automatic promotion, establish an independent authority and side-effect fence on an always-on device. Check whether the existing NAS can host it independently of either Captain host. Bobserver is optional compute. The fence must handle these conditions.
+
+- Grant one active host a monotonically increasing epoch. A missed renewal makes the Mac eligible to ask for authority. The Mac can act only after the fence issues a new epoch. If the fence is unreachable, stop admitting new side effects.
+- Put the production Telegram token and polling cursor behind one relay. Deliver updates only to the current holder. Check its epoch before forwarding replies and preserve uncertain send receipts. Remove direct Telegram access from both gateway instances before enabling promotion.
+- Require the current epoch for new Hatchet or Restate submissions at the queue ingress. Reconcile existing runs and delivery receipts by their original IDs. Preserve pending work for review and do not automatically retry submissions or replies with uncertain outcomes. Coding grants remain bound to their original epoch.
+- Recover the required Captain state from an independent durable copy. If that copy is missing or inconsistent, suspend the affected routes and report the blocker. A witness restart must preserve its last issued epoch and wait a full renewal window before reassigning an ambiguous lease to the Mac. This conservative recovery can move Captain to the Mac after a witness restart.
+
+The standalone generator accepts `--mac-launch-daemon` to render a system service under the unprivileged gateway account. The current local-authority guard still parks the Mac without an approved handoff. Run the generator as the Mac gateway user. Installation in the system launchd domain is a one-time administrator task. A system service can run at the login window after macOS has started. A Mac waiting at FileVault's preboot unlock screen cannot provide standby. Verify Andrea separately because it uses a user-session dependency. [Apple launchd guide](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html)
+
+The offline lease store in `first-officer/standby.py` tests the deadline, stale-epoch rejection, and cross-epoch effect reservations. Its database belongs on the broker's local disk. A mounted archive share alone supplies neither a broker process nor a fence. The loopback-tested broker in `first-officer/standby_broker.py` uses mutual TLS and pins one client certificate to each host. The client checks the broker certificate and host name. The broker derives the node identity from the certificate and denies effects until an adapter is registered. An optional private Telegram configuration enables the broker to own long polling for one verified bot and owner. The broker stores selected text updates in its private inbox before confirming them upstream and clears their text when a final reply receipt settles. Restart begins without a saved upstream offset and deduplicates any replay by message ID. An unconfirmed final reply leaves a receipt for review without blocking the next inbox entry. An optional `--review-queue-config` uses the same configured Hatchet and Restate review routes and exact-result verifier as standalone Captain. Keep their submission credentials on the broker. A private `review-scope.json` in its state directory grants one exact `request` at an `epoch` until `expires` (Unix seconds, no more than one hour ahead). Its request contains the lane, PR number and full head. The broker rechecks the lease and scope before sending to either backend. The active host can read an original review receipt and verify the accepted run after an epoch change. The optional `--project-queue-config` selects the dedicated Hatchet coding workflow. The separate private `project-scope.json` binds one exact coding request, Nuc lease epoch, `worker: local-qwen` and expiry. The broker holds at most one unresolved or accepted request per repository. A confirmed refusal releases the reservation. An accepted run holds the reservation through review. After promotion, the Mac can report the reservation and reconcile the original run by its ID after exact Hatchet readback. The broker checks at most one due coding receipt every 30 seconds. It records a candidate from the original worker with the exact lane and approved base. A changed candidate or unavailable worker remains visible and leaves the repository reserved. A worker candidate is a patch ready for review. Exact-commit GitHub CI remains an independent verification gate. It cannot start a new coding job under the Nuc's grant. The host supervisor in `first-officer/standby_host.py` starts a child only with a broker lease, checks OpenClaw's loopback readiness, and renews only for a ready child. Startup grace is 20 seconds. A failed renewal parks the host and stops its child. A private watchdog pipe also closes if the supervisor crashes. The child guard then kills the gateway process group. A new launcher refuses an already occupied readiness port. The native gateway can use `standby_channel.py` as a loopback Telegram API with a locally generated placeholder token. The gateway's Telegram config uses that loopback `apiRoot`, `replyToMode: all`, and `FO_STANDBY_TELEGRAM=1` for the brokered typing and acknowledgment paths. The adapter forwards replies only for a pending original message. Use `standalone.py --standby-profile` with the usual pinned release paths to render the brokered service. The private profile contains `hostname`, `port`, `bot_id`, and absolute `cert`, `key`, and `ca` paths. Start from a token-free config template with one allowlisted Telegram owner. The launcher generates a temporary loopback config, starts its bridge before OpenClaw, and reports the broker epoch. The brokered service answers chat, status, and read-only handoff. The Nuc can submit one exact, operator-approved coding job. `what needs me?` reads broker reservations. Production activation and proactive monitoring require separate operator verification. [OpenClaw health checks](https://docs.openclaw.ai/gateway/health) [OpenClaw Telegram reply behavior](https://docs.openclaw.ai/channels/telegram/messaging) [Python TLS documentation](https://docs.python.org/3/library/ssl.html#ssl.CERT_REQUIRED) [Telegram Bot API](https://core.telegram.org/bots/api#getupdates)
+
+When neither gateway has polled the broker in the last two seconds, the broker can send typing and acknowledge a fresh, durably queued owner message. The fixed reply says the gateway will answer when ready. Both effects share the gateway’s receipts, so activation or an uncertain send cannot repeat them. The final answer still requires a ready, leased gateway.
+
+Run `tests/first_officer/standby-joined.py` in a loopback-only Linux namespace with a supported First Officer bundle and the installed Node and OpenClaw executables. It runs both packaged launchers with separate certificates, uses the real 90-second deadline, and checks a queued command and stale-host rejection. This exercises the broker, native gateway and durable inbox. Physical Mac startup and real Telegram delivery require the BobTestesBot rehearsal before production. Verify a brief Nuc outage keeps the current epoch. Then test a Nuc outage exceeding 90 seconds, an isolated Nuc that can still reach Telegram, a returning Nuc with an old epoch, an unavailable witness, and a Mac reboot to the login window. Interrupt a reply and a queued job during transfer. Require one Telegram consumer, no duplicate job, and a correct Mac reply within the two-minute target without a local login, SSH password, or Bobserver. Record measured takeover and recovery times. Roll back by disabling promotion, parking the Mac and confirming its fence is closed before restoring the Nuc as the sole consumer. Automatic promotion remains pending.
+
+### Start the broker at boot on an independent Linux host
+
+The systemd template at `first-officer/systemd/openclaw-captain-broker@.service` starts the pinned broker at boot under the dedicated `openclaw-broker` system account. Confirm the host has systemd, Python 3, and local persistent storage before choosing it. The broker must be reachable from both Captain hosts while either one is offline. Keep the SQLite state under `/var/lib/openclaw-captain-broker` on the broker’s own disk.
+
+Stage the approved release under `/opt/openclaw-fo/first-officer-<digest>`. Verify the complete release inventory before copying it to the host. Keep the release root-owned, immutable to the service account, and readable by that account. At every start the unit checks the manifest digest against the instance name and verifies the listed files. Use a root-owned `/etc/openclaw-captain-broker` directory accessible only to the administrator and service account. Its `broker.env` sets `BROKER_LISTEN` to the chosen private IPv4 interface. Install `ca.pem`, `broker.pem`, `broker.key`, `nuc.pem`, `mac.pem`, and the verified bot’s `telegram.json` there. The service account needs read access. The Telegram JSON must be owned by the service account and mode `0600`. Keep the broker private key readable only by that account. Open only the private broker port to the two Captain hosts.
+
+Jeff activates the tested instance after confirming that the previous Telegram consumer is stopped. First use BobTestesBot and the rehearsed private credentials. From the reviewed checkout on the independent host, with `digest` set to the approved manifest SHA-256, run the following as the operator.
+
+```bash
+unit="openclaw-captain-broker@${digest}.service"
+systemd-analyze verify first-officer/systemd/openclaw-captain-broker@.service
+sudo install -m 0644 first-officer/systemd/openclaw-captain-broker@.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now "$unit"
+sudo systemctl is-active "$unit"
+```
+
+The base unit starts lease and Telegram services. When the queue rehearsal passes on that host, a root-owned instance drop-in can replace `ExecStart` with the same command plus `--review-queue-config` or `--project-queue-config`, using private operator-approved files. Keep queue tokens in the private service environment.
+
+To roll back, disable and stop that exact instance with `sudo systemctl disable --now "$unit"` and verify it is inactive before permitting a different consumer. Preserve the private authority and inbox state. If a prior reviewed instance can read that state, start it only after confirming the failing instance and both gateways are fenced. Reconcile unconfirmed deliveries before resuming.
+
+For brokered coding, the operator’s `project-scope.json` must contain the exact `request`, `epoch`, an `expires` time within one hour, `worker` set to `local-qwen`, and `planSha256` for the private Nuc worker plan. The broker stores that hash on the repository reservation. A dedicated Nuc Hatchet worker can verify it via mutual TLS by setting `FO_PROJECT_BROKER_PROFILE` to its private, absolute broker profile path. Brokered mode requires a current Nuc lease and the original reservation and queue receipt. Existing reservations without a plan hash can still be inspected and reconciled. They cannot authorize another edit. To admit a brokered job from Telegram, put the matching `project-grant.json` and `project-worker.json` in the Nuc’s private Captain state. Send `captain this: advance owner/repo #123` from the paired chat. The active Nuc gateway checks the exact owner command, local plan hash, live gate, capacity, open issue, and current base before forwarding the request. The broker independently checks its current lease and matching plan approval before reserving the repository. The Mac gateway supports read-only handoff and cannot start a new coding run. After an authorized publication, put the matching `project-verification.json` on the gateway host with `repository`, `issue`, `commit`, `branch`, `pr`, and the required `checks`. On `handoff`, the active gateway refreshes the broker’s candidate receipt and checks the current PR head, approved base, ancestry, and required GitHub Actions results. It re-reads the PR and base before giving a verdict. A moved head or unavailable read clears the current pass from the response.
+
+### Save the daily project briefing
+
+Put a private `project-daily.json` containing `{"enabled":true}` in the broker state directory, and keep the same read-only `projects.json` on both gateway hosts. At or after 07:00 Central Time, the current holder can read GitHub and save one snapshot for that calendar day. `brief me` shows the last saved snapshot beside fresh project evidence. The broker holds the receipt across a restart or takeover. Incomplete GitHub evidence leaves the day due for a later check. The schedule saves a snapshot without sending a proactive Telegram message.
+
+### Close a reviewed brokered coding run
+
+After reviewing the exact candidate and its CI, Jeff can release the repository for its next approved job. Put a private mode `0600` `project-complete.json` on the broker with `request`, the current broker lease `epoch`, `expires` within one hour, the original Hatchet `run`, and the reviewed `commit`. The request itself keeps the original run’s epoch. Keep an identical private approval copy on the Nuc. The broker independently re-reads the original worker and verifies the candidate before releasing the slot. The original receipt stays available for audit and replay.
+
+From the Nuc, use the approved absolute paths in `release`, `nuc_profile`, and `completion_approval`. Run the following under the broker-paired gateway account.
+
+```bash
+python3 -I -B - "$release" "$nuc_profile" "$completion_approval" <<'PY'
+import runpy
+from pathlib import Path
+import sys
+
+release, profile, approval = map(Path, sys.argv[1:])
+runtime = release / "round6/runtime/segment1/queue-runtime/standby_launch.py"
+broker = runpy.run_path(str(runtime))
+settings = broker["profile_from"](profile)
+approved = broker["read_private_json"](approval)
+client = broker["Client"](settings["hostname"], settings["port"], cert=settings["cert"],
+                          key=settings["key"], ca=settings["ca"])
+result = client.retire_project(approved["epoch"], approved["request"])
+print(result["state"])
+PY
+```
+
+A response of `retired` means the original run and candidate were archived. The command changes the private reservation only. GitHub and publishing remain under Jeff’s control.
+
 ### Standalone review queue
 
 The standalone review uses the same Hatchet and Restate dispatcher from the [isolated queue pilot](QUEUE-PILOT.md). It requires a mode `0600` `queue.json` file beside the standalone authority. Use the queue policy format in [INSTALL.md](INSTALL.md#queue-a-review-lane) and set the Hatchet workflow to `fo-captain-review`, the Restate service to `CaptainReview`, and the handler to `verify`. Use a dedicated scope with a concurrency limit of one for the Restate review worker. Load the ingress credentials in the gateway's private service environment.
@@ -151,6 +223,22 @@ nice -n 10 python3 -B first-officer/lanes/queue.py "$test_policy" "$private_ledg
 ```
 
 If the receipt shows `pending`, the status command establishes only what the local journal knows. Identify the original run in Hatchet and repeat the command with `--reconcile-project-run "$hatchet_run"` in place of `--status`. This uses the original private queue policy to read the run and checks its tenant, workflow, idempotency key, repository, issue, commit, and epoch before adopting the receipt. A mismatch leaves the run pending. The scoped coding worker and Telegram recovery rehearsal are separate acceptance gates.
+
+### Rehearse an admitted command in isolation
+
+The queue pilot can drive the packaged gateway through a private Telegram Bot API fixture. Set `FO_PROJECT_WIRE_RELEASE`, `FO_PROJECT_WIRE_NODE`, and `FO_PROJECT_WIRE_CLI` to the inventory-verified bundle, pinned Node executable, and installed OpenClaw entrypoint. Run `nice -n 10 bash tests/first_officer/queue-pilot/run.sh` from the Nuc in an isolated profile without a system GitHub CLI. The pilot supplies a private fixture adapter for GitHub and uses a loopback model stub.
+
+The rehearsal waits for the native outbox to settle before a normal restart. When a send is interrupted and the remote receipt is unknown, treat delivery as unresolved and inspect the original outcome before repeating the request. Telegram final-text recovery can resend a reply after a lost acknowledgment. The scoped job reservation still fences worker execution. [OpenClaw Telegram recovery](https://docs.openclaw.ai/channels/telegram/troubleshooting)
+
+### Verify an admitted reply on BobTestesBot
+
+With an authorized test window, run `tests/first_officer/queue-pilot/test-bot-bridge.py` outside the fixture network namespace. Give it a Unix socket path inside a private scratch directory and the private BobTestesBot pairing file. Then set `FO_PROJECT_BOT_SOCKET` for the joined queue pilot. The bridge verifies the bot identity and accepts three fixed phases once each. Only the typing signal, acknowledgment, and synthetic job admission reach the paired chat. GitHub and model data stay inside the fixture. Record times from synthetic ingress. Stop the bridge after the run.
+
+### Reconcile a Captain Telegram reply
+
+Explicit project advances and handoffs reserve their incoming message identity in the private authority journal before work or acknowledgment. The final reply uses one direct Telegram send to the paired owner. An interrupted response leaves an unconfirmed receipt. A restart preserves the receipt and a repeated input reuses its reservation.
+
+When **what needs me?** reports an unconfirmed delivery, inspect the private receipt times with `project-telegram-review` on the candidate state script. Open the original private conversation and determine whether the reply arrived. Use `resolve-project-telegram` with the receipt's full `key` and an observed `outcome` of `delivered` or `missing`. This records the observation without sending anything. For a fresh status request, use a new Telegram message. The journal stays with signed authority handoff. Ordinary Telegram replies still use the native recovery policy.
 
 ### Daily read-only project briefing
 

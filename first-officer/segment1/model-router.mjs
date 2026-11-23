@@ -1,6 +1,8 @@
 export const fastProvider = 'litellm';
 export const fastModel = 'minimax-m3.1-flash';
 export const fastModelRef = fastProvider + '/' + fastModel;
+const localModel = 'qwen-local-fast';
+const localModelRef = fastProvider + '/' + localModel;
 
 const quickPrompt = 'Answer the current standalone question in plain language and at most three short sentences. ' +
   'You have no tools or current operational evidence. Say when an answer would require a live source. ' +
@@ -33,9 +35,10 @@ function configuredFastModel(config) {
 }
 
 export function isLocalQuickChat(config) {
-  const model = 'litellm/qwen-local-fast';
   const url = config?.models?.providers?.litellm?.baseUrl;
-  return configuredFastModel(config) === model && config?.agents?.defaults?.model?.primary === model &&
+  const selected = config?.agents?.defaults?.model;
+  return configuredFastModel(config) === localModelRef && selected?.primary === localModelRef &&
+    (selected.fallbacks === undefined || Array.isArray(selected.fallbacks) && selected.fallbacks.length === 0) &&
     typeof url === 'string' && /^http:\/\/(?:localhost|127\.0\.0\.1|\[::1\]):[1-9]\d{0,4}\/v1\/?$/.test(url);
 }
 
@@ -52,13 +55,14 @@ export function quickFollowUp(text, routeFor, event) {
     /^(?:explain|compare|summarize|rewrite|rephrase|expand on|make |how |what |which |why |is |are |can |does |do )\b.*\b(?:it|that|this|them|those|the (?:first|second|last|previous|same) (?:one|example|answer|part))\b/i.test(ask);
 }
 
-export function createQuickChat(runtime, redact, now = () => performance.now()) {
+export function createQuickChat(runtime, redact, { now = () => performance.now(), requireLocal = false } = {}) {
   let recent;
   return {
     clear() { recent = undefined; },
     async answer({ prompt, followUp }, { owner, signal }, config) {
       if (!isLocalQuickChat(config)) {
         recent = undefined;
+        if (requireLocal) throw new Error('The local Qwen model route is unavailable');
         if (followUp) return noContext;
         return redact(await answerSimple(runtime, prompt, signal, config), 1250);
       }
@@ -86,6 +90,7 @@ export function createQuickChat(runtime, redact, now = () => performance.now()) 
 
 export function routeOwnerModel(event, config, routeFor) {
   const route = routeFor(event.prompt, event.attachments);
+  if (isLocalQuickChat(config)) return { ...route, model: localModel, fallbacks: [] };
   if (route.reason === 'short-chat') return { ...route, model: configuredFastModel(config).slice(fastProvider.length + 1), fallbacks: [] };
   const prefix = fastProvider + '/';
   const primary = prefix + route.model;

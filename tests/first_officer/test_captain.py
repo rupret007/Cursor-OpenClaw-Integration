@@ -245,6 +245,27 @@ def test_project_pr_checks_require_the_exact_commit_twice(captain, monkeypatch):
     assert module.project_pr_checks(request, "codex/captain", candidate, profile) == "stale-candidate"
 
 
+def test_project_telegram_uncertain_send_is_not_replayed_after_restart(captain, tmp_path):
+    module, _, _ = captain
+    root = tmp_path / "telegram-authority"
+    root.mkdir(mode=0o700)
+    authority = module.StandaloneAuthority("nucbox", root)
+    module.save(root / "lease.json", {"node": "nucbox", "epoch": 4, "active": True})
+    first = module.Controller(authority, private=root / "reviews")
+    receipt = {"key": "a" * 64}
+    assert first.project_telegram("reserve", receipt) == {"result": "reserved"}
+    restarted = module.Controller(authority, private=root / "reviews")
+    assert restarted.view()["unconfirmedProjectDelivery"] == [receipt["key"]]
+    pending, = restarted.project_telegram_review()["unconfirmed"]
+    assert pending["key"] == receipt["key"] and pending["state"] == "pending" and pending["at"] > 0
+    assert restarted.project_telegram("reserve", receipt) == {"result": "duplicate"}
+    assert restarted.project_telegram("finish", {**receipt, "outcome": "unverified"}) == {"result": "unverified"}
+    assert restarted.view()["unconfirmedProjectDelivery"] == [receipt["key"]]
+    assert restarted.project_telegram("resolve", {**receipt, "outcome": "delivered"}) == {"result": "delivered"}
+    assert restarted.view()["unconfirmedProjectDelivery"] == []
+    assert restarted.project_telegram("reserve", receipt) == {"result": "duplicate"}
+
+
 def test_daily_briefing_runs_at_0700_central_and_deduplicates_after_restart(captain, tmp_path, monkeypatch):
     module, _, _ = captain
     root = tmp_path / "daily-authority"
@@ -342,6 +363,8 @@ def test_standalone_handoff_signed_and_restart_safe(captain, tmp_path):
     mac_reviews.finish({"lane": review["lane"], "state": "verified"})
     recommendation = {"repo": "fixture/integration", "issue": 7, "action": "investigate"}
     assert mac_reviews.record_project_recommendation(recommendation) == {"recorded": True}
+    delivery = {"key": "d" * 64}
+    assert mac_reviews.project_telegram("reserve", delivery) == {"result": "reserved"}
     with mac_reviews.locked(write=True) as state:
         state["projectDaily"] = [{"date": "2026-11-23", "epoch": 1, "observed": 1795430000,
                                   "projects": [{"repository": "fixture/integration", "issue": 7,
@@ -367,6 +390,8 @@ def test_standalone_handoff_signed_and_restart_safe(captain, tmp_path):
     assert view["lastProjectRecommendation"]["issue"] == 7
     assert view["lastProjectDaily"]["date"] == "2026-11-23"
     assert view["lastProjectDaily"]["epoch"] == 1
+    assert view["unconfirmedProjectDelivery"] == [delivery["key"]]
+    assert nuc_reviews.project_telegram("reserve", delivery) == {"result": "duplicate"}
     assert nuc_reviews.control("grant", grant) == {"result": "stale"}
     with pytest.raises(ValueError, match="stale"):
         restarted.accept(receipt, nuc_reviews.file, nuc_reviews.locked)

@@ -436,7 +436,7 @@ def transition(ledger, request, key, expected, entry):
         append_entry(file, entry)
 
 
-def dispatch(config, request, ledger, now=None, timeout=TIMEOUT):
+def dispatch(config, request, ledger, now=None, timeout=TIMEOUT, *, authorize=None):
     """Dispatch one lane once. Resume from a recorded primary refusal after interruption."""
     timeout = _bounded_timeout(timeout)
     if now is None:
@@ -460,10 +460,14 @@ def dispatch(config, request, ledger, now=None, timeout=TIMEOUT):
 
         def attempt(backend):
             nonlocal state
+            if authorize is not None:
+                authorize()
             args, target = submission(backend, config[backend], request, key)
             entry = {"at": moment, "backend": backend, "head": request["head"], "key": key,
                      "lane": request["lane"], "phase": "pending", "run": None, "target": target}
             transition(ledger, request, key, state, entry)
+            if authorize is not None:
+                authorize()
             try:
                 run = accepted_run(backend, post(*args, timeout))
             except (Refusal, Uncertain) as error:
@@ -493,6 +497,59 @@ def dispatch(config, request, ledger, now=None, timeout=TIMEOUT):
                              "The lane was not queued.") from None
 
 
+def poll_review(get_config, request, receipt):
+    """Read an existing review result from the destination on its receipt."""
+    if receipt is None:
+        return {"worker": "unresolved"}
+    backend, phase = receipt["backend"], receipt["phase"]
+    metadata = {"backend": backend, "accepted": phase == "queued",
+                "age": max(0, int(time.time()) - receipt["at"])}
+    if phase != "queued":
+        result = "missing-result" if phase == "refused" and backend == "restate" else "unresolved"
+        return {"worker": result, **metadata}
+
+    try:
+        route = get_config()[backend]
+        args, target = submission(backend, route, request, receipt["key"])
+        if target != receipt["target"]:
+            return {"worker": "unresolved", **metadata}
+        opener, _, headers, _ = args
+        base = route["base_url"].rstrip("/")
+        run = receipt["run"]
+        if backend == "hatchet":
+            status_url = f"{base}/api/v1/stable/workflow-runs/{run}"
+            status = response_json(opener, Request(status_url + "/status", headers=headers), 1, str)
+            if status in ("QUEUED", "RUNNING"):
+                return {"worker": "running", **metadata}
+            completed = status == "COMPLETED"
+            failed = status in ("FAILED", "CANCELLED")
+        else:
+            headers = {"Authorization": headers["Authorization"]}
+            status_url = f"{base}/restate/output/{run}"
+            status = response_json(opener, Request(f"{base}/restate/status/{run}", headers=headers), 1)
+            if status.get("stage") in ("created", "started"):
+                return {"worker": "running", **metadata}
+            failed = status.get("stage") == "completed" and "error" in status
+            completed = status.get("stage") == "completed" and not failed
+        if not completed:
+            return {"worker": "missing-result" if failed else "unresolved", **metadata}
+        result = response_json(opener, Request(status_url, headers=headers), 1)
+    except (OSError, ValueError, Refusal, Uncertain):
+        return {"worker": "unresolved", **metadata}
+    if backend == "hatchet":
+        run_details = result.get("run")
+        run_metadata = run_details.get("metadata") if isinstance(run_details, dict) else None
+        if not isinstance(run_metadata, dict) or run_metadata.get("id") != run:
+            return {"worker": "invalid-result", **metadata}
+        result = run_details.get("output")
+    if not isinstance(result, dict) or result.keys() != {"lane", "pr", "head", "ci"}:
+        return {"worker": "invalid-result", **metadata}
+    if (result["lane"] != request["lane"] or type(result["pr"]) is not int or result["pr"] != request["pull_request"]
+            or result["head"] != request["head"] or result["ci"] not in ("passing", "failing")):
+        return {"worker": "invalid-result", **metadata}
+    return {"worker": "settled", "head": result["head"], "ci": result["ci"], **metadata}
+
+
 def read_project_run(config, request, state, run, timeout):
     if set(request) != PROJECT_REQUEST or not isinstance(run, str) or not RUN_ID.fullmatch(run):
         raise ValueError("Expected a coding lane and original Hatchet run ID")
@@ -519,6 +576,17 @@ def read_project_run(config, request, state, run, timeout):
             not isinstance(envelope, dict) or envelope.get("input") != request):
         raise ValueError("Hatchet returned a different coding run. The receipt remains unresolved.")
     return row
+
+
+def project_artifact(request, output, previous=None):
+    if (not isinstance(output, dict) or set(output) != {"lane", "head", "commit"} or
+            output["lane"] != request["lane"] or output["head"] != request["head"]):
+        return None
+    commit = output["commit"]
+    if (not isinstance(commit, str) or not SHA.fullmatch(commit) or commit == request["head"]
+            or previous is not None and commit != previous):
+        return None
+    return commit
 
 
 def reconcile_project(config, request, ledger, run, timeout=TIMEOUT):

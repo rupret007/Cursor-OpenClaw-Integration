@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { isIP } from 'node:net';
 import { join } from 'node:path';
@@ -28,33 +28,86 @@ async function telegramSend(api, owner, liveConfig, text, signal, buttons) {
   }
 }
 
+async function telegramDirect(owner, liveConfig, method, fields, signal) {
+  const channel = liveConfig(owner).channels.telegram;
+  const root = new URL(channel.apiRoot ?? 'https://api.telegram.org');
+  const official = root.protocol === 'https:' && root.hostname === 'api.telegram.org' && !root.port;
+  const loopback = root.protocol === 'http:' && (root.hostname === 'localhost' ||
+    isIP(root.hostname) === 4 && root.hostname.startsWith('127.'));
+  if ((!official && !loopback) || (process.env.FO_STANDBY_TELEGRAM === '1' && !loopback) ||
+      root.username || root.password || root.search || root.hash ||
+      root.pathname !== '/' || channel.proxy || typeof channel.botToken !== 'string' ||
+      !/^\d{6,12}:[A-Za-z0-9_-]{30,}$/.test(channel.botToken)) {
+    throw new Error('Direct Telegram transport is unavailable');
+  }
+  const response = await fetch(new URL('/bot' + channel.botToken + '/' + method, root), {
+    method: 'POST', redirect: 'error', signal,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...fields, chat_id: owner }),
+  });
+  if (!response.ok) throw new Error('Direct Telegram delivery failed');
+  const receipt = await response.json();
+  if (receipt.ok !== true) throw new Error('Direct Telegram delivery could not be verified');
+  return receipt.result;
+}
+
 async function telegramTyping(api, owner, liveConfig, signal) {
   const cfg = liveConfig(owner);
-  const channel = cfg.channels.telegram;
   const legacyTyping = api.runtime.channel.telegram?.sendTypingTelegram;
   if (typeof legacyTyping === 'function') {
     await legacyTyping(owner, { cfg, accountId: account, signal });
     return;
   }
-  // Use the resolved token and the same standard or local API as the account.
-  const root = new URL(channel.apiRoot ?? 'https://api.telegram.org');
-  const official = root.protocol === 'https:' && root.hostname === 'api.telegram.org' && !root.port;
-  const loopback = root.protocol === 'http:' && (root.hostname === 'localhost' ||
-    isIP(root.hostname) === 4 && root.hostname.startsWith('127.'));
-  if ((!official && !loopback) || root.username || root.password || root.search || root.hash ||
-      root.pathname !== '/' || channel.proxy || typeof channel.botToken !== 'string' ||
-      !/^\d{6,12}:[A-Za-z0-9_-]{30,}$/.test(channel.botToken)) {
-    throw new Error('Telegram typing transport is unavailable');
+  if (await telegramDirect(owner, liveConfig, 'sendChatAction', { action: 'typing' }, signal) !== true) {
+    throw new Error('Telegram typing failed');
   }
-  const response = await fetch(new URL('/bot' + channel.botToken + '/sendChatAction', root), {
-    method: 'POST', redirect: 'error', signal,
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: owner, action: 'typing' }),
-  });
-  if (!response.ok || (await response.json()).result !== true) throw new Error('Telegram typing failed');
 }
 
-async function acknowledge(api, owner, liveConfig, signal) {
+function brokerMessage(ctx) {
+  const value = String(ctx?.messageId);
+  if (!/^[1-9]\d{0,15}$/.test(value) || !Number.isSafeInteger(Number(value))) {
+    throw new Error('Brokered Telegram message needs its original ID');
+  }
+  return Number(value);
+}
+
+function projectTelegramDelivery(state, liveConfig, brokered) {
+  return {
+    async reserve(owner, ctx) {
+      const message = String(ctx.messageId);
+      if (!/^[1-9]\d{0,15}$/.test(message)) return;
+      const key = createHash('sha256').update('fo-project-telegram-v1:' + owner + ':' + message).digest('hex');
+      const reservation = await state('reserve-project-telegram', { key });
+      if (reservation.result === 'reserved') return key;
+      if (reservation.result !== 'duplicate') throw new Error('Project delivery cannot be reserved');
+    },
+    async deliver(key, owner, text, ctx) {
+      let outcome = 'unverified';
+      try {
+        const body = text.length <= 4096 ? text : text.slice(0, 3800) + '\n\nSee the private handoff for the full record.';
+        const fields = { text: body };
+        if (brokered) fields.reply_parameters = { message_id: brokerMessage(ctx) };
+        const receipt = await telegramDirect(owner, liveConfig, 'sendMessage', fields, AbortSignal.timeout(3000));
+        if (String(receipt?.chat?.id) !== owner || !/^[1-9]\d{0,15}$/.test(String(receipt?.message_id))) {
+          throw new Error('The project reply has no verified receipt');
+        }
+        outcome = 'delivered';
+      } finally {
+        const saved = await state('finish-project-telegram', { key, outcome });
+        if (saved.result !== outcome) throw new Error('The project reply receipt could not be saved');
+      }
+    },
+  };
+}
+
+async function acknowledge(api, owner, liveConfig, signal, ctx, brokered) {
+  if (brokered) {
+    const progress = await telegramDirect(owner, liveConfig, 'foProgress', { fo_message_id: brokerMessage(ctx) }, signal);
+    if (progress?.typing !== 'confirmed' || progress?.ack !== 'confirmed') {
+      throw new Error('Telegram acknowledgment incomplete');
+    }
+    return;
+  }
   const results = await Promise.allSettled([
     telegramTyping(api, owner, liveConfig, signal),
     telegramSend(api, owner, liveConfig, 'On it.', signal),
@@ -161,7 +214,8 @@ function toolRegistry(api, commands, liveConfig, services, state, chat) {
         if (!answer) throw new Error('Fast answer unavailable');
         return plain(answer);
       },
-      failure: 'The fast model didn’t return an answer in time or the request failed.',
+      failure: localFleetNode() === 'bobserver' ? 'The fast model didn’t return an answer in time or the request failed.' :
+        'The local Qwen route couldn’t answer. Check LiteLLM and the local model service.'
     },
   };
 }
@@ -187,6 +241,8 @@ async function prepareTelegramSessionRecorder(api, cfg) {
 
 export function registerSegmentOne(api, commands, services) {
   const { incomingOwner, telegramOwner, statusTopic, parseRequest, controlIntent, routeFor } = services;
+  const brokered = process.env.FO_STANDBY_TELEGRAM === '1';
+  const stagedStandby = brokered && Boolean(process.env.FO_STANDBY_EPOCH);
   const currentConfig = () => api.runtime.config?.current?.() ?? api.config;
   const liveConfig = (owner) => {
     const cfg = currentConfig();
@@ -201,22 +257,69 @@ export function registerSegmentOne(api, commands, services) {
     });
   }
   const script = resolveCaptainStateScript(currentConfig());
-  const state = (operation, data) => localState(operation, data, script);
-  const chat = createQuickChat(api.runtime, services.redacted);
+  const verifyBrokerCandidate = async (job, owner) => {
+    try {
+      const current = await telegramDirect(owner, liveConfig, 'foProjectInspect', { request: job.request }, AbortSignal.timeout(4000));
+      if (current?.request?.lane !== job.request.lane) throw new Error('Candidate identity changed');
+      if (current.state !== 'patch-ready') return current;
+      if (current.commit !== job.commit) return { ...job, state: 'invalid-artifact' };
+      const result = await localState('verify-brokered-project', { request: current.request, commit: current.commit }, script);
+      return { ...current, ...result };
+    } catch {
+      return { ...job, state: 'ci-unavailable' };
+    }
+  };
+  const state = async (operation, data, turn) => {
+    if (stagedStandby && ['project-daily-due', 'save-project-daily'].includes(operation)) {
+      const owner = telegramOwner(currentConfig(), account);
+      const method = operation === 'project-daily-due' ? 'foProjectDailyDue' : 'foProjectDailySave';
+      return telegramDirect(owner, liveConfig, method, data ?? {}, AbortSignal.timeout(2500));
+    }
+    if (stagedStandby && operation === 'dispatch-project') {
+      return telegramDirect(turn.owner, liveConfig, 'foProjectSubmit', {
+        ...data, fo_message_id: brokerMessage(turn.ctx),
+      }, turn.signal);
+    }
+    const view = await localState(operation, data, script);
+    if (!stagedStandby || !['view', 'handoff'].includes(operation)) return view;
+    try {
+      const owner = telegramOwner(currentConfig(), account);
+      const status = await telegramDirect(owner, liveConfig, 'foProjectStatus', {}, AbortSignal.timeout(2500));
+      if (typeof status?.enabled !== 'boolean' || !Array.isArray(status?.jobs)) throw new Error('Unknown shared coding status');
+      let jobs = status.jobs;
+      if (operation === 'handoff') {
+        const targets = jobs.filter((job) => job.state === 'patch-ready').slice(0, 2);
+        const verified = await Promise.all(targets.map((job) => verifyBrokerCandidate(job, owner)));
+        jobs = jobs.map((job) => verified.find((item) => item.request.lane === job.request.lane) ?? job);
+      }
+      return { ...view, activeProjectJobs: jobs, lastProjectDaily: status.lastDaily,
+        sharedProjectStatus: status.enabled ? 'ready' : 'disabled' };
+    } catch {
+      return { ...view, sharedProjectStatus: 'unavailable' };
+    }
+  };
+  const chat = createQuickChat(api.runtime, services.redacted, { requireLocal: localFleetNode() !== 'bobserver' });
   const registry = toolRegistry(api, commands, liveConfig, services, state, chat);
+  if (stagedStandby) {
+    registry.standby = { run: async () => plain(
+      'This standby session can answer chat and live status. Interactive approvals and dispatch need the primary project state.',
+    ) };
+  }
   if (services.getGithub) {
     const readCI = localFleetNode() === 'bobserver' ? services.getGithub : readIntegrationGithub;
     const projectBrief = localFleetNode() === 'bobserver' ? undefined : createProjectBrief({
       config: () => state('local-projects'),
       read: readProjectGithub,
-      record: (recommendation) => state('record-project-recommendation', recommendation),
+      record: stagedStandby ? undefined : (recommendation) => state('record-project-recommendation', recommendation),
       check(project, get) {
         const repository = 'repos/' + project.repo;
         return projectCI(repository, project.pr, project.checks,
           (path) => get(path.slice(repository.length + 1)));
       },
     });
-    const captain = createCaptain({ registry, get: readCI, state, projectBrief, dailyProjects: Boolean(projectBrief) });
+    const captain = createCaptain({
+      registry, get: readCI, state, projectBrief, dailyProjects: Boolean(projectBrief), inspectProjectJobs: !stagedStandby,
+    });
     registry.captain = {
       run: async (request, turn) => plain(await captain.run(request, turn)),
       failure: 'Captain state or evidence is unavailable. Check “captain status” before retrying.',
@@ -276,17 +379,23 @@ export function registerSegmentOne(api, commands, services) {
           return followUp || standaloneSimple(raw, routeFor, event);
         },
       });
+      if (stagedStandby && (!request || request.kind === 'remember' ||
+          request.kind === 'captain' && !['role', 'brief', 'decisions', 'handoff', 'help', 'advance-project'].includes(request.action))) {
+        return { kind: 'standby' };
+      }
       if (request?.kind !== 'simple') {
         chat.clear();
         return request;
       }
       return { ...request, followUp };
     },
-    acknowledge: (owner, _, signal) => acknowledge(api, owner, liveConfig, signal),
+    acknowledge: (owner, ctx, signal) => acknowledge(api, owner, liveConfig, signal, ctx, brokered),
+    projectDelivery: !stagedStandby && ['nucbox', 'mac-mini'].includes(localFleetNode())
+      ? projectTelegramDelivery(state, liveConfig, brokered) : undefined,
     registry,
     warn: (line) => api.logger.warn(line),
   });
   // The existing inbound safety hook runs at 250. Guarded operations retain
   // their handlers because control requests pass through to them.
-  api.on('before_dispatch', dispatch, { priority: 240, timeoutMs: 22_000 });
+  api.on('before_dispatch', dispatch, { priority: 240, timeoutMs: 27_000 });
 }

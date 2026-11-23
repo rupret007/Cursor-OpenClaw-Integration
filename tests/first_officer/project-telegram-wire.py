@@ -9,6 +9,8 @@ from pathlib import Path
 from queue import Empty, Queue
 import runpy
 import secrets
+import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -21,6 +23,29 @@ def write(path, value):
     temp = path.with_suffix(".tmp")
     temp.write_text(json.dumps(value))
     temp.replace(path)
+
+
+def forward_test_bot(wire, method, data):
+    if not wire.admission_bridge:
+        return True
+    if str(data.get("chat_id")) != str(wire.chat["id"]):
+        return False
+    if method == "sendChatAction" and data.get("action") == "typing":
+        phase = "typing"
+    elif data.get("text") == "On it.":
+        phase = "ack"
+    elif "Hatchet accepted the coding job" in data.get("text", ""):
+        phase = "admitted"
+    else:
+        return False
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as relay:
+            relay.settimeout(6)
+            relay.connect(wire.admission_bridge)
+            relay.sendall((phase + "\n").encode())
+            return relay.recv(16) == b"ok\n"
+    except OSError:
+        return False
 
 
 class BotApi(BaseHTTPRequestHandler):
@@ -62,9 +87,20 @@ class BotApi(BaseHTTPRequestHandler):
             except Empty:
                 result = []
         elif method == "sendChatAction":
+            if not forward_test_bot(wire, method, data):
+                self.send_error(502)
+                return
             wire.typing.append(time.monotonic())
         elif method == "sendMessage":
-            wire.replies.append((time.monotonic(), data.get("text", "")))
+            if not forward_test_bot(wire, method, data):
+                self.send_error(502)
+                return
+            text = data.get("text", "")
+            wire.replies.append((time.monotonic(), text))
+            if wire.drop_project_final and "Handoff recorded" in text:
+                wire.drop_project_final = False
+                self.close_connection = True
+                return
             result = {"message_id": 900 + len(wire.replies), "date": int(time.time()),
                       "chat": wire.chat, "from": wire.bot, "text": data.get("text", "")}
         self.send_bytes(json.dumps({"ok": True, "result": result}).encode())
@@ -84,12 +120,13 @@ class BotApi(BaseHTTPRequestHandler):
 
 
 @contextmanager
-def gateway(node, cli, root, config, wire):
+def gateway(node, cli, root, config, wire, extra_env=None):
     wire.polling.clear()
     env = {"HOME": str(root), "PATH": f"{node.parent}:/usr/bin:/bin", "LANG": "C.UTF-8",
            "FO_LOCAL_NODE": "nucbox", "OPENCLAW_CONFIG_PATH": str(config),
            "OPENCLAW_STATE_DIR": str(root / "gateway-state"),
            "XDG_CONFIG_HOME": str(root / ".config")}
+    env.update(extra_env or {})
     with (root / "gateway.log").open("ab") as log:
         process = subprocess.Popen([str(node), str(cli), "gateway", "run"], env=env, stdout=log, stderr=log)
         try:
@@ -104,25 +141,82 @@ def gateway(node, cli, root, config, wire):
                 process.wait(timeout=5)
 
 
-def exercise(wire, label, number, text, expected, deadline):
-    prior, typed = len(wire.replies), len(wire.typing)
-    started = time.monotonic()
-    wire.updates.put({"update_id": number, "message": {
-        "message_id": number, "chat": wire.chat,
+def outbox_settled(root):
+    db_files = list((root / "gateway-state").rglob("openclaw.sqlite"))
+    if len(db_files) != 1:
+        return False
+    db = sqlite3.connect(db_files[0].as_uri() + "?mode=ro", uri=True, timeout=.2)
+    try:
+        return db.execute("SELECT COUNT(*) FROM delivery_queue_entries").fetchone()[0] == 0
+    except sqlite3.OperationalError:
+        return False
+    finally:
+        db.close()
+
+
+def enqueue(wire, update_id, message_id, text):
+    wire.updates.put({"update_id": update_id, "message": {
+        "message_id": message_id, "chat": wire.chat,
         "from": {"id": wire.chat["id"], "is_bot": False, "first_name": "Fixture"},
         "text": text, "date": int(time.time()),
     }})
+
+
+def exercise(wire, label, number, text, expected, deadline):
+    prior, typed = len(wire.replies), len(wire.typing)
+    started = time.monotonic()
+    enqueue(wire, number, number, text)
     while len(wire.replies) < prior + 2 and time.monotonic() - started < deadline:
         time.sleep(.025)
     pair = wire.replies[prior:]
     if len(pair) != 2 or pair[0][1] != "On it." or expected.casefold() not in pair[1][1].casefold():
-        print(f"{label} reply mismatch. Replies {len(pair)}. Model calls {wire.model_calls}.", flush=True)
+        kinds = ("already has a receipt", "state or evidence is unavailable", "authority epoch changed",
+                 "scope", "required CI", "review the candidate", "On it.", "verified",
+                 "approve the exact issue", "active coding job", "project admission result", "Hatchet refused", "Gate is idle")
+        found = [kind for kind in kinds if any(kind.casefold() in item[1].casefold() for item in pair)]
+        print(f"{label} reply mismatch. Replies {len(pair)}. Model calls {wire.model_calls}. "
+              f"Known reply labels {found}.", flush=True)
         raise AssertionError("The Telegram reply did not match the fixture")
     ack, final = (reply[0] - started for reply in pair)
     typed_at = wire.typing[typed] - started if len(wire.typing) > typed else None
     timing = f"{typed_at:.2f}s" if typed_at is not None else "missing"
     print(f"{label} typing {timing}, acknowledgment {ack:.2f}s, final {final:.2f}s.", flush=True)
     return typed_at is not None and typed_at < 2 and ack < 2 and final < deadline
+
+
+def configure(wire, root, release):
+    wire.daemon_threads = True
+    wire.updates, wire.polling, wire.replies, wire.typing = Queue(), Event(), [], []
+    wire.model_calls = 0
+    wire.drop_project_final = False
+    wire.admission_bridge = None
+    owner = 123456
+    wire.bot = {"id": 234567, "is_bot": True, "first_name": "Fixture", "username": "project_rehearsal_bot"}
+    wire.chat = {"id": owner, "type": "private", "first_name": "Fixture"}
+    endpoint = f"http://127.0.0.1:{wire.server_port}"
+    config = root / "config.json"
+    with ThreadingHTTPServer(("127.0.0.1", 0), BotApi) as port_probe:
+        port = port_probe.server_port
+    alias = "litellm/qwen-local-fast"
+    write(config, {
+        "gateway": {"mode": "local", "bind": "loopback", "port": port,
+                    "auth": {"mode": "token", "token": secrets.token_urlsafe(32)}},
+        "plugins": {"allow": ["first-officer-conductor", "first-officer-exec-guard", "telegram"],
+                    "load": {"paths": [str(release / "first-officer-exec-guard.mjs"),
+                                       str(release / "round6/runtime/first-officer-conductor.mjs")]},
+                    "entries": {"telegram": {"enabled": True}, "first-officer-exec-guard": {"enabled": True},
+                                "first-officer-conductor": {"enabled": True, "hooks": {"allowConversationAccess": True},
+                                            "llm": {"allowModelOverride": True, "allowedModels": [alias],
+                                                    "allowedCompletionModels": [alias]}}}},
+        "agents": {"defaults": {"model": {"primary": alias}}},
+        "models": {"providers": {"litellm": {"baseUrl": endpoint + "/v1", "apiKey": "fixture-only",
+                                            "api": "openai-completions",
+                                            "models": [{"id": "qwen-local-fast", "name": "Fixture"}]}}},
+        "channels": {"telegram": {"enabled": True, "dmPolicy": "allowlist", "allowFrom": [owner],
+                                  "groupPolicy": "disabled", "botToken": "234567:" + secrets.token_urlsafe(32),
+                                  "execApprovals": {"approvers": [owner]}, "apiRoot": endpoint}},
+    })
+    return config
 
 
 def main():
@@ -135,13 +229,6 @@ def main():
     with tempfile.TemporaryDirectory(prefix="fo-project-telegram-") as directory, \
             ThreadingHTTPServer(("127.0.0.1", 0), BotApi) as wire:
         root = Path(directory)
-        wire.daemon_threads = True
-        wire.updates, wire.polling, wire.replies, wire.typing = Queue(), Event(), [], []
-        wire.model_calls = 0
-        owner = 123456
-        wire.bot = {"id": 234567, "is_bot": True, "first_name": "Fixture", "username": "project_rehearsal_bot"}
-        wire.chat = {"id": owner, "type": "private", "first_name": "Fixture"}
-        endpoint = f"http://127.0.0.1:{wire.server_port}"
         authority = root / ".local/state/openclaw-captain"
         (authority / "reviews").mkdir(parents=True, mode=0o700)
         gate = root / "gate"
@@ -149,28 +236,7 @@ def main():
         (gate / "fullgate.lock").touch()
         write(authority / "lease.json", {"node": "nucbox", "epoch": 3, "active": True})
         write(authority / "gate.json", {"directory": str(gate), "lock": "fullgate.lock", "hold": "HOLD"})
-        config = root / "config.json"
-        with ThreadingHTTPServer(("127.0.0.1", 0), BotApi) as port_probe:
-            port = port_probe.server_port
-        alias = "litellm/qwen-local-fast"
-        write(config, {
-            "gateway": {"mode": "local", "bind": "loopback", "port": port,
-                        "auth": {"mode": "token", "token": secrets.token_urlsafe(32)}},
-            "plugins": {"allow": ["first-officer-conductor", "first-officer-exec-guard", "telegram"],
-                        "load": {"paths": [str(release / "first-officer-exec-guard.mjs"),
-                                           str(release / "round6/runtime/first-officer-conductor.mjs")]},
-                        "entries": {"telegram": {"enabled": True}, "first-officer-exec-guard": {"enabled": True},
-                                    "first-officer-conductor": {"enabled": True, "hooks": {"allowConversationAccess": True},
-                                                "llm": {"allowModelOverride": True, "allowedModels": [alias],
-                                                        "allowedCompletionModels": [alias]}}}},
-            "agents": {"defaults": {"model": {"primary": alias}}},
-            "models": {"providers": {"litellm": {"baseUrl": endpoint + "/v1", "apiKey": "fixture-only",
-                                                "api": "openai-completions",
-                                                "models": [{"id": "qwen-local-fast", "name": "Fixture"}]}}},
-            "channels": {"telegram": {"enabled": True, "dmPolicy": "allowlist", "allowFrom": [owner],
-                                      "groupPolicy": "disabled", "botToken": "234567:" + secrets.token_urlsafe(32),
-                                      "execApprovals": {"approvers": [owner]}, "apiRoot": endpoint}},
-        })
+        config = configure(wire, root, release)
         thread = Thread(target=wire.serve_forever, daemon=True)
         thread.start()
         checks = []
@@ -180,6 +246,10 @@ def main():
                                        "approve the exact issue", 30))
                 checks.append(exercise(wire, "Simple reply", 101, "Define a Git branch", "line of development", 15))
                 checks.append(exercise(wire, "Live gate status", 102, "gate status", "Gate is idle", 30))
+                until = time.monotonic() + 8
+                while not outbox_settled(root) and time.monotonic() < until:
+                    time.sleep(.05)
+                assert outbox_settled(root), "Ordinary delivery must settle before the clean restart"
             request = {"repository": "example/integration", "issue": 40, "head": "a" * 40, "epoch": 3}
             queue = runpy.run_path(str(release / "round6/runtime/segment1/queue-runtime/lanes/queue.py"))
             write(authority / "project-grant.json", request)
@@ -190,6 +260,23 @@ def main():
             with gateway(node, cli, root, config, wire):
                 checks.append(exercise(wire, "Restarted coding request", 103,
                                        "captain this: advance example/integration #40", "already has a receipt", 30))
+                wire.drop_project_final = True
+                checks.append(exercise(wire, "Lost handoff receipt", 104, "handoff", "Handoff recorded", 30))
+                ledger = authority / "reviews/state.json"
+                until = time.monotonic() + 5
+                while time.monotonic() < until:
+                    state = json.loads(ledger.read_text())
+                    if any(row["state"] == "unverified" for row in state.get("projectTelegram", [])):
+                        break
+                    time.sleep(.05)
+                else:
+                    raise AssertionError("The lost response was not preserved as uncertain")
+                sent = len(wire.replies)
+            with gateway(node, cli, root, config, wire):
+                enqueue(wire, 105, 104, "handoff")
+                checks.append(exercise(wire, "Uncertain delivery decision", 106, "what needs me?",
+                                       "1 Captain Telegram delivery is unconfirmed", 30))
+                assert len(wire.replies) == sent + 2, "Restart must not repeat the uncertain handoff reply"
             assert wire.model_calls == 1, "Only the simple question should reach the model fixture"
             assert all(checks), "One or more Telegram fixture latency targets were missed"
         finally:

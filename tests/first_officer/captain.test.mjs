@@ -34,6 +34,16 @@ test('local Captain probes use the interpreter selected by the guarded launcher'
   assert.deepEqual(await localState('view', { fixture: true }), { fixture: true });
 });
 
+test('the decisions reply asks for action only when there is a decision or blocker', async () => {
+  const view = { lease: { holder: 'first-officer', state: 'held', epoch: 4 }, armed: false, grant: null, jobs: [] };
+  const captain = createCaptain({ state: async () => view });
+  const turn = { signal: AbortSignal.timeout(1000) };
+  assert.equal(await captain.run({ action: 'decisions' }, turn), 'You don’t need to do anything right now.');
+  assert.match(await captain.run({ action: 'role' }, turn), /no active scope grant/i);
+  view.unconfirmedProjectDelivery = ['fixture-receipt'];
+  assert.match(await captain.run({ action: 'decisions' }, turn), /^1 Captain Telegram delivery is unconfirmed/);
+});
+
 const head = 'a'.repeat(40);
 const other = 'b'.repeat(40);
 const readFixture = ({ latest = head, tested = head, conclusion = 'success' } = {}) => {

@@ -47,6 +47,7 @@ export function localState(operation, payload = {}, script = stateScript) {
         maxBuffer: 48 * 1024,
         ...(operation === 'submit' ? {} : {
           timeout: operation === 'inspect-project' ? 30_000 : operation === 'dispatch-project' ? 15_000 :
+            operation === 'verify-brokered-project' ? 10_000 :
             ['runner-quota', 'local-quota'].includes(operation) ? 7000 : 2500,
         }),
       },
@@ -133,7 +134,10 @@ function jobText(job) {
   return identity + ' ' + terminal[job.state];
 }
 
-const noDecisions = 'No captain decisions are waiting for Jeff.';
+const noDecisions = 'You don’t need to do anything right now.';
+const activeProjectPollSeconds = 30;
+const recentVerdictPollSeconds = 300;
+const needsVerdictCheck = (job) => ['verified', 'ci-failed'].includes(job?.state);
 
 function dailyProjectText(receipt) {
   if (!receipt) return '';
@@ -147,26 +151,33 @@ function projectWork(job) {
   const identity = repository + ' #' + issue + ' · ' + head.slice(0, 8) + '.';
   const status = {
     running: 'Hatchet accepted the coding job. Awaiting its outcome.',
+    retired: 'Jeff closed the reviewed run. Its receipt is archived.',
     'patch-ready': 'The worker returned a candidate. Jeff can review the patch and authorize publication for exact-commit CI.',
     'ci-pending': 'Independent CI evidence is pending for the candidate.',
+    'ci-unavailable': 'I couldn’t verify current GitHub CI for the candidate.',
     'ci-failed': 'The last verification found a failing required check. Review CI before another attempt.',
     verified: 'The last verification matched all required CI checks.',
     refused: 'Hatchet refused the job. Check the coding worker.',
     'worker-failed': 'Hatchet reports that the worker failed or was cancelled. Check the worker before authorizing another attempt.',
+    'worker-evidence-unavailable': 'I couldn’t verify the original worker’s result. Wait for a verified update before retrying.',
     'invalid-artifact': 'The worker returned an invalid or inconsistent artifact. Inspect the isolated worktree.',
     'stale-base': 'The issue or approved base changed. Review the current scope.',
     'stale-candidate': 'The PR head or its base changed. Review the candidate against current GitHub evidence.',
   };
   return [identity, job.commit ? 'Candidate ' + job.commit.slice(0, 8) + '.' : '',
-    status[job.state] ?? 'Coding submission is unresolved. Check the original Hatchet receipt before another attempt.'].filter(Boolean).join(' ');
+    job.pr ? 'PR #' + job.pr + '.' : '', status[job.state] ?? 'Coding submission is unresolved. Check the original Hatchet receipt before another attempt.'].filter(Boolean).join(' ');
 }
 
-function decisions(view) {
+function decisions(view, currentDelivery) {
   const needs = [];
-  if (view.lease.holder === 'first-officer' && view.lease.state === 'held' &&
-      (!view.armed || view.grant?.epoch !== view.lease.epoch || view.grant.paused)) {
-    needs.push('Jeff needs to grant or resume the named scope for this epoch before dispatch.');
+  const unresolved = (view.unconfirmedProjectDelivery ?? []).filter((key) => key !== currentDelivery).length;
+  if (unresolved) {
+    const status = unresolved === 1 ? '1 Captain Telegram delivery is unconfirmed.' :
+      unresolved + ' Captain Telegram deliveries are unconfirmed.';
+    needs.push(status + ' Check the original conversation and reconcile the private receipts.');
   }
+  if (view.projectTelegramLedgerFull) needs.push('The Captain Telegram receipt journal is full. Review it before continuing.');
+  if (view.sharedProjectStatus === 'unavailable') needs.push('I couldn’t verify the coding jobs. Wait for a verified update before retrying.');
   if (view.lease.state === 'handback-pending') needs.push('Wait for the shared fence to finish transferring authority.');
   if (view.active?.overtime) needs.push(jobText(view.active));
   for (const job of view.activeProjectJobs ?? []) {
@@ -188,7 +199,7 @@ function decisions(view) {
 }
 
 export function createCaptain({ registry, get, state = localState, admit = fleetAdmission, now = Date.now,
-  projectBrief = async () => null, dailyProjects = false }) {
+  projectBrief = async () => null, dailyProjects = false, inspectProjectJobs = true }) {
   const runnerQuota = () => state('runner-quota').catch(() => null);
   async function status(kind, turn) {
     const source = registry[kind];
@@ -251,13 +262,26 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
       'I delegated one exact-head CI review to the configured runner. ') + jobText(placed.job);
   }
 
+  function inspectProject(job) {
+    const { repository, issue, head, epoch } = job.request;
+    return state('inspect-project', { repository, issue, head, epoch });
+  }
+
   async function run(request, turn) {
     const action = request.action;
     if (action === 'help') return 'Use “captain status”, “brief me”, “what needs me?”, “handoff”, or “captain this: verify CI for PR #33”.';
     if (action === 'advance-project') {
       turn.signal.throwIfAborted();
-      const placed = await state('dispatch-project', { repository: request.repository, issue: request.issue });
-      if (placed.result === 'duplicate') return 'This approved coding run already has a receipt. ' + projectWork(placed.job);
+      const placed = await state('dispatch-project', { repository: request.repository, issue: request.issue }, turn);
+      if (placed.result === 'duplicate') {
+        const prefix = 'This approved coding run already has a receipt. ';
+        if (!needsVerdictCheck(placed.job)) return prefix + projectWork(placed.job);
+        const current = await bounded(6500, () => inspectProject(placed.job)).catch(() => null);
+        if (!current?.job || current.result !== current.job.state) {
+          return prefix + 'I couldn’t verify the current PR head and CI. Check GitHub before using the previous result.';
+        }
+        return prefix + projectWork(current.job);
+      }
       if (placed.job) return projectWork(placed.job);
       const blocker = {
         'scope-denied': 'Jeff needs to approve the exact issue, base commit, and authority epoch.',
@@ -266,6 +290,7 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
         'github-unavailable': 'Live GitHub evidence is unavailable. The run did not start.',
         active: 'This repository already has an active coding job. Ask for “handoff”.',
         'runner-unconfigured': 'The scoped coding worker or Hatchet policy is unavailable.',
+        'admission-unconfirmed': 'I couldn’t confirm Hatchet admission. Check the original receipt in “handoff” before retrying.',
         'admission-unavailable': 'The local gate or capacity could not be verified.',
         'admission-blocked': 'The local gate or capacity is blocking the run.',
         'existing-queue-receipt': 'Hatchet already has a receipt. Verify it before requesting another run.',
@@ -308,15 +333,17 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
     if (action === 'decisions') {
       const [view, projects] = await Promise.all([viewPromise, projectEvidence()]);
       const captainDecisions = decisions(view);
-      if (!projects) return role(view) + '\n' + captainDecisions;
-      return [role(view), ...projects.decisions,
+      if (!projects) return captainDecisions;
+      return [...projects.decisions,
         captainDecisions === noDecisions && projects.decisions.length ? null : captainDecisions].filter(Boolean).join('\n');
     }
     const view = await viewPromise;
     if (action === 'role') return role(view) + '\n' + decisions(view);
     const recommendation = view.lastProjectRecommendation;
     if (action === 'handoff') return [role(view), 'Work owner · OpenClaw. Decisions · Jeff.',
-      'Handoff recorded at ' + new Date(view.recorded * 1000).toISOString() + '.', decisions(view),
+      view.observed !== undefined ? 'Brokered handoff checked at ' + new Date(view.observed * 1000).toISOString() + '.' :
+        'Handoff recorded at ' + new Date(view.recorded * 1000).toISOString() + '.',
+      decisions(view, turn.delivery),
       recommendation ? 'Last recorded project recommendation · ' + recommendation.repo + ' #' +
         recommendation.issue + ' · ' + recommendation.action + ' · epoch ' + recommendation.epoch + '.' : '',
       view.blocked?.reason === 'ci-pending' ? 'Integration PR #' + view.blocked.pr + ' · ' +
@@ -390,14 +417,19 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
     try {
       const view = await state('view');
       if (view.lease?.holder !== 'first-officer' || view.lease.state !== 'held') return;
-      const jobs = (view.activeProjectJobs ?? []).filter((job) =>
-        ['running', 'patch-ready', 'ci-pending'].includes(job.state));
-      const ready = jobs.filter((job) => now() / 1000 - (job.observed ?? 0) >= 30)
-        .sort((a, b) => (a.observed ?? 0) - (b.observed ?? 0));
-      if (ready.length) {
-        const { repository, issue, head, epoch } = ready[0].request;
-        await state('inspect-project', { repository, issue, head, epoch });
+      if (!inspectProjectJobs) {
+        await saveDailyProject(view);
+        return;
       }
+      const check = (job, interval) => ({ job, due: (job.observed ?? job.checked ?? 0) + interval });
+      const active = (view.activeProjectJobs ?? []).filter((job) =>
+        ['running', 'patch-ready', 'ci-pending'].includes(job.state));
+      const recent = (view.recentProjectResults ?? []).filter(needsVerdictCheck);
+      const [next] = [
+        ...active.map((job) => check(job, activeProjectPollSeconds)),
+        ...recent.map((job) => check(job, recentVerdictPollSeconds)),
+      ].sort((left, right) => left.due - right.due);
+      if (next && next.due <= now() / 1000) await inspectProject(next.job);
       await saveDailyProject(view);
     } finally {
       checkingProject = false;

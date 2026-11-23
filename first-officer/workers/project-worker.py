@@ -81,11 +81,10 @@ def git(worktree, *args, data=None):
     ).stdout
 
 
-def load_scope(root, request):
-    if not private_directory(root) or not private_directory(root / "reviews"):
+def standalone_plan(root, request, identity):
+    if not private_directory(root / "reviews"):
         raise ValueError("The project authority directory is unavailable")
     lease = read_private(root / "lease.json", 4096)
-    identity = {key: value for key, value in request.items() if key != "lane"}
     grant = read_private(root / "project-grant.json", 4096)
     state = read_private(root / "reviews/state.json", 256 * 1024)
     if (lease.get("node") != "nucbox" or lease.get("active") is not True or lease.get("epoch") != request["epoch"] or
@@ -96,8 +95,27 @@ def load_scope(root, request):
                     and job.get("worker") == "local-qwen" and job.get("branch") == grant.get("branch")
                     and job.get("planSha256") == grant.get("planSha256") for job in state.get("projectJobs", []))):
         raise ValueError("The exact coding scope is unavailable")
+    return grant.get("planSha256")
+
+
+def broker_plan(request, profile):
+    if not profile.is_absolute():
+        raise ValueError("The worker needs an absolute broker profile path")
+    launcher = runpy.run_path(str(HERE.parents[1] / "standby_launch.py"))
+    settings = launcher["profile_from"](profile)
+    client = launcher["Client"](settings["hostname"], settings["port"], cert=settings["cert"],
+                                key=settings["key"], ca=settings["ca"])
+    return client.project_worker_plan(request["epoch"], request)
+
+
+def load_scope(root, request):
+    if not private_directory(root):
+        raise ValueError("The project authority directory is unavailable")
+    identity = {key: value for key, value in request.items() if key != "lane"}
+    profile = os.environ.get("FO_PROJECT_BROKER_PROFILE")
+    approved_plan = broker_plan(request, Path(profile)) if profile is not None else standalone_plan(root, request, identity)
     payload = private_bytes(root / "project-worker.json", 8192)
-    if digest(payload) != grant.get("planSha256"):
+    if digest(payload) != approved_plan:
         raise ValueError("The approved coding plan changed")
     plan = json.loads(payload)
     fields = {"request", "checkout", "file", "before", "prefix", "suffix", "prompt"}
@@ -136,6 +154,31 @@ def prepare(plan, request):
     return checkout, file, source
 
 
+def finish_candidate(slot, request, plan, result):
+    if (not isinstance(result, dict) or set(result) != {"lane", "head", "commit"}
+            or result["lane"] != request["lane"] or result["head"] != request["head"]
+            or not isinstance(result["commit"], str) or not SHA.fullmatch(result["commit"])):
+        raise ValueError("The existing worker receipt has a different identity")
+    worktree = slot / "candidate"
+    base, commit = result["head"], result["commit"]
+    common_dir = ("rev-parse", "--path-format=absolute", "--git-common-dir")
+    if (not worktree.is_dir() or worktree.is_symlink()
+            or git(worktree, *common_dir) != git(Path(plan["checkout"]), *common_dir)
+            or git(worktree, "rev-parse", "--abbrev-ref", "HEAD").strip() != b"HEAD"
+            or git(worktree, "rev-list", "--parents", "-n", "1", commit).split() != [commit.encode(), base.encode()]):
+        raise ValueError("The checkpoint does not belong to the isolated candidate")
+    head = git(worktree, "rev-parse", "HEAD").decode().strip()
+    if head == base:
+        try:
+            git(worktree, "update-ref", "HEAD", commit, base, "--no-deref")
+        except subprocess.CalledProcessError:
+            if git(worktree, "rev-parse", "HEAD").decode().strip() != commit:
+                raise
+    elif head != commit:
+        raise ValueError("The isolated candidate advanced beyond its checkpoint")
+    return result
+
+
 def run(root, request, respond=complete):
     queue["canonical"](request)
     plan = load_scope(root, request)
@@ -152,9 +195,7 @@ def run(root, request, respond=complete):
             previous = read_private(receipt, 4096)
         except FileNotFoundError:
             raise ValueError("A prior worker attempt is unresolved") from None
-        if previous.get("lane") != request["lane"] or previous.get("head") != request["head"]:
-            raise ValueError("The existing worker receipt has a different identity")
-        return previous
+        return finish_candidate(slot, request, plan, previous)
     checkout, file, source = prepare(plan, request)
     slot.mkdir(mode=0o700)
     worktree = slot / "candidate"
@@ -177,10 +218,12 @@ def run(root, request, respond=complete):
                  f"Captain candidate for issue #{request['issue']}").decode().strip()
     if not SHA.fullmatch(commit):
         raise ValueError("The candidate commit could not be verified")
-    git(worktree, "update-ref", "HEAD", commit, base)
     result = {"lane": request["lane"], "head": base, "commit": commit}
+    # Persist the exact commit before advancing HEAD so a restart can settle it once.
     save(receipt, result)
-    return result
+    if load_scope(root, request) != plan:
+        raise ValueError("The coding scope changed before finalizing the candidate")
+    return finish_candidate(slot, request, plan, result)
 
 
 def main():

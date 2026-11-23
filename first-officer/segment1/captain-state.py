@@ -592,6 +592,8 @@ class Controller:
         """Submit one operator-approved coding identity under the current authority fence."""
         if not self.standalone or not isinstance(req, dict) or req.keys() != {"repository", "issue", "head", "epoch"}:
             raise ValueError("Expected a standalone exact project request")
+        if self.watchdog.node != "nucbox":
+            return {"result": "runner-unconfigured"}
         request = {**req, "lane": self.queue.queue.project_lane(**req)}
         self.queue.queue.canonical(request)
         with self.locked(write=True) as data, self.fence._locked(), ExitStack() as resources:
@@ -613,12 +615,21 @@ class Controller:
             except (OSError, TypeError, ValueError):
                 return {"result": "runner-unconfigured"}
             now = int(time.time())
-            if (not isinstance(grant, dict) or grant.keys() != req.keys() | {"branch", "expires", "worker"} or
+            if (not isinstance(grant, dict) or grant.keys() != req.keys() | {"branch", "expires", "planSha256", "worker"} or
                     any(type(grant[key]) is not type(value) or grant[key] != value for key, value in req.items()) or
                     type(grant["expires"]) is not int or not now < grant["expires"] <= now + 3600 or
                     grant["worker"] != "local-qwen" or not isinstance(grant["branch"], str) or
                     not re.fullmatch(r"[a-zA-Z0-9_-]+(?:[./-][a-zA-Z0-9_-]+)*", grant["branch"]) or
                     len(grant["branch"]) > 150):
+                return {"result": "scope-denied"}
+            try:
+                plan_bytes = private_bytes(self.watchdog.AUTHORITY / "project-worker.json", 8192)
+                plan = json.loads(plan_bytes)
+            except (OSError, ValueError):
+                return {"result": "runner-unconfigured"}
+            if not isinstance(plan, dict) or plan.get("request") != req:
+                return {"result": "runner-unconfigured"}
+            if digest(plan_bytes) != grant["planSha256"]:
                 return {"result": "scope-denied"}
 
             try:
@@ -639,7 +650,7 @@ class Controller:
                 return {"result": "scope-denied"}
 
             job = {"request": request, "worker": grant["worker"], "branch": grant["branch"],
-                   "state": "reserved", "started": now}
+                   "planSha256": grant["planSha256"], "state": "reserved", "started": now}
             data["projectJobs"] = [*jobs, job]
             save(self.file, data)
             try:
@@ -649,6 +660,18 @@ class Controller:
             phase = receipt["phase"] if receipt else "unseen"
             job.update(queuePhase=phase, state={"queued": "running", "refused": "refused"}.get(phase, "unresolved"))
             return {"result": job["state"], "job": job}
+
+    def dispatch_project(self, req):
+        if not isinstance(req, dict) or req.keys() != {"repository", "issue"}:
+            raise ValueError("Expected a repository and issue")
+        try:
+            grant = read_private(self.watchdog.AUTHORITY / "project-grant.json", 4096)
+        except (OSError, ValueError):
+            return {"result": "scope-denied"}
+        if (not isinstance(grant, dict) or not {"head", "epoch"} <= grant.keys() or
+                any(type(grant.get(key)) is not type(value) or grant[key] != value for key, value in req.items())):
+            return {"result": "scope-denied"}
+        return self.submit_project({**req, "head": grant["head"], "epoch": grant["epoch"]})
 
     def reconcile_project(self, req):
         if not self.standalone or not isinstance(req, dict) or req.keys() != {"repository", "issue", "head", "epoch", "run"}:
@@ -996,6 +1019,8 @@ def main():
             return controller.record_project_recommendation(req)
         if entry == "submit-project":
             return controller.submit_project(req)
+        if entry == "dispatch-project":
+            return controller.dispatch_project(req)
         if entry == "reconcile-project":
             return controller.reconcile_project(req)
         if entry == "inspect-project":

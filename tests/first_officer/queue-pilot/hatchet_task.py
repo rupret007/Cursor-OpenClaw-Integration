@@ -3,6 +3,7 @@ import os
 import sqlite3
 import time
 from datetime import timedelta
+from pathlib import Path
 
 from hatchet_sdk import Hatchet, TTLBasedIdempotencyConfig
 from pydantic import BaseModel
@@ -49,7 +50,12 @@ async def execute(item, ctx):
 )
 def project_effect(item, _ctx):
     started = int(time.time() * 1000)
-    time.sleep(1)
+    marker = Path(os.environ["PILOT_EFFECTS"]).with_name("release-" + item.lane)
+    deadline = time.monotonic() + 12
+    while not marker.exists():
+        if time.monotonic() >= deadline:
+            raise ValueError("The coding fault fixture was never released")
+        time.sleep(.05)
     with sqlite3.connect(os.environ["PILOT_EFFECTS"]) as db:
         db.execute("INSERT INTO effects VALUES (?, ?, ?, ?, ?)",
                    (item.lane, item.head, item.issue, started, int(time.time() * 1000)))

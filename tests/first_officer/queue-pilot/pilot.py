@@ -8,6 +8,7 @@ import importlib.util
 import json
 import multiprocessing
 import os
+import runpy
 from pathlib import Path
 import secrets
 import signal
@@ -154,9 +155,9 @@ def stop(process):
         process.wait(timeout=10)
 
 
-def launch(stack, label, *args):
+def launch(stack, label, *args, env=None):
     with (LEDGER.parent / label).open("a") as out:
-        process = subprocess.Popen(args, stdout=out, stderr=out, start_new_session=True)
+        process = subprocess.Popen(args, stdout=out, stderr=out, start_new_session=True, env=env)
     stack.callback(stop, process)
     return process
 
@@ -223,6 +224,7 @@ def check_project_restart(config, headers):
                 assert submitter.exitcode == -9
                 assert effect({**job, "pull_request": job["issue"]}) is None
             finally:
+                EFFECTS.with_name("release-" + job["lane"]).touch()
                 release.set()
                 if submitter.is_alive():
                     submitter.kill()
@@ -236,6 +238,83 @@ def check_project_restart(config, headers):
             assert queue.dispatch(coding, job, LEDGER)["reused"] is True
             assert len(calls) == 2 and not fallback_calls
             log("A killed coding submitter recovered one verified Hatchet effect using one trigger and one lookup")
+
+
+def check_project_worker(stack, config, headers):
+    home = LEDGER.parent / "project-worker-home"
+    authority = home / ".local/state/openclaw-captain"
+    model = home / ".local/state/openclaw-nuc/litellm"
+    checkout = home / "source"
+    (authority / "reviews").mkdir(parents=True)
+    model.mkdir(parents=True)
+    checkout.mkdir()
+    worker_source = QUEUE_DIR / "first-officer/workers"
+    worker = runpy.run_path(str(worker_source / "project-worker.py"))
+    git, save = worker["git"], worker["save"]
+    git(checkout, "init", "--quiet")
+    git(checkout, "remote", "add", "origin", "https://github.com/example/integration.git")
+    (checkout / "review.mjs").write_text('const delivery = "old";\n')
+    git(checkout, "add", "review.mjs")
+    git(checkout, "commit", "-qm", "Fixture base")
+    head = git(checkout, "rev-parse", "HEAD").decode().strip()
+    identity = {"repository": "example/integration", "issue": 41, "head": head, "epoch": 2}
+    job = {**identity, "lane": queue.project_lane(**identity)}
+    save(authority / "lease.json", {"node": "nucbox", "active": True, "epoch": 2})
+    save(authority / "project-worker.json", {"request": identity, "checkout": str(checkout),
+                                            "file": "review.mjs", "before": '"old"', "prefix": "",
+                                            "suffix": "", "prompt": "Draft a neutral delivery status."})
+    fingerprint = worker["digest"]((authority / "project-worker.json").read_bytes())
+    save(authority / "project-grant.json", {
+        **identity, "branch": "main", "worker": "local-qwen", "expires": int(time.time()) + 120,
+        "planSha256": fingerprint,
+    })
+    save(authority / "reviews/state.json", {"projectJobs": [
+        {"request": job, "branch": "main", "worker": "local-qwen", "state": "reserved", "planSha256": fingerprint},
+    ]})
+    save(model / "litellm.yaml", {
+        "model_list": [{"model_name": "qwen-local-fast",
+                        "litellm_params": {"model": "openai/qwen-local-fast", "api_base": "http://127.0.0.1:41501/v1"}}],
+        "router_settings": {"fallbacks": [], "num_retries": 0},
+    })
+    save(model / "lane-policy.json", {"lanes": {"gateway": {"models": ["qwen-local-fast"]}}})
+    (model / "gateway-lane.key").write_text("fixture-model-key")
+    calls = []
+
+    class ModelStub(BaseHTTPRequestHandler):
+        def do_POST(self):
+            payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            assert self.path == "/v1/chat/completions" and payload["model"] == "qwen-local-fast"
+            calls.append(True)
+            response = json.dumps({"choices": [{"message": {"content": '{"replacement":"Delivery is unconfirmed."}'}}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(response)))
+            self.end_headers()
+            self.wfile.write(response)
+
+        def log_message(self, *_):
+            pass
+
+    server = stack.enter_context(ThreadingHTTPServer(("127.0.0.1", 41502), ModelStub))
+    thread = Thread(target=server.serve_forever)
+    thread.start()
+    stack.callback(thread.join)
+    stack.callback(server.shutdown)
+    python = Path("hatchet-worker/bin/python").absolute()
+    launch(stack, "hatchet-project-worker.log", str(python), str(worker_source / "hatchet-project.py"),
+           env={**os.environ, "HOME": str(home), "FO_PROJECT_PYTHON": str(python)})
+    time.sleep(3)
+    coding = deepcopy(config)
+    coding["hatchet"]["workflow"] = queue.PROJECT_WORKFLOW
+    receipt = queue.dispatch(coding, job, LEDGER)
+    eventually(lambda: worker_done("hatchet", receipt["run"], headers), "scoped Hatchet coding worker")
+    row = queue.read_project_run(coding, job, receipt, receipt["run"], 3)
+    result = row["output"]
+    assert set(result) == {"lane", "head", "commit"} and result["lane"] == job["lane"] and result["head"] == head
+    assert git(checkout, "rev-parse", result["commit"] + "^").decode().strip() == head
+    assert git(checkout, "show", result["commit"] + ":review.mjs") == b'const delivery = "Delivery is unconfirmed.";\n'
+    assert (checkout / "review.mjs").read_text() == 'const delivery = "old";\n'
+    assert queue.dispatch(coding, job, LEDGER)["reused"] and len(calls) == 1
+    log("The dedicated Hatchet coding worker made one isolated candidate commit from one loopback model call")
 
 
 def main():
@@ -392,6 +471,9 @@ def main():
                 expect_failure(lambda: sending.result(timeout=5), "ledger changed")
             assert state(job) == reconciled
             log("Late real Hatchet reply could not overwrite a newer durable receipt")
+
+        stop(hatchet_worker)
+        check_project_worker(stack, config, headers)
 
 
 if __name__ == "__main__":

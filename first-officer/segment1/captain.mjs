@@ -46,7 +46,8 @@ export function localState(operation, payload = {}, script = stateScript) {
       {
         maxBuffer: 48 * 1024,
         ...(operation === 'submit' ? {} : {
-          timeout: operation === 'inspect-project' ? 30_000 : ['runner-quota', 'local-quota'].includes(operation) ? 7000 : 2500,
+          timeout: operation === 'inspect-project' ? 30_000 : operation === 'dispatch-project' ? 15_000 :
+            ['runner-quota', 'local-quota'].includes(operation) ? 7000 : 2500,
         }),
       },
       (error, stdout) => {
@@ -245,6 +246,25 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
   async function run(request, turn) {
     const action = request.action;
     if (action === 'help') return 'Use “captain status”, “brief me”, “what needs me?”, “handoff”, or “captain this: verify CI for PR #33”.';
+    if (action === 'advance-project') {
+      turn.signal.throwIfAborted();
+      const placed = await state('dispatch-project', { repository: request.repository, issue: request.issue });
+      if (placed.result === 'duplicate') return 'This approved coding run already has a receipt. ' + projectWork(placed.job);
+      if (placed.job) return projectWork(placed.job);
+      const blocker = {
+        'scope-denied': 'Jeff needs to approve the exact issue, base commit, and authority epoch.',
+        stale: 'The Captain authority epoch changed. Check “captain status”.',
+        'stale-github': 'The approved issue or base commit changed. Check GitHub before requesting a fresh grant.',
+        'github-unavailable': 'Live GitHub evidence is unavailable. The run did not start.',
+        active: 'This repository already has an active coding job. Ask for “handoff”.',
+        'runner-unconfigured': 'The scoped coding worker or Hatchet policy is unavailable.',
+        'admission-unavailable': 'The local gate or capacity could not be verified.',
+        'admission-blocked': 'The local gate or capacity is blocking the run.',
+        'existing-queue-receipt': 'Hatchet already has a receipt. Verify it before requesting another run.',
+        'ledger-full': 'Jeff needs to review the full project ledger before dispatch.',
+      };
+      return blocker[placed.result] ?? 'The project admission result is unavailable. Check “handoff” before retrying.';
+    }
     if (['grant', 'pause', 'handback'].includes(action)) {
       const outcome = await state(action, {
         owner: turn.owner, epoch: request.epoch, message: Number(turn.ctx.messageId),

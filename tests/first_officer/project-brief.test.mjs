@@ -64,6 +64,18 @@ test('Invalid profiles make no reads and unavailable live evidence cannot recomm
   assert.throws(() => readProjectGithub('example/..', 'issues/17'), /outside/);
 });
 
+test('Captain dispatch routes a scoped project identity and reports an explicit missing grant', async () => {
+  const calls = [];
+  const captain = createCaptain({ state: async (op, payload) => {
+    calls.push([op, payload]);
+    return { result: 'scope-denied' };
+  } });
+  const result = await captain.run({ action: 'advance-project', repository: 'example/integration', issue: 40 },
+    { signal: AbortSignal.timeout(2000) });
+  assert.match(result, /approve the exact issue, base commit, and authority epoch/);
+  assert.deepEqual(calls, [['dispatch-project', { repository: 'example/integration', issue: 40 }]]);
+});
+
 test('The background monitor checks one admitted job and reports a candidate as an approval decision', async () => {
   const request = { repository: 'example/integration', issue: 40, head: 'a'.repeat(40), epoch: 2, lane: 'fixture' };
   const job = { request, state: 'running' };

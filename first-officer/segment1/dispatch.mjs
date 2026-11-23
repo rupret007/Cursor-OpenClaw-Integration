@@ -14,6 +14,8 @@ export function captainRequest(raw) {
   if (Object.hasOwn(daily, normalized)) return { kind: 'captain', action: daily[normalized] };
   const task = /^captain this:\s*(?:verify|review|check) (?:the )?ci for (?:integration )?pr #?([1-9]\d{0,7})$/.exec(normalized);
   if (task) return { kind: 'captain', action: 'task', pr: Number(task[1]) };
+  const project = /^captain this: advance ([a-z0-9][a-z0-9_.-]{0,99}\/[a-z0-9_-][a-z0-9_.-]{0,99}) #([1-9]\d{0,7})$/.exec(normalized);
+  if (project) return { kind: 'captain', action: 'advance-project', repository: project[1], issue: Number(project[2]) };
   const grant = /^captain grant integration-ci epoch ([1-9]\d{0,12})$/.exec(normalized);
   if (grant) return { kind: 'captain', action: 'grant', epoch: Number(grant[1]) };
   const control = /^captain (pause|handback) epoch ([1-9]\d{0,12})$/.exec(normalized);

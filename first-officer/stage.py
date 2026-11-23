@@ -28,6 +28,8 @@ QUEUE_MODULES = {
     "queue-runtime/lanes/queue.py": "lanes/queue.py",
     "queue-runtime/pinhttp.py": "pinhttp.py",
     "queue-runtime/workers/hatchet-review.py": "workers/hatchet-review.py",
+    "queue-runtime/workers/hatchet-project.py": "workers/hatchet-project.py",
+    "queue-runtime/workers/project-worker.py": "workers/project-worker.py",
     "queue-runtime/workers/restate-review.mjs": "workers/restate-review.mjs",
 }
 

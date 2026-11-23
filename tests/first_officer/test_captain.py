@@ -146,16 +146,22 @@ def test_project_admission_binds_scope_head_and_repository_write_lane(captain, t
     monkeypatch.setattr(controller.queue.queue, "dispatch", dispatch)
     assert controller.submit_project(request) == {"result": "runner-unconfigured"}
     now = int(time.time())
-    grant = {**request, "worker": "local-qwen", "branch": "codex/captain", "expires": now + 300}
+    grant = {**request, "worker": "local-qwen", "branch": "codex/captain", "expires": now + 300, "planSha256": "pending"}
     module.save(root / "project-grant.json", {**grant, "expires": now - 1})
     assert controller.submit_project(request) == {"result": "scope-denied"}
+    module.save(root / "project-grant.json", grant)
+    assert controller.dispatch_project({"repository": "example/other", "issue": 40}) == {"result": "scope-denied"}
+    assert controller.submit_project(request) == {"result": "runner-unconfigured"}
+    module.save(root / "project-worker.json", {"request": request})
+    assert controller.submit_project(request) == {"result": "scope-denied"}
+    grant["planSha256"] = module.digest((root / "project-worker.json").read_bytes())
     module.save(root / "project-grant.json", grant)
     assert controller.submit_project({**request, "head": "b" * 40}) == {"result": "scope-denied"}
     assert controller.submit_project(request) == {"result": "stale-github"}
     assert not calls
 
     monkeypatch.setattr(module, "current_project_evidence", lambda current, branch: all(current[key] == value for key, value in request.items()) and branch == "codex/captain")
-    result = controller.submit_project(request)
+    result = controller.dispatch_project({"repository": request["repository"], "issue": 40})
     assert result["result"] == "running" and len(calls) == 1
     restarted = module.Controller(authority, private=root / "reviews")
     assert restarted.submit_project(request)["result"] == "duplicate"
@@ -167,7 +173,10 @@ def test_project_admission_binds_scope_head_and_repository_write_lane(captain, t
     assert restarted.view()["lease"]["state"] == "held"
 
     other = {**request, "repository": "example/other"}
-    module.save(root / "project-grant.json", {**grant, **other})
+    module.save(root / "project-worker.json", {"request": other})
+    module.save(root / "project-grant.json", {
+        **grant, **other, "planSha256": module.digest((root / "project-worker.json").read_bytes()),
+    })
     def crash(*_args, **_kwargs):
         raise SystemExit(19)
 

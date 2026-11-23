@@ -32,6 +32,12 @@ The Nuc staged the inventory-verified runtime from draft [PR #42](https://github
 
 Two earlier runs restarted before the Telegram send receipt settled. The fixture saw a replayed final reply and a native outbox row marked `unknown_after_send`. This is an unresolved delivery gate for interrupted sends. The worker ledger retained one run. The successful normal restart waited for the outbox to settle. The joined rehearsal used fixture GitHub and Telegram, separately from the live #41 CI and live BobTestesBot outbound timing evidence. [OpenClaw Telegram recovery](https://docs.openclaw.ai/channels/telegram/troubleshooting)
 
+### Captain delivery recovery candidate
+
+The follow-on candidate uses a private durable receipt for project advances and handoffs. The packaged gateway's loopback Telegram fixture accepted a handoff reply and deliberately dropped its response before the gateway could record delivery. The gateway recorded the loss as unconfirmed. A fresh gateway received the same message identity and issued no second acknowledgment or final reply. The next `what needs me?` showed the single unresolved receipt in 1.60 seconds. The signed transfer test carries the unconfirmed receipt to the next authority, where it continues to fence the same message.
+
+This protects the two Captain routes. Ordinary Telegram responses use native recovery. The preceding interrupted-send findings remain relevant to ordinary routes and the earlier draft.
+
 ### Captain benchmark evidence
 
 The [ten-case protocol](CAPTAIN.md#compare-captain-performance) is ready for a matched run. The Nuc has no installed Grok CLI or Grok Agent CLI, and an eligible zero-extra-cost Grok session was unavailable. No Grok jobs were submitted. Its results and the comparison remain unverified. The Mac standby shell also requires interactive sign-in. This pilot used isolated state and the signed transfer fixture for standby evidence.

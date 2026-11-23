@@ -158,6 +158,12 @@ The queue pilot can drive the packaged gateway through a private Telegram Bot AP
 
 The rehearsal waits for the native outbox to settle before a normal restart. When a send is interrupted and the remote receipt is unknown, treat delivery as unresolved and inspect the original outcome before repeating the request. Telegram final-text recovery can resend a reply after a lost acknowledgment. The scoped job reservation still fences worker execution. [OpenClaw Telegram recovery](https://docs.openclaw.ai/channels/telegram/troubleshooting)
 
+### Reconcile a Captain Telegram reply
+
+Explicit project advances and handoffs reserve their incoming message identity in the private authority journal before work or acknowledgment. The final reply uses one direct Telegram send to the paired owner. An interrupted response leaves an unconfirmed receipt. A restart preserves the receipt and a repeated input reuses its reservation.
+
+When **what needs me?** reports an unconfirmed delivery, inspect the private receipt times with `project-telegram-review` on the candidate state script. Open the original private conversation and determine whether the reply arrived. Use `resolve-project-telegram` with the receipt's full `key` and an observed `outcome` of `delivered` or `missing`. This records the observation without sending anything. For a fresh status request, use a new Telegram message. The journal stays with signed authority handoff. Ordinary Telegram replies still use the native recovery policy.
+
 ### Daily read-only project briefing
 
 Enable the daily pilot on an isolated authority by placing `{"enabled":true}` in a private `project-daily.json` beside the lease and supplying its approved `projects.json`. The active Captain checks once per minute and generates the first eligible briefing at or after 07:00 Central Time. A restart after 07:00 can catch up. The saved day and observation time travel in the signed authority handoff.

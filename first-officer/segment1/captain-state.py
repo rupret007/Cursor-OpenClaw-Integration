@@ -575,6 +575,11 @@ class Controller:
             save(self.private / "handoff.json", view)
             return view
 
+    def project_telegram_review(self):
+        with self.locked() as data:
+            return {"unconfirmed": [row for row in data.get("projectTelegram", [])
+                                    if row["state"] in ("pending", "unverified")]}
+
     def project_telegram(self, action, req):
         if not self.standalone or not isinstance(req, dict):
             raise ValueError("The project delivery journal requires standalone authority")
@@ -1127,7 +1132,7 @@ def main():
         if entry in ("reserve-project-telegram", "finish-project-telegram", "resolve-project-telegram"):
             return controller.project_telegram(entry.split("-", 1)[0], req)
         if entry == "project-telegram-review":
-            return {"unconfirmed": controller.view()["unconfirmedProjectDelivery"]}
+            return controller.project_telegram_review()
         if entry == "project-daily-due":
             return controller.daily_project_due()
         if entry == "save-project-daily":

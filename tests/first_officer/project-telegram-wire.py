@@ -9,6 +9,7 @@ from pathlib import Path
 from queue import Empty, Queue
 import runpy
 import secrets
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -110,6 +111,19 @@ def gateway(node, cli, root, config, wire, extra_env=None):
                 process.wait(timeout=5)
 
 
+def outbox_settled(root):
+    db_files = list((root / "gateway-state").rglob("openclaw.sqlite"))
+    if len(db_files) != 1:
+        return False
+    db = sqlite3.connect(db_files[0].as_uri() + "?mode=ro", uri=True, timeout=.2)
+    try:
+        return db.execute("SELECT COUNT(*) FROM delivery_queue_entries").fetchone()[0] == 0
+    except sqlite3.OperationalError:
+        return False
+    finally:
+        db.close()
+
+
 def enqueue(wire, update_id, message_id, text):
     wire.updates.put({"update_id": update_id, "message": {
         "message_id": message_id, "chat": wire.chat,
@@ -128,7 +142,7 @@ def exercise(wire, label, number, text, expected, deadline):
     if len(pair) != 2 or pair[0][1] != "On it." or expected.casefold() not in pair[1][1].casefold():
         kinds = ("already has a receipt", "state or evidence is unavailable", "authority epoch changed",
                  "scope", "required CI", "review the candidate", "On it.", "verified",
-                 "approve the exact issue", "active coding job", "project admission result", "Hatchet refused")
+                 "approve the exact issue", "active coding job", "project admission result", "Hatchet refused", "Gate is idle")
         found = [kind for kind in kinds if any(kind.casefold() in item[1].casefold() for item in pair)]
         print(f"{label} reply mismatch. Replies {len(pair)}. Model calls {wire.model_calls}. "
               f"Known reply labels {found}.", flush=True)
@@ -201,6 +215,10 @@ def main():
                                        "approve the exact issue", 30))
                 checks.append(exercise(wire, "Simple reply", 101, "Define a Git branch", "line of development", 15))
                 checks.append(exercise(wire, "Live gate status", 102, "gate status", "Gate is idle", 30))
+                until = time.monotonic() + 8
+                while not outbox_settled(root) and time.monotonic() < until:
+                    time.sleep(.05)
+                assert outbox_settled(root), "Ordinary delivery must settle before the clean restart"
             request = {"repository": "example/integration", "issue": 40, "head": "a" * 40, "epoch": 3}
             queue = runpy.run_path(str(release / "round6/runtime/segment1/queue-runtime/lanes/queue.py"))
             write(authority / "project-grant.json", request)

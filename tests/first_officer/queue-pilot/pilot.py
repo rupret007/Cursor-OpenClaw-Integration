@@ -361,8 +361,9 @@ print(json.dumps(response))
     return accepted
 
 
-def check_project_worker(stack, config, headers, restart_hatchet=None):
-    home = LEDGER.parent / ("server-restart-home" if restart_hatchet else "project-worker-home")
+def check_project_worker(stack, config, headers, restart_hatchet=None, *, brokered=False):
+    directory = "brokered-project-home" if brokered else "server-restart-home" if restart_hatchet else "project-worker-home"
+    home = LEDGER.parent / directory
     authority = home / ".local/state/openclaw-captain"
     model = home / ".local/state/openclaw-nuc/litellm"
     checkout = home / "source"
@@ -370,6 +371,10 @@ def check_project_worker(stack, config, headers, restart_hatchet=None):
     model.mkdir(parents=True)
     checkout.mkdir()
     worker_source = QUEUE_DIR / "first-officer/workers"
+    if brokered:
+        release, node, cli = (Path(os.environ[key]).resolve(strict=True) for key in
+                              ("FO_PROJECT_WIRE_RELEASE", "FO_PROJECT_WIRE_NODE", "FO_PROJECT_WIRE_CLI"))
+        worker_source = release / "round6/runtime/segment1/queue-runtime/workers"
     worker = runpy.run_path(str(worker_source / "project-worker.py"))
     git, save = worker["git"], worker["save"]
     git(checkout, "init", "--quiet")
@@ -378,9 +383,11 @@ def check_project_worker(stack, config, headers, restart_hatchet=None):
     git(checkout, "add", "review.mjs")
     git(checkout, "commit", "-qm", "Fixture base")
     head = git(checkout, "rev-parse", "HEAD").decode().strip()
-    identity = {"repository": "example/integration", "issue": 42 if restart_hatchet else 41, "head": head, "epoch": 2}
+    issue = 43 if brokered else 42 if restart_hatchet else 41
+    identity = {"repository": "example/integration", "issue": issue, "head": head, "epoch": 1 if brokered else 2}
     job = {**identity, "lane": queue.project_lane(**identity)}
-    save(authority / "lease.json", {"node": "nucbox", "active": True, "epoch": 2})
+    if not brokered:
+        save(authority / "lease.json", {"node": "nucbox", "active": True, "epoch": identity["epoch"]})
     save(authority / "project-worker.json", {"request": identity, "checkout": str(checkout),
                                             "file": "review.mjs", "before": '"old"', "prefix": "",
                                             "suffix": "", "prompt": "Draft a neutral delivery status."})
@@ -389,8 +396,8 @@ def check_project_worker(stack, config, headers, restart_hatchet=None):
         **identity, "branch": "main", "worker": "local-qwen", "expires": int(time.time()) + 120,
         "planSha256": fingerprint,
     })
-    joined = restart_hatchet is None and bool(os.environ.get("FO_PROJECT_WIRE_RELEASE"))
-    if not joined:
+    joined = not brokered and restart_hatchet is None and bool(os.environ.get("FO_PROJECT_WIRE_RELEASE"))
+    if not joined and not brokered:
         save(authority / "reviews/state.json", {"projectJobs": [
             {"request": job, "branch": "main", "worker": "local-qwen", "state": "reserved", "planSha256": fingerprint},
         ]})
@@ -432,7 +439,7 @@ def check_project_worker(stack, config, headers, restart_hatchet=None):
     python = Path("hatchet-worker/bin/python").absolute()
     interpreter = python
     interrupted = home / "worker-interrupted"
-    if not joined and not restart_hatchet:
+    if not joined and not restart_hatchet and not brokered:
         interpreter = home / "interrupt-project-worker"
         interpreter.write_text(f'''#!{python}
 import os
@@ -458,13 +465,21 @@ worker["run"].__globals__["git"] = interrupt_after_checkpoint
 worker["main"]()
 ''')
         interpreter.chmod(0o700)
-    launch(stack, "hatchet-project-worker.log", str(python), str(worker_source / "hatchet-project.py"),
-           env={**os.environ, "HOME": str(home), "FO_PROJECT_PYTHON": str(interpreter)})
-    time.sleep(3)
     coding = deepcopy(config)
     coding["hatchet"]["workflow"] = queue.PROJECT_WORKFLOW
-    receipt = (joined_project_rehearsal(stack, home, authority, identity, job, coding, headers)
-               if joined else queue.dispatch(coding, job, LEDGER))
+    worker_env = {**os.environ, "HOME": str(home), "FO_PROJECT_PYTHON": str(interpreter)}
+    if brokered:
+        wire = runpy.run_path(str(QUEUE_DIR / "tests/first_officer/brokered-project-wire.py"))
+        profile, exercise = wire["setup"](stack, release, home, authority, job, coding, save)
+        worker_env["FO_PROJECT_BROKER_PROFILE"] = str(profile)
+    launch(stack, "hatchet-project-worker.log", str(python), str(worker_source / "hatchet-project.py"), env=worker_env)
+    time.sleep(3)
+    if brokered:
+        receipt = exercise(node, cli, eventually, lambda run: worker_done("hatchet", run, headers))
+    elif joined:
+        receipt = joined_project_rehearsal(stack, home, authority, identity, job, coding, headers)
+    else:
+        receipt = queue.dispatch(coding, job, LEDGER)
     if restart_hatchet:
         try:
             assert model_started.wait(10), "The coding worker did not start"
@@ -480,7 +495,7 @@ worker["main"]()
     assert git(checkout, "rev-parse", result["commit"] + "^").decode().strip() == head
     assert git(checkout, "show", result["commit"] + ":review.mjs") == b'const delivery = "Delivery is unconfirmed.";\n'
     assert (checkout / "review.mjs").read_text() == 'const delivery = "old";\n'
-    if not joined:
+    if not joined and not brokered:
         replay = queue.dispatch(coding, job, LEDGER)
         assert replay["reused"] and replay["run"] == receipt["run"]
         if restart_hatchet:
@@ -652,6 +667,9 @@ def run_pilot(restart_hatchet):
             check_project_worker(project, config, headers)
         with ExitStack() as project:
             check_project_worker(project, config, headers, restart_hatchet)
+        if os.environ.get("FO_PROJECT_WIRE_RELEASE"):
+            with ExitStack() as project:
+                check_project_worker(project, config, headers, brokered=True)
 
 
 def main():

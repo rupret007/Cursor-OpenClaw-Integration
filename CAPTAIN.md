@@ -100,6 +100,49 @@ launchctl bootout "gui/$(id -u)/local.openclaw.captain"
 
 Standalone cutover gates still include the native Mac service rehearsal, binding the live gate, capacity and quota probes on each host, and the full Telegram checklist on each host. Verify both peer transfer and rollback through the generated services. Use the standalone checklist in [LIVE-TEST.md](LIVE-TEST.md) for both hosts. The Bobserver pilot and rollback below apply only to the legacy profile.
 
+## Project briefing pilot
+
+The standalone candidate can include up to two projects in **brief me** and **what needs me?**. A project profile is optional. Use an owner-only file named `projects.json` beside the standalone lease in the **isolated** authority directory for the pilot. Keep it out of source control. The gateway reads it on each request. The existing owner DM gate still applies.
+
+```json
+[
+  {
+    "repo": "rupret007/Cursor-OpenClaw-Integration",
+    "issue": 40,
+    "goal": "Make review delivery recoverable",
+    "milestone": "Show unconfirmed delivery",
+    "owner": "Jeff",
+    "acceptance": "Captain surfaces the unresolved receipt",
+    "scope": "read-only",
+    "impact": 3,
+    "urgency": 2,
+    "risk": 0,
+    "dependencies": []
+  }
+]
+```
+
+Set the profile mode to `0600` and its authority directory to `0700`. Dependencies are issue numbers in the same repo. Use values between 0 and 3 for impact, urgency, and risk. Higher impact takes precedence, followed by higher urgency and lower risk. Only rows with live evidence and actionable milestones compete for the next recommendation. A linked PR is optional. Set `pr` to its number and `checks` to the required GitHub Actions job names. Bob reads the PR head before and after reading checks and reports uncertainty when they differ.
+
+The read-only profile can recommend work. It does not grant worker dispatch. The ledger stores the last 50 changed recommendations with the issue, action, observed commit when available, and lease epoch. Signed handoff carries the ledger. Each host loads its own operator-provided profile. To roll back the briefing on an approved test host, move its `projects.json` to a private backup on the same host. The next request uses the existing Captain briefing. Restoring the file restores the project view.
+
+### Compare Captain performance
+
+Use the same scoped task, initial GitHub state, and acceptance checks for each assistant. Use private fixtures for write and fault cases. Collect wall time from prompt receipt to the first correct actionable answer, the number of separate Jeff interventions, and the number of milestones with verified receipts. Record unrun cases as unverified.
+
+| Case | What a passing outcome shows |
+| --- | --- |
+| Milestone triage | Chooses an actionable item from the live board and gives the reason |
+| Two competing projects | Selects the higher-impact eligible action with both projects visible |
+| Blocked dependency | Gives the current blocker and prioritizes remaining eligible work |
+| Small implementation | Produces a reviewable change that satisfies independent checks |
+| CI failure | Reports the failing check on the current commit |
+| Stale PR head | Withholds the earlier verdict and rechecks the new head |
+| Missing worker allowance | Stops before a model call and says what is missing |
+| Restart during dispatch | Recovers the same run and reconciles its outcome |
+| Duplicate delivery | Returns one stable outcome and produces one write |
+| Approval required | Identifies the exact decision, scope, and revision Jeff must approve |
+
 ## Daily commands
 
 | Send in the private owner chat | What OpenClaw does |

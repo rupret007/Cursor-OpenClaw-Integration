@@ -53,21 +53,25 @@ export function localState(operation, payload = {}, script = stateScript) {
   });
 }
 
-export async function integrationCI(pr, read) {
-  const path = repo + '/pulls/' + pr;
+export function integrationCI(pr, read) {
+  return projectCI(repo, pr, required, read);
+}
+
+export async function projectCI(repository, pr, expectedChecks, read) {
+  const path = repository + '/pulls/' + pr;
   const pull = await read(path);
   const identity = (row) => row?.number === pr && row.state === 'open' &&
-    row.base?.repo?.full_name?.toLowerCase() === repo.slice(6).toLowerCase() &&
+    row.base?.repo?.full_name?.toLowerCase() === repository.slice(6).toLowerCase() &&
     sha.test(row.head?.sha ?? '');
-  if (!identity(pull)) throw new Error('Open integration PR identity unavailable');
+  if (!identity(pull)) throw new Error('Open project PR identity unavailable');
   const head = pull.head.sha;
-  const checks = await read(repo + '/commits/' + head + '/check-runs?per_page=100&filter=latest');
+  const checks = await read(repository + '/commits/' + head + '/check-runs?per_page=100&filter=latest');
   const final = await read(path);
   if (!identity(final) || final.head.sha !== head) return { head, ci: 'changed' };
   if (!Array.isArray(checks?.check_runs) || checks.total_count !== checks.check_runs.length) {
     return { head, ci: 'unavailable' };
   }
-  const valid = required.map((name) =>
+  const valid = expectedChecks.map((name) =>
     checks.check_runs.filter((row) => row.app?.slug === 'github-actions' && row.name === name && row.head_sha === head));
   if (valid.some((rows) => rows.length !== 1)) return { head, ci: 'unavailable' };
   const statuses = valid.flat().map((row) => row.status === 'completed' ? row.conclusion : 'pending');
@@ -123,6 +127,8 @@ function jobText(job) {
   return identity + ' ' + terminal[job.state];
 }
 
+const noDecisions = 'No captain decisions are waiting for Jeff.';
+
 function decisions(view) {
   const needs = [];
   if (view.lease.holder === 'first-officer' && view.lease.state === 'held' &&
@@ -135,10 +141,10 @@ function decisions(view) {
     blockers[view.blocked.reason]);
   for (const job of view.jobs.filter((row) => row.delivery === 'delivery-unverified' ||
       row.state in terminal && row.state !== 'verified')) needs.push(jobText(job));
-  return needs.length ? needs.join('\n') : 'No captain decisions are waiting for Jeff.';
+  return needs.length ? needs.join('\n') : noDecisions;
 }
 
-export function createCaptain({ registry, get, state = localState, admit = fleetAdmission, now = Date.now }) {
+export function createCaptain({ registry, get, state = localState, admit = fleetAdmission, now = Date.now, projectBrief = async () => null }) {
   const runnerQuota = () => state('runner-quota').catch(() => null);
   async function status(kind, turn) {
     const source = registry[kind];
@@ -218,22 +224,35 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
       }[outcome.result];
     }
     const viewPromise = state(action === 'handoff' ? 'handoff' : 'view');
+    const projectEvidence = () => bounded(11_000, (signal) =>
+      projectBrief(AbortSignal.any([signal, turn.signal])))
+      .catch(() => ({ summary: 'Project evidence is unavailable.', decisions: ['Project decisions could not be verified.'] }));
     if (action === 'brief') {
-      const [view, quota, ...evidence] = await Promise.all([
-        viewPromise.catch(() => null), runnerQuota(),
+      const [view, quota, projects, ...evidence] = await Promise.all([
+        viewPromise.catch(() => null), runnerQuota(), projectEvidence(),
         ...['fleet', 'gate', 'github-open', 'quota'].map((kind) => status(kind, turn)),
       ]);
       return [view ? role(view) + '\n' + decisions(view).split('\n')[0] +
         (view.active ? '\n' + jobText(view.active) : '') :
-        'Captain authority and decisions are unavailable.', ...evidence,
+        'Captain authority and decisions are unavailable.', ...(projects ? [projects.summary] : []), ...evidence,
         quota?.modelFree ? 'Captain CI review uses a model-free worker.' :
           quota ? 'Captain runner quota · ' + quota.session.used + '% of 5-hour window · ' + quota.weekly.used + '% of weekly window.'
           : 'The captain runner’s subscription quota is unavailable.'].join('\n\n');
     }
+    if (action === 'decisions') {
+      const [view, projects] = await Promise.all([viewPromise, projectEvidence()]);
+      const captainDecisions = decisions(view);
+      if (!projects) return role(view) + '\n' + captainDecisions;
+      return [role(view), ...projects.decisions,
+        captainDecisions === noDecisions && projects.decisions.length ? null : captainDecisions].filter(Boolean).join('\n');
+    }
     const view = await viewPromise;
-    if (action === 'role' || action === 'decisions') return role(view) + '\n' + decisions(view);
+    if (action === 'role') return role(view) + '\n' + decisions(view);
+    const recommendation = view.lastProjectRecommendation;
     if (action === 'handoff') return [role(view), 'Work owner · OpenClaw. Decisions · Jeff.',
       'Handoff recorded at ' + new Date(view.recorded * 1000).toISOString() + '.', decisions(view),
+      recommendation ? 'Last recorded project recommendation · ' + recommendation.repo + ' #' +
+        recommendation.issue + ' · ' + recommendation.action + ' · epoch ' + recommendation.epoch + '.' : '',
       view.blocked?.reason === 'ci-pending' ? 'Integration PR #' + view.blocked.pr + ' · ' +
         view.blocked.head.slice(0, 8) + ' · awaiting required CI.' : '',
       ...view.jobs.map(jobText)].filter(Boolean).join('\n');

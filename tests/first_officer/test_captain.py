@@ -118,6 +118,26 @@ def test_failed_launch_is_persisted_through_a_restart_and_cannot_be_replayed(cap
     assert reopened.submit(plan) == {"result": "duplicate"}
 
 
+def test_project_recommendation_survives_restart_and_rechecks_epoch(captain):
+    module, lease, watchdog = captain
+    recommendation = {"repo": "Fixture/Integration", "issue": 7, "action": "fix", "head": "a" * 40}
+    controller = module.Controller(watchdog)
+    assert controller.record_project_recommendation(recommendation) == {"recorded": True}
+    restarted = module.Controller(watchdog)
+    assert restarted.record_project_recommendation(recommendation) == {"recorded": False, "duplicate": True}
+    with restarted.locked() as saved:
+        assert len(saved["projectRecommendations"]) == 1
+        assert saved["projectRecommendations"][0]["repo"] == "fixture/integration"
+        assert saved["projectRecommendations"][0]["epoch"] == 11
+    lease.epoch = 12
+    assert restarted.record_project_recommendation(recommendation) == {"recorded": True}
+    lease.state = "parked"
+    with pytest.raises(ValueError, match="lease"):
+        restarted.record_project_recommendation(recommendation)
+    with pytest.raises(ValueError, match="Invalid project"):
+        restarted.record_project_recommendation({**recommendation, "prompt": "must stay out of the ledger"})
+
+
 def test_standalone_handoff_signed_and_restart_safe(captain, tmp_path):
     module, _, _ = captain
     mac_root = tmp_path / "mac"
@@ -155,6 +175,8 @@ def test_standalone_handoff_signed_and_restart_safe(captain, tmp_path):
     assert mac_reviews.view()["armed"]
 
     mac_reviews.finish({"lane": review["lane"], "state": "verified"})
+    recommendation = {"repo": "fixture/integration", "issue": 7, "action": "investigate"}
+    assert mac_reviews.record_project_recommendation(recommendation) == {"recorded": True}
     receipt = mac.release(1, mac_reviews.locked)
     assert mac_reviews.control("grant", {**grant, "message": 103}) == {"result": "stale"}
     assert not mac_reviews.view()["armed"]
@@ -172,6 +194,8 @@ def test_standalone_handoff_signed_and_restart_safe(captain, tmp_path):
     assert view["jobs"][0]["state"] == "verified"
     assert view["jobs"][0]["delivery"] == "delivery-unverified"
     assert view["grant"] is None
+    assert view["lastProjectRecommendation"]["epoch"] == 1
+    assert view["lastProjectRecommendation"]["issue"] == 7
     assert nuc_reviews.control("grant", grant) == {"result": "stale"}
     with pytest.raises(ValueError, match="stale"):
         restarted.accept(receipt, nuc_reviews.file, nuc_reviews.locked)

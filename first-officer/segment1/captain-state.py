@@ -471,11 +471,13 @@ class Controller:
             active = {**active, "queuePhase": phase}
             if receipt:
                 active.update(backend=receipt["backend"], acceptedAt=receipt["at"])
+        recommendations = data.get("projectRecommendations", [])
         return {"lease": {"holder": record.holder, "state": record.state, "epoch": record.epoch},
                 "armed": self.watchdog.enabled() and (not self.standalone or record.state == "held"),
                 "grant": data["grant"], "blocked": data.get("blocked"),
                 **({"standalone": self.watchdog.node} if self.standalone else {}),
                 "jobs": data["jobs"][-5:],
+                "lastProjectRecommendation": recommendations[-1] if recommendations else None,
                 "active": active}
 
     def handoff(self):
@@ -486,6 +488,27 @@ class Controller:
             view["recorded"] = int(time.time())
             save(self.private / "handoff.json", view)
             return view
+
+    def record_project_recommendation(self, req):
+        if (not isinstance(req, dict) or req.keys() - {"repo", "issue", "action", "head"} or
+                not isinstance(req.get("repo"), str) or not re.fullmatch(
+                    r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}/[A-Za-z0-9_-][A-Za-z0-9_.-]{0,99}", req["repo"]) or
+                type(req.get("issue")) is not int or not 1 <= req["issue"] <= 99_999_999 or
+                req.get("action") not in ("investigate", "fix", "verify") or
+                ("head" in req) != (req["action"] in ("fix", "verify")) or
+                ("head" in req and (not isinstance(req["head"], str) or not SHA.fullmatch(req["head"])))):
+            raise ValueError("Invalid project recommendation")
+        with self.locked(write=True) as data:
+            lease = self.fence.status()
+            if not lease or not self.matches(lease, lease.epoch):
+                raise ValueError("The Captain lease is unavailable")
+            entry = {**req, "repo": req["repo"].lower(), "epoch": lease.epoch}
+            history = data.get("projectRecommendations", [])
+            if history and all(history[-1].get(key) == value for key, value in entry.items()) and (
+                    history[-1].get("head") == entry.get("head")):
+                return {"recorded": False, "duplicate": True}
+            data["projectRecommendations"] = [*history[-49:], {**entry, "observed": int(time.time())}]
+            return {"recorded": True}
 
     @staticmethod
     def submitted_message(data, owner, message):
@@ -750,6 +773,15 @@ def main():
             return controller.gate.read()
         if entry == "local-capacity":
             return local_capacity(authority)
+        if entry == "record-project-recommendation":
+            return controller.record_project_recommendation(req)
+        if entry == "local-projects":
+            if not private_directory(LOCAL_AUTHORITY):
+                raise ValueError("The standalone authority directory is invalid")
+            try:
+                return read_private(LOCAL_AUTHORITY / "projects.json", 8192)
+            except FileNotFoundError:
+                return None
         if entry == "local-quota":
             profile = read_private(LOCAL_AUTHORITY / "quota.json", 4096)
             if not isinstance(profile, dict) or profile.keys() != {"codex"} or not isinstance(profile["codex"], str):

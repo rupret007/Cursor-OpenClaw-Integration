@@ -1,5 +1,15 @@
 # First Officer Segment 1 status
 
+## Project Captain pilot
+
+The Nuc is running the pinned `62f77b7e` Captain release at epoch 2 with its queue and LiteLLM active. The live lease had no dispatch grant when inspected. Existing PR #39 had all four checks passing at `062a947`. Its checks cover that commit.
+
+The isolated `codex/fo-project-captain` worktree adds live project briefs and a durable recommendation ledger. Mock tests cover project priority, unavailable GitHub evidence, stale PR heads, a restarted ledger, and signed handoff with the saved recommendation. The live read-only check looked up [issue #40](https://github.com/rupret007/Cursor-OpenClaw-Integration/issues/40) and returned a recommendation in 437 ms from the Nuc. This timing covers the reader and ranking code. Telegram was outside that run.
+
+The local offline gate passed 1,145 Python tests and 22 Cursor skill tests. All 35 focused JavaScript tests passed. The offline gate excludes live Telegram and provider calls.
+
+Jeff approved filing issue #40. A baseline fixture reproduced its missing delivery decision. The local Codex quota probe verified only a weekly window, so the existing full-window admission rule did not qualify it for this lane. Isolated coding dispatch, exact-commit verification, test-bot restart rehearsal, the second live project, and the head-to-head Grok comparison are pending. Production configuration and services remain unchanged.
+
 The gateway snapshot pointed to Round 13. Its conductor intentionally removes all model tools from ordinary turns and rejects tool calls except a single exact, approved gate proposal. The Telegram handlers match a smaller set of phrases than Jeff uses. The pinned bundle reproduced the problem on “my open PRs and CI”. The request went unclaimed, and the ordinary model turn had zero tools.
 
 The copied settings showed the coding profile, an off sandbox, one main agent with no additional tool profile, and no provider-specific tool allowlist. The plugin applied the empty allowlist independently of provider support. Takeover and epoch checks applied to the exception for the exact proposal. The gateway’s trace report also recorded a separate latency problem from provider rate limits and retries.

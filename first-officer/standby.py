@@ -24,6 +24,7 @@ PRIMARY = "nucbox"
 STANDBY = "mac-mini"
 HEARTBEAT_SECONDS = 15
 LEASE_SECONDS = 90
+IMPORT_PENDING = "broker-import-pending.json"
 EFFECT_KINDS = frozenset(("telegram-reply", "telegram-typing", "hatchet-submit", "restate-submit"))
 
 
@@ -86,6 +87,9 @@ class StandbyAuthority:
         with ExitStack() as opening:
             lock = opening.enter_context(open_private(directory, "authority.lock"))
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            pending = directory / IMPORT_PENDING
+            if pending.exists() or pending.is_symlink():
+                raise LeaseRejected("Broker journal has an interrupted import")
             with open_private(directory, database.name):
                 self._db = sqlite3.connect(database)
             opening.callback(self._db.close)
@@ -363,6 +367,101 @@ def export_snapshot(authority, state, output, source, destination, transfer_id):
         sync_path(output.parent)
 
 
+def snapshot_manifest(directory, source, destination, transfer_id):
+    private_directory(directory)
+    journals = journal_digests(directory)
+    expected = {"version": 1, "transfer": transfer_id, "source": source.node, "epoch": source.epoch,
+                "destination": destination, "journals": journals}
+    if (read_private_json(directory / "transfer.json") != expected
+            or {entry.name for entry in directory.iterdir()} != {*journals, "transfer.json"}):
+        raise ValueError("Snapshot does not match the expected transfer")
+    return expected
+
+
+def read_imported(db):
+    table = db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'broker_import'").fetchone()
+    return db.execute("SELECT digest FROM broker_import WHERE id = 1").fetchone() if table else None
+
+
+def check_import_target(state, source, digest):
+    path = state / "authority.sqlite"
+    try:
+        existing = open_private(state, path.name, create=False)
+    except FileNotFoundError:
+        if any((state / name).exists() or (state / name).is_symlink() for name in BROKER_JOURNALS[1:]):
+            raise LeaseRejected("Destination has journals without an authority")
+        return False
+    with existing, closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
+        exported = db.execute("SELECT transfer_id FROM broker_export WHERE id = 1").fetchone()
+        if exported is None:
+            if read_imported(db) == (digest,):
+                return True
+            raise LeaseRejected("Destination must be empty or sealed by an earlier export")
+        prior = db.execute("SELECT epoch FROM holder WHERE id = 1").fetchone()
+        if prior is None or prior[0] >= source.epoch:
+            raise LeaseRejected("The incoming epoch is not newer than the destination fence")
+    return False
+
+
+def import_snapshot(state, snapshot, source, destination, transfer_id):
+    """Install to the fixed destination state path while blocking startup across crashes."""
+    private_directory(state)
+    if snapshot.resolve().is_relative_to(state.resolve()) or state.resolve().is_relative_to(snapshot.resolve()):
+        raise ValueError("Keep the snapshot separate from the destination state")
+    if not re.fullmatch(r"[0-9a-f]{32}", transfer_id):
+        raise ValueError("Expected a 32-character hex transfer ID")
+    manifest = snapshot_manifest(snapshot, source, destination, transfer_id)
+    digest = hashlib.sha256(json.dumps(manifest, sort_keys=True).encode()).hexdigest()
+    pending = state / IMPORT_PENDING
+    with open_private(state, "authority.lock") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if pending.exists() or pending.is_symlink():
+            if read_private_json(pending) != digest:
+                raise LeaseRejected("Resume the same destination transfer first")
+        elif check_import_target(state, source, digest):
+            return False
+        for name in BROKER_JOURNALS:
+            if any(os.path.lexists(state / (name + suffix)) for suffix in ("-wal", "-shm", "-journal")):
+                raise LeaseRejected("Destination has unfinished database recovery")
+
+        with tempfile.TemporaryDirectory(dir=state, prefix=".captain-import-") as temporary:
+            staged = Path(temporary)
+            for name in manifest["journals"]:
+                with open_private(snapshot, name, create=False) as data:
+                    with open(staged / name, "xb", opener=private_create) as output:
+                        shutil.copyfileobj(data, output)
+            if journal_digests(staged) != manifest["journals"]:
+                raise ValueError("Staged snapshot failed verification")
+            database = staged / "authority.sqlite"
+            with closing(sqlite3.connect(database, timeout=1)) as db, db:
+                if (db.execute("SELECT node, epoch FROM holder WHERE id = 1").fetchone() != (source.node, source.epoch)
+                        or db.execute("SELECT node, epoch FROM planned_holder WHERE id = 1").fetchone()
+                        != (destination, source.epoch)
+                        or db.execute("SELECT transfer_id FROM broker_export WHERE id = 1").fetchone()
+                        != (transfer_id,)):
+                    raise LeaseRejected("Snapshot is missing the matching source fence")
+                db.execute("CREATE TABLE IF NOT EXISTS broker_import (id INTEGER PRIMARY KEY CHECK (id = 1), digest TEXT)")
+                db.execute("INSERT OR REPLACE INTO broker_import VALUES (1, ?)", (digest,))
+                db.execute("DELETE FROM broker_export WHERE id = 1")
+            for name in manifest["journals"]:
+                sync_path(staged / name)
+            with open(staged / IMPORT_PENDING, "x", opener=private_create) as receipt:
+                json.dump(digest, receipt)
+            sync_path(staged / IMPORT_PENDING)
+            (staged / IMPORT_PENDING).replace(pending)
+            sync_path(state)
+            for name in BROKER_JOURNALS[1:]:
+                if name in manifest["journals"]:
+                    (staged / name).replace(state / name)
+                else:
+                    (state / name).unlink(missing_ok=True)
+            database.replace(state / database.name)
+            sync_path(state)
+            pending.unlink()
+            sync_path(state)
+    return True
+
+
 def private_create(path, flags):
     return os.open(path, flags | os.O_NOFOLLOW, 0o600)
 
@@ -374,14 +473,21 @@ def main():
     parser.add_argument("--epoch", type=int, required=True)
     parser.add_argument("--destination", choices=(PRIMARY, STANDBY), required=True)
     parser.add_argument("--replace-target", choices=(PRIMARY, STANDBY))
-    parser.add_argument("--export-path", type=Path)
+    transfer = parser.add_mutually_exclusive_group()
+    transfer.add_argument("--export-path", type=Path)
+    transfer.add_argument("--import-path", type=Path)
     parser.add_argument("--transfer-id")
     args = parser.parse_args()
-    if (args.export_path is None) != (args.transfer_id is None) or (args.export_path and args.replace_target):
-        parser.error("An export requires its path and transfer ID, independent of target replacement")
+    transferring = args.export_path is not None or args.import_path is not None
+    if transferring != (args.transfer_id is not None) or (transferring and args.replace_target):
+        parser.error("A transfer requires a snapshot path and transfer ID, independent of target replacement")
     source = Grant(args.source, args.epoch)
     try:
         private_directory(args.state)
+        if args.import_path:
+            imported = import_snapshot(args.state, args.import_path, source, args.destination, args.transfer_id)
+            print("Captain broker import ready." if imported else "Captain broker import already applied.")
+            return
         with (open_private(args.state, "authority.sqlite", create=False),
               StandbyAuthority(args.state, export_id=args.transfer_id) as authority):
             if args.export_path:

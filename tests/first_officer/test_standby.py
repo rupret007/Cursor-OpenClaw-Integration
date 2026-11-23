@@ -237,3 +237,91 @@ def test_interrupted_export_keeps_source_sealed_for_same_retry(tmp_path, monkeyp
     with Authority(source, export_id=transfer) as recovery:
         standby["export_snapshot"](recovery, source, snapshot, grant, STANDBY, transfer)
     assert (snapshot / "transfer.json").is_file()
+
+
+def test_import_preserves_pending_effect_and_refuses_replay_to_retired_host(tmp_path):
+    nuc_state, mac_state = (tmp_path / name for name in ("nuc", "mac"))
+    nuc_state.mkdir(mode=0o700)
+    mac_state.mkdir(mode=0o700)
+    now = 0
+    with Authority(mac_state, clock=lambda: now) as broker:
+        nuc = broker.claim(PRIMARY)
+
+        def interrupted():
+            raise TimeoutError
+
+        with pytest.raises(TimeoutError):
+            broker.perform(nuc, "telegram-reply", "pending", interrupted)
+
+    first_transfer = "12" * 16
+    first = tmp_path / "first"
+    with Authority(mac_state, export_id=first_transfer) as journal:
+        standby["export_snapshot"](journal, mac_state, first, nuc, PRIMARY, first_transfer)
+
+    install = standby["import_snapshot"]
+    with pytest.raises(ValueError):
+        install(nuc_state, first, nuc, STANDBY, first_transfer)
+    assert install(nuc_state, first, nuc, PRIMARY, first_transfer)
+    assert not install(nuc_state, first, nuc, PRIMARY, first_transfer)
+    with pytest.raises(LeaseRejected, match="newer"):
+        install(mac_state, first, nuc, PRIMARY, first_transfer)
+
+    with Authority(nuc_state, clock=lambda: now) as broker:
+        with pytest.raises(BlockingIOError):
+            install(nuc_state, first, nuc, PRIMARY, first_transfer)
+        assert broker.claim(PRIMARY) is None
+        now = 90
+        current = broker.claim(PRIMARY)
+        assert current.epoch == nuc.epoch + 1
+        assert broker.perform(current, "telegram-reply", "pending", pytest.fail) == "unconfirmed"
+        with pytest.raises(LeaseRejected):
+            broker.renew(nuc)
+
+    second_transfer = "34" * 16
+    second = tmp_path / "second"
+    with Authority(nuc_state, export_id=second_transfer) as journal:
+        standby["export_snapshot"](journal, nuc_state, second, current, STANDBY, second_transfer)
+    with pytest.raises(LeaseRejected, match="newer"):
+        install(nuc_state, first, nuc, PRIMARY, first_transfer)
+    assert install(mac_state, second, current, STANDBY, second_transfer)
+    with Authority(mac_state, clock=lambda: now) as broker:
+        now = 180
+        assert broker.claim(PRIMARY) is None
+        mac = broker.claim(STANDBY)
+        assert mac.epoch == current.epoch + 1
+        assert broker.perform(mac, "telegram-reply", "pending", pytest.fail) == "unconfirmed"
+
+
+def test_interrupted_destination_is_fenced_and_same_import_resumes(tmp_path, monkeypatch):
+    source, destination = (tmp_path / name for name in ("source", "destination"))
+    source.mkdir(mode=0o700)
+    destination.mkdir(mode=0o700)
+    snapshot = tmp_path / "snapshot"
+    transfer = "ab" * 16
+    with Authority(source) as broker:
+        grant = broker.claim(PRIMARY)
+    with Authority(source, export_id=transfer) as journal:
+        standby["export_snapshot"](journal, source, snapshot, grant, STANDBY, transfer)
+
+    install = standby["import_snapshot"]
+    sync_path = standby["sync_path"]
+    calls = 0
+
+    def interrupt_before_unlock(path):
+        nonlocal calls
+        if path == destination:
+            calls += 1
+            if calls == 2:
+                raise OSError("fixture interruption")
+        sync_path(path)
+
+    with monkeypatch.context() as injected:
+        injected.setitem(install.__globals__, "sync_path", interrupt_before_unlock)
+        with pytest.raises(OSError, match="fixture interruption"):
+            install(destination, snapshot, grant, STANDBY, transfer)
+    with pytest.raises(LeaseRejected, match="interrupted import"):
+        Authority(destination)
+    assert install(destination, snapshot, grant, STANDBY, transfer)
+    assert not install(destination, snapshot, grant, STANDBY, transfer)
+    with Authority(destination):
+        pass

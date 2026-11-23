@@ -88,7 +88,23 @@ The export stage requires the source broker process to have exited, including it
 
 Use the same stopped-journal command with an additional `--export-path` under a private mode-0700 parent and a locally generated 32-digit hexadecimal `--transfer-id`. Record the ID securely for retry. The command seals the source before publishing a private, checksummed snapshot. It preserves the Telegram inbox, lease and effects, daily briefing, coding reservations, and the review and project receipts. Provision destinations with separate private runtime settings and issue fresh grants on the new epoch. Transfer snapshots over an authenticated private connection. The inbox can contain private update text, so keep snapshots out of logs, source control, and shared storage.
 
-A failed copy can leave the source sealed without a completed snapshot. Use the same transfer ID and destination to resume. Keep the old service disabled. An existing snapshot with missing or changed contents fails verification and is preserved for investigation. The snapshot is sealed too. This stage does not activate a destination, and the full transfer and rollback procedure must be verified before using it for maintenance.
+A failed copy can leave the source sealed without a completed snapshot. Use the same transfer ID and destination to resume. Keep the old service disabled. An existing snapshot with missing or changed contents fails verification and is preserved for investigation. The snapshot remains sealed.
+
+### Import into the stopped destination broker
+
+Use the same pinned release on both hosts. For a test rehearsal, keep both destination services stopped during import and confirm the source broker is still disabled. Copy the sealed snapshot over an authenticated connection into private storage owned by the destination broker account. Preserve mode 0700 for the directory and mode 0600 for the files. Maintain one fixed, private state directory per service. Use an empty directory for first provisioning. Subsequent moves require the previously exported and sealed destination state. Keep the fixed directory and its journal after handoff so it can reject stale snapshots.
+
+On the destination, run as the broker account. Use the expected source lease host and epoch, next lease host, and transfer ID recorded during export.
+
+```bash
+python3 -I -B "$release/round6/runtime/segment1/queue-runtime/standby.py" \
+  --state "$broker_state" --source "$lease_owner" --epoch "$current_epoch" \
+  --destination "$next_owner" --import-path "$snapshot" --transfer-id "$transfer_id"
+```
+
+The import checks the manifest, the matching export seal, and the destination's prior epoch. A destination with an interrupted import stays fenced. Resume with the same snapshot and transfer ID. A repeat of an already applied import leaves the live journal untouched. A source journal and a received snapshot both remain sealed. Only the installed destination journal can open for service.
+
+Point the gateway profiles at the destination broker's verified private endpoint and restart the intended gateway and broker after import succeeds. The existing 90-second broker recovery window applies. Verify the exact next epoch and a test-bot reply before taking the former broker host offline. Handback after a successful claim uses a fresh export and import at the now-current epoch. Rollback before the first destination claim and physical service orchestration still require verification. Keep production on its current setup until the live test rehearsals and rollback pass.
 
 ### Start the broker at boot on an independent Linux host
 

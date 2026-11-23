@@ -14,7 +14,7 @@ from threading import Event, Thread
 
 from standby import EFFECT_KINDS, Grant, LeaseRejected, PRIMARY, STANDBY, StandbyAuthority, read_private_json
 from standby_queue import ProjectBusy, ProjectQueue, ProjectScopeRejected, ReviewQueue, ReviewScopeRejected
-from standby_telegram import BotAPI, TelegramInbox, TelegramPoll, reply_operation
+from standby_telegram import BotAPI, POLL_TRANSPORT_SECONDS, TelegramInbox, TelegramPoll, reply_operation
 
 
 MAX_REQUEST_BYTES = 32_768
@@ -351,7 +351,7 @@ def main():
                 finally:
                     stop.set()
                     for thread in threads:
-                        thread.join(timeout=7)
+                        thread.join(timeout=POLL_TRANSPORT_SECONDS + 1)
     except KeyboardInterrupt:
         return 0
     except (OSError, ValueError, RecursionError, sqlite3.Error):

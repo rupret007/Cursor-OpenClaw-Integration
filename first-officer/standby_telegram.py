@@ -14,6 +14,8 @@ from standby import open_private
 
 MAX_PENDING = 512
 MAX_TEXT_BYTES = 16_384
+POLL_WAIT_SECONDS = 4
+POLL_TRANSPORT_SECONDS = 10
 
 
 def positive_id(value):
@@ -212,10 +214,11 @@ class BotAPI:
             raise ValueError("Telegram bot or polling mode could not be verified")
 
     def get_updates(self, offset):
-        fields = {"allowed_updates": ["message"], "limit": 20, "timeout": 4}
+        fields = {"allowed_updates": ["message"], "limit": 20, "timeout": POLL_WAIT_SECONDS}
         if offset is not None:
             fields["offset"] = offset
-        return self.call("getUpdates", fields, timeout=6)
+        # The server's long-poll hold is separate from connection and response latency.
+        return self.call("getUpdates", fields, timeout=POLL_TRANSPORT_SECONDS)
 
     def send_typing(self, owner):
         return self.call("sendChatAction", {"chat_id": owner, "action": "typing"}, timeout=1.25)

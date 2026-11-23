@@ -339,6 +339,26 @@ def test_broker_authenticates_each_host_and_fences_partitioned_primary(tmp_path,
     assert not thread.is_alive()
 
 
+def test_slow_valid_telegram_poll_still_commits_the_owner_update(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "first-officer"))
+    telegram = importlib.import_module("standby_telegram")
+    inbox = telegram.TelegramInbox(tmp_path, 101, 234567)
+    api = telegram.BotAPI("234567:" + "x" * 32, 234567)
+
+    def call(method, fields, *, timeout):
+        assert method == "getUpdates" and fields["timeout"] == 4
+        # Simulate a successful upstream response whose headers arrive seven seconds in.
+        if timeout <= 7:
+            raise TimeoutError("Fixture response arrived after the transport deadline")
+        return [telegram_update(1, 11)]
+
+    monkeypatch.setattr(api, "call", call)
+    poll = telegram.TelegramPoll(inbox, api.get_updates)
+    poll.step()
+    assert poll.available.is_set() and poll.offset == 2
+    assert inbox.next()["message_id"] == 11
+
+
 def test_poll_commits_before_confirming_and_replay_never_resurrects_completed_messages(tmp_path, monkeypatch):
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "first-officer"))
     telegram = importlib.import_module("standby_telegram")

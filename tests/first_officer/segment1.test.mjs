@@ -585,6 +585,13 @@ test('standalone quick chat fails closed when the local model route cannot be ve
   assert.deepEqual(calls, []);
   assert.equal(await chat.answer({ prompt: 'define a branch' }, turn, config), 'A fixture answer.');
   assert.deepEqual(calls, [reference]);
+
+  const classify = () => ({ reason: 'deliberate-task', model: 'minimax-m3',
+    fallbacks: [fastModelRef, 'litellm/gemini-3.1-pro'] });
+  const context = { prompt: 'Explain the longer context', attachments: [] };
+  const selection = routeOwnerModel(context, config, classify);
+  assert.equal(selection.model, alias);
+  assert.deepEqual(selection.fallbacks, []);
 });
 
 test('the approved LiteLLM alias can serve simple turns from an independent local proxy', async () => {

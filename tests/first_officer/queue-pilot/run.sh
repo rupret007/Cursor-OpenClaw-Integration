@@ -47,7 +47,14 @@ hatchet-worker/bin/pip -q --disable-pip-version-check install 'hatchet-sdk==2.0.
     cp -- "$pilot_source/restate-worker.mjs" .
 )
 
+project_wire=()
+if [[ -n ${FO_PROJECT_WIRE_RELEASE:-} ]]; then
+    : "${FO_PROJECT_WIRE_NODE:?Set the pinned Node executable}"
+    : "${FO_PROJECT_WIRE_CLI:?Set the installed OpenClaw entrypoint}"
+    project_wire=("FO_PROJECT_WIRE_RELEASE=$FO_PROJECT_WIRE_RELEASE"
+                  "FO_PROJECT_WIRE_NODE=$FO_PROJECT_WIRE_NODE" "FO_PROJECT_WIRE_CLI=$FO_PROJECT_WIRE_CLI")
+fi
 # The nested namespace maps the loopback namespace owner to a non-root UID for Postgres.
-env -i HOME="$HOME" PATH="$PATH" FO_QUEUE_PILOT_HOME="$scratch" \
+env -i HOME="$HOME" PATH="$PATH" FO_QUEUE_PILOT_HOME="$scratch" "${project_wire[@]}" \
     unshare -Urn bash -c 'ip link set lo up && exec unshare --map-user="$1" --map-group="$2" bash "$3/boot.sh" "$3"' \
     _ "$(id -u)" "$(id -g)" "$pilot_source"

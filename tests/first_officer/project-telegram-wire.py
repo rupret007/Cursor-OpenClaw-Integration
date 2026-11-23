@@ -84,12 +84,13 @@ class BotApi(BaseHTTPRequestHandler):
 
 
 @contextmanager
-def gateway(node, cli, root, config, wire):
+def gateway(node, cli, root, config, wire, extra_env=None):
     wire.polling.clear()
     env = {"HOME": str(root), "PATH": f"{node.parent}:/usr/bin:/bin", "LANG": "C.UTF-8",
            "FO_LOCAL_NODE": "nucbox", "OPENCLAW_CONFIG_PATH": str(config),
            "OPENCLAW_STATE_DIR": str(root / "gateway-state"),
            "XDG_CONFIG_HOME": str(root / ".config")}
+    env.update(extra_env or {})
     with (root / "gateway.log").open("ab") as log:
         process = subprocess.Popen([str(node), str(cli), "gateway", "run"], env=env, stdout=log, stderr=log)
         try:
@@ -116,13 +117,51 @@ def exercise(wire, label, number, text, expected, deadline):
         time.sleep(.025)
     pair = wire.replies[prior:]
     if len(pair) != 2 or pair[0][1] != "On it." or expected.casefold() not in pair[1][1].casefold():
-        print(f"{label} reply mismatch. Replies {len(pair)}. Model calls {wire.model_calls}.", flush=True)
+        kinds = ("already has a receipt", "state or evidence is unavailable", "authority epoch changed",
+                 "scope", "required CI", "review the candidate", "On it.", "verified",
+                 "approve the exact issue", "active coding job", "project admission result", "Hatchet refused")
+        found = [kind for kind in kinds if any(kind.casefold() in item[1].casefold() for item in pair)]
+        print(f"{label} reply mismatch. Replies {len(pair)}. Model calls {wire.model_calls}. "
+              f"Known reply labels {found}.", flush=True)
         raise AssertionError("The Telegram reply did not match the fixture")
     ack, final = (reply[0] - started for reply in pair)
     typed_at = wire.typing[typed] - started if len(wire.typing) > typed else None
     timing = f"{typed_at:.2f}s" if typed_at is not None else "missing"
     print(f"{label} typing {timing}, acknowledgment {ack:.2f}s, final {final:.2f}s.", flush=True)
     return typed_at is not None and typed_at < 2 and ack < 2 and final < deadline
+
+
+def configure(wire, root, release):
+    wire.daemon_threads = True
+    wire.updates, wire.polling, wire.replies, wire.typing = Queue(), Event(), [], []
+    wire.model_calls = 0
+    owner = 123456
+    wire.bot = {"id": 234567, "is_bot": True, "first_name": "Fixture", "username": "project_rehearsal_bot"}
+    wire.chat = {"id": owner, "type": "private", "first_name": "Fixture"}
+    endpoint = f"http://127.0.0.1:{wire.server_port}"
+    config = root / "config.json"
+    with ThreadingHTTPServer(("127.0.0.1", 0), BotApi) as port_probe:
+        port = port_probe.server_port
+    alias = "litellm/qwen-local-fast"
+    write(config, {
+        "gateway": {"mode": "local", "bind": "loopback", "port": port,
+                    "auth": {"mode": "token", "token": secrets.token_urlsafe(32)}},
+        "plugins": {"allow": ["first-officer-conductor", "first-officer-exec-guard", "telegram"],
+                    "load": {"paths": [str(release / "first-officer-exec-guard.mjs"),
+                                       str(release / "round6/runtime/first-officer-conductor.mjs")]},
+                    "entries": {"telegram": {"enabled": True}, "first-officer-exec-guard": {"enabled": True},
+                                "first-officer-conductor": {"enabled": True, "hooks": {"allowConversationAccess": True},
+                                            "llm": {"allowModelOverride": True, "allowedModels": [alias],
+                                                    "allowedCompletionModels": [alias]}}}},
+        "agents": {"defaults": {"model": {"primary": alias}}},
+        "models": {"providers": {"litellm": {"baseUrl": endpoint + "/v1", "apiKey": "fixture-only",
+                                            "api": "openai-completions",
+                                            "models": [{"id": "qwen-local-fast", "name": "Fixture"}]}}},
+        "channels": {"telegram": {"enabled": True, "dmPolicy": "allowlist", "allowFrom": [owner],
+                                  "groupPolicy": "disabled", "botToken": "234567:" + secrets.token_urlsafe(32),
+                                  "execApprovals": {"approvers": [owner]}, "apiRoot": endpoint}},
+    })
+    return config
 
 
 def main():
@@ -135,13 +174,6 @@ def main():
     with tempfile.TemporaryDirectory(prefix="fo-project-telegram-") as directory, \
             ThreadingHTTPServer(("127.0.0.1", 0), BotApi) as wire:
         root = Path(directory)
-        wire.daemon_threads = True
-        wire.updates, wire.polling, wire.replies, wire.typing = Queue(), Event(), [], []
-        wire.model_calls = 0
-        owner = 123456
-        wire.bot = {"id": 234567, "is_bot": True, "first_name": "Fixture", "username": "project_rehearsal_bot"}
-        wire.chat = {"id": owner, "type": "private", "first_name": "Fixture"}
-        endpoint = f"http://127.0.0.1:{wire.server_port}"
         authority = root / ".local/state/openclaw-captain"
         (authority / "reviews").mkdir(parents=True, mode=0o700)
         gate = root / "gate"
@@ -149,28 +181,7 @@ def main():
         (gate / "fullgate.lock").touch()
         write(authority / "lease.json", {"node": "nucbox", "epoch": 3, "active": True})
         write(authority / "gate.json", {"directory": str(gate), "lock": "fullgate.lock", "hold": "HOLD"})
-        config = root / "config.json"
-        with ThreadingHTTPServer(("127.0.0.1", 0), BotApi) as port_probe:
-            port = port_probe.server_port
-        alias = "litellm/qwen-local-fast"
-        write(config, {
-            "gateway": {"mode": "local", "bind": "loopback", "port": port,
-                        "auth": {"mode": "token", "token": secrets.token_urlsafe(32)}},
-            "plugins": {"allow": ["first-officer-conductor", "first-officer-exec-guard", "telegram"],
-                        "load": {"paths": [str(release / "first-officer-exec-guard.mjs"),
-                                           str(release / "round6/runtime/first-officer-conductor.mjs")]},
-                        "entries": {"telegram": {"enabled": True}, "first-officer-exec-guard": {"enabled": True},
-                                    "first-officer-conductor": {"enabled": True, "hooks": {"allowConversationAccess": True},
-                                                "llm": {"allowModelOverride": True, "allowedModels": [alias],
-                                                        "allowedCompletionModels": [alias]}}}},
-            "agents": {"defaults": {"model": {"primary": alias}}},
-            "models": {"providers": {"litellm": {"baseUrl": endpoint + "/v1", "apiKey": "fixture-only",
-                                                "api": "openai-completions",
-                                                "models": [{"id": "qwen-local-fast", "name": "Fixture"}]}}},
-            "channels": {"telegram": {"enabled": True, "dmPolicy": "allowlist", "allowFrom": [owner],
-                                      "groupPolicy": "disabled", "botToken": "234567:" + secrets.token_urlsafe(32),
-                                      "execApprovals": {"approvers": [owner]}, "apiRoot": endpoint}},
-        })
+        config = configure(wire, root, release)
         thread = Thread(target=wire.serve_forever, daemon=True)
         thread.start()
         checks = []

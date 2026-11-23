@@ -152,6 +152,12 @@ nice -n 10 python3 -B first-officer/lanes/queue.py "$test_policy" "$private_ledg
 
 If the receipt shows `pending`, the status command establishes only what the local journal knows. Identify the original run in Hatchet and repeat the command with `--reconcile-project-run "$hatchet_run"` in place of `--status`. This uses the original private queue policy to read the run and checks its tenant, workflow, idempotency key, repository, issue, commit, and epoch before adopting the receipt. A mismatch leaves the run pending. The scoped coding worker and Telegram recovery rehearsal are separate acceptance gates.
 
+### Rehearse an admitted command in isolation
+
+The queue pilot can drive the packaged gateway through a private Telegram Bot API fixture. Set `FO_PROJECT_WIRE_RELEASE`, `FO_PROJECT_WIRE_NODE`, and `FO_PROJECT_WIRE_CLI` to the inventory-verified bundle, pinned Node executable, and installed OpenClaw entrypoint. Run `nice -n 10 bash tests/first_officer/queue-pilot/run.sh` from the Nuc in an isolated profile without a system GitHub CLI. The pilot supplies a private fixture adapter for GitHub and uses a loopback model stub.
+
+The rehearsal waits for the native outbox to settle before a normal restart. When a send is interrupted and the remote receipt is unknown, treat delivery as unresolved and inspect the original outcome before repeating the request. Telegram final-text recovery can resend a reply after a lost acknowledgment. The scoped job reservation still fences worker execution. [OpenClaw Telegram recovery](https://docs.openclaw.ai/channels/telegram/troubleshooting)
+
 ### Daily read-only project briefing
 
 Enable the daily pilot on an isolated authority by placing `{"enabled":true}` in a private `project-daily.json` beside the lease and supplying its approved `projects.json`. The active Captain checks once per minute and generates the first eligible briefing at or after 07:00 Central Time. A restart after 07:00 can catch up. The saved day and observation time travel in the signed authority handoff.

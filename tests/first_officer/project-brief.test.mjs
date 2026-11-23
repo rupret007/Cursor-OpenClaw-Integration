@@ -107,6 +107,17 @@ test('Captain dispatch routes a scoped project identity and reports an explicit 
     { signal: AbortSignal.timeout(2000) });
   assert.match(result, /approve the exact issue, base commit, and authority epoch/);
   assert.deepEqual(calls, [['dispatch-project', { repository: 'example/integration', issue: 40 }]]);
+  const verified = createCaptain({ state: async (op) => {
+    assert.equal(op, 'dispatch-project');
+    return { result: 'duplicate', job: {
+      request: { repository: 'example/integration', issue: 40, head: 'a'.repeat(40) },
+      state: 'verified', commit: 'b'.repeat(40),
+    } };
+  } });
+  const repeat = await verified.run({ action: 'advance-project', repository: 'example/integration', issue: 40 },
+    { signal: AbortSignal.timeout(2000) });
+  assert.match(repeat, /already has a receipt/);
+  assert.match(repeat, /last verification matched all required CI checks/);
 });
 
 test('The background monitor checks one admitted job and reports a candidate as an approval decision', async () => {

@@ -6,7 +6,7 @@ The maintenance worktree starts from `5513419`. GitHub shows draft PR #43 open w
 
 The offline handoff command records a pending holder against the last exact lease epoch while the broker journal is exclusively locked. After the standard recovery wait, only the named host can claim the next epoch. A stale source epoch, a conflicting target, or a running broker blocks the command. Retrying the same target before it claims is safe. An explicit correction must name the previous target. The tests verify that an unconfirmed effect survives handback without a second send. The focused standby, broker, and host suite passed 23 tests on the Nuc.
 
-The journal command covers lease planning. Moving the broker between machines still requires a transfer that fences local service restarts and preserves every inbox, job, and receipt journal. Physical maintenance in both directions and unattended Mac takeover remain unverified.
+The export command also seals the stopped source journal before publishing a checksummed, private copy of the broker databases and queue receipts. Offline fault tests verify source restart refusal after an interrupted export, same-ID retry, preserved inbox and run data, and damage detection on replay. The focused suite passed 25 tests. Destination activation and cross-host rollback still need implementation. Physical maintenance in both directions and unattended Mac takeover remain unverified.
 
 ## Current Captain candidate
 

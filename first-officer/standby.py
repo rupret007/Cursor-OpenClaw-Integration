@@ -8,12 +8,15 @@ import argparse
 from contextlib import ExitStack, closing
 from dataclasses import dataclass
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import shutil
 import sqlite3
 import stat
+import tempfile
 import time
 
 
@@ -70,7 +73,7 @@ def confirm_effect(db, kind, operation):
 
 
 class StandbyAuthority:
-    def __init__(self, directory: Path, *, clock=time.monotonic):
+    def __init__(self, directory: Path, *, clock=time.monotonic, export_id=None):
         self._clock = clock
         self._grant = None
         self._deadline = None
@@ -97,6 +100,10 @@ class StandbyAuthority:
                     epoch INTEGER NOT NULL,
                     node TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS broker_export (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    transfer_id TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS effects (
                     kind TEXT NOT NULL,
                     operation TEXT NOT NULL,
@@ -104,6 +111,9 @@ class StandbyAuthority:
                     PRIMARY KEY (kind, operation)
                 );
             """)
+            sealed = self._export_id()
+            if sealed is not None and sealed != export_id:
+                raise LeaseRejected("Broker journal was sealed for transfer")
             prior = self._last_grant()
             self._recover_after = clock() + LEASE_SECONDS if prior else clock()
             self._resources = opening.pop_all()
@@ -121,31 +131,52 @@ class StandbyAuthority:
     def _valid_grant(self, now):
         return self._grant if self._deadline is not None and now < self._deadline else None
 
+    def _export_id(self):
+        row = self._db.execute("SELECT transfer_id FROM broker_export WHERE id = 1").fetchone()
+        return row[0] if row else None
+
+    def seal_export(self, expected, destination, transfer_id):
+        """Fence restarts before a portable copy of the journal can be published."""
+        if not isinstance(transfer_id, str) or not re.fullmatch(r"[0-9a-f]{32}", transfer_id):
+            raise ValueError("Expected a 32-character hex transfer ID")
+        sealed = self._export_id()
+        if sealed is not None and sealed != transfer_id:
+            raise LeaseRejected("Broker journal is sealed for another transfer")
+        if sealed is not None and self._planned_holder() != Grant(destination, expected.epoch):
+            raise LeaseRejected("Broker journal is sealed for a different destination")
+        self.plan_handoff(expected, destination, transfer_id=transfer_id)
+
     def _planned_holder(self):
         row = self._db.execute("SELECT node, epoch FROM planned_holder WHERE id = 1").fetchone()
         return Grant(*row) if row else None
 
-    def plan_handoff(self, expected, destination, *, replaces=None):
+    def plan_handoff(self, expected, destination, *, replaces=None, transfer_id=None):
         """Set the next holder while exclusively opening a stopped broker's journal."""
+        sealed = self._export_id()
+        if sealed is not None and sealed != transfer_id:
+            raise LeaseRejected("Broker journal was sealed for transfer")
         if destination not in (PRIMARY, STANDBY) or replaces not in (None, PRIMARY, STANDBY):
             raise ValueError("Unknown Captain host")
         if expected is None or self._grant is not None or self._last_grant() != expected:
             raise LeaseRejected("Handoff requires a stopped broker and the current source epoch")
 
         pending = self._planned_holder()
-        if pending == Grant(destination, expected.epoch):
-            return "planned"
+        wanted = Grant(destination, expected.epoch)
         previous = Grant(replaces, expected.epoch) if replaces is not None else None
-        if pending != previous:
+        if pending != wanted and pending != previous:
             raise LeaseRejected("Handoff target changed")
         with self._db:
             self._db.execute("INSERT OR REPLACE INTO planned_holder VALUES (1, ?, ?)",
                              (expected.epoch, destination))
+            if transfer_id is not None:
+                self._db.execute("INSERT OR IGNORE INTO broker_export VALUES (1, ?)", (transfer_id,))
         return "planned"
 
     def claim(self, node):
         if node not in (PRIMARY, STANDBY):
             raise ValueError("Unknown Captain host")
+        if self._export_id() is not None:
+            raise LeaseRejected("Broker journal was sealed for transfer")
         now = self._clock()
         if now < self._recover_after:
             return None
@@ -234,6 +265,108 @@ class StandbyAuthority:
             raise LeaseRejected("Captain lease expired or superseded")
 
 
+BROKER_JOURNALS = (
+    "authority.sqlite", "telegram-inbox.sqlite", "project-daily.sqlite", "project-reservations.sqlite",
+    "review-queue-receipts.jsonl", "project-queue-receipts.jsonl",
+)
+
+
+def private_directory(path):
+    info = path.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise ValueError("Expected a private broker directory")
+
+
+def sync_path(path):
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def journal_digests(directory):
+    result = {}
+    for name in BROKER_JOURNALS:
+        try:
+            source = open_private(directory, name, create=False)
+        except FileNotFoundError:
+            if name == "authority.sqlite":
+                raise
+            continue
+        with source:
+            digest = hashlib.sha256()
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+            result[name] = digest.hexdigest()
+    return result
+
+
+def copy_database(source, output):
+    deadline = time.monotonic() + 30
+
+    def enforce_deadline(status, remaining, total):
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Broker database copy timed out")
+
+    with (closing(sqlite3.connect(source.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)) as live,
+          closing(sqlite3.connect(output, timeout=1)) as copy):
+        live.backup(copy, pages=256, progress=enforce_deadline)
+        if copy.execute("PRAGMA quick_check").fetchone() != ("ok",):
+            raise ValueError("Broker journal failed validation")
+
+
+def export_snapshot(authority, state, output, source, destination, transfer_id):
+    """Publish a sealed snapshot while holding the same lock as the live broker."""
+    private_directory(state)
+    private_directory(output.parent)
+    if output.resolve().is_relative_to(state.resolve()) or state.resolve().is_relative_to(output.resolve()):
+        raise ValueError("Keep the export outside the broker state")
+    identity = {"version": 1, "transfer": transfer_id, "source": source.node,
+                "epoch": source.epoch, "destination": destination}
+    if output.exists() or output.is_symlink():
+        private_directory(output)
+        if authority._export_id() != transfer_id or authority._last_grant() != source:
+            raise LeaseRejected("Existing export does not match the source fence")
+        journals = journal_digests(output)
+        if ({entry.name for entry in output.iterdir()} != {*journals, "transfer.json"}
+                or read_private_json(output / "transfer.json") != {**identity, "journals": journals}):
+            raise ValueError("Existing export failed verification")
+        sync_path(output.parent)
+        return
+
+    with tempfile.TemporaryDirectory(dir=output.parent, prefix=".captain-export-") as temporary:
+        # Rename a child, so cleanup can still remove the private staging parent.
+        snapshot = Path(temporary) / "snapshot"
+        snapshot.mkdir(mode=0o700)
+        authority.seal_export(source, destination, transfer_id)
+        for name in BROKER_JOURNALS:
+            try:
+                data = open_private(state, name, create=False)
+            except FileNotFoundError:
+                if name == "authority.sqlite":
+                    raise
+                continue
+            with data, open_private(snapshot, name):
+                if name.endswith(".sqlite"):
+                    copy_database(state / name, snapshot / name)
+                else:
+                    with (snapshot / name).open("wb") as copy:
+                        shutil.copyfileobj(data, copy)
+            sync_path(snapshot / name)
+        manifest = {**identity, "journals": journal_digests(snapshot)}
+        with open(snapshot / "transfer.json", "x", opener=private_create) as receipt:
+            json.dump(manifest, receipt, sort_keys=True)
+        sync_path(snapshot / "transfer.json")
+        sync_path(snapshot)
+        snapshot.rename(output)
+        sync_path(output.parent)
+
+
+def private_create(path, flags):
+    return os.open(path, flags | os.O_NOFOLLOW, 0o600)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Plan the next lease on a stopped Captain broker.")
     parser.add_argument("--state", type=Path, required=True)
@@ -241,15 +374,25 @@ def main():
     parser.add_argument("--epoch", type=int, required=True)
     parser.add_argument("--destination", choices=(PRIMARY, STANDBY), required=True)
     parser.add_argument("--replace-target", choices=(PRIMARY, STANDBY))
+    parser.add_argument("--export-path", type=Path)
+    parser.add_argument("--transfer-id")
     args = parser.parse_args()
+    if (args.export_path is None) != (args.transfer_id is None) or (args.export_path and args.replace_target):
+        parser.error("An export requires its path and transfer ID, independent of target replacement")
+    source = Grant(args.source, args.epoch)
     try:
-        with open_private(args.state, "authority.sqlite", create=False), StandbyAuthority(args.state) as authority:
-            authority.plan_handoff(Grant(args.source, args.epoch), args.destination, replaces=args.replace_target)
+        private_directory(args.state)
+        with (open_private(args.state, "authority.sqlite", create=False),
+              StandbyAuthority(args.state, export_id=args.transfer_id) as authority):
+            if args.export_path:
+                export_snapshot(authority, args.state, args.export_path, source, args.destination, args.transfer_id)
+            else:
+                authority.plan_handoff(source, args.destination, replaces=args.replace_target)
     except BlockingIOError:
         parser.exit(1, "Captain broker journal is in use.\n")
     except (OSError, ValueError, sqlite3.Error):
         parser.exit(1, "Captain handoff could not be planned. Check the private journal and expected lease.\n")
-    print("Captain handoff planned.")
+    print("Captain broker export ready." if args.export_path else "Captain handoff planned.")
 
 
 if __name__ == "__main__":

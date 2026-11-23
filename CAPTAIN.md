@@ -82,6 +82,14 @@ python3 -I -B "$release/round6/runtime/segment1/queue-runtime/standby.py" \
 
 A successful plan reserves the next claim for the named host. The broker still observes the 90-second recovery wait on startup. A repeated command before promotion preserves the existing plan. To undo a plan before it is consumed, run the command against the same stopped journal and source epoch with the original host as the destination and the previous destination supplied in `--replace-target`. After a successful claim, use the new epoch for any further handoff. The operation leaves effect receipts intact. Cross-host broker movement and service fencing require a separate transfer procedure.
 
+### Export a stopped broker for maintenance
+
+The export stage requires the source broker process to have exited, including its poll and queue threads. Disable service restart before export and verify the source service is pinned to a release that enforces the export seal. Restore from old backups or launching an older broker can bypass the seal. Keep one fixed state directory per service.
+
+Use the same stopped-journal command with an additional `--export-path` under a private mode-0700 parent and a locally generated 32-digit hexadecimal `--transfer-id`. Record the ID securely for retry. The command seals the source before publishing a private, checksummed snapshot. It preserves the Telegram inbox, lease and effects, daily briefing, coding reservations, and the review and project receipts. Provision destinations with separate private runtime settings and issue fresh grants on the new epoch. Transfer snapshots over an authenticated private connection. The inbox can contain private update text, so keep snapshots out of logs, source control, and shared storage.
+
+A failed copy can leave the source sealed without a completed snapshot. Use the same transfer ID and destination to resume. Keep the old service disabled. An existing snapshot with missing or changed contents fails verification and is preserved for investigation. The snapshot is sealed too. This stage does not activate a destination, and the full transfer and rollback procedure must be verified before using it for maintenance.
+
 ### Start the broker at boot on an independent Linux host
 
 The systemd template at `first-officer/systemd/openclaw-captain-broker@.service` starts the pinned broker at boot under the dedicated `openclaw-broker` system account. Confirm the host has systemd, Python 3, and local persistent storage before choosing it. The broker must be reachable from both Captain hosts while either one is offline. Keep the SQLite state under `/var/lib/openclaw-captain-broker` on the broker’s own disk.

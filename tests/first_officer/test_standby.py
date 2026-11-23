@@ -1,4 +1,6 @@
+import json
 import runpy
+import sqlite3
 from pathlib import Path
 import subprocess
 import sys
@@ -163,3 +165,75 @@ def test_handoff_command_refuses_open_broker_and_missing_journal(tmp_path):
         assert "journal is in use" in blocked.stderr
     assert run().returncode == 0
     assert run().returncode == 0
+
+
+def test_export_fences_source_and_retries_without_overwriting(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir(mode=0o700)
+    destination = tmp_path / "snapshot"
+    transfer = "12" * 16
+    command = [sys.executable, "-I", "-B", str(STANDBY_SCRIPT), "--state", str(source),
+               "--source", PRIMARY, "--epoch", "1", "--destination", STANDBY,
+               "--export-path", str(destination), "--transfer-id", transfer]
+
+    def run(*argv):
+        return subprocess.run([*command, *argv], check=False, capture_output=True, timeout=3)
+
+    with Authority(source) as first:
+        grant = first.claim(PRIMARY)
+        assert first.perform(grant, "telegram-reply", "prior", lambda: None) == "confirmed"
+        assert run().returncode == 1
+        assert not destination.exists()
+
+    inbox = source / "telegram-inbox.sqlite"
+    inbox.touch(mode=0o600)
+    with sqlite3.connect(inbox) as db:
+        db.execute("CREATE TABLE pending (id INT)")
+        db.execute("INSERT INTO pending VALUES (42)")
+    (source / "project-queue-receipts.jsonl").write_text('{"run": "original"}\n')
+    (source / "project-queue-receipts.jsonl").chmod(0o600)
+    (source / "project-scope.json").write_text("{}")
+
+    assert run().returncode == 0
+    assert run().returncode == 0
+    with pytest.raises(LeaseRejected, match="sealed"):
+        Authority(source)
+    with pytest.raises(LeaseRejected, match="sealed"):
+        Authority(destination)
+    with sqlite3.connect(destination / inbox.name) as db:
+        assert db.execute("SELECT id FROM pending").fetchone() == (42,)
+    assert (destination / "project-queue-receipts.jsonl").read_text() == '{"run": "original"}\n'
+    assert not (destination / "project-scope.json").exists()
+    receipt = json.loads((destination / "transfer.json").read_bytes())
+    assert receipt["transfer"] == transfer
+    assert set(receipt["journals"]) == {"authority.sqlite", inbox.name, "project-queue-receipts.jsonl"}
+
+    assert run("--transfer-id", "34" * 16).returncode == 1
+    (destination / "project-queue-receipts.jsonl").write_text("damaged")
+    assert run().returncode == 1
+    assert (destination / "project-queue-receipts.jsonl").read_text() == "damaged"
+
+
+def test_interrupted_export_keeps_source_sealed_for_same_retry(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir(mode=0o700)
+    snapshot = tmp_path / "snapshot"
+    transfer = "ab" * 16
+    with Authority(source) as broker:
+        grant = broker.claim(PRIMARY)
+
+    with Authority(source, export_id=transfer) as journal:
+        with monkeypatch.context() as injected:
+            def interrupted(path):
+                raise OSError("fixture interruption")
+
+            injected.setitem(standby["export_snapshot"].__globals__, "sync_path", interrupted)
+            with pytest.raises(OSError, match="fixture interruption"):
+                standby["export_snapshot"](journal, source, snapshot, grant, STANDBY, transfer)
+        assert not snapshot.exists()
+
+    with pytest.raises(LeaseRejected, match="sealed"):
+        Authority(source)
+    with Authority(source, export_id=transfer) as recovery:
+        standby["export_snapshot"](recovery, source, snapshot, grant, STANDBY, transfer)
+    assert (snapshot / "transfer.json").is_file()

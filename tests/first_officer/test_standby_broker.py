@@ -133,6 +133,26 @@ def test_broker_entrypoint_loads_release_modules_in_isolated_python(tmp_path):
     assert "--telegram-config" in result.stdout
 
 
+def test_portable_queue_environment_is_private_and_limited(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "first-officer"))
+    transport = importlib.import_module("standby_broker")
+    name = "FO_HATCHET_LANE_TOKEN"
+    monkeypatch.setenv(name, "existing-fixture")
+    config = tmp_path / "queue-environment.json"
+    config.write_text(json.dumps({name: "fixture-token", "PATH": "unexpected"}))
+    config.chmod(0o600)
+    with pytest.raises(ValueError, match="private broker queue environment"):
+        transport.load_queue_environment(config)
+    assert transport.os.environ[name] == "existing-fixture"
+    config.write_text(json.dumps({name: "fixture-token"}))
+    config.chmod(0o644)
+    with pytest.raises(ValueError, match="private authority file"):
+        transport.load_queue_environment(config)
+    config.chmod(0o600)
+    transport.load_queue_environment(config)
+    assert transport.os.environ[name] == "fixture-token"
+
+
 def telegram_update(update_id, message_id, author=101):
     return {"update_id": update_id, "message": {"message_id": message_id, "date": 1, "text": "Fixture command",
             "chat": {"id": author, "type": "private"}, "from": {"id": author, "is_bot": False}}}
@@ -143,6 +163,7 @@ def test_broker_authenticates_each_host_and_fences_partitioned_primary(tmp_path,
     transport = importlib.import_module("standby_broker")
     host = importlib.import_module("standby_host")
     channel_module = importlib.import_module("standby_channel")
+    lease = importlib.import_module("standby")
     certificates(tmp_path, ("broker", "nuc", "mac", "unregistered"))
 
     ca = tmp_path / "ca.pem"
@@ -243,7 +264,7 @@ def test_broker_authenticates_each_host_and_fences_partitioned_primary(tmp_path,
         if message_id == 13 and text == "On it.":
             active_progress.wait()
         sends.append((owner, text, message_id))
-        if message_id == 12 and text != "On it.":
+        if message_id in (12, 14) and text != "On it.":
             raise TimeoutError
         return {"chat": {"id": owner}, "message_id": 400 + message_id}
 
@@ -526,12 +547,69 @@ def test_broker_authenticates_each_host_and_fences_partitioned_primary(tmp_path,
         assert sends == [(101, "Fixture response", 11), (101, "On it.", 12),
                          (101, "Fixture response", 12), (101, "On it.", 13),
                          (101, "Fixture response", 13)]
+        poll.step()
+        inbox.ingest([telegram_update(4, 14), telegram_update(5, 15)])
+        assert mac.next_telegram_message(2)["message_id"] == 14
+        with pytest.raises(transport.EffectUnconfirmed):
+            mac.send_telegram_reply(2, 14, "final", "Fixture response")
         standby.park()
         assert not active_gateways
     finally:
         broker.shutdown()
         thread.join(timeout=5)
 
+    assert not thread.is_alive()
+    old_endpoint = mac
+    old_state = state
+    approved_source = lease.Grant(transport.STANDBY, 2)
+    snapshot = tmp_path / "snapshot"
+    transfer_id = "ab" * 16
+    with lease.StandbyAuthority(old_state, export_id=transfer_id) as authority:
+        lease.export_snapshot(authority, old_state, snapshot, approved_source, transport.PRIMARY, transfer_id)
+    with pytest.raises(lease.LeaseRejected, match="sealed"):
+        lease.StandbyAuthority(old_state)
+
+    state = tmp_path / "destination"
+    state.mkdir(mode=0o700)
+    assert lease.import_snapshot(state, snapshot, approved_source, transport.PRIMARY, transfer_id)
+    assert not (state / "project-scope.json").exists()
+
+    telegram_module = importlib.import_module("standby_telegram")
+    inbox = telegram_module.TelegramInbox(state, 101, 202)
+    poll = telegram_module.TelegramPoll(inbox, lambda _offset: [telegram_update(4, 14), telegram_update(5, 15)])
+    poll.step()  # Upstream replay does not recreate settled messages.
+    review = transport.ReviewQueue(state, profile, clock=lambda: now)
+    project = transport.ProjectQueue(state, project_profile, clock=lambda: now)
+    ready = Future()
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    broker = ready.result(timeout=5)
+    try:
+        with pytest.raises(transport.BrokerUnavailable):
+            old_endpoint.claim()
+        nuc, mac = client("nuc"), client("mac")
+        assert nuc.claim() is None
+        now += lease.LEASE_SECONDS
+        assert mac.claim() is None
+        epoch = nuc.claim()
+        assert epoch == 3
+        with pytest.raises(transport.LeaseRejected):
+            mac.renew(2)
+        assert nuc.next_telegram_message(epoch)["message_id"] == 14
+        assert nuc.send_telegram_reply(epoch, 14, "final", "Fixture response") == "unconfirmed"
+        assert nuc.complete_telegram_message(epoch, 14) == "unconfirmed"
+        assert nuc.next_telegram_message(epoch)["message_id"] == 15
+        assert nuc.send_telegram_reply(epoch, 15, "final", "Fixture response") == "confirmed"
+        assert nuc.complete_telegram_message(epoch, 15) == "confirmed"
+        assert nuc.next_telegram_message(epoch) is None
+        assert nuc.project_receipt(epoch, coding)["run"] == "fixture-project-run"
+        assert nuc.reconcile_project(epoch, coding, "fixture-project-run")["reused"] is True
+        assert nuc.review_receipt(epoch, approved)["run"] == "fixture-run-1"
+        assert len(queue_calls) == 3
+        assert [message_id for _, _, message_id in sends][-2:] == [14, 15]
+    finally:
+        broker.shutdown()
+        thread.join(timeout=5)
     assert not thread.is_alive()
 
 

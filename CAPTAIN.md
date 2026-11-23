@@ -147,7 +147,7 @@ sudo launchctl disable system/local.openclaw.captain-broker
 sudo launchctl bootout system/local.openclaw.captain-broker
 ```
 
-The rendered broker service starts leases and the Telegram relay. Queue adapters and credentials require separate private service configuration before verifying queue reconciliation on the Mini. Use BobTestesBot through the macOS login window to verify operation without an active desktop session. A preboot FileVault unlock is a separate condition. [Apple launchd guide](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html)
+The base broker service starts leases and the Telegram relay. To enable reconciliation on the Mini, also pass `--project-queue-config` or `--review-queue-config` with the respective private policy file and `--queue-environment` with a separate private JSON file. Use the existing `FO_HATCHET_LANE_TOKEN`, `FO_RESTATE_LANE_TOKEN`, and `FO_QUEUE_HOSTS` settings as needed. The plist contains only file paths. Keep the underlying queue reachable during maintenance if you need live job readback. The transferred receipts remain available if that queue is offline. Use BobTestesBot through the macOS login window to verify operation without an active desktop session. A preboot FileVault unlock is a separate condition. [Apple launchd guide](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html)
 
 ### Start the broker at boot on a Linux host
 

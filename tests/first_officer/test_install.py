@@ -791,6 +791,20 @@ def test_standalone_service_pins_the_same_guard_on_both_hosts(tmp_path, monkeypa
     assert broker["ProgramArguments"][broker["ProgramArguments"].index("--telegram-config") + 1] == str(
         broker_dir / "telegram.json")
     assert b"fixture-broker-setting" not in rendered
+    queue_config = broker_dir / "project-queue.json"
+    queue_env = broker_dir / "queue-environment.json"
+    for fixture in (queue_config, queue_env):
+        fixture.write_text("fixture-queue-setting")
+        fixture.chmod(0o600)
+    with pytest.raises(ValueError, match="policies and their private environment together"):
+        standalone.prepare_mac_broker(release, runtime / "python3", state, broker_dir, listen,
+                                      project_queue_config=queue_config)
+    rendered = standalone.prepare_mac_broker(release, runtime / "python3", state, broker_dir, listen,
+                                             project_queue_config=queue_config, queue_environment=queue_env)
+    assert plistlib.loads(rendered)["ProgramArguments"][-4:] == [
+        "--project-queue-config", str(queue_config), "--queue-environment", str(queue_env),
+    ]
+    assert b"fixture-queue-setting" not in rendered
     with pytest.raises(ValueError, match="private broker interface"):
         standalone.prepare_mac_broker(release, runtime / "python3", state, broker_dir,
                                       standalone.ipaddress.IPv4Address("0.0.0.0"))

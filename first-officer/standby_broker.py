@@ -6,6 +6,7 @@ import http.client
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import ipaddress
 import json
+import os
 from pathlib import Path
 import re
 import sqlite3
@@ -397,6 +398,17 @@ def telegram_components(state, config):
     return inbox, effects, TelegramPoll(inbox, api.get_updates)
 
 
+def load_queue_environment(path):
+    settings = read_private_json(path)
+    allowed = {"FO_HATCHET_LANE_TOKEN", "FO_RESTATE_LANE_TOKEN", "FO_QUEUE_HOSTS"}
+    if not isinstance(settings, dict) or not settings.keys() <= allowed or any(
+            not isinstance(value, str) or not value or len(value) > 4096 or
+            not value.isprintable() or any(character.isspace() for character in value)
+            for value in settings.values()):
+        raise ValueError("Invalid private broker queue environment")
+    os.environ.update(settings)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--listen", type=ipaddress.IPv4Address, default=ipaddress.IPv4Address("127.0.0.1"))
@@ -406,19 +418,24 @@ def main():
     parser.add_argument("--telegram-config", type=Path)
     parser.add_argument("--review-queue-config", type=Path)
     parser.add_argument("--project-queue-config", type=Path)
+    parser.add_argument("--queue-environment", type=Path)
     args = parser.parse_args()
     if args.listen.is_global or args.listen.is_unspecified or args.listen.is_multicast:
         parser.error("Select a specific private interface")
     try:
+        if args.queue_environment is not None:
+            if args.review_queue_config is None and args.project_queue_config is None:
+                raise ValueError("Queue environment requires a configured broker queue")
+            load_queue_environment(args.queue_environment)
         peers = {client_fingerprint(args.nuc_cert): PRIMARY, client_fingerprint(args.mac_cert): STANDBY}
         with StandbyAuthority(args.state) as authority:
-            inbox, effects, poll = None, {}, None
-            if args.telegram_config is not None:
-                inbox, effects, poll = telegram_components(args.state, args.telegram_config)
             review = (ReviewQueue(args.state, read_private_json(args.review_queue_config))
                       if args.review_queue_config is not None else None)
             project = (ProjectQueue(args.state, read_private_json(args.project_queue_config))
                        if args.project_queue_config is not None else None)
+            inbox, effects, poll = None, {}, None
+            if args.telegram_config is not None:
+                inbox, effects, poll = telegram_components(args.state, args.telegram_config)
             with Broker((str(args.listen), args.port), authority, cert=args.cert, key=args.key, ca=args.ca,
                         peers=peers, effects=effects, inbox=inbox, poll=poll, review=review, project=project,
                         daily=DailyBriefing(args.state)) as broker:

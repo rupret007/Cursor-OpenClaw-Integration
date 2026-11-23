@@ -118,7 +118,8 @@ def verify_release(release):
     stage.verify_inventory(release, pin.group(1))
 
 
-def prepare_mac_broker(release, python, state, config, listen):
+def prepare_mac_broker(release, python, state, config, listen, *, review_queue_config=None,
+                       project_queue_config=None, queue_environment=None):
     if os.getuid() == 0 or os.getuid() != os.geteuid():
         raise ValueError("Prepare the broker as its unprivileged service account")
     for path in (state, config):
@@ -145,6 +146,13 @@ def prepare_mac_broker(release, python, state, config, listen):
                "--key", str(key), "--telegram-config", str(telegram)]
     for flag, path in certificates.items():
         command.extend(("--" + flag, str(path)))
+    if (queue_environment is None) != (review_queue_config is None and project_queue_config is None):
+        raise ValueError("Configure broker queue policies and their private environment together")
+    for flag, path in (("review-queue-config", review_queue_config), ("project-queue-config", project_queue_config),
+                       ("queue-environment", queue_environment)):
+        if path is not None:
+            private_config(path)
+            command.extend(("--" + flag, str(path)))
     return plistlib.dumps({
         "Label": BROKER_LABEL, "ProgramArguments": command, "UserName": pwd.getpwuid(os.getuid()).pw_name,
         "WorkingDirectory": str(state), "RunAtLoad": True, "KeepAlive": {"SuccessfulExit": False},
@@ -213,9 +221,14 @@ def mac_broker_main(argv):
     for name in ("release", "python", "state", "config-dir"):
         parser.add_argument("--" + name, type=Path, required=True)
     parser.add_argument("--listen", type=ipaddress.IPv4Address, required=True)
+    for option in ("review-queue-config", "project-queue-config", "queue-environment"):
+        parser.add_argument("--" + option, type=Path)
     args = parser.parse_args(argv)
     try:
-        definition = prepare_mac_broker(args.release, args.python, args.state, args.config_dir, args.listen)
+        definition = prepare_mac_broker(args.release, args.python, args.state, args.config_dir, args.listen,
+                                        review_queue_config=args.review_queue_config,
+                                        project_queue_config=args.project_queue_config,
+                                        queue_environment=args.queue_environment)
     except (OSError, ValueError):
         print("Broker preflight failed. Check the release, interface and private service paths.", file=sys.stderr)
         return 1

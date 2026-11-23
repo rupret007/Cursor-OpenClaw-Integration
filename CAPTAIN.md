@@ -126,6 +126,20 @@ Set the profile mode to `0600` and its authority directory to `0700`. Dependenci
 
 The read-only profile can recommend work. It does not grant worker dispatch. The ledger stores the last 50 changed recommendations with the issue, action, observed commit when available, and lease epoch. Signed handoff carries the ledger. Each host loads its own operator-provided profile. To roll back the briefing on an approved test host, move its `projects.json` to a private backup on the same host. The next request uses the existing Captain briefing. Restoring the file restores the project view.
 
+### Inspect a coding submission after interruption
+
+The coding queue boundary uses a stable lane ID derived from the normalized repository, issue number, exact commit, and lease epoch. Only the dedicated Hatchet coding workflow can accept this payload. A refused coding submission needs an operator decision. A submission with unknown acceptance stays reserved while the original outcome is checked. Existing review lanes retain their Restate route.
+
+Inspect a private test ledger without contacting the queue:
+
+```bash
+nice -n 10 python3 -B first-officer/lanes/queue.py "$test_policy" "$private_ledger" \
+  --status --project-repository "$repository" --project-issue "$issue" \
+  --head "$full_commit" --project-epoch "$epoch"
+```
+
+If the receipt shows `pending`, the status command establishes only what the local journal knows. Identify the original run in Hatchet and repeat the command with `--reconcile-project-run "$hatchet_run"` in place of `--status`. This uses the original private queue policy to read the run and checks its tenant, workflow, idempotency key, repository, issue, commit, and epoch before adopting the receipt. A mismatch leaves the run pending. The scoped coding worker and Telegram recovery rehearsal are separate acceptance gates.
+
 ### Compare Captain performance
 
 Use the same scoped task, initial GitHub state, and acceptance checks for each assistant. Use private fixtures for write and fault cases. Collect wall time from prompt receipt to the first correct actionable answer, the number of separate Jeff interventions, and the number of milestones with verified receipts. Record unrun cases as unverified.

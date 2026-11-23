@@ -6,6 +6,7 @@ from copy import deepcopy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.util
 import json
+import multiprocessing
 import os
 from pathlib import Path
 import secrets
@@ -118,8 +119,11 @@ def relay(target, mode):
                 if mode == "drop" and ("/send/" in self.path or "/trigger" in self.path):
                     self.connection.shutdown(socket.SHUT_RDWR)
                     return
-                if mode == "hold" and not release.wait(12):
+                if mode in ("hold", "hold-drop") and not release.wait(12):
                     raise AssertionError("Real reply was never released")
+                if mode == "hold-drop" and self.command == "POST":
+                    self.close_connection = True
+                    return
                 self.send_response(code)
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
@@ -195,6 +199,45 @@ def check_workers(config, refused, headers):
             f"{[max(0, x[0] - x[2]) for x in intervals]}, max observed concurrency 1")
 
 
+def dispatch_project(config, job, ledger):
+    queue.dispatch(config, job, ledger)
+
+
+def check_project_restart(config, headers):
+    identity = {"repository": "example/integration", "issue": 40, "head": secrets.token_hex(20), "epoch": 2}
+    job = {**identity, "lane": queue.project_lane(**identity)}
+    with relay(RESTATE, "pass") as (fallback, _, _, _, fallback_calls):
+        with relay(HATCHET, "hold-drop") as (url, received, release, real, calls):
+            coding = deepcopy(config)
+            coding["hatchet"].update(base_url=url, workflow=queue.PROJECT_WORKFLOW)
+            coding["restate"]["base_url"] = fallback
+            submitter = multiprocessing.get_context("spawn").Process(target=dispatch_project,
+                                                                     args=(coding, job, LEDGER))
+            submitter.start()
+            try:
+                assert received.wait(10), "Hatchet did not accept the coding submission"
+                run = queue.accepted_run("hatchet", real[0][1])
+                assert state(job)["phase"] == "pending"
+                submitter.kill()
+                submitter.join(timeout=5)
+                assert submitter.exitcode == -9
+                assert effect({**job, "pull_request": job["issue"]}) is None
+            finally:
+                release.set()
+                if submitter.is_alive():
+                    submitter.kill()
+                    submitter.join(timeout=5)
+            expect_failure(lambda: queue.dispatch(coding, job, LEDGER), "was not sent again")
+            assert len(calls) == 1 and not fallback_calls
+            eventually(lambda: worker_done("hatchet", run, headers), "coding worker completed after submitter crash")
+            assert effect({**job, "pull_request": job["issue"]})
+            recovered = queue.reconcile_project(coding, job, LEDGER, run)
+            assert recovered["run"] == run and recovered["phase"] == "queued"
+            assert queue.dispatch(coding, job, LEDGER)["reused"] is True
+            assert len(calls) == 2 and not fallback_calls
+            log("A killed coding submitter recovered one verified Hatchet effect using one trigger and one lookup")
+
+
 def main():
     token = Path("hatchet-token").read_text().strip()
     part = token.split(".")[1]
@@ -230,6 +273,7 @@ def main():
         time.sleep(3)
         assert hatchet_worker.poll() is None and restate_worker.poll() is None
         check_workers(config, refused, headers)
+        check_project_restart(config, headers)
 
         job = request()
         with relay(RESTATE, "pass") as (unused_restate, _, _, _, fallback_calls):

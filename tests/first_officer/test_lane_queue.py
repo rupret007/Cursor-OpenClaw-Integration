@@ -119,6 +119,90 @@ def phases(ledger):
     return [json.loads(line)["phase"] for line in Path(ledger).read_text().splitlines() if line.strip()]
 
 
+def project_request():
+    request = {"repository": "example/integration", "issue": 40, "head": HEAD, "epoch": 2}
+    return {**request, "lane": queue.project_lane(**request)}
+
+
+def test_coding_route_refusal_never_falls_back_and_needs_fresh_scope(tmp_path, tokens, monkeypatch):
+    request = project_request()
+    config = policy("http://localhost:10000", "http://localhost:10001")
+    ledger = tmp_path / "project.jsonl"
+    calls = []
+
+    def post(_opener, url, _headers, payload, _timeout):
+        calls.append((url, payload))
+        raise queue.Refusal("queue unavailable")
+
+    monkeypatch.setattr(queue, "post", post)
+    with pytest.raises(ValueError, match="dedicated Hatchet"):
+        dispatch(config, ledger, request)
+    with pytest.raises(ValueError, match="stable"):
+        dispatch(config, ledger, {**request, "epoch": 3})
+    assert not calls
+    config["hatchet"]["workflow"] = queue.PROJECT_WORKFLOW
+    with pytest.raises(ValueError, match="No other worker"):
+        dispatch(config, ledger, request)
+    with pytest.raises(ValueError, match="authorizing a new attempt"):
+        dispatch(config, ledger, request)
+    with pytest.raises(ValueError, match="no Restate destination"):
+        queue.reconcile_restate(config, request, ledger)
+    assert len(calls) == 1
+    assert calls[0][1]["input"] == request
+    assert phases(ledger) == ["pending", "refused"]
+
+
+def test_restart_after_unconfirmed_coding_submission_preserves_one_attempt(tmp_path, tokens, monkeypatch, capsys):
+    request = project_request()
+    config = policy("http://localhost:10000", "http://localhost:10001")
+    config["hatchet"]["workflow"] = queue.PROJECT_WORKFLOW
+    ledger = tmp_path / "project.jsonl"
+    calls = []
+
+    def interrupted(*args):
+        calls.append(args[3])
+        raise SystemExit(19)
+
+    monkeypatch.setattr(queue, "post", interrupted)
+    with pytest.raises(SystemExit):
+        dispatch(config, ledger, request)
+    assert phases(ledger) == ["pending"]
+    restarted_spec = importlib.util.spec_from_file_location("restarted_queue", spec.origin)
+    restarted = importlib.util.module_from_spec(restarted_spec)
+    restarted_spec.loader.exec_module(restarted)
+    monkeypatch.setattr(restarted, "post", lambda *_args: pytest.fail("a restart must never resend"))
+    with pytest.raises(ValueError, match="unknown outcome"):
+        restarted.dispatch(config, request, ledger, NOW)
+    assert len(calls) == 1 and phases(ledger) == ["pending"]
+    args = [str(tmp_path / "unneeded-policy.json"), str(ledger), "--head", HEAD, "--project-repository",
+            request["repository"], "--project-issue", "40", "--project-epoch", "2"]
+    assert restarted.main([*args, "--status"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"backend": "hatchet", "phase": "pending", "run": None}
+    assert restarted.main(args) == 1
+    assert "status or reconcile mode" in capsys.readouterr().err
+
+    key = queue.idempotency_key(request)
+    response = {"workflowConfig": {"Name": queue.PROJECT_WORKFLOW},
+                "run": {"metadata": {"id": "run_coding"}, "tenantId": TENANT,
+                        "additionalMetadata": {"idempotencyKey": key}, "input": {"input": request}}}
+    reads = []
+
+    def lookup(_opener, probe, _timeout):
+        reads.append(probe.get_method())
+        return response
+
+    monkeypatch.setattr(restarted, "response_json", lookup)
+    response["run"]["input"]["input"] = {**request, "head": OTHER}
+    with pytest.raises(ValueError, match="different coding run"):
+        restarted.reconcile_project(config, request, ledger, "run_coding")
+    assert phases(ledger) == ["pending"]
+    response["run"]["input"]["input"] = request
+    result = restarted.reconcile_project(config, request, ledger, "run_coding")
+    assert result["phase"] == "queued" and result["run"] == "run_coding"
+    assert restarted.dispatch(config, request, ledger)["reused"] is True
+    assert reads == ["GET", "GET"] and phases(ledger) == ["pending", "queued"]
+
+
 def test_primary_success_never_calls_restate_and_a_repeat_is_free(tmp_path, tokens):
     hatchet = serve({HATCHET_PATH: {"body": {"run": {"metadata": {"id": "run_primary"}}}}})
     restate = serve({RESTATE_PATH: {"body": {"invocationId": "inv_unused", "status": "Accepted"}}})

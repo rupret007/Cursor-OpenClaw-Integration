@@ -34,7 +34,8 @@ async function telegramDirect(owner, liveConfig, method, fields, signal) {
   const official = root.protocol === 'https:' && root.hostname === 'api.telegram.org' && !root.port;
   const loopback = root.protocol === 'http:' && (root.hostname === 'localhost' ||
     isIP(root.hostname) === 4 && root.hostname.startsWith('127.'));
-  if ((!official && !loopback) || root.username || root.password || root.search || root.hash ||
+  if ((!official && !loopback) || (process.env.FO_STANDBY_TELEGRAM === '1' && !loopback) ||
+      root.username || root.password || root.search || root.hash ||
       root.pathname !== '/' || channel.proxy || typeof channel.botToken !== 'string' ||
       !/^\d{6,12}:[A-Za-z0-9_-]{30,}$/.test(channel.botToken)) {
     throw new Error('Direct Telegram transport is unavailable');
@@ -62,7 +63,15 @@ async function telegramTyping(api, owner, liveConfig, signal) {
   }
 }
 
-function projectTelegramDelivery(state, liveConfig) {
+function brokerMessage(ctx) {
+  const value = String(ctx?.messageId);
+  if (!/^[1-9]\d{0,15}$/.test(value) || !Number.isSafeInteger(Number(value))) {
+    throw new Error('Brokered Telegram message needs its original ID');
+  }
+  return Number(value);
+}
+
+function projectTelegramDelivery(state, liveConfig, brokered) {
   return {
     async reserve(owner, ctx) {
       const message = String(ctx.messageId);
@@ -72,11 +81,13 @@ function projectTelegramDelivery(state, liveConfig) {
       if (reservation.result === 'reserved') return key;
       if (reservation.result !== 'duplicate') throw new Error('Project delivery cannot be reserved');
     },
-    async deliver(key, owner, text) {
+    async deliver(key, owner, text, ctx) {
       let outcome = 'unverified';
       try {
         const body = text.length <= 4096 ? text : text.slice(0, 3800) + '\n\nSee the private handoff for the full record.';
-        const receipt = await telegramDirect(owner, liveConfig, 'sendMessage', { text: body }, AbortSignal.timeout(3000));
+        const fields = { text: body };
+        if (brokered) fields.reply_parameters = { message_id: brokerMessage(ctx) };
+        const receipt = await telegramDirect(owner, liveConfig, 'sendMessage', fields, AbortSignal.timeout(3000));
         if (String(receipt?.chat?.id) !== owner || !/^[1-9]\d{0,15}$/.test(String(receipt?.message_id))) {
           throw new Error('The project reply has no verified receipt');
         }
@@ -89,8 +100,14 @@ function projectTelegramDelivery(state, liveConfig) {
   };
 }
 
-async function acknowledge(api, owner, liveConfig, signal) {
-  const results = await Promise.allSettled([
+async function acknowledge(api, owner, liveConfig, signal, ctx, brokered) {
+  const message = brokered ? brokerMessage(ctx) : undefined;
+  const results = await Promise.allSettled(brokered ? [
+    telegramDirect(owner, liveConfig, 'sendChatAction', { action: 'typing', fo_message_id: message }, signal),
+    telegramDirect(owner, liveConfig, 'sendMessage', {
+      text: 'On it.', fo_phase: 'ack', reply_parameters: { message_id: message },
+    }, signal),
+  ] : [
     telegramTyping(api, owner, liveConfig, signal),
     telegramSend(api, owner, liveConfig, 'On it.', signal),
   ]);
@@ -222,6 +239,8 @@ async function prepareTelegramSessionRecorder(api, cfg) {
 
 export function registerSegmentOne(api, commands, services) {
   const { incomingOwner, telegramOwner, statusTopic, parseRequest, controlIntent, routeFor } = services;
+  const brokered = process.env.FO_STANDBY_TELEGRAM === '1';
+  const stagedStandby = brokered && Boolean(process.env.FO_STANDBY_EPOCH);
   const currentConfig = () => api.runtime.config?.current?.() ?? api.config;
   const liveConfig = (owner) => {
     const cfg = currentConfig();
@@ -236,9 +255,25 @@ export function registerSegmentOne(api, commands, services) {
     });
   }
   const script = resolveCaptainStateScript(currentConfig());
-  const state = (operation, data) => localState(operation, data, script);
+  const state = async (operation, data) => {
+    const view = await localState(operation, data, script);
+    if (!stagedStandby || operation !== 'view') return view;
+    try {
+      const owner = telegramOwner(currentConfig(), account);
+      const status = await telegramDirect(owner, liveConfig, 'foProjectStatus', {}, AbortSignal.timeout(2500));
+      if (typeof status?.enabled !== 'boolean' || !Array.isArray(status?.jobs)) throw new Error('Unknown shared coding status');
+      return { ...view, activeProjectJobs: status.jobs, sharedProjectStatus: status.enabled ? 'ready' : 'disabled' };
+    } catch {
+      return { ...view, sharedProjectStatus: 'unavailable' };
+    }
+  };
   const chat = createQuickChat(api.runtime, services.redacted);
   const registry = toolRegistry(api, commands, liveConfig, services, state, chat);
+  if (stagedStandby) {
+    registry.standby = { run: async () => plain(
+      'This standby session can answer chat and live status. Interactive approvals and dispatch need the primary project state.',
+    ) };
+  }
   if (services.getGithub) {
     const readCI = localFleetNode() === 'bobserver' ? services.getGithub : readIntegrationGithub;
     const projectBrief = localFleetNode() === 'bobserver' ? undefined : createProjectBrief({
@@ -251,7 +286,9 @@ export function registerSegmentOne(api, commands, services) {
           (path) => get(path.slice(repository.length + 1)));
       },
     });
-    const captain = createCaptain({ registry, get: readCI, state, projectBrief, dailyProjects: Boolean(projectBrief) });
+    const captain = createCaptain({
+      registry, get: readCI, state, projectBrief, dailyProjects: Boolean(projectBrief) && !stagedStandby,
+    });
     registry.captain = {
       run: async (request, turn) => plain(await captain.run(request, turn)),
       failure: 'Captain state or evidence is unavailable. Check “captain status” before retrying.',
@@ -284,7 +321,8 @@ export function registerSegmentOne(api, commands, services) {
     api.registerService({
       id: 'fo-captain-project-monitor',
       start() {
-        if (projectMonitor) return;
+        // The independent broker refreshes these receipts in standby mode.
+        if (projectMonitor || stagedStandby) return;
         projectMonitor = setInterval(() => captain.tickProject().catch(() =>
           api.logger.warn('Project Captain could not verify the current worker result.')), 15_000);
         projectMonitor.unref();
@@ -311,14 +349,19 @@ export function registerSegmentOne(api, commands, services) {
           return followUp || standaloneSimple(raw, routeFor, event);
         },
       });
+      if (stagedStandby && (!request || request.kind === 'remember' ||
+          request.kind === 'captain' && !['role', 'brief', 'decisions', 'help'].includes(request.action))) {
+        return { kind: 'standby' };
+      }
       if (request?.kind !== 'simple') {
         chat.clear();
         return request;
       }
       return { ...request, followUp };
     },
-    acknowledge: (owner, _, signal) => acknowledge(api, owner, liveConfig, signal),
-    projectDelivery: ['nucbox', 'mac-mini'].includes(localFleetNode()) ? projectTelegramDelivery(state, liveConfig) : undefined,
+    acknowledge: (owner, ctx, signal) => acknowledge(api, owner, liveConfig, signal, ctx, brokered),
+    projectDelivery: !stagedStandby && ['nucbox', 'mac-mini'].includes(localFleetNode())
+      ? projectTelegramDelivery(state, liveConfig, brokered) : undefined,
     registry,
     warn: (line) => api.logger.warn(line),
   });

@@ -124,6 +124,26 @@ def project_request():
     return {**request, "lane": queue.project_lane(**request)}
 
 
+def test_authority_expired_after_hatchet_refusal_blocks_restate(tmp_path, tokens, monkeypatch):
+    config = policy("http://127.0.0.1:1", "http://127.0.0.1:2")
+    ledger = tmp_path / "lane.jsonl"
+    calls = []
+
+    def authorize():
+        if calls:
+            raise ValueError("Expired lease")
+
+    def post(_opener, url, _headers, _payload, _timeout):
+        calls.append(url)
+        raise queue.Refusal("Fixture primary refused")
+
+    monkeypatch.setattr(queue, "post", post)
+    with pytest.raises(ValueError, match="Expired lease"):
+        queue.dispatch(config, REQUEST, ledger, NOW, authorize=authorize)
+    assert len(calls) == 1
+    assert phases(ledger) == ["pending", "refused"]
+
+
 def test_coding_route_refusal_never_falls_back_and_needs_fresh_scope(tmp_path, tokens, monkeypatch):
     request = project_request()
     config = policy("http://localhost:10000", "http://localhost:10001")

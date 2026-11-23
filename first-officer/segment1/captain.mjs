@@ -133,7 +133,7 @@ function jobText(job) {
   return identity + ' ' + terminal[job.state];
 }
 
-const noDecisions = 'No captain decisions are waiting for Jeff.';
+const noDecisions = 'You don’t need to do anything right now.';
 
 function dailyProjectText(receipt) {
   if (!receipt) return '';
@@ -153,6 +153,7 @@ function projectWork(job) {
     verified: 'The last verification matched all required CI checks.',
     refused: 'Hatchet refused the job. Check the coding worker.',
     'worker-failed': 'Hatchet reports that the worker failed or was cancelled. Check the worker before authorizing another attempt.',
+    'worker-evidence-unavailable': 'I couldn’t verify the original worker’s result. Wait for a verified update before retrying.',
     'invalid-artifact': 'The worker returned an invalid or inconsistent artifact. Inspect the isolated worktree.',
     'stale-base': 'The issue or approved base changed. Review the current scope.',
     'stale-candidate': 'The PR head or its base changed. Review the candidate against current GitHub evidence.',
@@ -163,10 +164,6 @@ function projectWork(job) {
 
 function decisions(view, currentDelivery) {
   const needs = [];
-  if (view.lease.holder === 'first-officer' && view.lease.state === 'held' &&
-      (!view.armed || view.grant?.epoch !== view.lease.epoch || view.grant.paused)) {
-    needs.push('Jeff needs to grant or resume the named scope for this epoch before dispatch.');
-  }
   const unresolved = (view.unconfirmedProjectDelivery ?? []).filter((key) => key !== currentDelivery).length;
   if (unresolved) {
     const status = unresolved === 1 ? '1 Captain Telegram delivery is unconfirmed.' :
@@ -174,6 +171,7 @@ function decisions(view, currentDelivery) {
     needs.push(status + ' Check the original conversation and reconcile the private receipts.');
   }
   if (view.projectTelegramLedgerFull) needs.push('The Captain Telegram receipt journal is full. Review it before continuing.');
+  if (view.sharedProjectStatus === 'unavailable') needs.push('I couldn’t verify the coding jobs. Wait for a verified update before retrying.');
   if (view.lease.state === 'handback-pending') needs.push('Wait for the shared fence to finish transferring authority.');
   if (view.active?.overtime) needs.push(jobText(view.active));
   for (const job of view.activeProjectJobs ?? []) {
@@ -315,8 +313,8 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
     if (action === 'decisions') {
       const [view, projects] = await Promise.all([viewPromise, projectEvidence()]);
       const captainDecisions = decisions(view);
-      if (!projects) return role(view) + '\n' + captainDecisions;
-      return [role(view), ...projects.decisions,
+      if (!projects) return captainDecisions;
+      return [...projects.decisions,
         captainDecisions === noDecisions && projects.decisions.length ? null : captainDecisions].filter(Boolean).join('\n');
     }
     const view = await viewPromise;

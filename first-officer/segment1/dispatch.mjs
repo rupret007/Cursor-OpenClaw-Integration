@@ -154,7 +154,7 @@ export function createDispatch({ authorize, classify, acknowledge, registry, war
     await ack;
     if (delivery) {
       try {
-        await projectDelivery.deliver(delivery, owner, final.text);
+        await projectDelivery.deliver(delivery, owner, final.text, ctx);
       } catch {
         warn('Project Captain final delivery could not be confirmed. Check the original receipt.');
       }

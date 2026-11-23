@@ -27,6 +27,10 @@ OVERLAY = Path(__file__).resolve().parent / "segment1"
 QUEUE_MODULES = {
     "queue-runtime/lanes/queue.py": "lanes/queue.py",
     "queue-runtime/pinhttp.py": "pinhttp.py",
+    **{f"queue-runtime/{name}.py": f"{name}.py" for name in (
+        "standby", "standby_broker", "standby_channel", "standby_host", "standby_launch",
+        "standby_queue", "standby_telegram",
+    )},
     "queue-runtime/workers/hatchet-review.py": "workers/hatchet-review.py",
     "queue-runtime/workers/hatchet-project.py": "workers/hatchet-project.py",
     "queue-runtime/workers/project-worker.py": "workers/project-worker.py",

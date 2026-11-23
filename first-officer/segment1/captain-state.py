@@ -17,7 +17,6 @@ import tempfile
 import time
 from types import SimpleNamespace
 from urllib.parse import quote
-from urllib.request import Request
 from zoneinfo import ZoneInfo
 
 
@@ -451,57 +450,7 @@ class CaptainQueue:
             return None
 
     def poll(self, job):
-        receipt = self.receipt(job)
-        if receipt is None:
-            return {"worker": "unresolved"}
-        backend, phase = receipt["backend"], receipt["phase"]
-        metadata = {"backend": backend, "accepted": phase == "queued",
-                    "age": max(0, int(time.time()) - receipt["at"])}
-        if phase != "queued":
-            result = "missing-result" if phase == "refused" and backend == "restate" else "unresolved"
-            return {"worker": result, **metadata}
-
-        try:
-            route = self.config()[backend]
-            args, target = self.queue.submission(backend, route, self.request(job), receipt["key"])
-            if target != receipt["target"]:
-                return {"worker": "unresolved", **metadata}
-            opener, _, headers, _ = args
-            base = route["base_url"].rstrip("/")
-            run = receipt["run"]
-            if backend == "hatchet":
-                status_url = f"{base}/api/v1/stable/workflow-runs/{run}"
-                status = self.queue.response_json(opener, Request(
-                    status_url + "/status", headers=headers), 1, str)
-                if status in ("QUEUED", "RUNNING"):
-                    return {"worker": "running", **metadata}
-                completed = status == "COMPLETED"
-                failed = status in ("FAILED", "CANCELLED")
-            else:
-                headers = {"Authorization": headers["Authorization"]}
-                status_url = f"{base}/restate/output/{run}"
-                status = self.queue.response_json(opener, Request(
-                    f"{base}/restate/status/{run}", headers=headers), 1)
-                if status.get("stage") in ("created", "started"):
-                    return {"worker": "running", **metadata}
-                failed = status.get("stage") == "completed" and "error" in status
-                completed = status.get("stage") == "completed" and not failed
-            if not completed:
-                return {"worker": "missing-result" if failed else "unresolved", **metadata}
-            result = self.queue.response_json(opener, Request(status_url, headers=headers), 1)
-        except (OSError, ValueError, self.queue.Refusal, self.queue.Uncertain):
-            return {"worker": "unresolved", **metadata}
-        if backend == "hatchet":
-            run_details = result.get("run")
-            run_metadata = run_details.get("metadata") if isinstance(run_details, dict) else None
-            if not isinstance(run_metadata, dict) or run_metadata.get("id") != run:
-                return {"worker": "invalid-result", **metadata}
-            result = run_details.get("output")
-        if not isinstance(result, dict) or result.keys() != {"lane", "pr", "head", "ci"}:
-            return {"worker": "invalid-result", **metadata}
-        if any(result[key] != job[key] for key in ("lane", "pr", "head")) or result["ci"] not in ("passing", "failing"):
-            return {"worker": "invalid-result", **metadata}
-        return {"worker": "settled", "head": result["head"], "ci": result["ci"], **metadata}
+        return self.queue.poll_review(self.config, self.request(job), self.receipt(job))
 
 
 class Controller:
@@ -831,13 +780,11 @@ class Controller:
 
     def review_project_candidate(self, job, output):
         request = job["request"]
-        if (not isinstance(output, dict) or set(output) != {"lane", "head", "commit"} or
-                output["lane"] != request["lane"] or output["head"] != request["head"] or
-                not isinstance(output["commit"], str) or not SHA.fullmatch(output["commit"]) or
-                output["commit"] == request["head"] or job.get("commit", output["commit"]) != output["commit"]):
+        commit = self.queue.queue.project_artifact(request, output, previous=job.get("commit"))
+        if commit is None:
             job.update(state="invalid-artifact")
             return
-        job.update(commit=output["commit"], state="patch-ready")
+        job.update(commit=commit, state="patch-ready")
         if not current_project_evidence(request, job["branch"]):
             job.update(state="stale-base")
             return
@@ -1106,6 +1053,18 @@ def main():
     if len(raw) > limit:
         raise ValueError("Captain request exceeded its limit")
     req = json.loads(raw)
+    broker_epoch = os.environ.get("FO_STANDBY_EPOCH")
+    if broker_epoch is not None:
+        epoch = check_epoch(int(broker_epoch))
+        if epoch == 0 or node not in LOCAL_NODES:
+            raise ValueError("Invalid brokered gateway epoch")
+        if entry == "view":
+            return {"lease": {"holder": "first-officer", "state": "held", "epoch": epoch},
+                    "armed": False, "grant": None, "blocked": None, "standalone": node,
+                    "jobs": [], "active": None}
+        if entry not in ("local-gate", "local-capacity", "local-quota", "local-projects",
+                         "project-telegram-review", "record-project-recommendation"):
+            raise ValueError("Brokered job state is unavailable in this gateway configuration")
     if node in LOCAL_NODES:
         authority = StandaloneAuthority(node, LOCAL_AUTHORITY)
         if entry == "local-initialize":

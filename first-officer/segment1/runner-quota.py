@@ -65,7 +65,7 @@ def local_quota_windows(result, now):
     return limits
 
 
-def quota_rpc(proc, timeout=5):
+def quota_rpc(proc, timeout=5, *, read_account=False):
     deadline = time.monotonic() + timeout
     pending = b""
 
@@ -84,6 +84,8 @@ def quota_rpc(proc, timeout=5):
                     line, pending = pending.split(b"\n", 1)
                     row = json.loads(line)
                     if row.get("id") == request_id:
+                        if not isinstance(row.get("result"), dict):
+                            raise ValueError("Lane quota RPC did not return usable metadata")
                         return row["result"]
                 if not reader.select(max(0, deadline - time.monotonic())):
                     break
@@ -98,15 +100,29 @@ def quota_rpc(proc, timeout=5):
               "params": {"clientInfo": {"name": "openclaw_captain", "version": "1.0"}}})
         receive(1)
         send({"method": "initialized"})
-        send({"id": 2, "method": "account/rateLimits/read"})
-        return receive(2)
+        if not read_account:
+            send({"id": 2, "method": "account/rateLimits/read"})
+            return receive(2)
+        send({"id": 2, "method": "account/read", "params": {"refreshToken": False}})
+        account = receive(2)
+        identity = account.get("account")
+        if (not isinstance(identity, dict) or identity.get("type") != "chatgpt"
+                or account.get("requiresOpenaiAuth") is not True):
+            raise ValueError("Codex does not report a live ChatGPT subscription sign-in")
+        send({"id": 3, "method": "account/rateLimits/read"})
+        return receive(3)
+
+
+def approved_local_cli(binary):
+    path = Path(binary)
+    if not path.is_absolute() or path.name != "codex" or not os.access(path, os.X_OK) or not path.is_file():
+        raise ValueError("The approved standalone Codex CLI is unavailable")
+    return path
 
 
 def read_local_quota(binary):
     """Query the standalone host's signed-in local CLI without copying credentials."""
-    path = Path(binary)
-    if not path.is_absolute() or path.name != "codex" or not os.access(path, os.X_OK) or not path.is_file():
-        raise ValueError("The approved standalone Codex CLI is unavailable")
+    path = approved_local_cli(binary)
     with subprocess.Popen(
         ["/usr/bin/nice", "-n", "10", str(path), "app-server", "--listen", "stdio://"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -117,6 +133,30 @@ def read_local_quota(binary):
             return {**local_quota_windows(result, now), "observed": int(now)}
         finally:
             proc.kill()
+
+
+def read_coding_allowance(binary):
+    """Read only the local ChatGPT sign-in and included usage evidence for coding."""
+    path = approved_local_cli(binary)
+    env = {key: os.environ[key] for key in ("HOME", "PATH", "LANG", "LC_ALL", "TMPDIR") if key in os.environ}
+    with subprocess.Popen(
+        ["/usr/bin/nice", "-n", "10", str(path), "app-server", "--listen", "stdio://"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env,
+    ) as proc:
+        try:
+            result = quota_rpc(proc, read_account=True)
+        finally:
+            proc.kill()
+    now = int(time.time())
+    snapshot = quota_snapshot(result)
+    credits = snapshot.get("credits")
+    windows = local_quota_windows(result, now)
+    included_only = (isinstance(credits, dict) and credits.get("hasCredits") is False
+                     and credits.get("unlimited") is False and not snapshot.get("rateLimitReachedType")
+                     and result.get("ordinaryUsageAllowed") is not False)
+    return {"windows": windows, "observed": now, "included_only": included_only,
+            "eligible": included_only and set(windows) == {"session", "weekly"} and
+            all(window["used"] < 90 for window in windows.values())}
 
 
 def read_runner_quota(runner):

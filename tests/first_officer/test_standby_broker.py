@@ -245,7 +245,9 @@ def test_broker_authenticates_each_host_and_fences_partitioned_primary(tmp_path,
         coding_scope(coding, plan_sha)
         with pytest.raises(transport.ProjectScopeRejected):
             worker["load_scope"](worker_home, coding)
-        assert nuc.submit_project(1, coding)["phase"] == "uncertain"
+        with pytest.raises(transport.ProjectScopeRejected):
+            nuc.submit_project(1, coding, "e" * 64)
+        assert nuc.submit_project(1, coding, plan_sha)["phase"] == "uncertain"
         assert nuc.project_worker_plan(1, coding) == plan_sha
         assert worker["load_scope"](worker_home, coding) == operator_plan
         worker["save"](plan_path, {**operator_plan, "prompt": "Changed operator plan"})

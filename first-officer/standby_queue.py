@@ -161,9 +161,11 @@ class ProjectQueue(BrokerQueue):
         authority.require_grant(grant)
         return plan
 
-    def submit(self, authority, grant, request):
+    def submit(self, authority, grant, request, expected_plan=None):
         key = self.key(request)
         plan = self.approved_plan(authority, grant, request)
+        if expected_plan is not None and expected_plan != plan:
+            raise ProjectScopeRejected("The Nuc and broker coding plan approvals differ")
 
         def authorize():
             if self.approved_plan(authority, grant, request) != plan:

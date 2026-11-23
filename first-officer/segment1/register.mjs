@@ -255,7 +255,12 @@ export function registerSegmentOne(api, commands, services) {
     });
   }
   const script = resolveCaptainStateScript(currentConfig());
-  const state = async (operation, data) => {
+  const state = async (operation, data, turn) => {
+    if (stagedStandby && operation === 'dispatch-project') {
+      return telegramDirect(turn.owner, liveConfig, 'foProjectSubmit', {
+        ...data, fo_message_id: brokerMessage(turn.ctx),
+      }, turn.signal);
+    }
     const view = await localState(operation, data, script);
     if (!stagedStandby || !['view', 'handoff'].includes(operation)) return view;
     try {
@@ -350,7 +355,7 @@ export function registerSegmentOne(api, commands, services) {
         },
       });
       if (stagedStandby && (!request || request.kind === 'remember' ||
-          request.kind === 'captain' && !['role', 'brief', 'decisions', 'handoff', 'help'].includes(request.action))) {
+          request.kind === 'captain' && !['role', 'brief', 'decisions', 'handoff', 'help', 'advance-project'].includes(request.action))) {
         return { kind: 'standby' };
       }
       if (request?.kind !== 'simple') {

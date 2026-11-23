@@ -269,7 +269,7 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
     if (action === 'help') return 'Use “captain status”, “brief me”, “what needs me?”, “handoff”, or “captain this: verify CI for PR #33”.';
     if (action === 'advance-project') {
       turn.signal.throwIfAborted();
-      const placed = await state('dispatch-project', { repository: request.repository, issue: request.issue });
+      const placed = await state('dispatch-project', { repository: request.repository, issue: request.issue }, turn);
       if (placed.result === 'duplicate') {
         const prefix = 'This approved coding run already has a receipt. ';
         if (!needsVerdictCheck(placed.job)) return prefix + projectWork(placed.job);
@@ -287,6 +287,7 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
         'github-unavailable': 'Live GitHub evidence is unavailable. The run did not start.',
         active: 'This repository already has an active coding job. Ask for “handoff”.',
         'runner-unconfigured': 'The scoped coding worker or Hatchet policy is unavailable.',
+        'admission-unconfirmed': 'I couldn’t confirm Hatchet admission. Check the original receipt in “handoff” before retrying.',
         'admission-unavailable': 'The local gate or capacity could not be verified.',
         'admission-blocked': 'The local gate or capacity is blocking the run.',
         'existing-queue-receipt': 'Hatchet already has a receipt. Verify it before requesting another run.',

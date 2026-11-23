@@ -1,5 +1,6 @@
 """Run the packaged OpenClaw gateway through the standby launcher in isolation."""
 from http.server import ThreadingHTTPServer
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -20,6 +21,7 @@ class FixtureBroker:
         self.polling = Event()
         self.message = None
         self.effects = []
+        self.submissions = []
         self.completed = Event()
 
     def next_telegram_message(self, epoch):
@@ -33,6 +35,11 @@ class FixtureBroker:
             "request": {"repository": "example/integration", "issue": 40, "head": "a" * 40, "epoch": 3},
             "state": "unresolved",
         }]}
+
+    def submit_project(self, epoch, request, plan):
+        assert epoch == 4 and request["epoch"] == epoch
+        self.submissions.append((request, plan))
+        return {"phase": "queued", "run": "fixture-job"}
 
     def telegram_typing(self, epoch, message_id):
         assert epoch == 4 and self.message["message_id"] == message_id
@@ -128,6 +135,45 @@ def main():
                 verify_turn(broker, message_id, text, expected, final_limit)
             assert any(phase == "final" and "Brokered handoff checked at" in text
                        for phase, _, text in broker.effects)
+            command = "captain this: advance example/integration #41"
+            verify_turn(broker, 16, command, "approve the exact issue", 30)
+            assert not broker.submissions
+            identity = {"repository": "example/integration", "issue": 41, "epoch": 4, "head": "a" * 40}
+            plan = authority / "project-worker.json"
+            wire_test["write"](plan, {"request": identity})
+            fingerprint = hashlib.sha256(plan.read_bytes()).hexdigest()
+            wire_test["write"](authority / "project-grant.json", {**identity, "branch": "main",
+                                "expires": int(time.time()) + 120, "planSha256": fingerprint, "worker": "local-qwen"})
+            wire_test["write"](authority / "capacity.json", {"commands": ["fixture-coding-capacity"], "limit": 1})
+            (gate / "HOLD").touch()
+            verify_turn(broker, 17, command, "capacity is blocking", 30)
+            assert not broker.submissions
+            (gate / "HOLD").unlink()
+            assert not Path("/usr/bin/gh").exists(), "The loopback fixture needs the private GitHub CLI override"
+            gh = root / ".local/bin/gh"
+            gh.parent.mkdir(parents=True)
+            gh.write_text("""#!/usr/bin/python3
+import json
+from pathlib import Path
+import sys
+route = sys.argv[4]
+if route == "repos/example/integration/issues/41":
+    value = {"number": 41, "state": "open", "repository_url": "https://api.github.com/repos/example/integration"}
+elif route == "repos/example/integration/git/ref/heads/main":
+    base = (Path.home() / "fixture-head").read_text().strip()
+    value = {"ref": "refs/heads/main", "object": {"sha": base, "type": "commit"}}
+else:
+    sys.exit(2)
+print(json.dumps(value))
+""")
+            gh.chmod(0o700)
+            (root / "fixture-head").write_text("b" * 40)
+            verify_turn(broker, 18, command, "base commit changed", 30)
+            assert not broker.submissions
+            (root / "fixture-head").write_text("a" * 40)
+            verify_turn(broker, 19, command, "Hatchet accepted the coding job", 30)
+            assert len(broker.submissions) == 1 and broker.submissions[0][1] == fingerprint
+            assert {key: value for key, value in broker.submissions[0][0].items() if key != "lane"} == identity
             assert not (authority / "lease.json").exists()
         finally:
             gateway.stop()

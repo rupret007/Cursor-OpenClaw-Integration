@@ -338,27 +338,29 @@ def local_capacity(authority):
     return {"node": authority.node, "observed": int(time.time()), "used": used, "limit": limit}
 
 
-def github_get(route):
-    candidates = (Path("/usr/bin/gh"), HOME / ".local/bin/gh", Path("/opt/homebrew/bin/gh"), Path("/usr/local/bin/gh"))
+def github_get(route, *, home=None):
+    home = HOME if home is None else home
+    candidates = (Path("/usr/bin/gh"), home / ".local/bin/gh", Path("/opt/homebrew/bin/gh"), Path("/usr/local/bin/gh"))
     binary = next((candidate for candidate in candidates if candidate.is_file() and os.access(candidate, os.X_OK)), None)
     if binary is None:
         raise ValueError("The approved GitHub CLI is unavailable")
     result = subprocess.run(
         ["/usr/bin/nice", "-n", "10", str(binary), "api", "--method", "GET", route, "--hostname", "github.com"],
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True, timeout=4,
-        env={"HOME": str(HOME), "PATH": "/usr/bin:/bin", "GH_PROMPT_DISABLED": "1"},
+        env={"HOME": str(home), "PATH": "/usr/bin:/bin", "GH_PROMPT_DISABLED": "1"},
     )
     return json.loads(result.stdout)
 
 
-def current_project_evidence(request, branch):
+def current_project_evidence(request, branch, read=None):
+    read = github_get if read is None else read
     root = f"repos/{request['repository']}"
-    issue = github_get(f"{root}/issues/{request['issue']}")
+    issue = read(f"{root}/issues/{request['issue']}")
     if (issue.get("number") != request["issue"] or "pull_request" in issue or
             str(issue.get("repository_url", "")).lower() != f"https://api.github.com/{root}" or
             issue.get("state") != "open"):
         return False
-    ref = github_get(f"{root}/git/ref/heads/{quote(branch, safe='/')}")
+    ref = read(f"{root}/git/ref/heads/{quote(branch, safe='/')}")
     target = ref.get("object")
     return (ref.get("ref") == f"refs/heads/{branch}" and isinstance(target, dict) and
             target.get("sha") == request["head"] and target.get("type") == "commit")
@@ -393,6 +395,59 @@ def project_pr_checks(request, branch, candidate, verification):
         if matched[0].get("conclusion") != "success":
             return "ci-failed"
     return "verified"
+
+
+def brokered_project_submit(home, queue, broker, epoch, repository, issue):
+    root = home / ".local/state/openclaw-captain"
+    try:
+        if not private_directory(root):
+            return {"result": "scope-denied"}
+        grant = read_private(root / "project-grant.json", 4096)
+        if not isinstance(grant, dict) or set(grant) != {
+                "repository", "issue", "head", "epoch", "worker", "branch", "expires", "planSha256"}:
+            return {"result": "scope-denied"}
+        identity = {"repository": repository, "issue": issue, "head": grant["head"], "epoch": epoch}
+        request = {**identity, "lane": queue.project_lane(**identity)}
+        queue.canonical(request)
+        branch, expires, plan_hash = grant["branch"], grant["expires"], grant["planSha256"]
+        if (any(type(grant[key]) is not type(value) or grant[key] != value for key, value in identity.items())
+                or grant["worker"] != "local-qwen" or type(expires) is not int
+                or not int(time.time()) < expires <= int(time.time()) + 3600
+                or not isinstance(branch, str) or len(branch) > 150
+                or not re.fullmatch(r"[a-zA-Z0-9_-]+(?:[./-][a-zA-Z0-9_-]+)*", branch)
+                or not isinstance(plan_hash, str) or not re.fullmatch(r"[a-f0-9]{64}", plan_hash)):
+            return {"result": "scope-denied"}
+        payload = private_bytes(root / "project-worker.json", 8192)
+        if digest(payload) != plan_hash or json.loads(payload).get("request") != identity:
+            return {"result": "scope-denied"}
+    except (OSError, ValueError, TypeError, AttributeError):
+        return {"result": "scope-denied"}
+
+    authority = SimpleNamespace(AUTHORITY=root, node="nucbox")
+    with ExitStack() as resources:
+        try:
+            gate = resources.enter_context(LiveGate(authority).open())
+            capacity = local_capacity(authority)
+            if gate["hold"] or gate["running"] or capacity["used"] >= capacity["limit"] or os.getloadavg()[0] > 16:
+                return {"result": "admission-blocked"}
+        except (OSError, KeyError, TypeError, ValueError, subprocess.SubprocessError):
+            return {"result": "admission-unavailable"}
+        try:
+            if not current_project_evidence(request, branch, lambda route: github_get(route, home=home)):
+                return {"result": "stale-github"}
+        except (OSError, ValueError, TypeError, AttributeError, subprocess.SubprocessError):
+            return {"result": "github-unavailable"}
+        try:
+            if (int(time.time()) >= expires or read_private(root / "project-grant.json", 4096) != grant
+                    or digest(private_bytes(root / "project-worker.json", 8192)) != plan_hash):
+                return {"result": "scope-denied"}
+        except (OSError, ValueError, TypeError):
+            return {"result": "scope-denied"}
+        receipt = broker.submit_project(epoch, request, plan_hash)
+
+    state = {"queued": "running", "refused": "refused"}.get(receipt["phase"], "unresolved")
+    result = "duplicate" if receipt.get("reused") else state
+    return {"result": result, "job": {"request": request, "state": state}}
 
 
 class CaptainQueue:

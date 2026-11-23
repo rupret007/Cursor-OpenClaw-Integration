@@ -9,7 +9,7 @@ import time
 from urllib.parse import parse_qs, urlsplit
 
 from standby import LeaseRejected
-from standby_broker import BrokerUnavailable, EffectUnconfirmed
+from standby_broker import BrokerUnavailable, EffectUnconfirmed, ProjectBusy, ProjectScopeRejected
 from standby_telegram import positive_id
 
 
@@ -20,7 +20,7 @@ INITIAL_TIMEOUT = 3
 class Channel(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, broker, epoch, owner, bot_id, local_token, *, port=0):
+    def __init__(self, broker, epoch, owner, bot_id, local_token, *, port=0, admit_project=None):
         if not all(map(positive_id, (epoch, owner, bot_id))) or not isinstance(local_token, str):
             raise ValueError("Expected a broker lease and a private loopback identity")
         if re.fullmatch(r"[1-9][0-9]{5,15}:[A-Za-z0-9_-]{30,}", local_token) is None:
@@ -30,6 +30,8 @@ class Channel(ThreadingHTTPServer):
         self.chat = {"id": owner, "type": "private", "first_name": "Owner"}
         self.token_path = "/bot" + local_token + "/"
         self.offered = None
+        self.offered_project = None
+        self.admit_project = admit_project
         self.lock = Lock()
         self.idle = Event()
         super().__init__(("127.0.0.1", port), LocalRequest)
@@ -47,10 +49,36 @@ class Channel(ThreadingHTTPServer):
             message = self.broker.next_telegram_message(self.epoch)
             if message is not None and message["message_id"] != self.offered:
                 self.offered = message["message_id"]
+                text = re.sub(r" +", " ", message["text"].strip().lower().rstrip("?.!"))
+                project = re.fullmatch(r"captain this:\s*advance ([a-z0-9][a-z0-9_.-]*/[a-z0-9][a-z0-9_.-]*) #([1-9]\d{0,7})", text)
+                self.offered_project = project.groups() if project else None
                 author = {**self.chat, "is_bot": False}
                 return [{"update_id": self.offered, "message": {**message, "chat": self.chat, "from": author}}]
         self.idle.wait(0.25)
         return []
+
+    def submit_project(self, fields):
+        if fields.keys() != {"chat_id", "fo_message_id", "repository", "issue"} or str(fields["chat_id"]) != str(self.owner):
+            raise ValueError("Invalid coding request context")
+        repository, issue = fields["repository"], fields["issue"]
+        if not isinstance(repository, str) or not positive_id(issue):
+            raise ValueError("Invalid coding issue identity")
+        with self.lock:
+            message_id = fields["fo_message_id"]
+            if not positive_id(message_id) or message_id != self.offered or self.offered_project != (repository, str(issue)):
+                raise ValueError("The coding request must match the original owner command")
+        if self.admit_project is None:
+            return {"result": "runner-unconfigured"}
+        try:
+            return self.admit_project(repository, issue)
+        except ProjectScopeRejected:
+            return {"result": "scope-denied"}
+        except ProjectBusy:
+            return {"result": "active"}
+        except LeaseRejected:
+            return {"result": "stale"}
+        except BrokerUnavailable:
+            return {"result": "admission-unconfirmed"}
 
     def typing(self, fields):
         if str(fields.get("chat_id")) != str(self.owner) or fields.get("action") != "typing":
@@ -156,6 +184,8 @@ class LocalRequest(BaseHTTPRequestHandler):
                 if str(fields.get("chat_id")) != str(channel.owner):
                     raise ValueError("Invalid Telegram recipient")
                 result = channel.broker.project_status(channel.epoch)
+            elif method == "foProjectSubmit":
+                result = channel.submit_project(fields)
             elif method == "sendChatAction":
                 result = channel.typing(fields)
             elif method == "sendMessage":

@@ -6,6 +6,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import runpy
 import secrets
 import signal
 import subprocess
@@ -16,6 +17,7 @@ from threading import Event, Thread
 # The release inventory pins this directory, including under Python -I.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from lanes import queue
 from standby import open_private, read_private_json
 from standby_broker import Client
 from standby_channel import Channel
@@ -88,7 +90,15 @@ class BrokeredGateway:
         token = f"{bot_id}:{secrets.token_urlsafe(32)}"
         with ExitStack() as opening:
             scratch = Path(opening.enter_context(TemporaryDirectory(prefix=".broker-gateway-", dir=directory)))
-            bridge = opening.enter_context(Channel(broker, epoch, owner, bot_id, token))
+            admit_project = None
+            if environment.get("FO_LOCAL_NODE") == "nucbox":
+                source = Path(__file__).resolve().parents[1] / "captain-state.py"
+                if not source.is_file():
+                    source = Path(__file__).resolve().with_name("segment1") / "captain-state.py"
+                admission = runpy.run_path(str(source))["brokered_project_submit"]
+                home = Path(environment["HOME"])
+                admit_project = lambda repository, issue: admission(home, queue, broker, epoch, repository, issue)
+            bridge = opening.enter_context(Channel(broker, epoch, owner, bot_id, token, admit_project=admit_project))
             thread = Thread(target=bridge.serve_forever, kwargs={"poll_interval": 0.1}, daemon=True)
             thread.start()
 

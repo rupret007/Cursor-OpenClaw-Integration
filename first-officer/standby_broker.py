@@ -117,8 +117,11 @@ class Client:
     def project_status(self, epoch):
         return self.request("/v1/project/active", {"epoch": epoch})["status"]
 
-    def submit_project(self, epoch, request):
-        return self.request("/v1/project/submit", {"epoch": epoch, "request": request})["receipt"]
+    def submit_project(self, epoch, request, plan=None):
+        fields = {"epoch": epoch, "request": request}
+        if plan is not None:
+            fields["planSha256"] = plan
+        return self.request("/v1/project/submit", fields, timeout=5)["receipt"]
 
     def project_worker_plan(self, epoch, request):
         return self.request("/v1/project/worker-plan", {"epoch": epoch, "request": request})["planSha256"]
@@ -307,8 +310,11 @@ class Request(BaseHTTPRequestHandler):
             if project is None:
                 return 403, {"error": "project-not-enabled"}
             fields = {"epoch", "request", "run"} if self.path == "/v1/project/reconcile" else {"epoch", "request"}
-            if body.keys() != fields:
+            guarded = self.path == "/v1/project/submit" and body.keys() == fields | {"planSha256"}
+            if body.keys() != fields and not guarded:
                 raise ValueError("Expected an exact project queue request")
+            if guarded and (not isinstance(body["planSha256"], str) or not re.fullmatch(r"[a-f0-9]{64}", body["planSha256"])):
+                raise ValueError("Invalid local plan hash")
             request = body["request"]
             if self.path == "/v1/project/worker-plan":
                 return 200, {"planSha256": project.worker_plan(authority, grant, request)}
@@ -319,7 +325,7 @@ class Request(BaseHTTPRequestHandler):
             if self.path == "/v1/project/reconcile":
                 receipt = project.reconcile(request, body["run"])
             elif self.path == "/v1/project/submit":
-                receipt = project.submit(authority, grant, request)
+                receipt = project.submit(authority, grant, request, body.get("planSha256"))
             else:
                 receipt = project.receipt(request)
             return 200, {"receipt": receipt}

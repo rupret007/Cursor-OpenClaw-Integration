@@ -54,6 +54,8 @@ A mapped storage share exists. NAS service hosting and local durable storage for
 
 The combined standby candidate passed the offline integration gate with 1,197 Python tests and 22 Cursor handoff skill tests. All 42 JavaScript tests passed on the bundled Node 24 runtime. The privacy scan passed. The repeat joined Linux rehearsal answered the queued command 99.70 seconds after stopping the Nuc-role gateway, with zero duplicate replies. The offline readiness grade could not find the managed OpenClaw binary on the ordinary shell PATH. Native rehearsals use the pinned executable directly. GitHub's four green checks for #41 and #42 still apply to `4c69ec8` and `394230c` respectively. The newer candidate awaits separate publication approval and CI.
 
+The separate crash-recovery follow-up proves a killed supervisor cannot leave its gateway serving the readiness port. The child guard stops the real fixture process, the port becomes reusable, and an unrelated listener blocks startup. These changes are separate from the packaged `fb3a0c2617` review candidate.
+
 ### Provider routing comparison
 
 Jeff relayed Grok Bot's routing summary. Grok reports using signed-in Codex for routine coding, Claude Code for harder design and debugging, and Cursor for focused edits. It reports that the prepaid Gemini and MiniMax accounts are exhausted and disabled. It uses a local handoff when a lane reaches its allowance. These are reported operating practices. The paired trial and forced-limit proof remain unverified.

@@ -1,6 +1,9 @@
 import importlib
 from pathlib import Path
+import os
+import signal
 import socket
+import subprocess
 import sys
 import time
 
@@ -100,13 +103,18 @@ def test_unready_gateway_never_renews_and_stops_after_bounded_startup(host):
     assert child.stopped
 
 
-def test_gateway_process_checks_readiness_and_stops_the_real_child(host, tmp_path):
+@pytest.fixture
+def gateway_fixture(tmp_path):
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
     executable = tmp_path / "openclaw"
     executable.write_text(f"""#!{sys.executable}
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import os
+from pathlib import Path
+
+Path({str(tmp_path / "gateway.pid")!r}).write_text(str(os.getpid()))
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -118,6 +126,11 @@ class Handler(BaseHTTPRequestHandler):
 HTTPServer(("127.0.0.1", {port}), Handler).serve_forever()
 """)
     executable.chmod(0o700)
+    return executable, port
+
+
+def test_gateway_process_checks_readiness_and_stops_the_real_child(host, gateway_fixture):
+    executable, port = gateway_fixture
     gateway = host.GatewayProcess(executable, {}, port)
     try:
         deadline = time.monotonic() + 4
@@ -129,3 +142,59 @@ HTTPServer(("127.0.0.1", {port}), Handler).serve_forever()
         gateway.stop()
     assert gateway.exited()
     assert not gateway.ready()
+
+
+def test_gateway_never_uses_an_existing_listeners_readiness(host, gateway_fixture):
+    executable, _ = gateway_fixture
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        with pytest.raises(OSError, match="already in use"):
+            host.GatewayProcess(executable, {}, listener.getsockname()[1])
+
+
+def test_gateway_exits_after_supervisor_is_killed_and_the_port_is_reusable(host, gateway_fixture, tmp_path):
+    executable, port = gateway_fixture
+    launch = """
+import sys, time
+sys.path.insert(0, sys.argv[1])
+from pathlib import Path
+from standby_host import GatewayProcess
+live = GatewayProcess(Path(sys.argv[2]), {}, int(sys.argv[3]))
+while True:
+    time.sleep(1)
+"""
+    directory = Path(host.__file__).parent
+    supervisor = subprocess.Popen([sys.executable, "-c", launch, str(directory), str(executable), str(port)],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def listening():
+        with socket.socket() as probe:
+            probe.settimeout(.1)
+            return probe.connect_ex(("127.0.0.1", port)) == 0
+
+    try:
+        deadline = time.monotonic() + 4
+        while not listening():
+            assert supervisor.poll() is None and time.monotonic() < deadline
+            time.sleep(.02)
+        supervisor.kill()
+        supervisor.wait(timeout=4)
+        deadline = time.monotonic() + 4
+        while listening():
+            assert time.monotonic() < deadline
+            time.sleep(.02)
+        restarted = host.GatewayProcess(executable, {}, port)
+        try:
+            deadline = time.monotonic() + 4
+            while not restarted.ready():
+                assert not restarted.exited() and time.monotonic() < deadline
+                time.sleep(.02)
+        finally:
+            restarted.stop()
+    finally:
+        if supervisor.poll() is None:
+            supervisor.kill()
+            supervisor.wait(timeout=4)
+        if listening():
+            os.kill(int((tmp_path / "gateway.pid").read_text()), signal.SIGTERM)

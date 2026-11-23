@@ -4,7 +4,7 @@ The broker owns this store and calls it from one thread. Its local disk and
 upstream credentials stay with the broker. Gateways authenticate to the broker,
 which supplies the node identity and owns the outbound effect callbacks.
 """
-from contextlib import ExitStack
+from contextlib import ExitStack, closing
 from dataclasses import dataclass
 import fcntl
 import json
@@ -52,6 +52,22 @@ def read_private_json(path):
     return json.loads(payload)
 
 
+def reserve_effect(db, kind, operation):
+    with db:
+        inserted = db.execute("INSERT OR IGNORE INTO effects (kind, operation, state) VALUES (?, ?, 'unconfirmed')",
+                              (kind, operation)).rowcount
+        if not inserted:
+            return db.execute("SELECT state FROM effects WHERE kind = ? AND operation = ?",
+                              (kind, operation)).fetchone()[0]
+    return None
+
+
+def confirm_effect(db, kind, operation):
+    with db:
+        db.execute("UPDATE effects SET state = 'confirmed' WHERE kind = ? AND operation = ?", (kind, operation))
+    return "confirmed"
+
+
 class StandbyAuthority:
     def __init__(self, directory: Path, *, clock=time.monotonic):
         self._clock = clock
@@ -61,7 +77,8 @@ class StandbyAuthority:
         if (not stat.S_ISDIR(directory_info.st_mode) or directory_info.st_uid != os.getuid()
                 or directory_info.st_mode & 0o077):
             raise ValueError("Use a private authority directory on the broker's local disk")
-        database = directory / "authority.sqlite"
+        self._database = directory / "authority.sqlite"
+        database = self._database
         with ExitStack() as opening:
             lock = opening.enter_context(open_private(directory, "authority.lock"))
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -136,12 +153,10 @@ class StandbyAuthority:
         if (kind not in EFFECT_KINDS or not isinstance(operation, str)
                 or not re.fullmatch(r"[A-Za-z0-9:_-]{1,160}", operation)):
             raise ValueError("Invalid effect identity")
-        state = self.effect_status(grant, kind, operation)
+        self.require_grant(grant)
+        state = reserve_effect(self._db, kind, operation)
         if state is not None:
             return state
-        with self._db:
-            self._db.execute("INSERT INTO effects (kind, operation, state) VALUES (?, ?, 'unconfirmed')",
-                             (kind, operation))
         try:
             self.require_grant(grant)
         except LeaseRejected:
@@ -149,10 +164,20 @@ class StandbyAuthority:
                 self._db.execute("DELETE FROM effects WHERE kind = ? AND operation = ?", (kind, operation))
             raise
         send()
-        with self._db:
-            self._db.execute("UPDATE effects SET state = 'confirmed' WHERE kind = ? AND operation = ?",
-                             (kind, operation))
-        return "confirmed"
+        return confirm_effect(self._db, kind, operation)
+
+    def acknowledge_queued_message(self, message_id, send):
+        """Use the same receipt as the gateway, with a separate poll-thread connection."""
+        if type(message_id) is not int or not 0 < message_id < 2**63 - 1:
+            raise ValueError("Invalid queued message")
+        kind, operation = "telegram-reply", f"message:{message_id}:ack"
+        path = self._database
+        with open_private(path.parent, path.name, create=False), closing(sqlite3.connect(path, timeout=0.25)) as db:
+            state = reserve_effect(db, kind, operation)
+            if state is not None:
+                return state
+            send()
+            return confirm_effect(db, kind, operation)
 
     def effect_status(self, grant, kind, operation):
         self.require_grant(grant)

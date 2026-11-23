@@ -6,6 +6,7 @@ from pathlib import Path
 import ssl
 from types import SimpleNamespace
 import threading
+import time
 
 import pytest
 
@@ -337,6 +338,67 @@ def test_broker_authenticates_each_host_and_fences_partitioned_primary(tmp_path,
         thread.join(timeout=5)
 
     assert not thread.is_alive()
+
+
+@pytest.mark.parametrize("mode", ["cold", "healthy", "uncertain"])
+def test_broker_acknowledges_pending_owner_message_before_any_gateway_is_ready(tmp_path, monkeypatch, mode):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "first-officer"))
+    transport = importlib.import_module("standby_broker")
+    telegram = importlib.import_module("standby_telegram")
+    certificates(tmp_path, ("broker", "nuc", "mac"))
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    peers = {transport.client_fingerprint(tmp_path / (name + ".pem")): node
+             for name, node in (("nuc", transport.PRIMARY), ("mac", transport.STANDBY))}
+    inbox = telegram.TelegramInbox(state, 101, 202)
+    fresh = telegram_update(1, 11)
+    fresh["message"]["date"] = int(time.time())
+    unrelated = telegram_update(2, 12, author=999)
+    replay = telegram_update(3, 13)
+    sends = []
+
+    def send(owner, text, message_id):
+        assert inbox.pending(message_id)
+        sends.append((owner, text, message_id))
+        if mode == "uncertain":
+            raise TimeoutError("The acknowledgment may have been delivered")
+        return {"chat": {"id": owner}, "message_id": 411}
+
+    def broker(authority):
+        poll = telegram.TelegramPoll(inbox, lambda _offset: [fresh, unrelated, replay])
+        return transport.Broker(("127.0.0.1", 0), authority, cert=tmp_path / "broker.pem", key=tmp_path / "broker.key",
+                                ca=tmp_path / "ca.pem", peers=peers,
+                                effects={"telegram-reply": inbox.reply_adapter(send)}, inbox=inbox, poll=poll)
+
+    now = 0
+    with transport.StandbyAuthority(state, clock=lambda: now) as authority, broker(authority) as running:
+        if mode == "healthy":
+            primary = authority.claim(transport.PRIMARY)
+            request = SimpleNamespace(server=running, path="/v1/telegram/next")
+            transport.Request.dispatch(request, transport.PRIMARY, {"epoch": primary.epoch})
+        worker = threading.Thread(target=running.poll.step)
+        worker.start()
+        worker.join(timeout=2)
+        assert not worker.is_alive()
+        assert running.poll.available.is_set()
+        assert inbox.next()["message_id"] == 11
+        assert authority.claim(transport.STANDBY) is None
+        primary = authority.claim(transport.PRIMARY)
+        if mode == "healthy":
+            assert sends == []
+            operation, delivery = inbox.reply_adapter(send)({"message_id": 11, "phase": "ack"})
+            assert authority.perform(primary, "telegram-reply", operation, delivery) == "confirmed"
+            assert sends == [(101, "On it.", 11)]
+        else:
+            assert sends == [(101, "Queued. I’ll reply when the gateway is ready.", 11)]
+            expected = "unconfirmed" if mode == "uncertain" else "confirmed"
+            assert authority.effect_status(primary, "telegram-reply", "message:11:ack") == expected
+            assert authority.perform(primary, "telegram-reply", "message:11:ack",
+                                     lambda: pytest.fail("The gateway must reuse the queued acknowledgment")) == expected
+
+    with transport.StandbyAuthority(state, clock=lambda: now) as authority, broker(authority) as running:
+        running.poll.step()
+        assert len(sends) == 1
 
 
 def test_slow_valid_telegram_poll_still_commits_the_owner_update(tmp_path, monkeypatch):

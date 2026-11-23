@@ -117,13 +117,17 @@ def main():
             sends.append((message_id, text, time.monotonic()))
             return {"chat": {"id": owner}, "message_id": message_id + 1000}
 
+        updates = []
+        poll = telegram.TelegramPoll(inbox, lambda _offset: updates)
+        poll.step()
+
         def serve_broker():
             try:
                 peers = {transport.client_fingerprint(certs / f"{name}.pem"): identity
                          for name, identity in (("nuc", lease.PRIMARY), ("mac", lease.STANDBY))}
                 with MeasuredAuthority(state) as authority, transport.Broker(
                         ("127.0.0.1", 0), authority, cert=certs / "broker.pem", key=certs / "broker.key",
-                        ca=certs / "ca.pem", peers=peers, inbox=inbox,
+                        ca=certs / "ca.pem", peers=peers, inbox=inbox, poll=poll,
                         effects={"telegram-reply": inbox.reply_adapter(send_message),
                                  "telegram-typing": inbox.typing_adapter(lambda _owner: True)}) as broker:
                     ready.set_result(broker)
@@ -156,18 +160,19 @@ def main():
             return run_host(directory, identity, executable, runtime / "standby_launch.py", config, profile, node)
 
         def enqueue(number):
-            inbox.ingest([{"update_id": number, "message": {
+            updates[:] = [{"update_id": number, "message": {
                 "message_id": number, "date": int(time.time()), "text": "captain status",
                 "chat": {"type": "private", "id": 123456}, "from": {"id": 123456, "is_bot": False},
-            }}])
+            }}]
+            poll.step()
 
-        def reply(number, epoch, deadline):
+        def reply(number, epoch, deadline, acknowledgment="On it."):
             def settled():
                 pair = [row for row in sends if row[0] == number]
                 return pair if len(pair) >= 2 else None
 
             pair = until(settled, deadline, "A brokered Captain reply did not settle.")
-            assert len(pair) == 2 and pair[0][1] == "On it." and f"epoch {epoch}" in pair[1][1]
+            assert len(pair) == 2 and pair[0][1] == acknowledgment and f"epoch {epoch}" in pair[1][1]
             return pair[-1][2]
 
         try:
@@ -175,15 +180,23 @@ def main():
                 until(lambda: mac_status("parked"), 10, "The standby host did not park.")
                 nuc_status = primary.enter_context(host("nuc", lease.PRIMARY))
                 until(lambda: nuc_status("active"), 30, "The primary did not become ready.")
+                until(lambda: broker.last_telegram_pull is not None, 5, "Primary did not poll the broker.")
                 enqueue(10)
                 reply(10, 1, 10)
                 assert lease.STANDBY not in timestamps
                 stopped = time.monotonic()
                 primary.close()
                 last_renewal = timestamps[lease.PRIMARY]
+                until(lambda: time.monotonic() - broker.last_telegram_pull >= 2, 5,
+                      "Primary polling did not stop.")
+                received = time.monotonic()
                 enqueue(11)
-                print("Nuc-role process stopped. Waiting for the 90-second lease deadline.", flush=True)
-                finished = reply(11, 2, 115)
+                queued = "Queued. I’ll reply when the gateway is ready."
+                assert sends[-1][:2] == (11, queued) and lease.STANDBY not in timestamps
+                acknowledgment_seconds = sends[-1][2] - received
+                assert acknowledgment_seconds < 2
+                print("Nuc-role process stopped. Broker acknowledged the queued message.", flush=True)
+                finished = reply(11, 2, 115, queued)
                 mac_ready = until(lambda: timestamps.get(lease.STANDBY), 5, "Standby never renewed its own lease.")
                 assert mac_ready - last_renewal >= lease.LEASE_SECONDS
                 assert finished - stopped < 120
@@ -198,7 +211,8 @@ def main():
                     raise AssertionError("The previous host renewed the new epoch.")
                 until(lambda: inbox.next() is None, 5, "The shared inbox did not settle.")
                 assert len(sends) == 4
-                print(json.dumps({"takeover_from_last_renewal": round(mac_ready - last_renewal, 2),
+                print(json.dumps({"queued_ack_seconds": round(acknowledgment_seconds, 3),
+                                  "takeover_from_last_renewal": round(mac_ready - last_renewal, 2),
                                   "reply_after_nuc_stop": round(finished - stopped, 2),
                                   "final_replies": 2, "duplicate_replies": 0}))
         finally:

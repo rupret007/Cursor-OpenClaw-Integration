@@ -105,7 +105,7 @@ class TelegramInbox:
                               (message_id,)).fetchone() is not None
 
     def reply_adapter(self, send_message):
-        def prepare(payload):
+        def prepare(payload, *, queued=False):
             if payload.keys() not in ({"message_id", "phase"}, {"message_id", "phase", "text"}):
                 raise ValueError("Invalid Telegram reply")
             message_id, phase = payload["message_id"], payload["phase"]
@@ -113,7 +113,7 @@ class TelegramInbox:
             if not self.pending(message_id):
                 raise ValueError("Telegram message is no longer pending")
             if phase == "ack" and "text" not in payload:
-                text = "On it."
+                text = "Queued. I’ll reply when the gateway is ready." if queued else "On it."
             else:
                 text = payload.get("text")
                 if phase != "final" or not isinstance(text, str) or not 0 < len(text.encode("utf-16-le")) <= 8192:
@@ -160,12 +160,19 @@ class TelegramPoll:
         self.get_updates = get_updates
         self.offset = None
         self.available = Event()
+        self.on_owner_update = None
 
     def step(self):
         # The previous successful step durably staged everything below this
         # offset. Start without an offset after restart to handle old cursors.
-        self.offset = self.inbox.ingest(self.get_updates(self.offset))
+        updates = self.get_updates(self.offset)
+        self.offset = self.inbox.ingest(updates)
         self.available.set()
+        if self.on_owner_update is not None:
+            for update in updates:
+                message = self.inbox.selected_message(update)
+                if message is not None:
+                    self.on_owner_update(message[0], message[1])
 
     def run(self, stop):
         while not stop.is_set():

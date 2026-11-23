@@ -11,6 +11,7 @@ import re
 import sqlite3
 import ssl
 from threading import Event, Thread
+import time
 
 from standby import EFFECT_KINDS, Grant, LeaseRejected, PRIMARY, STANDBY, StandbyAuthority, read_private_json
 from standby_queue import ProjectBusy, ProjectQueue, ProjectScopeRejected, ReviewQueue, ReviewScopeRejected
@@ -137,6 +138,9 @@ class Broker(HTTPServer):
         self.effects = dict(effects or {})
         self.inbox = inbox
         self.poll = poll
+        self.last_telegram_pull = None
+        if poll is not None and "telegram-reply" in self.effects:
+            poll.on_owner_update = self.acknowledge_pending
         self.review = review
         self.project = project
         if self.effects.keys() - EFFECT_KINDS:
@@ -147,6 +151,19 @@ class Broker(HTTPServer):
         self.tls.load_verify_locations(cafile=ca)
         self.tls.verify_mode = ssl.CERT_REQUIRED
         super().__init__(address, Request)
+
+    def acknowledge_pending(self, message_id, sent_at):
+        # A recent authenticated pull gives the active gateway its normal progress path.
+        last_pull = self.last_telegram_pull
+        if (last_pull is not None and time.monotonic() - last_pull < 2
+                or not -2 <= time.time() - sent_at <= 15):
+            return
+        try:
+            _, send = self.effects["telegram-reply"]({"message_id": message_id, "phase": "ack"}, queued=True)
+            self.authority.acknowledge_queued_message(message_id, send)
+        except (OSError, ValueError, sqlite3.Error):
+            # An uncertain acknowledgment stays reserved. The pending turn can still run.
+            pass
 
     def get_request(self):
         connection, address = super().get_request()
@@ -232,6 +249,7 @@ class Request(BaseHTTPRequestHandler):
             authority.require_grant(grant)
             update = self.server.inbox.next()
             authority.require_grant(grant)
+            self.server.last_telegram_pull = time.monotonic()
             if update is None and self.server.poll is not None and not self.server.poll.available.is_set():
                 return 503, {"error": "telegram-poll-unavailable"}
             return 200, {"message": update}

@@ -178,6 +178,14 @@ function queryGithub(query, signal) {
   return githubCli(['graphql', '-f', 'query=' + query], signal);
 }
 
+export function readProjectGithub(repository, route, signal) {
+  if (!repoSlug.test(repository) || repository.split('/').some((part) => part === '.' || part === '..') ||
+      !/^(?:(?:issues|pulls)\/[1-9]\d{0,7}|commits\/[a-f0-9]{40}\/check-runs\?per_page=100&filter=latest)$/.test(route)) {
+    throw new Error('The GitHub route is outside the project evidence scope');
+  }
+  return githubCli(['--method', 'GET', 'repos/' + repository + '/' + route], signal);
+}
+
 export function readIntegrationGithub(path, signal) {
   const prefix = 'repos/rupret007/Cursor-OpenClaw-Integration/';
   const route = path.slice(prefix.length);

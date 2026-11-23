@@ -3,10 +3,11 @@ import { isIP } from 'node:net';
 import { join } from 'node:path';
 import { readMacAndrea } from './andrea-mac.mjs';
 import { sshAndreaSummary } from './andrea-ssh.mjs';
-import { createCaptain, localState, resolveCaptainStateScript } from './captain.mjs';
+import { createCaptain, localState, projectCI, resolveCaptainStateScript } from './captain.mjs';
+import { createProjectBrief } from './project-brief.mjs';
 import { classifyRequest, createDispatch } from './dispatch.mjs';
 import { answerSimple, standaloneSimple } from './model-router.mjs';
-import { fleetStatus, localFleetNode, openPullRequests, readIntegrationGithub, standaloneGateStatus, standaloneQuotaStatus, summarizeAndrea } from './tools.mjs';
+import { fleetStatus, localFleetNode, openPullRequests, readIntegrationGithub, readProjectGithub, standaloneGateStatus, standaloneQuotaStatus, summarizeAndrea } from './tools.mjs';
 
 const account = 'default';
 const expectedGithubAccount = 'rupret007';
@@ -177,7 +178,17 @@ export function registerSegmentOne(api, commands, services) {
   const registry = toolRegistry(api, commands, liveConfig, services, state);
   if (services.getGithub) {
     const readCI = localFleetNode() === 'bobserver' ? services.getGithub : readIntegrationGithub;
-    const captain = createCaptain({ registry, get: readCI, state });
+    const projectBrief = localFleetNode() === 'bobserver' ? undefined : createProjectBrief({
+      config: () => state('local-projects'),
+      read: readProjectGithub,
+      record: (recommendation) => state('record-project-recommendation', recommendation),
+      check(project, get) {
+        const repository = 'repos/' + project.repo;
+        return projectCI(repository, project.pr, project.checks,
+          (path) => get(path.slice(repository.length + 1)));
+      },
+    });
+    const captain = createCaptain({ registry, get: readCI, state, projectBrief });
     registry.captain = {
       run: async (request, turn) => plain(await captain.run(request, turn)),
       failure: 'Captain state or evidence is unavailable. Check “captain status” before retrying.',

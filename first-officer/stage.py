@@ -22,7 +22,7 @@ SUPPORTED_BASES = (BASELINE, SEGMENT1, CAPTAIN, ANDREA_SUMMARY)
 ROLLBACK_SLOT = "4759047e8a16d1691499d55c4b6656882e67bc2275a3297d2283aa9b01538753"
 RUNTIME = Path("round6/runtime")
 MODULES = ("andrea-mac.mjs", "andrea-ssh.mjs", "captain.mjs", "captain-state.py", "dispatch.mjs",
-           "model-router.mjs", "register.mjs", "review-worker.mjs", "runner-quota.py", "tools.mjs")
+           "model-router.mjs", "project-brief.mjs", "register.mjs", "review-worker.mjs", "runner-quota.py", "tools.mjs")
 OVERLAY = Path(__file__).resolve().parent / "segment1"
 QUEUE_MODULES = {
     "queue-runtime/lanes/queue.py": "lanes/queue.py",

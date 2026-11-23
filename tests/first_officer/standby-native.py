@@ -41,6 +41,10 @@ class FixtureBroker:
         self.submissions.append((request, plan))
         return {"phase": "queued", "run": "fixture-job"}
 
+    def telegram_progress(self, epoch, message_id):
+        return {"typing": self.telegram_typing(epoch, message_id),
+                "ack": self.send_telegram_reply(epoch, message_id, "ack", "On it.")}
+
     def telegram_typing(self, epoch, message_id):
         assert epoch == 4 and self.message["message_id"] == message_id
         self.effects.append(("typing", time.monotonic(), None))

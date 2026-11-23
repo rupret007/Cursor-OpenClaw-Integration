@@ -166,7 +166,7 @@ class StandbyAuthority:
         send()
         return confirm_effect(self._db, kind, operation)
 
-    def send_queued_progress(self, message_id, phase, send):
+    def send_telegram_progress(self, message_id, phase, send, *, grant=None):
         """Use the gateway’s receipt for typing or acknowledgment."""
         if type(message_id) is not int or not 0 < message_id < 2**63 - 1 or phase not in ("ack", "typing"):
             raise ValueError("Invalid queued message progress")
@@ -174,9 +174,18 @@ class StandbyAuthority:
         operation = f"message:{message_id}:{phase}"
         path = self._database
         with open_private(path.parent, path.name, create=False), closing(sqlite3.connect(path, timeout=0.25)) as db:
+            if grant is not None:
+                self.require_grant(grant)
             state = reserve_effect(db, kind, operation)
             if state is not None:
                 return state
+            if grant is not None:
+                try:
+                    self.require_grant(grant)
+                except LeaseRejected:
+                    with db:
+                        db.execute("DELETE FROM effects WHERE kind = ? AND operation = ?", (kind, operation))
+                    raise
             send()
             return confirm_effect(db, kind, operation)
 

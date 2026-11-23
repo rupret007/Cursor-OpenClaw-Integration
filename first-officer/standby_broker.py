@@ -88,6 +88,9 @@ class Client:
             raise BrokerUnavailable("Captain authority returned an invalid renewal")
 
 
+    def telegram_progress(self, epoch, message_id):
+        return self.request("/v1/telegram/progress", {"epoch": epoch, "message_id": message_id})["progress"]
+
     def next_telegram_message(self, epoch):
         return self.request("/v1/telegram/next", {"epoch": epoch})["message"]
 
@@ -170,24 +173,29 @@ class Broker(HTTPServer):
         if (last_pull is not None and time.monotonic() - last_pull < 2
                 or not -2 <= time.time() - sent_at <= 15):
             return
-        with ThreadPoolExecutor(max_workers=2) as progress:
-            acknowledgment = progress.submit(self.send_pending_progress, message_id, "ack")
-            self.send_pending_progress(message_id, "typing")
-            acknowledgment.result()
+        self.telegram_progress(message_id)
 
-    def send_pending_progress(self, message_id, phase):
+    def telegram_progress(self, message_id, grant=None):
+        with ThreadPoolExecutor(max_workers=2) as progress:
+            acknowledgment = progress.submit(self.send_pending_progress, message_id, "ack", grant)
+            typing = self.send_pending_progress(message_id, "typing", grant)
+            return {"typing": typing, "ack": acknowledgment.result()}
+
+    def send_pending_progress(self, message_id, phase, grant):
         try:
             if phase == "ack":
-                _, send = self.effects["telegram-reply"]({"message_id": message_id, "phase": "ack"}, queued=True)
+                _, send = self.effects["telegram-reply"]({"message_id": message_id, "phase": "ack"}, queued=grant is None)
             else:
                 typing = self.effects.get("telegram-typing")
                 if typing is None:
-                    return
+                    return "unconfirmed"
                 _, send = typing({"message_id": message_id})
-            self.authority.send_queued_progress(message_id, phase, send)
+            return self.authority.send_telegram_progress(message_id, phase, send, grant=grant)
+        except LeaseRejected:
+            raise
         except (OSError, ValueError, sqlite3.Error):
             # Uncertain progress stays reserved and the pending turn can still run.
-            pass
+            return "unconfirmed"
 
     def get_request(self):
         connection, address = super().get_request()
@@ -269,6 +277,9 @@ class Request(BaseHTTPRequestHandler):
         if self.path == "/v1/renew" and body.keys() == {"epoch"}:
             authority.renew(grant)
             return 200, {"epoch": epoch}
+        if self.path == "/v1/telegram/progress" and body.keys() == {"epoch", "message_id"} and self.server.inbox:
+            authority.require_grant(grant)
+            return 200, {"progress": self.server.telegram_progress(body["message_id"], grant)}
         if self.path == "/v1/telegram/next" and body.keys() == {"epoch"} and self.server.inbox is not None:
             authority.require_grant(grant)
             update = self.server.inbox.next()

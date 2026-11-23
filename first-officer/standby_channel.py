@@ -80,6 +80,14 @@ class Channel(ThreadingHTTPServer):
         except BrokerUnavailable:
             return {"result": "admission-unconfirmed"}
 
+    def progress(self, fields):
+        message_id = fields.get("fo_message_id")
+        with self.lock:
+            if (fields.keys() != {"chat_id", "fo_message_id"} or str(fields["chat_id"]) != str(self.owner)
+                    or not positive_id(message_id) or message_id != self.offered):
+                raise ValueError("Progress needs the original brokered owner message")
+        return self.broker.telegram_progress(self.epoch, message_id)
+
     def typing(self, fields):
         if str(fields.get("chat_id")) != str(self.owner) or fields.get("action") != "typing":
             raise ValueError("Invalid Telegram action")
@@ -186,6 +194,8 @@ class LocalRequest(BaseHTTPRequestHandler):
                 result = channel.broker.project_status(channel.epoch)
             elif method == "foProjectSubmit":
                 result = channel.submit_project(fields)
+            elif method == "foProgress":
+                result = channel.progress(fields)
             elif method == "sendChatAction":
                 result = channel.typing(fields)
             elif method == "sendMessage":

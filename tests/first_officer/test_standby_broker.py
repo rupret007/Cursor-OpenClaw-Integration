@@ -129,14 +129,18 @@ def test_broker_authenticates_each_host_and_fences_partitioned_primary(tmp_path,
     monkeypatch.setattr(queue, "post", queue_post)
     monkeypatch.setattr(queue, "response_json", queue_get)
     ready = Future()
+    active_progress = threading.Barrier(2, timeout=1)
 
     def send_message(owner, text, message_id):
+        if message_id == 13 and text == "On it.":
+            active_progress.wait()
         sends.append((owner, text, message_id))
         if message_id == 12 and text != "On it.":
             raise TimeoutError
         return {"chat": {"id": owner}, "message_id": 400 + message_id}
 
     def send_typing(owner):
+        active_progress.wait()
         typing.append(owner)
         return True
 
@@ -386,6 +390,12 @@ def test_broker_authenticates_each_host_and_fences_partitioned_primary(tmp_path,
                 assert models[1]["result"][0]["message"]["message_id"] == 13
                 assert telegram("getUpdates", {}) == (200, {"ok": True, "result": []})
                 assert telegram("sendMessage", {"chat_id": 101, "text": "Unreferenced reply"})[0] == 400
+                progress = {"chat_id": 101, "fo_message_id": 13}
+                assert telegram("foProgress", {**progress, "fo_message_id": 12})[0] == 400
+                expected = (200, {"ok": True, "result": {"typing": "confirmed", "ack": "confirmed"}})
+                assert request("nuc", "/v1/telegram/progress", {"epoch": 2, "message_id": 13})[0] == 409
+                assert telegram("foProgress", progress) == expected
+                assert telegram("foProgress", progress) == expected
                 assert telegram("sendChatAction", {"chat_id": 101, "action": "typing", "fo_message_id": 13})[0] == 200
                 assert telegram("sendMessage", {"chat_id": 101, "text": "On it.", "fo_phase": "ack",
                                                 "reply_parameters": {"message_id": 13}})[0] == 200

@@ -101,13 +101,14 @@ function projectTelegramDelivery(state, liveConfig, brokered) {
 }
 
 async function acknowledge(api, owner, liveConfig, signal, ctx, brokered) {
-  const message = brokered ? brokerMessage(ctx) : undefined;
-  const results = await Promise.allSettled(brokered ? [
-    telegramDirect(owner, liveConfig, 'sendChatAction', { action: 'typing', fo_message_id: message }, signal),
-    telegramDirect(owner, liveConfig, 'sendMessage', {
-      text: 'On it.', fo_phase: 'ack', reply_parameters: { message_id: message },
-    }, signal),
-  ] : [
+  if (brokered) {
+    const progress = await telegramDirect(owner, liveConfig, 'foProgress', { fo_message_id: brokerMessage(ctx) }, signal);
+    if (progress?.typing !== 'confirmed' || progress?.ack !== 'confirmed') {
+      throw new Error('Telegram acknowledgment incomplete');
+    }
+    return;
+  }
+  const results = await Promise.allSettled([
     telegramTyping(api, owner, liveConfig, signal),
     telegramSend(api, owner, liveConfig, 'On it.', signal),
   ]);

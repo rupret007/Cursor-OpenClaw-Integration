@@ -10,9 +10,14 @@ from pathlib import Path
 import re
 import sqlite3
 import ssl
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event, Thread
 import time
+
+if __name__ == "__main__":
+    # Start with Python isolated mode and resolve peers only from the pinned release.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from standby import EFFECT_KINDS, Grant, LeaseRejected, PRIMARY, STANDBY, StandbyAuthority, read_private_json
 from standby_queue import ProjectBusy, ProjectQueue, ProjectScopeRejected, ReviewQueue, ReviewScopeRejected

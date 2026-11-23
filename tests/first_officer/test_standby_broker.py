@@ -4,6 +4,8 @@ import importlib
 import json
 from pathlib import Path
 import ssl
+import subprocess
+import sys
 from types import SimpleNamespace
 import threading
 import time
@@ -12,6 +14,14 @@ import pytest
 
 
 from standby_fixture import certificates
+
+
+def test_broker_entrypoint_loads_release_modules_in_isolated_python(tmp_path):
+    broker = Path(__file__).resolve().parents[2] / "first-officer/standby_broker.py"
+    result = subprocess.run([sys.executable, "-I", "-B", str(broker), "--help"],
+                            cwd=tmp_path, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert "--telegram-config" in result.stdout
 
 
 def telegram_update(update_id, message_id, author=101):

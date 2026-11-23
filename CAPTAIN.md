@@ -69,6 +69,27 @@ When neither gateway has polled the broker in the last two seconds, the broker c
 
 Run `tests/first_officer/standby-joined.py` in a loopback-only Linux namespace with a supported First Officer bundle and the installed Node and OpenClaw executables. It runs both packaged launchers with separate certificates, uses the real 90-second deadline, and checks a queued command and stale-host rejection. This exercises the broker, native gateway and durable inbox. Physical Mac startup and real Telegram delivery require the BobTestesBot rehearsal before production. Verify a brief Nuc outage keeps the current epoch. Then test a Nuc outage exceeding 90 seconds, an isolated Nuc that can still reach Telegram, a returning Nuc with an old epoch, an unavailable witness, and a Mac reboot to the login window. Interrupt a reply and a queued job during transfer. Require one Telegram consumer, no duplicate job, and a correct Mac reply within the two-minute target without a local login, SSH password, or Bobserver. Record measured takeover and recovery times. Roll back by disabling promotion, parking the Mac and confirming its fence is closed before restoring the Nuc as the sole consumer. Automatic promotion remains pending.
 
+### Start the broker at boot on an independent Linux host
+
+The systemd template at `first-officer/systemd/openclaw-captain-broker@.service` starts the pinned broker at boot under the dedicated `openclaw-broker` system account. Confirm the host has systemd, Python 3, and local persistent storage before choosing it. The broker must be reachable from both Captain hosts while either one is offline. Keep the SQLite state under `/var/lib/openclaw-captain-broker` on the broker’s own disk.
+
+Stage the approved release under `/opt/openclaw-fo/first-officer-<digest>`. Verify the complete release inventory before copying it to the host. Keep the release root-owned, immutable to the service account, and readable by that account. At every start the unit checks the manifest digest against the instance name and verifies the listed files. Use a root-owned `/etc/openclaw-captain-broker` directory accessible only to the administrator and service account. Its `broker.env` sets `BROKER_LISTEN` to the chosen private IPv4 interface. Install `ca.pem`, `broker.pem`, `broker.key`, `nuc.pem`, `mac.pem`, and the verified bot’s `telegram.json` there. The service account needs read access. The Telegram JSON must be owned by the service account and mode `0600`. Keep the broker private key readable only by that account. Open only the private broker port to the two Captain hosts.
+
+Jeff activates the tested instance after confirming that the previous Telegram consumer is stopped. First use BobTestesBot and the rehearsed private credentials. From the reviewed checkout on the independent host, with `digest` set to the approved manifest SHA-256, run the following as the operator.
+
+```bash
+unit="openclaw-captain-broker@${digest}.service"
+systemd-analyze verify first-officer/systemd/openclaw-captain-broker@.service
+sudo install -m 0644 first-officer/systemd/openclaw-captain-broker@.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now "$unit"
+sudo systemctl is-active "$unit"
+```
+
+The base unit starts lease and Telegram services. When the queue rehearsal passes on that host, a root-owned instance drop-in can replace `ExecStart` with the same command plus `--review-queue-config` or `--project-queue-config`, using private operator-approved files. Keep queue tokens in the private service environment.
+
+To roll back, disable and stop that exact instance with `sudo systemctl disable --now "$unit"` and verify it is inactive before permitting a different consumer. Preserve the private authority and inbox state. If a prior reviewed instance can read that state, start it only after confirming the failing instance and both gateways are fenced. Reconcile unconfirmed deliveries before resuming.
+
 ### Standalone review queue
 
 The standalone review uses the same Hatchet and Restate dispatcher from the [isolated queue pilot](QUEUE-PILOT.md). It requires a mode `0600` `queue.json` file beside the standalone authority. Use the queue policy format in [INSTALL.md](INSTALL.md#queue-a-review-lane) and set the Hatchet workflow to `fo-captain-review`, the Restate service to `CaptainReview`, and the handler to `verify`. Use a dedicated scope with a concurrency limit of one for the Restate review worker. Load the ingress credentials in the gateway's private service environment.

@@ -1058,10 +1058,13 @@ def main():
         epoch = check_epoch(int(broker_epoch))
         if epoch == 0 or node not in LOCAL_NODES:
             raise ValueError("Invalid brokered gateway epoch")
-        if entry == "view":
-            return {"lease": {"holder": "first-officer", "state": "held", "epoch": epoch},
+        if entry in ("view", "handoff"):
+            view = {"lease": {"holder": "first-officer", "state": "held", "epoch": epoch},
                     "armed": False, "grant": None, "blocked": None, "standalone": node,
                     "jobs": [], "active": None}
+            if entry == "handoff":
+                view["observed"] = int(time.time())
+            return view
         if entry not in ("local-gate", "local-capacity", "local-quota", "local-projects",
                          "project-telegram-review", "record-project-recommendation"):
             raise ValueError("Brokered job state is unavailable in this gateway configuration")

@@ -337,7 +337,9 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
     if (action === 'role') return role(view) + '\n' + decisions(view);
     const recommendation = view.lastProjectRecommendation;
     if (action === 'handoff') return [role(view), 'Work owner · OpenClaw. Decisions · Jeff.',
-      'Handoff recorded at ' + new Date(view.recorded * 1000).toISOString() + '.', decisions(view, turn.delivery),
+      view.observed !== undefined ? 'Brokered handoff checked at ' + new Date(view.observed * 1000).toISOString() + '.' :
+        'Handoff recorded at ' + new Date(view.recorded * 1000).toISOString() + '.',
+      decisions(view, turn.delivery),
       recommendation ? 'Last recorded project recommendation · ' + recommendation.repo + ' #' +
         recommendation.issue + ' · ' + recommendation.action + ' · epoch ' + recommendation.epoch + '.' : '',
       view.blocked?.reason === 'ci-pending' ? 'Integration PR #' + view.blocked.pr + ' · ' +

@@ -123,8 +123,11 @@ def main():
                     (12, "what is a branch?", "line of development", 15),
                     (13, "captain grant integration-ci epoch 4", "dispatch need", 30),
                     (14, "what needs me?", "coding submission is unresolved", 30),
+                    (15, "handoff", "coding submission is unresolved", 30),
             ):
                 verify_turn(broker, message_id, text, expected, final_limit)
+            assert any(phase == "final" and "Brokered handoff checked at" in text
+                       for phase, _, text in broker.effects)
             assert not (authority / "lease.json").exists()
         finally:
             gateway.stop()

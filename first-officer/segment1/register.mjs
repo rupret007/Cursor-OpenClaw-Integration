@@ -257,7 +257,7 @@ export function registerSegmentOne(api, commands, services) {
   const script = resolveCaptainStateScript(currentConfig());
   const state = async (operation, data) => {
     const view = await localState(operation, data, script);
-    if (!stagedStandby || operation !== 'view') return view;
+    if (!stagedStandby || !['view', 'handoff'].includes(operation)) return view;
     try {
       const owner = telegramOwner(currentConfig(), account);
       const status = await telegramDirect(owner, liveConfig, 'foProjectStatus', {}, AbortSignal.timeout(2500));
@@ -350,7 +350,7 @@ export function registerSegmentOne(api, commands, services) {
         },
       });
       if (stagedStandby && (!request || request.kind === 'remember' ||
-          request.kind === 'captain' && !['role', 'brief', 'decisions', 'help'].includes(request.action))) {
+          request.kind === 'captain' && !['role', 'brief', 'decisions', 'handoff', 'help'].includes(request.action))) {
         return { kind: 'standby' };
       }
       if (request?.kind !== 'simple') {

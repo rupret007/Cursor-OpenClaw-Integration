@@ -1,5 +1,19 @@
 # First Officer Segment 1 status
 
+## Current Captain candidate
+
+The Nuc Captain, local LiteLLM, and Captain queue user units were inactive at the latest read-only check. The evidence below includes earlier deployment observations and isolated rehearsals. The current production Telegram consumer remains unverified.
+
+| Requirement | Latest evidence |
+| --- | --- |
+| Verified real coding change | [PR #41](https://github.com/rupret007/Cursor-OpenClaw-Integration/pull/41) addresses issue #40. GitHub still reports four successful checks at `4c69ec8`. The worker ran under the separately scoped local pilot. |
+| Two competing projects | Integration #40 and Bob Ops Dashboard #473 were read live. A direct daily briefing ranked them and saved one receipt. The competing-write scenario used a fixture. Two-project Telegram delivery and continuous scheduling remain unverified. |
+| Recovery on the Nuc | Real Hatchet recovered a killed coding subprocess and separately completed a job after a Hatchet server restart. Each exercise returned one candidate from one loopback model call under the original run ID. Duplicate dispatch reused the receipt. Restate and its separate recovery path passed in the same isolated network. See [queue rehearsal](QUEUE-PILOT.md#observed-results). |
+| Telegram response time | A real owner-originated BobTestesBot status command through the isolated Nuc gateway at `abb90e4` confirmed typing in 1.377 s, acknowledgment in 1.425 s and correct final status in 2.181 s. Times start when the test relay receives the update. The current combined candidate still needs an exact-bundle timing run. |
+| Passwordless standby | The paired Linux rehearsal completed with one bot consumer and no interactive password. The physical Mac login-window rehearsal and the independent broker host are unverified. |
+| Grok comparison and providers | The ten-case Bob benchmark is recorded in private operator evidence. Grok's routing description is available. Same-case timings and intervention counts are still missing. Subscription coding execution and real provider fallback remain unverified. |
+| Review and CI | Draft [PR #42](https://github.com/rupret007/Cursor-OpenClaw-Integration/pull/42) still has four successful checks at `394230c`. The combined follow-up needs its own approval to publish and CI for the exact proposed head. Production activation remains a separate decision. |
+
 ## Project Captain pilot
 
 The Nuc is running the pinned `62f77b7e` Captain release at epoch 2 with its queue and LiteLLM active. The live lease had no dispatch grant when inspected. Existing PR #39 had all four checks passing at `062a947`. Its checks cover that commit.

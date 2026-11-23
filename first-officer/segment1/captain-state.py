@@ -15,6 +15,7 @@ import sys
 import tempfile
 import time
 from types import SimpleNamespace
+from urllib.parse import quote
 from urllib.request import Request
 
 
@@ -33,6 +34,7 @@ SHA = re.compile(r"[a-f0-9]{40}")
 LANE = re.compile(r"fo-ci-[a-f0-9]{24}")
 OWNER = re.compile(r"[1-9][0-9]{0,15}")
 DELIVERY = ("reported", "delivery-unverified")
+ACTIVE_PROJECT = ("reserved", "running", "unresolved")
 BLOCKERS = ("fleet", "gate", "quota", "ci-changed", "ci-unavailable", "ci-pending", "ci-timeout", "ci-paused")
 
 
@@ -219,6 +221,8 @@ class StandaloneAuthority:
             if row["active"] and row["epoch"] == epoch:
                 if any(job["state"] in ("launching", "running") for job in data["jobs"]):
                     raise ValueError("Captain still has an active review")
+                if any(job["state"] in ACTIVE_PROJECT for job in data.get("projectJobs", [])):
+                    raise ValueError("Resolve the active project coding job before transferring authority")
                 if data.get("blocked", {}).get("reason") == "ci-pending":
                     raise ValueError("Pause the pending review before transferring authority")
                 self._peer_key()
@@ -331,6 +335,32 @@ def local_capacity(authority):
     return {"node": authority.node, "observed": int(time.time()), "used": used, "limit": limit}
 
 
+def current_project_evidence(request, branch):
+    candidates = (Path("/usr/bin/gh"), HOME / ".local/bin/gh", Path("/opt/homebrew/bin/gh"), Path("/usr/local/bin/gh"))
+    binary = next((candidate for candidate in candidates if candidate.is_file() and os.access(candidate, os.X_OK)), None)
+    if binary is None:
+        raise ValueError("The approved GitHub CLI is unavailable")
+    root = f"repos/{request['repository']}"
+
+    def get(route):
+        result = subprocess.run(
+            ["/usr/bin/nice", "-n", "10", str(binary), "api", "--method", "GET", route, "--hostname", "github.com"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True, timeout=4,
+            env={"HOME": str(HOME), "PATH": "/usr/bin:/bin", "GH_PROMPT_DISABLED": "1"},
+        )
+        return json.loads(result.stdout)
+
+    issue = get(f"{root}/issues/{request['issue']}")
+    if (issue.get("number") != request["issue"] or "pull_request" in issue or
+            str(issue.get("repository_url", "")).lower() != f"https://api.github.com/{root}" or
+            issue.get("state") != "open"):
+        return False
+    ref = get(f"{root}/git/ref/heads/{quote(branch, safe='/')}")
+    target = ref.get("object")
+    return (ref.get("ref") == f"refs/heads/{branch}" and isinstance(target, dict) and
+            target.get("sha") == request["head"] and target.get("type") == "commit")
+
+
 class CaptainQueue:
     """Use the reviewed dispatcher and its local receipt for standalone reviews."""
 
@@ -343,6 +373,8 @@ class CaptainQueue:
         spec.loader.exec_module(self.queue)
         self.policy = root / "queue.json"
         self.ledger = root / "queue-receipts.jsonl"
+        self.project_policy = root / "project-queue.json"
+        self.project_ledger = root / "project-queue-receipts.jsonl"
 
     def config(self):
         config = self.queue.validate_config(read_private(self.policy, 4096))
@@ -350,6 +382,19 @@ class CaptainQueue:
                 "fo-captain-review", "CaptainReview", "verify"):
             raise ValueError("Expected the reviewed, model-free Captain worker routes")
         return config
+
+    def project_config(self):
+        config = self.queue.validate_config(read_private(self.project_policy, 4096))
+        if config["hatchet"]["workflow"] != self.queue.PROJECT_WORKFLOW:
+            raise ValueError("Expected the scoped Hatchet coding workflow")
+        return config
+
+    def project_receipt(self, request):
+        try:
+            with self.queue.locked_ledger(self.project_ledger, read_only=True) as file:
+                return self.queue.queue_state(file, request, self.queue.idempotency_key(request))
+        except FileNotFoundError:
+            return None
 
     @staticmethod
     def request(job):
@@ -478,6 +523,7 @@ class Controller:
                 **({"standalone": self.watchdog.node} if self.standalone else {}),
                 "jobs": data["jobs"][-5:],
                 "lastProjectRecommendation": recommendations[-1] if recommendations else None,
+                "activeProjectJobs": [job for job in data.get("projectJobs", []) if job["state"] in ACTIVE_PROJECT],
                 "active": active}
 
     def handoff(self):
@@ -509,6 +555,84 @@ class Controller:
                 return {"recorded": False, "duplicate": True}
             data["projectRecommendations"] = [*history[-49:], {**entry, "observed": int(time.time())}]
             return {"recorded": True}
+
+    def submit_project(self, req):
+        """Submit one operator-approved coding identity under the current authority fence."""
+        if not self.standalone or not isinstance(req, dict) or req.keys() != {"repository", "issue", "head", "epoch"}:
+            raise ValueError("Expected a standalone exact project request")
+        request = {**req, "lane": self.queue.queue.project_lane(**req)}
+        self.queue.queue.canonical(request)
+        with self.locked(write=True) as data, self.fence._locked(), ExitStack() as resources:
+            lease = self.fence._read_unlocked()
+            if not self.matches(lease, req["epoch"]):
+                return {"result": "stale"}
+            jobs = data.get("projectJobs", [])
+            existing = next((job for job in jobs if job["request"] == request), None)
+            if existing:
+                return {"result": "duplicate", "job": existing}
+            if any(job["request"]["repository"] == req["repository"] and job["state"] in ACTIVE_PROJECT for job in jobs):
+                return {"result": "active"}
+            if len(jobs) >= 100:
+                return {"result": "ledger-full"}
+
+            try:
+                grant = read_private(self.watchdog.AUTHORITY / "project-grant.json", 4096)
+                config = self.queue.project_config()
+            except (OSError, TypeError, ValueError):
+                return {"result": "runner-unconfigured"}
+            now = int(time.time())
+            if (not isinstance(grant, dict) or grant.keys() != req.keys() | {"branch", "expires", "worker"} or
+                    any(type(grant[key]) is not type(value) or grant[key] != value for key, value in req.items()) or
+                    type(grant["expires"]) is not int or not now < grant["expires"] <= now + 3600 or
+                    grant["worker"] != "local-qwen" or not isinstance(grant["branch"], str) or
+                    not re.fullmatch(r"[a-zA-Z0-9_-]+(?:[./-][a-zA-Z0-9_-]+)*", grant["branch"]) or
+                    len(grant["branch"]) > 150):
+                return {"result": "scope-denied"}
+
+            try:
+                gate = resources.enter_context(self.gate.open())
+                capacity = local_capacity(self.watchdog)
+            except (OSError, KeyError, TypeError, ValueError, subprocess.SubprocessError):
+                return {"result": "admission-unavailable"}
+            if gate["hold"] or gate["running"] or capacity["used"] >= capacity["limit"] or os.getloadavg()[0] > 16:
+                return {"result": "admission-blocked"}
+            if self.queue.project_receipt(request) is not None:
+                return {"result": "existing-queue-receipt"}
+            try:
+                if not current_project_evidence(request, grant["branch"]):
+                    return {"result": "stale-github"}
+            except (OSError, TypeError, ValueError, subprocess.SubprocessError):
+                return {"result": "github-unavailable"}
+            if int(time.time()) >= grant["expires"]:
+                return {"result": "scope-denied"}
+
+            job = {"request": request, "worker": grant["worker"], "state": "reserved", "started": now}
+            data["projectJobs"] = [*jobs, job]
+            save(self.file, data)
+            try:
+                receipt = self.queue.queue.dispatch(config, request, self.queue.project_ledger, timeout=3)
+            except (OSError, ValueError):
+                receipt = self.queue.project_receipt(request)
+            phase = receipt["phase"] if receipt else "unseen"
+            job.update(queuePhase=phase, state={"queued": "running", "refused": "refused"}.get(phase, "unresolved"))
+            return {"result": job["state"], "job": job}
+
+    def reconcile_project(self, req):
+        if not self.standalone or not isinstance(req, dict) or req.keys() != {"repository", "issue", "head", "epoch", "run"}:
+            raise ValueError("Expected an exact project request and its original Hatchet run ID")
+        request = {key: value for key, value in req.items() if key != "run"}
+        request["lane"] = self.queue.queue.project_lane(**request)
+        self.queue.queue.canonical(request)
+        with self.locked(write=True) as data, self.fence._locked():
+            if not self.matches(self.fence._read_unlocked(), request["epoch"]):
+                return {"result": "stale"}
+            job = next((row for row in data.get("projectJobs", []) if row["request"] == request), None)
+            if job is None or job["state"] not in ACTIVE_PROJECT:
+                return {"result": "no-active-job"}
+            receipt = self.queue.queue.reconcile_project(self.queue.project_config(), request,
+                                                         self.queue.project_ledger, req["run"], timeout=3)
+            job.update(queuePhase=receipt["phase"], state="running")
+            return {"result": job["state"], "job": job}
 
     @staticmethod
     def submitted_message(data, owner, message):
@@ -775,6 +899,10 @@ def main():
             return local_capacity(authority)
         if entry == "record-project-recommendation":
             return controller.record_project_recommendation(req)
+        if entry == "submit-project":
+            return controller.submit_project(req)
+        if entry == "reconcile-project":
+            return controller.reconcile_project(req)
         if entry == "local-projects":
             if not private_directory(LOCAL_AUTHORITY):
                 raise ValueError("The standalone authority directory is invalid")

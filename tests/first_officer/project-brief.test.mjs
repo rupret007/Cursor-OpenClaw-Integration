@@ -37,6 +37,9 @@ test('Captain recommends the highest-impact actionable milestone and reads each 
   dependency = 'closed';
   assert.match((await brief(signal)).summary, /Recommended next · example\/integration #17/);
   assert.equal(reads.length, 6);
+  const active = await brief(signal, [{ request: { repository: 'example/integration' } }]);
+  assert.match(active.summary, /Continue the existing coding run/);
+  assert.match(active.summary, /Recommended next · example\/other #21/);
 });
 
 test('Invalid profiles make no reads and unavailable live evidence cannot recommend work', async () => {

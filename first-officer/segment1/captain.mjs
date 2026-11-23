@@ -129,6 +129,14 @@ function jobText(job) {
 
 const noDecisions = 'No captain decisions are waiting for Jeff.';
 
+function projectWork(job) {
+  const { repository, issue, head } = job.request;
+  const identity = repository + ' #' + issue + ' · ' + head.slice(0, 8) + '.';
+  return identity + (job.state === 'running'
+    ? ' Hatchet accepted the coding job. Awaiting independent verification.'
+    : ' Coding submission is unresolved. Check the original Hatchet receipt before another attempt.');
+}
+
 function decisions(view) {
   const needs = [];
   if (view.lease.holder === 'first-officer' && view.lease.state === 'held' &&
@@ -137,6 +145,9 @@ function decisions(view) {
   }
   if (view.lease.state === 'handback-pending') needs.push('Wait for the shared fence to finish transferring authority.');
   if (view.active?.overtime) needs.push(jobText(view.active));
+  for (const job of view.activeProjectJobs ?? []) {
+    if (job.state !== 'running') needs.push(projectWork(job));
+  }
   if (view.blocked && view.blocked.reason !== 'ci-pending') needs.push('Last blocked review · Integration PR #' + view.blocked.pr + '. ' +
     blockers[view.blocked.reason]);
   for (const job of view.jobs) {
@@ -230,7 +241,8 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
     }
     const viewPromise = state(action === 'handoff' ? 'handoff' : 'view');
     const projectEvidence = () => bounded(11_000, (signal) =>
-      projectBrief(AbortSignal.any([signal, turn.signal])))
+      viewPromise.catch(() => null).then((view) =>
+        projectBrief(AbortSignal.any([signal, turn.signal]), view?.activeProjectJobs ?? [])))
       .catch(() => ({ summary: 'Project evidence is unavailable.', decisions: ['Project decisions could not be verified.'] }));
     if (action === 'brief') {
       const [view, quota, projects, ...evidence] = await Promise.all([
@@ -239,7 +251,9 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
       ]);
       return [view ? role(view) + '\n' + decisions(view).split('\n')[0] +
         (view.active ? '\n' + jobText(view.active) : '') :
-        'Captain authority and decisions are unavailable.', ...(projects ? [projects.summary] : []), ...evidence,
+        'Captain authority and decisions are unavailable.',
+        ...(view?.activeProjectJobs ?? []).filter((job) => job.state === 'running').map(projectWork),
+        ...(projects ? [projects.summary] : []), ...evidence,
         quota?.modelFree ? 'Captain CI review uses a model-free worker.' :
           quota ? 'Captain runner quota · ' + quota.session.used + '% of 5-hour window · ' + quota.weekly.used + '% of weekly window.'
           : 'The captain runner’s subscription quota is unavailable.'].join('\n\n');
@@ -260,6 +274,7 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
         recommendation.issue + ' · ' + recommendation.action + ' · epoch ' + recommendation.epoch + '.' : '',
       view.blocked?.reason === 'ci-pending' ? 'Integration PR #' + view.blocked.pr + ' · ' +
         view.blocked.head.slice(0, 8) + ' · awaiting required CI.' : '',
+      ...(view.activeProjectJobs ?? []).filter((job) => job.state === 'running').map(projectWork),
       ...view.jobs.map(jobText)].filter(Boolean).join('\n');
     return task(request.pr, view, turn);
   }

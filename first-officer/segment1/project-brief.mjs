@@ -13,6 +13,7 @@ const nextActions = {
   refresh: 'Refresh the GitHub issue, PR, or CI evidence',
   blocked: 'Resolve the open dependency',
   closed: 'Confirm the milestone outcome and set the next one',
+  working: 'Continue the existing coding run through verification',
 };
 
 function validProject(project) {
@@ -55,7 +56,7 @@ const actionable = new Set(['investigate', 'fix', 'verify']);
 const needsJeff = new Set(['closed', 'investigate', 'fix']);
 
 export function createProjectBrief({ config, read, check, record }) {
-  return async function projectBrief(signal) {
+  return async function projectBrief(signal, activeWork = []) {
     const projects = await config();
     if (projects === null) return null;
     if (!Array.isArray(projects) || projects.length < 1 || projects.length > 2 ||
@@ -67,6 +68,10 @@ export function createProjectBrief({ config, read, check, record }) {
       bounded(8000, (deadline) =>
         inspect(project, read, check, AbortSignal.any([signal, deadline])))
         .catch(() => ({ project, action: 'refresh' }))));
+    const activeRepositories = new Set(activeWork.map((job) => job.request.repository));
+    for (const row of rows) {
+      if (actionable.has(row.action) && activeRepositories.has(row.project.repo.toLowerCase())) row.action = 'working';
+    }
     signal.throwIfAborted();
     const compare = (a, b) => b.project.impact - a.project.impact ||
       b.project.urgency - a.project.urgency || a.project.risk - b.project.risk ||

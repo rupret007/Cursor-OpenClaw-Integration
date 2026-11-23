@@ -126,6 +126,14 @@ Set the profile mode to `0600` and its authority directory to `0700`. Dependenci
 
 The read-only profile can recommend work. It does not grant worker dispatch. The ledger stores the last 50 changed recommendations with the issue, action, observed commit when available, and lease epoch. Signed handoff carries the ledger. Each host loads its own operator-provided profile. To roll back the briefing on an approved test host, move its `projects.json` to a private backup on the same host. The next request uses the existing Captain briefing. Restoring the file restores the project view.
 
+### Isolated coding admission
+
+Use a private test authority and a dedicated test Hatchet workflow. The coordinator requires one `project-grant.json` in the authority directory. Its fields are `repository` in lowercase, `issue`, `head` as a full commit, `epoch`, `branch`, `worker` set to `local-qwen`, and `expires` as Unix time within the next hour. Keep grant and policy files at mode `0600`. A separately reviewed `project-queue.json` selects the dedicated `fo-captain-project` workflow.
+
+Pass the four identity fields as JSON to the state script's `submit-project` operation. The coordinator checks the live GitHub issue and branch head, local gate and capacity, current authority, and exact grant before saving the reservation or contacting Hatchet. One unresolved reservation blocks a second coding job for the repo and blocks standby transfer. The briefing can still recommend eligible work in another project.
+
+After independently identifying an accepted Hatchet run, use `reconcile-project` with the original four identity fields and `run`. This checks the original queue receipt and restores the coordinator's running state without submitting again. Finishing an accepted coding job still requires independent patch verification.
+
 ### Inspect a coding submission after interruption
 
 The coding queue boundary uses a stable lane ID derived from the normalized repository, issue number, exact commit, and lease epoch. Only the dedicated Hatchet coding workflow can accept this payload. A refused coding submission needs an operator decision. A submission with unknown acceptance stays reserved while the original outcome is checked. Existing review lanes retain their Restate route.

@@ -118,6 +118,76 @@ def test_failed_launch_is_persisted_through_a_restart_and_cannot_be_replayed(cap
     assert reopened.submit(plan) == {"result": "duplicate"}
 
 
+def test_project_admission_binds_scope_head_and_repository_write_lane(captain, tmp_path, monkeypatch):
+    module, _, _ = captain
+    root = tmp_path / "project-authority"
+    root.mkdir(mode=0o700)
+    authority = module.StandaloneAuthority("nucbox", root)
+    module.save(root / "lease.json", {"node": "nucbox", "epoch": 2, "active": True})
+    controller = module.Controller(authority, private=root / "reviews")
+    request = {"repository": "example/integration", "issue": 40, "head": "a" * 40, "epoch": 2}
+    calls = []
+
+    def dispatch(_config, queued, _ledger, **_kwargs):
+        saved = module.read_private(controller.file, module.STATE_LIMIT)
+        assert saved["projectJobs"][-1]["state"] == "reserved"
+        calls.append(queued)
+        return {"phase": "queued"}
+
+    @contextmanager
+    def gate(self):
+        yield {"hold": False, "running": False}
+
+    monkeypatch.setattr(module.CaptainQueue, "project_config", lambda _queue: {})
+    monkeypatch.setattr(module.LiveGate, "open", gate)
+    monkeypatch.setattr(module, "local_capacity", lambda _authority: {"used": 0, "limit": 1})
+    monkeypatch.setattr(module.os, "getloadavg", lambda: (0, 0, 0))
+    monkeypatch.setattr(module, "current_project_evidence", lambda current, branch: False)
+    monkeypatch.setattr(controller.queue.queue, "dispatch", dispatch)
+    assert controller.submit_project(request) == {"result": "runner-unconfigured"}
+    now = int(time.time())
+    grant = {**request, "worker": "local-qwen", "branch": "codex/captain", "expires": now + 300}
+    module.save(root / "project-grant.json", {**grant, "expires": now - 1})
+    assert controller.submit_project(request) == {"result": "scope-denied"}
+    module.save(root / "project-grant.json", grant)
+    assert controller.submit_project({**request, "head": "b" * 40}) == {"result": "scope-denied"}
+    assert controller.submit_project(request) == {"result": "stale-github"}
+    assert not calls
+
+    monkeypatch.setattr(module, "current_project_evidence", lambda current, branch: all(current[key] == value for key, value in request.items()) and branch == "codex/captain")
+    result = controller.submit_project(request)
+    assert result["result"] == "running" and len(calls) == 1
+    restarted = module.Controller(authority, private=root / "reviews")
+    assert restarted.submit_project(request)["result"] == "duplicate"
+    assert restarted.submit_project({**request, "issue": 41}) == {"result": "active"}
+    assert restarted.submit_project({**request, "epoch": 3}) == {"result": "stale"}
+    assert restarted.view()["activeProjectJobs"] == [result["job"]]
+    with pytest.raises(ValueError, match="active project coding job"):
+        authority.release(2, restarted.locked)
+    assert restarted.view()["lease"]["state"] == "held"
+
+    other = {**request, "repository": "example/other"}
+    module.save(root / "project-grant.json", {**grant, **other})
+    def crash(*_args, **_kwargs):
+        raise SystemExit(19)
+
+    monkeypatch.setattr(restarted.queue.queue, "dispatch", crash)
+    monkeypatch.setattr(module, "current_project_evidence", lambda *_args: True)
+    with pytest.raises(SystemExit):
+        restarted.submit_project(other)
+    recovered = module.Controller(authority, private=root / "reviews")
+    assert recovered.submit_project(other)["job"]["state"] == "reserved"
+    observed = []
+    def lookup(_config, queued, _ledger, run, **_kwargs):
+        observed.append((queued["repository"], run))
+        return {"phase": "queued"}
+
+    monkeypatch.setattr(recovered.queue.queue, "reconcile_project", lookup)
+    assert recovered.reconcile_project({**other, "run": "existing"})["result"] == "running"
+    assert observed == [("example/other", "existing")]
+    assert recovered.submit_project(other)["result"] == "duplicate"
+
+
 def test_project_recommendation_survives_restart_and_rechecks_epoch(captain):
     module, lease, watchdog = captain
     recommendation = {"repo": "Fixture/Integration", "issue": 7, "action": "fix", "head": "a" * 40}

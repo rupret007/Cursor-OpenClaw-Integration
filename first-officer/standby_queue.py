@@ -3,6 +3,7 @@
 from contextlib import closing
 import json
 from pathlib import Path
+import re
 import sqlite3
 from threading import Lock
 import time
@@ -50,14 +51,12 @@ class BrokerQueue:
         except FileNotFoundError:
             return None
 
-    def scope_matches(self, grant, request, *, worker=None):
+    def scope_matches(self, grant, request):
         fields = {"epoch", "request", "expires"}
-        if worker is not None:
-            fields.add("worker")
         try:
             scope = read_private_json(self.scope)
             now = int(self.clock())
-            return (isinstance(scope, dict) and scope.keys() == fields and scope.get("worker") == worker
+            return (isinstance(scope, dict) and scope.keys() == fields
                     and type(scope["epoch"]) is int and scope["epoch"] == grant.epoch
                     and self.key(scope["request"]) == self.key(request)
                     and type(scope["expires"]) is int and now < scope["expires"] <= now + MAX_SCOPE_SECONDS)
@@ -107,40 +106,72 @@ class ProjectQueue(BrokerQueue):
         self.observing = Lock()
         with open_private(directory, self.reservations.name), closing(sqlite3.connect(self.reservations)) as db:
             db.execute("CREATE TABLE IF NOT EXISTS active_repo (repo TEXT PRIMARY KEY, lane_key TEXT NOT NULL, "
-                       "request TEXT NOT NULL)")
+                       "request TEXT NOT NULL, plan_sha TEXT)")
+            if "plan_sha" not in {column[1] for column in db.execute("PRAGMA table_info(active_repo)")}:
+                db.execute("ALTER TABLE active_repo ADD COLUMN plan_sha TEXT")
             db.execute("CREATE TABLE IF NOT EXISTS project_observation (lane_key TEXT PRIMARY KEY, "
                        "state TEXT NOT NULL, commit_sha TEXT, observed INTEGER NOT NULL)")
 
-    def reserve(self, request, key):
+    def reserve(self, request, key, plan):
         repo = request["repository"]
         with closing(sqlite3.connect(self.reservations)) as db, db:
-            active = db.execute("SELECT lane_key FROM active_repo WHERE repo = ?", (repo,)).fetchone()
+            active = db.execute("SELECT lane_key, plan_sha FROM active_repo WHERE repo = ?", (repo,)).fetchone()
             if active is not None:
                 if active[0] != key:
                     raise ProjectBusy("An earlier coding run is still reserved for this repository")
+                if active[1] != plan:
+                    raise ProjectScopeRejected("The reserved coding plan changed")
                 return
             if db.execute("SELECT count(*) FROM active_repo").fetchone()[0] >= MAX_ACTIVE_PROJECTS:
                 raise ProjectBusy("The coding reservation ledger is full")
-            db.execute("INSERT INTO active_repo (repo, lane_key, request) VALUES (?, ?, ?)",
-                       (repo, key, queue.canonical(request)))
+            db.execute("INSERT INTO active_repo (repo, lane_key, request, plan_sha) VALUES (?, ?, ?, ?)",
+                       (repo, key, queue.canonical(request), plan))
 
     def clear_refused(self, request, key):
         with closing(sqlite3.connect(self.reservations)) as db, db:
             db.execute("DELETE FROM active_repo WHERE repo = ? AND lane_key = ?", (request["repository"], key))
 
+    def approved_plan(self, authority, grant, request):
+        authority.require_grant(grant)
+        key = self.key(request)
+        if grant.node != PRIMARY or request["epoch"] != grant.epoch:
+            raise ProjectScopeRejected("The exact coding run needs a current Nuc approval")
+        try:
+            scope = read_private_json(self.scope)
+            now = int(self.clock())
+            if (isinstance(scope, dict) and scope.keys() == {"epoch", "request", "expires", "worker", "planSha256"}
+                    and type(scope["epoch"]) is int and scope["epoch"] == grant.epoch
+                    and scope["worker"] == "local-qwen" and self.key(scope["request"]) == key
+                    and type(scope["expires"]) is int and now < scope["expires"] <= now + MAX_SCOPE_SECONDS
+                    and isinstance(scope["planSha256"], str) and re.fullmatch(r"[a-f0-9]{64}", scope["planSha256"])):
+                return scope["planSha256"]
+        except (OSError, ValueError, RecursionError):
+            pass
+        raise ProjectScopeRejected("The coding run needs an exact approved plan")
+
+    def worker_plan(self, authority, grant, request):
+        plan = self.approved_plan(authority, grant, request)
+        key = self.key(request)
+        with closing(sqlite3.connect(self.reservations)) as db:
+            reserved = db.execute("SELECT lane_key, plan_sha FROM active_repo WHERE repo = ?",
+                                  (request["repository"],)).fetchone()
+        receipt = self.receipt(request)
+        if reserved != (key, plan) or not receipt or receipt["phase"] not in ("pending", "uncertain", "queued"):
+            raise ProjectScopeRejected("The worker needs the original reserved run and coding plan")
+        authority.require_grant(grant)
+        return plan
+
     def submit(self, authority, grant, request):
         key = self.key(request)
+        plan = self.approved_plan(authority, grant, request)
 
         def authorize():
-            authority.require_grant(grant)
-            if (grant.node != PRIMARY or request["epoch"] != grant.epoch
-                    or not self.scope_matches(grant, request, worker="local-qwen")):
-                raise ProjectScopeRejected("The exact coding run needs a current Nuc approval")
+            if self.approved_plan(authority, grant, request) != plan:
+                raise ProjectScopeRejected("The approved coding plan changed before submission")
 
-        authorize()
         # Resolve the configured route before taking a repository reservation.
         queue.submission("hatchet", self.config["hatchet"], request, key)
-        self.reserve(request, key)
+        self.reserve(request, key, plan)
         receipt = self.dispatch(request, authorize)
         if receipt["phase"] == "refused":
             self.clear_refused(request, key)

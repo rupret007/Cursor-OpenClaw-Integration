@@ -3,6 +3,7 @@ import http.client
 import importlib
 import json
 from pathlib import Path
+import runpy
 import ssl
 import subprocess
 import sys
@@ -70,8 +71,20 @@ def test_broker_authenticates_each_host_and_fences_partitioned_primary(tmp_path,
 
     queue = importlib.import_module("lanes.queue")
 
+    worker = runpy.run_path(str(Path(__file__).resolve().parents[2] / "first-officer/workers/project-worker.py"))
+    checkout = tmp_path / "repo"
+    checkout.mkdir(mode=0o700)
+    git = worker["git"]
+    git(checkout, "init", "--quiet")
+    git(checkout, "remote", "add", "origin", "https://github.com/example/integration.git")
+    source = checkout / "review.mjs"
+    source.write_text('const status = "old";\n')
+    git(checkout, "add", source.name)
+    git(checkout, "commit", "-qm", "Approved base")
+    base = git(checkout, "rev-parse", "HEAD").decode().strip()
+
     def coding_request(issue):
-        request = {"repository": "example/integration", "issue": issue, "head": "a" * 40, "epoch": 1}
+        request = {"repository": "example/integration", "issue": issue, "head": base, "epoch": 1}
         return {**request, "lane": queue.project_lane(**request)}
 
     coding = coding_request(40)
@@ -80,9 +93,12 @@ def test_broker_authenticates_each_host_and_fences_partitioned_primary(tmp_path,
     project_commit = "b" * 40
     hatchet_available = True
 
-    def coding_scope(request):
+    def coding_scope(request, plan=None):
         project.scope.touch(mode=0o600, exist_ok=True)
-        project.scope.write_text(json.dumps({"epoch": 1, "request": request, "expires": 300, "worker": "local-qwen"}))
+        fields = {"epoch": 1, "request": request, "expires": 300, "worker": "local-qwen"}
+        if plan is not None:
+            fields["planSha256"] = plan
+        project.scope.write_text(json.dumps(fields))
 
     monkeypatch.setenv("FO_FIXTURE_HATCHET", "fixture-token")
     monkeypatch.setenv("FO_FIXTURE_RESTATE", "fixture-token")
@@ -212,13 +228,52 @@ def test_broker_authenticates_each_host_and_fences_partitioned_primary(tmp_path,
         with pytest.raises(transport.ProjectScopeRejected):
             nuc.submit_project(1, coding)
         coding_scope(coding)
+        with pytest.raises(transport.ProjectScopeRejected):
+            nuc.submit_project(1, coding)
+        worker_home = tmp_path / "worker"
+        worker_home.mkdir(mode=0o700)
+        plan_path = worker_home / "project-worker.json"
+        operator_plan = {"request": {key: value for key, value in coding.items() if key != "lane"},
+                         "checkout": str(checkout), "file": source.name,
+                         "before": '"old"', "prefix": "", "suffix": "", "prompt": "Update delivery status"}
+        worker["save"](plan_path, operator_plan)
+        plan_sha = worker["digest"](plan_path.read_bytes())
+        profile_path = worker_home / "broker.json"
+        worker["save"](profile_path, {"hostname": "127.0.0.1", "port": broker.server_port, "bot_id": 234567,
+                                      "cert": str(tmp_path / "nuc.pem"), "key": str(tmp_path / "nuc.key"), "ca": str(ca)})
+        monkeypatch.setenv("FO_PROJECT_BROKER_PROFILE", str(profile_path))
+        coding_scope(coding, plan_sha)
+        with pytest.raises(transport.ProjectScopeRejected):
+            worker["load_scope"](worker_home, coding)
         assert nuc.submit_project(1, coding)["phase"] == "uncertain"
-        coding_scope(candidate)
+        assert nuc.project_worker_plan(1, coding) == plan_sha
+        assert worker["load_scope"](worker_home, coding) == operator_plan
+        worker["save"](plan_path, {**operator_plan, "prompt": "Changed operator plan"})
+        with pytest.raises(ValueError, match="approved coding plan changed"):
+            worker["load_scope"](worker_home, coding)
+        worker["save"](plan_path, operator_plan)
+        calls = []
+
+        def model(prompt):
+            calls.append(prompt)
+            return "Delivery is unconfirmed"
+
+        local_result = worker["run"](worker_home, coding, model)
+        assert worker["run"](worker_home, coding, model) == local_result
+        assert calls == [operator_plan["prompt"]]
+        assert git(checkout, "show", local_result["commit"] + ":review.mjs") == b'const status = "Delivery is unconfirmed";\n'
+        assert source.read_text() == 'const status = "old";\n'
+        coding_scope(coding, "e" * 64)
+        with pytest.raises(transport.ProjectScopeRejected):
+            nuc.project_worker_plan(1, coding)
+        with pytest.raises(transport.ProjectScopeRejected):
+            nuc.submit_project(1, coding)
+        coding_scope(candidate, "e" * 64)
         with pytest.raises(transport.ProjectBusy):
             nuc.submit_project(1, candidate)
         reopened = transport.ProjectQueue(state, project_profile, clock=lambda: now)
         with pytest.raises(transport.ProjectBusy):
-            reopened.reserve(candidate, reopened.key(candidate))
+            reopened.reserve(candidate, reopened.key(candidate), "e" * 64)
         assert len(queue_calls) == 3
         with pytest.raises(transport.LeaseRejected):
             mac.renew(1)
@@ -258,12 +313,16 @@ def test_broker_authenticates_each_host_and_fences_partitioned_primary(tmp_path,
         scope(2, uncertain)
         assert mac.submit_review(2, uncertain)["phase"] == "uncertain"
         assert mac.project_receipt(2, coding)["phase"] == "uncertain"
+        with pytest.raises(transport.ProjectScopeRejected):
+            mac.project_worker_plan(2, coding)
         assert mac.project_status(2) == {"enabled": True, "jobs": [{"request": coding, "state": "unresolved"}]}
         with pytest.raises(transport.ProjectScopeRejected):
             mac.submit_project(2, coding)
         with pytest.raises(transport.BrokerUnavailable):
             mac.reconcile_project(2, coding, "fixture-project-run")
         assert mac.project_receipt(2, coding)["phase"] == "uncertain"
+        with pytest.raises(transport.ProjectScopeRejected):
+            mac.project_worker_plan(2, coding)
         assert mac.project_status(2) == {"enabled": True, "jobs": [{"request": coding, "state": "unresolved"}]}
         exact_project_readback = True
         reconciled = mac.reconcile_project(2, coding, "fixture-project-run")
@@ -272,6 +331,8 @@ def test_broker_authenticates_each_host_and_fences_partitioned_primary(tmp_path,
         assert mac.project_status(2) == {"enabled": True, "jobs": [{"request": coding, "state": "running"}]}
         with pytest.raises(transport.LeaseRejected):
             nuc.inspect_project(2, coding)
+        with pytest.raises(transport.LeaseRejected):
+            worker["load_scope"](worker_home, coding)
         observed = mac.inspect_project(2, coding)
         assert observed == {"request": coding, "state": "patch-ready", "commit": "b" * 40, "observed": 90}
         assert mac.project_status(2)["jobs"] == [observed]
@@ -289,7 +350,7 @@ def test_broker_authenticates_each_host_and_fences_partitioned_primary(tmp_path,
         hatchet_available = True
         assert mac.inspect_project(2, coding)["commit"] == "b" * 40
         with pytest.raises(transport.ProjectBusy):
-            reopened.reserve(candidate, reopened.key(candidate))
+            reopened.reserve(candidate, reopened.key(candidate), "e" * 64)
         with pytest.raises(transport.LeaseRejected):
             nuc.project_status(2)
         with pytest.raises(transport.LeaseRejected):

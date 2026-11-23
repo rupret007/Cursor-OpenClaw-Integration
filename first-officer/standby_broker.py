@@ -120,6 +120,9 @@ class Client:
     def submit_project(self, epoch, request):
         return self.request("/v1/project/submit", {"epoch": epoch, "request": request})["receipt"]
 
+    def project_worker_plan(self, epoch, request):
+        return self.request("/v1/project/worker-plan", {"epoch": epoch, "request": request})["planSha256"]
+
     def project_receipt(self, epoch, request):
         return self.request("/v1/project/receipt", {"epoch": epoch, "request": request})["receipt"]
 
@@ -297,7 +300,8 @@ class Request(BaseHTTPRequestHandler):
             status = {"enabled": project is not None, "jobs": project.active() if project else []}
             authority.require_grant(grant)
             return 200, {"status": status}
-        if self.path in ("/v1/project/submit", "/v1/project/receipt", "/v1/project/reconcile", "/v1/project/inspect"):
+        if self.path in ("/v1/project/submit", "/v1/project/receipt", "/v1/project/reconcile", "/v1/project/inspect",
+                         "/v1/project/worker-plan"):
             authority.require_grant(grant)
             project = self.server.project
             if project is None:
@@ -306,6 +310,8 @@ class Request(BaseHTTPRequestHandler):
             if body.keys() != fields:
                 raise ValueError("Expected an exact project queue request")
             request = body["request"]
+            if self.path == "/v1/project/worker-plan":
+                return 200, {"planSha256": project.worker_plan(authority, grant, request)}
             if self.path == "/v1/project/inspect":
                 job = project.inspect(request)
                 authority.require_grant(grant)

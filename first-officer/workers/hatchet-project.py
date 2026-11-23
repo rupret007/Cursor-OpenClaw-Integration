@@ -25,6 +25,8 @@ hatchet = Hatchet()
 
 @hatchet.task(
     name="fo-captain-project", input_validator=CodingRequest, execution_timeout=timedelta(seconds=110),
+    # A new attempt must reconcile the durable lane slot before any model call.
+    retries=1,
     idempotency=TTLBasedIdempotencyConfig(
         key_expression="additional_metadata.idempotencyKey", ttl=timedelta(hours=24),
     ),

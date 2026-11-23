@@ -423,8 +423,36 @@ def check_project_worker(stack, config, headers):
     stack.callback(thread.join)
     stack.callback(server.shutdown)
     python = Path("hatchet-worker/bin/python").absolute()
+    interpreter = python
+    interrupted = home / "worker-interrupted"
+    if not joined:
+        interpreter = home / "interrupt-project-worker"
+        interpreter.write_text(f'''#!{python}
+import os
+from pathlib import Path
+import runpy
+import signal
+import sys
+
+marker = Path({str(interrupted)!r})
+worker = runpy.run_path(sys.argv[-1])
+original_git = worker["git"]
+
+
+def interrupt_after_checkpoint(worktree, *args, **kwargs):
+    if args[:2] == ("update-ref", "HEAD") and not marker.exists():
+        assert (worktree.parent / "candidate.json").is_file()
+        marker.touch(exist_ok=False)
+        os.kill(os.getpid(), signal.SIGKILL)
+    return original_git(worktree, *args, **kwargs)
+
+
+worker["run"].__globals__["git"] = interrupt_after_checkpoint
+worker["main"]()
+''')
+        interpreter.chmod(0o700)
     launch(stack, "hatchet-project-worker.log", str(python), str(worker_source / "hatchet-project.py"),
-           env={**os.environ, "HOME": str(home), "FO_PROJECT_PYTHON": str(python)})
+           env={**os.environ, "HOME": str(home), "FO_PROJECT_PYTHON": str(interpreter)})
     time.sleep(3)
     coding = deepcopy(config)
     coding["hatchet"]["workflow"] = queue.PROJECT_WORKFLOW
@@ -438,7 +466,10 @@ def check_project_worker(stack, config, headers):
     assert git(checkout, "show", result["commit"] + ":review.mjs") == b'const delivery = "Delivery is unconfirmed.";\n'
     assert (checkout / "review.mjs").read_text() == 'const delivery = "old";\n'
     if not joined:
-        assert queue.dispatch(coding, job, LEDGER)["reused"]
+        assert interrupted.is_file()
+        replay = queue.dispatch(coding, job, LEDGER)
+        assert replay["reused"] and replay["run"] == receipt["run"]
+        log("Hatchet recovered the interrupted coding child within the original run")
     assert len(calls) == 1
     log("The dedicated Hatchet coding worker made one isolated candidate commit from one loopback model call")
 

@@ -794,6 +794,7 @@ def test_standalone_service_pins_the_same_guard_on_both_hosts(tmp_path, monkeypa
     secrets.write_text(json.dumps({"OPENCLAW_LITELLM_API_KEY": "fixture-setting"}))
     settings["gateway"] = {"mode": "local", "bind": "loopback", "port": 43000}
     settings["channels"]["telegram"]["groupPolicy"] = "disabled"
+    settings["messages"] = {"inbound": {"debounceMs": 300, "byChannel": {"telegram": 300, "slack": 500}}}
     config.write_text(json.dumps(settings))
     profile = tmp_path / "broker.json"
     key = tmp_path / "fixture.key"
@@ -808,6 +809,8 @@ def test_standalone_service_pins_the_same_guard_on_both_hosts(tmp_path, monkeypa
         telegram = checked["channels"]["telegram"]
         assert telegram["apiRoot"] == "http://127.0.0.1:1"
         assert telegram["replyToMode"] == "all"
+        assert checked["messages"]["inbound"] == {"debounceMs": 300, "byChannel": {"telegram": 0, "slack": 500}}
+        assert json.loads(config.read_bytes())["messages"]["inbound"]["byChannel"]["telegram"] == 300
         assert telegram["botToken"].startswith("234567:")
         assert options["env"]["OPENCLAW_LITELLM_API_KEY"] == "fixture-setting"
         return SimpleNamespace(returncode=0)

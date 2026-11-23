@@ -70,7 +70,15 @@ def gateway_env(environment_file):
 
 def write_gateway_config(path, template, port, token):
     telegram = {"apiRoot": f"http://127.0.0.1:{port}", "botToken": token, "replyToMode": "all"}
-    selected = {**template, "channels": {"telegram": {**template["channels"]["telegram"], **telegram}}}
+    messages = template.get("messages", {})
+    inbound = messages.get("inbound", {})
+    # The broker delivers one update at a time and waits for its final reply.
+    by_channel = {**inbound.get("byChannel", {}), "telegram": 0}
+    selected = {
+        **template,
+        "channels": {"telegram": {**template["channels"]["telegram"], **telegram}},
+        "messages": {**messages, "inbound": {**inbound, "byChannel": by_channel}},
+    }
     with path.open("x", encoding="utf-8") as handle:
         json.dump(selected, handle)
 

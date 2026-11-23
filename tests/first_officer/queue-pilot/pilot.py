@@ -329,13 +329,16 @@ print(json.dumps(response))
         assert accepted and accepted["phase"] == "queued"
         eventually(lambda: worker_done("hatchet", accepted["run"], headers), "joined Hatchet worker")
         output = queue.read_project_run(coding, job, accepted, accepted["run"], 3)["output"]
-        assert inspect_now() == "patch-ready"
+        eventually(lambda: project_deliveries_settled(1), "confirmed admission reply")
+        eventually(lambda: inspect_saved().get("state") == "patch-ready",
+                   "native monitor observed the candidate", timeout=40)
         assert inspect_saved()["commit"] == output["commit"]
         save(home / "github-fixture.json", {"base": identity["head"], "candidate": output["commit"]})
         save(authority / "project-verification.json",
              {"repository": identity["repository"], "issue": identity["issue"],
               "commit": output["commit"], "pr": 13, "checks": ["independent-wire"]})
-        assert inspect_now() == "verified"
+        eventually(lambda: inspect_saved().get("state") == "verified",
+                   "native monitor verified the exact candidate", timeout=55)
         assert wire["exercise"](roster, "Verified handoff", 101, "handoff", "all required CI checks", 30)
         delivered = len(roster.replies)
         eventually(lambda: project_deliveries_settled(2), "confirmed Captain handoff receipt")

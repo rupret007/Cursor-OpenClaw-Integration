@@ -139,8 +139,13 @@ function decisions(view) {
   if (view.active?.overtime) needs.push(jobText(view.active));
   if (view.blocked && view.blocked.reason !== 'ci-pending') needs.push('Last blocked review · Integration PR #' + view.blocked.pr + '. ' +
     blockers[view.blocked.reason]);
-  for (const job of view.jobs.filter((row) => row.delivery === 'delivery-unverified' ||
-      row.state in terminal && row.state !== 'verified')) needs.push(jobText(job));
+  for (const job of view.jobs) {
+    if (job.delivery === 'delivery-unverified') {
+      needs.push(jobText(job) + ' Delivery could not be confirmed. Check Telegram for the final review reply.');
+    } else if (job.state in terminal && job.state !== 'verified') {
+      needs.push(jobText(job));
+    }
+  }
   return needs.length ? needs.join('\n') : noDecisions;
 }
 

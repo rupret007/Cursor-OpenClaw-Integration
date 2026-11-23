@@ -161,12 +161,19 @@ function projectWork(job) {
     status[job.state] ?? 'Coding submission is unresolved. Check the original Hatchet receipt before another attempt.'].filter(Boolean).join(' ');
 }
 
-function decisions(view) {
+function decisions(view, currentDelivery) {
   const needs = [];
   if (view.lease.holder === 'first-officer' && view.lease.state === 'held' &&
       (!view.armed || view.grant?.epoch !== view.lease.epoch || view.grant.paused)) {
     needs.push('Jeff needs to grant or resume the named scope for this epoch before dispatch.');
   }
+  const unresolved = (view.unconfirmedProjectDelivery ?? []).filter((key) => key !== currentDelivery).length;
+  if (unresolved) {
+    const status = unresolved === 1 ? '1 Captain Telegram delivery is unconfirmed.' :
+      unresolved + ' Captain Telegram deliveries are unconfirmed.';
+    needs.push(status + ' Check the original conversation and reconcile the private receipts.');
+  }
+  if (view.projectTelegramLedgerFull) needs.push('The Captain Telegram receipt journal is full. Review it before continuing.');
   if (view.lease.state === 'handback-pending') needs.push('Wait for the shared fence to finish transferring authority.');
   if (view.active?.overtime) needs.push(jobText(view.active));
   for (const job of view.activeProjectJobs ?? []) {
@@ -316,7 +323,7 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
     if (action === 'role') return role(view) + '\n' + decisions(view);
     const recommendation = view.lastProjectRecommendation;
     if (action === 'handoff') return [role(view), 'Work owner · OpenClaw. Decisions · Jeff.',
-      'Handoff recorded at ' + new Date(view.recorded * 1000).toISOString() + '.', decisions(view),
+      'Handoff recorded at ' + new Date(view.recorded * 1000).toISOString() + '.', decisions(view, turn.delivery),
       recommendation ? 'Last recorded project recommendation · ' + recommendation.repo + ' #' +
         recommendation.issue + ' · ' + recommendation.action + ' · epoch ' + recommendation.epoch + '.' : '',
       view.blocked?.reason === 'ci-pending' ? 'Integration PR #' + view.blocked.pr + ' · ' +

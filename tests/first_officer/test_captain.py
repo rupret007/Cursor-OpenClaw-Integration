@@ -245,6 +245,25 @@ def test_project_pr_checks_require_the_exact_commit_twice(captain, monkeypatch):
     assert module.project_pr_checks(request, "codex/captain", candidate, profile) == "stale-candidate"
 
 
+def test_project_telegram_uncertain_send_is_not_replayed_after_restart(captain, tmp_path):
+    module, _, _ = captain
+    root = tmp_path / "telegram-authority"
+    root.mkdir(mode=0o700)
+    authority = module.StandaloneAuthority("nucbox", root)
+    module.save(root / "lease.json", {"node": "nucbox", "epoch": 4, "active": True})
+    first = module.Controller(authority, private=root / "reviews")
+    receipt = {"key": "a" * 64}
+    assert first.project_telegram("reserve", receipt) == {"result": "reserved"}
+    restarted = module.Controller(authority, private=root / "reviews")
+    assert restarted.view()["unconfirmedProjectDelivery"] == [receipt["key"]]
+    assert restarted.project_telegram("reserve", receipt) == {"result": "duplicate"}
+    assert restarted.project_telegram("finish", {**receipt, "outcome": "unverified"}) == {"result": "unverified"}
+    assert restarted.view()["unconfirmedProjectDelivery"] == [receipt["key"]]
+    assert restarted.project_telegram("resolve", {**receipt, "outcome": "delivered"}) == {"result": "delivered"}
+    assert restarted.view()["unconfirmedProjectDelivery"] == []
+    assert restarted.project_telegram("reserve", receipt) == {"result": "duplicate"}
+
+
 def test_daily_briefing_runs_at_0700_central_and_deduplicates_after_restart(captain, tmp_path, monkeypatch):
     module, _, _ = captain
     root = tmp_path / "daily-authority"

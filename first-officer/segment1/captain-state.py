@@ -561,6 +561,9 @@ class Controller:
                 "activeProjectJobs": [job for job in data.get("projectJobs", []) if job["state"] in ACTIVE_PROJECT],
                 "recentProjectResults": [job for job in data.get("projectJobs", []) if job["state"] not in ACTIVE_PROJECT][-5:],
                 "lastProjectDaily": next(reversed(data.get("projectDaily", [])), None),
+                "projectTelegramLedgerFull": len(data.get("projectTelegram", [])) >= 512,
+                "unconfirmedProjectDelivery": [row["key"] for row in data.get("projectTelegram", [])
+                                               if row["state"] in ("pending", "unverified")],
                 "active": active}
 
     def handoff(self):
@@ -571,6 +574,42 @@ class Controller:
             view["recorded"] = int(time.time())
             save(self.private / "handoff.json", view)
             return view
+
+    def project_telegram(self, action, req):
+        if not self.standalone or not isinstance(req, dict):
+            raise ValueError("The project delivery journal requires standalone authority")
+        key = req.get("key")
+        if not isinstance(key, str) or not re.fullmatch(r"[0-9a-f]{64}", key):
+            raise ValueError("Invalid project delivery identity")
+        with self.locked(write=True) as data, self.fence._locked():
+            lease = self.fence._read_unlocked()
+            if not lease or not self.matches(lease, lease.epoch):
+                return {"result": "stale"}
+            journal = data.setdefault("projectTelegram", [])
+            existing = next((row for row in journal if row["key"] == key), None)
+            if action == "reserve":
+                if existing:
+                    return {"result": "duplicate"}
+                if len(journal) >= 512:
+                    return {"result": "ledger-full"}
+                journal.append({"key": key, "state": "pending", "epoch": lease.epoch, "at": int(time.time())})
+                return {"result": "reserved"}
+            if action == "finish":
+                outcome = req.get("outcome")
+                if outcome not in ("delivered", "unverified"):
+                    raise ValueError("Invalid project delivery outcome")
+                if not existing or existing["state"] != "pending" or existing["epoch"] != lease.epoch:
+                    return {"result": "stale"}
+            elif action == "resolve":
+                outcome = req.get("outcome")
+                if outcome not in ("delivered", "missing"):
+                    raise ValueError("Invalid observed project delivery outcome")
+                if not existing or existing["state"] not in ("pending", "unverified"):
+                    return {"result": "stale"}
+            else:
+                raise ValueError("Unknown project delivery action")
+            existing.update(state=outcome, settled=int(time.time()))
+            return {"result": outcome}
 
     def daily_project_date(self):
         if not self.standalone:
@@ -1085,6 +1124,10 @@ def main():
             return controller.reconcile_project(req)
         if entry == "inspect-project":
             return controller.inspect_project(req)
+        if entry in ("reserve-project-telegram", "finish-project-telegram", "resolve-project-telegram"):
+            return controller.project_telegram(entry.split("-", 1)[0], req)
+        if entry == "project-telegram-review":
+            return {"unconfirmed": controller.view()["unconfirmedProjectDelivery"]}
         if entry == "project-daily-due":
             return controller.daily_project_due()
         if entry == "save-project-daily":

@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createProjectBrief } from '../../first-officer/segment1/project-brief.mjs';
+import { createDispatch } from '../../first-officer/segment1/dispatch.mjs';
 import { createCaptain } from '../../first-officer/segment1/captain.mjs';
 import { readProjectGithub } from '../../first-officer/segment1/tools.mjs';
 
@@ -63,6 +64,38 @@ test('Invalid profiles make no reads and unavailable live evidence cannot recomm
   assert.throws(() => readProjectGithub('example/integration', 'issues/17/comments'), /outside/);
   assert.throws(() => readProjectGithub('example/..', 'issues/17'), /outside/);
 });
+
+test('An uncertain Captain reply is delivered once without a native retry or duplicate acknowledgment', async () => {
+  let reserved = false;
+  const calls = [];
+  const dispatch = createDispatch({
+    authorize: () => '123456',
+    classify: () => ({ kind: 'captain', action: 'handoff' }),
+    warn: () => {},
+    acknowledge: async () => calls.push('ack'),
+    registry: { captain: { run: async (_request, turn) => {
+      assert.equal(turn.delivery, 'key');
+      calls.push('work');
+      return { text: 'Fixture handoff' };
+    } } },
+    projectDelivery: {
+      async reserve() {
+        if (reserved) return;
+        reserved = true;
+        return 'key';
+      },
+      async deliver(key, owner, text) {
+        assert.deepEqual([key, owner, text], ['key', '123456', 'Fixture handoff']);
+        calls.push('send');
+        throw new Error('Response lost after send');
+      },
+    },
+  });
+  assert.deepEqual(await dispatch({ content: 'handoff' }, { messageId: '100' }), { handled: true });
+  assert.deepEqual(await dispatch({ content: 'handoff' }, { messageId: '100' }), { handled: true });
+  assert.deepEqual(calls, ['ack', 'work', 'send']);
+});
+
 
 test('Daily briefing saves one read-only snapshot and resumes from the persisted day', async () => {
   const next = { repository: 'example/integration', issue: 40, action: 'investigate' };

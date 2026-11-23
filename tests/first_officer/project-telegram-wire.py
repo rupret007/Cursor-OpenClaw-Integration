@@ -64,7 +64,12 @@ class BotApi(BaseHTTPRequestHandler):
         elif method == "sendChatAction":
             wire.typing.append(time.monotonic())
         elif method == "sendMessage":
-            wire.replies.append((time.monotonic(), data.get("text", "")))
+            text = data.get("text", "")
+            wire.replies.append((time.monotonic(), text))
+            if wire.drop_project_final and "Handoff recorded" in text:
+                wire.drop_project_final = False
+                self.close_connection = True
+                return
             result = {"message_id": 900 + len(wire.replies), "date": int(time.time()),
                       "chat": wire.chat, "from": wire.bot, "text": data.get("text", "")}
         self.send_bytes(json.dumps({"ok": True, "result": result}).encode())
@@ -105,14 +110,18 @@ def gateway(node, cli, root, config, wire, extra_env=None):
                 process.wait(timeout=5)
 
 
-def exercise(wire, label, number, text, expected, deadline):
-    prior, typed = len(wire.replies), len(wire.typing)
-    started = time.monotonic()
-    wire.updates.put({"update_id": number, "message": {
-        "message_id": number, "chat": wire.chat,
+def enqueue(wire, update_id, message_id, text):
+    wire.updates.put({"update_id": update_id, "message": {
+        "message_id": message_id, "chat": wire.chat,
         "from": {"id": wire.chat["id"], "is_bot": False, "first_name": "Fixture"},
         "text": text, "date": int(time.time()),
     }})
+
+
+def exercise(wire, label, number, text, expected, deadline):
+    prior, typed = len(wire.replies), len(wire.typing)
+    started = time.monotonic()
+    enqueue(wire, number, number, text)
     while len(wire.replies) < prior + 2 and time.monotonic() - started < deadline:
         time.sleep(.025)
     pair = wire.replies[prior:]
@@ -135,6 +144,7 @@ def configure(wire, root, release):
     wire.daemon_threads = True
     wire.updates, wire.polling, wire.replies, wire.typing = Queue(), Event(), [], []
     wire.model_calls = 0
+    wire.drop_project_final = False
     owner = 123456
     wire.bot = {"id": 234567, "is_bot": True, "first_name": "Fixture", "username": "project_rehearsal_bot"}
     wire.chat = {"id": owner, "type": "private", "first_name": "Fixture"}
@@ -201,6 +211,23 @@ def main():
             with gateway(node, cli, root, config, wire):
                 checks.append(exercise(wire, "Restarted coding request", 103,
                                        "captain this: advance example/integration #40", "already has a receipt", 30))
+                wire.drop_project_final = True
+                checks.append(exercise(wire, "Lost handoff receipt", 104, "handoff", "Handoff recorded", 30))
+                ledger = authority / "reviews/state.json"
+                until = time.monotonic() + 5
+                while time.monotonic() < until:
+                    state = json.loads(ledger.read_text())
+                    if any(row["state"] == "unverified" for row in state.get("projectTelegram", [])):
+                        break
+                    time.sleep(.05)
+                else:
+                    raise AssertionError("The lost response was not preserved as uncertain")
+                sent = len(wire.replies)
+            with gateway(node, cli, root, config, wire):
+                enqueue(wire, 105, 104, "handoff")
+                checks.append(exercise(wire, "Uncertain delivery decision", 106, "what needs me?",
+                                       "1 Captain Telegram delivery is unconfirmed", 30))
+                assert len(wire.replies) == sent + 2, "Restart must not repeat the uncertain handoff reply"
             assert wire.model_calls == 1, "Only the simple question should reach the model fixture"
             assert all(checks), "One or more Telegram fixture latency targets were missed"
         finally:

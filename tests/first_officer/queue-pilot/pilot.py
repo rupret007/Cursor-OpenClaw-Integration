@@ -306,6 +306,10 @@ print(json.dumps(response))
         )
         return json.loads(result)["result"]
 
+    def project_deliveries_settled(expected):
+        journal = json.loads(candidate_state.read_text()).get("projectTelegram", [])
+        return len(journal) == expected and all(row["state"] == "delivered" for row in journal)
+
     def outbox_settled():
         state = list((home / "gateway-state").rglob("openclaw.sqlite"))
         if len(state) != 1:
@@ -334,11 +338,13 @@ print(json.dumps(response))
         assert inspect_now() == "verified"
         assert wire["exercise"](roster, "Verified handoff", 101, "handoff", "all required CI checks", 30)
         delivered = len(roster.replies)
+        eventually(lambda: project_deliveries_settled(2), "confirmed Captain handoff receipt")
         eventually(outbox_settled, "verified native Telegram delivery checkpoint")
         assert len(roster.replies) == delivered, "The first gateway sent an extra reply"
     with wire["gateway"](node, cli, home, config, roster, env):
         assert len(roster.replies) == delivered, "Restart replayed a confirmed Telegram reply"
         assert wire["exercise"](roster, "Duplicate after restart", 102, command, "already has a receipt", 30)
+        eventually(lambda: project_deliveries_settled(3), "confirmed post-restart receipt")
         save(home / "github-fixture.json", {"base": identity["head"], "candidate": "f" * 40})
         assert inspect_now() == "stale-candidate"
     entries = [json.loads(line) for line in ledger.read_text().splitlines()]

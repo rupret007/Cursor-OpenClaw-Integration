@@ -152,6 +152,12 @@ nice -n 10 python3 -B first-officer/lanes/queue.py "$test_policy" "$private_ledg
 
 If the receipt shows `pending`, the status command establishes only what the local journal knows. Identify the original run in Hatchet and repeat the command with `--reconcile-project-run "$hatchet_run"` in place of `--status`. This uses the original private queue policy to read the run and checks its tenant, workflow, idempotency key, repository, issue, commit, and epoch before adopting the receipt. A mismatch leaves the run pending. The scoped coding worker and Telegram recovery rehearsal are separate acceptance gates.
 
+### Daily read-only project briefing
+
+Enable the daily pilot on an isolated authority by placing `{"enabled":true}` in a private `project-daily.json` beside the lease and supplying its approved `projects.json`. The active Captain checks once per minute and generates the first eligible briefing at or after 07:00 Central Time. A restart after 07:00 can catch up. The saved day and observation time travel in the signed authority handoff.
+
+The snapshot saves repository and issue identities, the recommendation, and the exact CI commit if available. No message is sent by the timer. Use **brief me** to refresh evidence on demand and **handoff** to see the date of the last saved briefing. To roll back the daily pilot, set the private profile's `enabled` value to `false`. Existing receipts stay available.
+
 ### Compare Captain performance
 
 Use the same scoped task, initial GitHub state, and acceptance checks for each assistant. Use private fixtures for write and fault cases. Collect wall time from prompt receipt to the first correct actionable answer, the number of separate Jeff interventions, and the number of milestones with verified receipts. Record unrun cases as unverified.

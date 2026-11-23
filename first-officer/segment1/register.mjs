@@ -216,7 +216,7 @@ export function registerSegmentOne(api, commands, services) {
           (path) => get(path.slice(repository.length + 1)));
       },
     });
-    const captain = createCaptain({ registry, get: readCI, state, projectBrief });
+    const captain = createCaptain({ registry, get: readCI, state, projectBrief, dailyProjects: Boolean(projectBrief) });
     registry.captain = {
       run: async (request, turn) => plain(await captain.run(request, turn)),
       failure: 'Captain state or evidence is unavailable. Check “captain status” before retrying.',

@@ -92,7 +92,11 @@ export function createProjectBrief({ config, read, check, record }) {
       }
     }
     signal.throwIfAborted();
+    const evidence = rows.map(({ project, action, head, ci }) => ({
+      repository: project.repo.toLowerCase(), issue: project.issue, action, ...(head ? { head, ci } : {}),
+    }));
     return {
+      snapshot: { projects: evidence, recommended: best ? evidence[rows.indexOf(best)] : null },
       summary: [
         'Projects · live GitHub read · read-only scope.',
         ...rows.map((row) => {

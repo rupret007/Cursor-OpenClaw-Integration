@@ -135,6 +135,13 @@ function jobText(job) {
 
 const noDecisions = 'No captain decisions are waiting for Jeff.';
 
+function dailyProjectText(receipt) {
+  if (!receipt) return '';
+  const next = receipt.recommended;
+  return 'Last saved project briefing · ' + receipt.date + ' CT' +
+    (next ? ' · ' + next.repository + ' #' + next.issue + ' · ' + next.action : '') + '.';
+}
+
 function projectWork(job) {
   const { repository, issue, head } = job.request;
   const identity = repository + ' #' + issue + ' · ' + head.slice(0, 8) + '.';
@@ -180,7 +187,8 @@ function decisions(view) {
   return needs.length ? needs.join('\n') : noDecisions;
 }
 
-export function createCaptain({ registry, get, state = localState, admit = fleetAdmission, now = Date.now, projectBrief = async () => null }) {
+export function createCaptain({ registry, get, state = localState, admit = fleetAdmission, now = Date.now,
+  projectBrief = async () => null, dailyProjects = false }) {
   const runnerQuota = () => state('runner-quota').catch(() => null);
   async function status(kind, turn) {
     const source = registry[kind];
@@ -292,10 +300,10 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
         (view.active ? '\n' + jobText(view.active) : '') :
         'Captain authority and decisions are unavailable.',
         ...(view?.activeProjectJobs ?? []).filter((job) => ['running', 'ci-pending'].includes(job.state)).map(projectWork),
-        ...(projects ? [projects.summary] : []), ...evidence,
+        ...(projects ? [projects.summary] : []), dailyProjectText(view?.lastProjectDaily), ...evidence,
         quota?.modelFree ? 'Captain CI review uses a model-free worker.' :
           quota ? 'Captain runner quota · ' + quota.session.used + '% of 5-hour window · ' + quota.weekly.used + '% of weekly window.'
-          : 'The captain runner’s subscription quota is unavailable.'].join('\n\n');
+          : 'The captain runner’s subscription quota is unavailable.'].filter(Boolean).join('\n\n');
     }
     if (action === 'decisions') {
       const [view, projects] = await Promise.all([viewPromise, projectEvidence()]);
@@ -315,6 +323,7 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
         view.blocked.head.slice(0, 8) + ' · awaiting required CI.' : '',
       ...(view.activeProjectJobs ?? []).filter((job) => ['running', 'ci-pending'].includes(job.state)).map(projectWork),
       ...(view.recentProjectResults ?? []).filter((job) => job.state === 'verified').map(projectWork),
+      dailyProjectText(view.lastProjectDaily),
       ...view.jobs.map(jobText)].filter(Boolean).join('\n');
     return task(request.pr, view, turn);
   }
@@ -363,6 +372,17 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
       await state('reported', { lane: job.lane });
     }
   }
+  let lastDailyCheck = -Infinity;
+  async function saveDailyProject(view) {
+    const started = now();
+    if (!dailyProjects || started - lastDailyCheck < 60_000) return;
+    lastDailyCheck = started;
+    const due = await state('project-daily-due');
+    if (!due) return;
+    const projects = await bounded(11_000, (signal) => projectBrief(signal, view.activeProjectJobs ?? []));
+    if (projects?.snapshot) await state('save-project-daily', { ...due, snapshot: projects.snapshot });
+  }
+
   let checkingProject = false;
   async function tickProject() {
     if (checkingProject) return;
@@ -378,6 +398,7 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
         const { repository, issue, head, epoch } = ready[0].request;
         await state('inspect-project', { repository, issue, head, epoch });
       }
+      await saveDailyProject(view);
     } finally {
       checkingProject = false;
     }

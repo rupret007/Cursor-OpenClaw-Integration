@@ -1,6 +1,7 @@
 """Keep the Telegram captain grant and lane receipts next to the existing fence."""
 
 from contextlib import ExitStack, contextmanager
+from datetime import datetime, timezone
 import fcntl
 import hashlib
 import importlib.util
@@ -17,6 +18,7 @@ import time
 from types import SimpleNamespace
 from urllib.parse import quote
 from urllib.request import Request
+from zoneinfo import ZoneInfo
 
 
 HOME = Path.home()
@@ -34,6 +36,8 @@ SHA = re.compile(r"[a-f0-9]{40}")
 LANE = re.compile(r"fo-ci-[a-f0-9]{24}")
 OWNER = re.compile(r"[1-9][0-9]{0,15}")
 DELIVERY = ("reported", "delivery-unverified")
+PROJECT_REPO = re.compile(r"[a-z0-9][a-z0-9_.-]{0,99}/[a-z0-9_-][a-z0-9_.-]{0,99}")
+PROJECT_ACTIONS = {"investigate", "fix", "verify", "wait", "refresh", "blocked", "closed", "working"}
 ACTIVE_PROJECT = ("reserved", "running", "unresolved", "patch-ready", "ci-pending")
 BLOCKERS = ("fleet", "gate", "quota", "ci-changed", "ci-unavailable", "ci-pending", "ci-timeout", "ci-paused")
 
@@ -556,6 +560,7 @@ class Controller:
                 "lastProjectRecommendation": recommendations[-1] if recommendations else None,
                 "activeProjectJobs": [job for job in data.get("projectJobs", []) if job["state"] in ACTIVE_PROJECT],
                 "recentProjectResults": [job for job in data.get("projectJobs", []) if job["state"] not in ACTIVE_PROJECT][-5:],
+                "lastProjectDaily": next(reversed(data.get("projectDaily", [])), None),
                 "active": active}
 
     def handoff(self):
@@ -566,6 +571,61 @@ class Controller:
             view["recorded"] = int(time.time())
             save(self.private / "handoff.json", view)
             return view
+
+    def daily_project_date(self):
+        if not self.standalone:
+            return None
+        try:
+            enabled = read_private(self.watchdog.AUTHORITY / "project-daily.json", 1024)
+        except FileNotFoundError:
+            return None
+        if not isinstance(enabled, dict) or enabled.keys() != {"enabled"} or type(enabled["enabled"]) is not bool:
+            raise ValueError("Invalid daily project profile")
+        local = datetime.now(timezone.utc).astimezone(ZoneInfo("America/Chicago"))
+        return local.date().isoformat() if enabled["enabled"] and local.hour >= 7 else None
+
+    def daily_project_due(self):
+        day = self.daily_project_date()
+        if not day:
+            return None
+        with self.locked() as data:
+            lease = self.fence.status()
+            if (not lease or not self.matches(lease, lease.epoch) or
+                    any(receipt["date"] == day for receipt in data.get("projectDaily", []))):
+                return None
+            return {"date": day, "epoch": lease.epoch}
+
+    def save_daily_project(self, req):
+        day, epoch = req["date"], check_epoch(req["epoch"])
+        if not isinstance(day, str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", day):
+            raise ValueError("The daily snapshot date is invalid")
+        snapshot = req["snapshot"]
+        projects, recommendation = snapshot["projects"], snapshot["recommended"]
+        if not isinstance(projects, list) or not 1 <= len(projects) <= 2:
+            raise ValueError("A daily snapshot needs verified project evidence")
+        for project in projects:
+            if (not isinstance(project, dict) or project.keys() not in (
+                    {"repository", "issue", "action"}, {"repository", "issue", "action", "head", "ci"}) or
+                    not isinstance(project["repository"], str) or not PROJECT_REPO.fullmatch(project["repository"]) or
+                    type(project["issue"]) is not int or not 1 <= project["issue"] <= 99_999_999 or
+                    project["action"] not in PROJECT_ACTIONS or
+                    ("head" in project and (not isinstance(project["head"], str) or not SHA.fullmatch(project["head"]) or
+                     project["ci"] not in ("changed", "passing", "failing", "pending", "unavailable")))):
+                raise ValueError("The daily snapshot contains invalid evidence")
+        if (len({row["repository"] for row in projects}) != len(projects) or
+                recommendation is not None and (recommendation not in projects or
+                    recommendation["action"] not in {"investigate", "fix", "verify"})):
+            raise ValueError("The daily recommendation is outside the current evidence")
+        with self.locked(write=True) as data, self.fence._locked():
+            if day != self.daily_project_date() or not self.matches(self.fence._read_unlocked(), epoch):
+                return {"result": "stale"}
+            history = data.get("projectDaily", [])
+            if any(receipt["date"] == day for receipt in history):
+                return {"result": "duplicate"}
+            receipt = {"date": day, "epoch": epoch, "observed": int(time.time()),
+                       "projects": projects, "recommended": recommendation}
+            data["projectDaily"] = [*history[-13:], receipt]
+            return {"result": "saved"}
 
     def record_project_recommendation(self, req):
         if (not isinstance(req, dict) or req.keys() - {"repo", "issue", "action", "head"} or
@@ -1025,6 +1085,10 @@ def main():
             return controller.reconcile_project(req)
         if entry == "inspect-project":
             return controller.inspect_project(req)
+        if entry == "project-daily-due":
+            return controller.daily_project_due()
+        if entry == "save-project-daily":
+            return controller.save_daily_project(req)
         if entry == "local-projects":
             if not private_directory(LOCAL_AUTHORITY):
                 raise ValueError("The standalone authority directory is invalid")

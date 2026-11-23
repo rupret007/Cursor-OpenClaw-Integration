@@ -64,6 +64,39 @@ test('Invalid profiles make no reads and unavailable live evidence cannot recomm
   assert.throws(() => readProjectGithub('example/..', 'issues/17'), /outside/);
 });
 
+test('Daily briefing saves one read-only snapshot and resumes from the persisted day', async () => {
+  const next = { repository: 'example/integration', issue: 40, action: 'investigate' };
+  const snapshot = { projects: [next], recommended: next };
+  const due = { date: '2026-11-23', epoch: 2 };
+  let saved;
+  let reads = 0;
+  const active = [{ request: { repository: 'example/other' }, state: 'unresolved' }];
+  const params = {
+    dailyProjects: true,
+    now: () => Date.UTC(2026, 10, 23, 13),
+    projectBrief: async (_signal, work) => {
+      assert.equal(work, active);
+      reads += 1;
+      return { snapshot };
+    },
+    state: async (operation, payload) => {
+      if (operation === 'view') return {
+        lease: { holder: 'first-officer', state: 'held', epoch: 2 }, activeProjectJobs: active,
+      };
+      if (operation === 'project-daily-due') return saved ? null : due;
+      assert.equal(operation, 'save-project-daily');
+      assert.deepEqual(payload, { ...due, snapshot });
+      saved = payload;
+    },
+  };
+  const captain = createCaptain(params);
+  await captain.tickProject();
+  await captain.tickProject();
+  await createCaptain(params).tickProject();
+  assert.equal(reads, 1);
+});
+
+
 test('Captain dispatch routes a scoped project identity and reports an explicit missing grant', async () => {
   const calls = [];
   const captain = createCaptain({ state: async (op, payload) => {

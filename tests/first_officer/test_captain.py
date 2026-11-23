@@ -245,6 +245,44 @@ def test_project_pr_checks_require_the_exact_commit_twice(captain, monkeypatch):
     assert module.project_pr_checks(request, "codex/captain", candidate, profile) == "stale-candidate"
 
 
+def test_daily_briefing_runs_at_0700_central_and_deduplicates_after_restart(captain, tmp_path, monkeypatch):
+    module, _, _ = captain
+    root = tmp_path / "daily-authority"
+    root.mkdir(mode=0o700)
+    authority = module.StandaloneAuthority("nucbox", root)
+    module.save(root / "lease.json", {"node": "nucbox", "epoch": 4, "active": True})
+    controller = module.Controller(authority, private=root / "reviews")
+    module.save(root / "project-daily.json", {"enabled": True})
+    utc = module.timezone.utc
+    now = module.datetime(2026, 11, 23, 12, 59, tzinfo=utc)
+
+    class Clock:
+        @staticmethod
+        def now(_zone):
+            return now
+
+    monkeypatch.setattr(module, "datetime", Clock)
+    assert controller.daily_project_due() is None
+    now = now.replace(hour=13, minute=0)
+    due = controller.daily_project_due()
+    assert due == {"date": "2026-11-23", "epoch": 4}
+    project = {"repository": "fixture/integration", "issue": 40, "action": "investigate"}
+    snapshot = {"projects": [project], "recommended": project}
+    assert controller.save_daily_project({**due, "epoch": 3, "snapshot": snapshot}) == {"result": "stale"}
+    assert controller.save_daily_project({**due, "snapshot": snapshot}) == {"result": "saved"}
+    restarted = module.Controller(authority, private=root / "reviews")
+    assert restarted.daily_project_due() is None
+    assert restarted.save_daily_project({**due, "snapshot": snapshot}) == {"result": "duplicate"}
+    assert restarted.view()["lastProjectDaily"]["recommended"] == project
+
+    now = now.replace(year=2027, month=7, day=1, hour=11, minute=59)
+    assert restarted.daily_project_due() is None
+    now = now.replace(hour=12, minute=0)
+    assert restarted.daily_project_due() == {"date": "2027-07-01", "epoch": 4}
+    module.save(root / "project-daily.json", {"enabled": False})
+    assert restarted.daily_project_due() is None
+
+
 def test_project_recommendation_survives_restart_and_rechecks_epoch(captain):
     module, lease, watchdog = captain
     recommendation = {"repo": "Fixture/Integration", "issue": 7, "action": "fix", "head": "a" * 40}
@@ -304,6 +342,10 @@ def test_standalone_handoff_signed_and_restart_safe(captain, tmp_path):
     mac_reviews.finish({"lane": review["lane"], "state": "verified"})
     recommendation = {"repo": "fixture/integration", "issue": 7, "action": "investigate"}
     assert mac_reviews.record_project_recommendation(recommendation) == {"recorded": True}
+    with mac_reviews.locked(write=True) as state:
+        state["projectDaily"] = [{"date": "2026-11-23", "epoch": 1, "observed": 1795430000,
+                                  "projects": [{"repository": "fixture/integration", "issue": 7,
+                                                "action": "investigate"}], "recommended": None}]
     receipt = mac.release(1, mac_reviews.locked)
     assert mac_reviews.control("grant", {**grant, "message": 103}) == {"result": "stale"}
     assert not mac_reviews.view()["armed"]
@@ -323,6 +365,8 @@ def test_standalone_handoff_signed_and_restart_safe(captain, tmp_path):
     assert view["grant"] is None
     assert view["lastProjectRecommendation"]["epoch"] == 1
     assert view["lastProjectRecommendation"]["issue"] == 7
+    assert view["lastProjectDaily"]["date"] == "2026-11-23"
+    assert view["lastProjectDaily"]["epoch"] == 1
     assert nuc_reviews.control("grant", grant) == {"result": "stale"}
     with pytest.raises(ValueError, match="stale"):
         restarted.accept(receipt, nuc_reviews.file, nuc_reviews.locked)

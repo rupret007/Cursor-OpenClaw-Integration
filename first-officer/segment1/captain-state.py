@@ -34,7 +34,7 @@ SHA = re.compile(r"[a-f0-9]{40}")
 LANE = re.compile(r"fo-ci-[a-f0-9]{24}")
 OWNER = re.compile(r"[1-9][0-9]{0,15}")
 DELIVERY = ("reported", "delivery-unverified")
-ACTIVE_PROJECT = ("reserved", "running", "unresolved")
+ACTIVE_PROJECT = ("reserved", "running", "unresolved", "patch-ready", "ci-pending")
 BLOCKERS = ("fleet", "gate", "quota", "ci-changed", "ci-unavailable", "ci-pending", "ci-timeout", "ci-paused")
 
 
@@ -335,30 +335,61 @@ def local_capacity(authority):
     return {"node": authority.node, "observed": int(time.time()), "used": used, "limit": limit}
 
 
-def current_project_evidence(request, branch):
+def github_get(route):
     candidates = (Path("/usr/bin/gh"), HOME / ".local/bin/gh", Path("/opt/homebrew/bin/gh"), Path("/usr/local/bin/gh"))
     binary = next((candidate for candidate in candidates if candidate.is_file() and os.access(candidate, os.X_OK)), None)
     if binary is None:
         raise ValueError("The approved GitHub CLI is unavailable")
+    result = subprocess.run(
+        ["/usr/bin/nice", "-n", "10", str(binary), "api", "--method", "GET", route, "--hostname", "github.com"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True, timeout=4,
+        env={"HOME": str(HOME), "PATH": "/usr/bin:/bin", "GH_PROMPT_DISABLED": "1"},
+    )
+    return json.loads(result.stdout)
+
+
+def current_project_evidence(request, branch):
     root = f"repos/{request['repository']}"
-
-    def get(route):
-        result = subprocess.run(
-            ["/usr/bin/nice", "-n", "10", str(binary), "api", "--method", "GET", route, "--hostname", "github.com"],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True, timeout=4,
-            env={"HOME": str(HOME), "PATH": "/usr/bin:/bin", "GH_PROMPT_DISABLED": "1"},
-        )
-        return json.loads(result.stdout)
-
-    issue = get(f"{root}/issues/{request['issue']}")
+    issue = github_get(f"{root}/issues/{request['issue']}")
     if (issue.get("number") != request["issue"] or "pull_request" in issue or
             str(issue.get("repository_url", "")).lower() != f"https://api.github.com/{root}" or
             issue.get("state") != "open"):
         return False
-    ref = get(f"{root}/git/ref/heads/{quote(branch, safe='/')}")
+    ref = github_get(f"{root}/git/ref/heads/{quote(branch, safe='/')}")
     target = ref.get("object")
     return (ref.get("ref") == f"refs/heads/{branch}" and isinstance(target, dict) and
             target.get("sha") == request["head"] and target.get("type") == "commit")
+
+
+def project_pr_checks(request, branch, candidate, verification):
+    number, required = verification["pr"], verification["checks"]
+    root = f"repos/{request['repository']}"
+    path = f"{root}/pulls/{number}"
+
+    def exact(pull):
+        return (pull.get("number") == number and pull.get("state") == "open" and
+                pull.get("head", {}).get("sha") == candidate and pull.get("base", {}).get("ref") == branch and
+                pull.get("base", {}).get("repo", {}).get("full_name", "").lower() == request["repository"])
+
+    if not exact(github_get(path)):
+        return "stale-candidate"
+    comparison = github_get(f"{root}/compare/{request['head']}...{candidate}")
+    if comparison.get("status") != "ahead" or (comparison.get("merge_base_commit") or {}).get("sha") != request["head"]:
+        return "stale-candidate"
+    checks = github_get(f"{root}/commits/{candidate}/check-runs?per_page=100&filter=latest")
+    if not exact(github_get(path)) or not current_project_evidence(request, branch):
+        return "stale-candidate"
+    rows = checks.get("check_runs")
+    if not isinstance(rows, list) or checks.get("total_count") != len(rows):
+        return "ci-pending"
+    for name in required:
+        matched = [row for row in rows if row.get("name") == name and row.get("head_sha") == candidate and
+                   (row.get("app") or {}).get("slug") == "github-actions"]
+        if len(matched) != 1 or matched[0].get("status") != "completed":
+            return "ci-pending"
+        if matched[0].get("conclusion") != "success":
+            return "ci-failed"
+    return "verified"
 
 
 class CaptainQueue:
@@ -524,6 +555,7 @@ class Controller:
                 "jobs": data["jobs"][-5:],
                 "lastProjectRecommendation": recommendations[-1] if recommendations else None,
                 "activeProjectJobs": [job for job in data.get("projectJobs", []) if job["state"] in ACTIVE_PROJECT],
+                "recentProjectResults": [job for job in data.get("projectJobs", []) if job["state"] not in ACTIVE_PROJECT][-5:],
                 "active": active}
 
     def handoff(self):
@@ -606,7 +638,8 @@ class Controller:
             if int(time.time()) >= grant["expires"]:
                 return {"result": "scope-denied"}
 
-            job = {"request": request, "worker": grant["worker"], "state": "reserved", "started": now}
+            job = {"request": request, "worker": grant["worker"], "branch": grant["branch"],
+                   "state": "reserved", "started": now}
             data["projectJobs"] = [*jobs, job]
             save(self.file, data)
             try:
@@ -627,12 +660,74 @@ class Controller:
             if not self.matches(self.fence._read_unlocked(), request["epoch"]):
                 return {"result": "stale"}
             job = next((row for row in data.get("projectJobs", []) if row["request"] == request), None)
-            if job is None or job["state"] not in ACTIVE_PROJECT:
+            if job is None or job["state"] not in ("reserved", "unresolved", "running"):
                 return {"result": "no-active-job"}
             receipt = self.queue.queue.reconcile_project(self.queue.project_config(), request,
                                                          self.queue.project_ledger, req["run"], timeout=3)
             job.update(queuePhase=receipt["phase"], state="running")
             return {"result": job["state"], "job": job}
+
+    def inspect_project(self, req):
+        if not self.standalone or not isinstance(req, dict) or req.keys() != {"repository", "issue", "head", "epoch"}:
+            raise ValueError("Expected the exact project identity")
+        request = {**req, "lane": self.queue.queue.project_lane(**req)}
+        self.queue.queue.canonical(request)
+        with self.locked(write=True) as data, self.fence._locked():
+            if not self.matches(self.fence._read_unlocked(), req["epoch"]):
+                return {"result": "stale"}
+            job = next((row for row in data.get("projectJobs", []) if row["request"] == request), None)
+            if job is None:
+                return {"result": "job-unavailable"}
+            if job["state"] not in (*ACTIVE_PROJECT, "verified", "ci-failed"):
+                return {"result": job["state"], "job": job}
+            job["observed"] = int(time.time())
+            try:
+                receipt = self.queue.project_receipt(request)
+                if not receipt or receipt["phase"] != "queued":
+                    if receipt and receipt["phase"] == "refused":
+                        job.update(state="refused", queuePhase="refused")
+                    return {"result": job["state"], "job": job}
+                row = self.queue.queue.read_project_run(self.queue.project_config(), request, receipt, receipt["run"], 3)
+                if row.get("status") in ("FAILED", "CANCELLED"):
+                    job.update(state="worker-failed")
+                elif row.get("status") == "COMPLETED":
+                    self.review_project_candidate(job, row.get("output"))
+                elif row.get("status") in ("QUEUED", "RUNNING"):
+                    job.update(state="running")
+                else:
+                    return {"result": "worker-evidence-unavailable"}
+            except (OSError, KeyError, TypeError, ValueError, subprocess.SubprocessError):
+                if job["state"] in ("verified", "ci-failed"):
+                    job.update(state="ci-pending")
+                return {"result": "verification-unavailable"}
+            return {"result": job["state"], "job": job}
+
+    def review_project_candidate(self, job, output):
+        request = job["request"]
+        if (not isinstance(output, dict) or set(output) != {"lane", "head", "commit"} or
+                output["lane"] != request["lane"] or output["head"] != request["head"] or
+                not isinstance(output["commit"], str) or not SHA.fullmatch(output["commit"]) or
+                output["commit"] == request["head"] or job.get("commit", output["commit"]) != output["commit"]):
+            job.update(state="invalid-artifact")
+            return
+        job.update(commit=output["commit"], state="patch-ready")
+        if not current_project_evidence(request, job["branch"]):
+            job.update(state="stale-base")
+            return
+        try:
+            verification = read_private(self.watchdog.AUTHORITY / "project-verification.json", 4096)
+        except FileNotFoundError:
+            return
+        expected = {"repository": request["repository"], "issue": request["issue"], "commit": job["commit"]}
+        if not isinstance(verification, dict) or any(verification.get(key) != value for key, value in expected.items()):
+            return
+        checks, pr = verification.get("checks"), verification.get("pr")
+        if (type(pr) is not int or not 0 < pr < 100_000_000 or not isinstance(checks, list) or
+                not 0 < len(checks) <= 6 or not all(isinstance(check, str) and 0 < len(check) <= 100 for check in checks) or
+                len(set(checks)) != len(checks)):
+            raise ValueError("The independent verification profile is invalid")
+        outcome = project_pr_checks(request, job["branch"], job["commit"], verification)
+        job.update(state=outcome, pr=pr, checks=checks, checked=int(time.time()))
 
     @staticmethod
     def submitted_message(data, owner, message):
@@ -903,6 +998,8 @@ def main():
             return controller.submit_project(req)
         if entry == "reconcile-project":
             return controller.reconcile_project(req)
+        if entry == "inspect-project":
+            return controller.inspect_project(req)
         if entry == "local-projects":
             if not private_directory(LOCAL_AUTHORITY):
                 raise ValueError("The standalone authority directory is invalid")

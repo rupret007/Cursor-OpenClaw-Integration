@@ -132,7 +132,9 @@ Use a private test authority and a dedicated test Hatchet workflow. The coordina
 
 Pass the four identity fields as JSON to the state script's `submit-project` operation. The coordinator checks the live GitHub issue and branch head, local gate and capacity, current authority, and exact grant before saving the reservation or contacting Hatchet. One unresolved reservation blocks a second coding job for the repo and blocks standby transfer. The briefing can still recommend eligible work in another project.
 
-After independently identifying an accepted Hatchet run, use `reconcile-project` with the original four identity fields and `run`. This checks the original queue receipt and restores the coordinator's running state without submitting again. Finishing an accepted coding job still requires independent patch verification.
+After independently identifying an accepted Hatchet run, use `reconcile-project` with the original four identity fields and `run`. This checks the original queue receipt and restores the coordinator's running state without submitting again.
+
+The project monitor inspects one eligible job at a time. The worker returns the lane, approved base, and candidate commit. Jeff reviews the isolated patch and decides whether to publish it. An operator who has an authorized PR can place a private `project-verification.json` beside the lease with the lowercase `repository`, `issue`, full candidate `commit`, `pr`, and `checks` of required GitHub Actions job names. Set mode `0600`. The verifier checks candidate ancestry, rechecks the open issue and base, and confirms the PR head both before and after reading exact-commit checks. Use `inspect-project` with the four identity fields to refresh the receipt on demand. The handoff labels a saved verdict as the last verification.
 
 ### Inspect a coding submission after interruption
 

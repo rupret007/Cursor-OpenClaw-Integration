@@ -187,6 +187,54 @@ def test_project_admission_binds_scope_head_and_repository_write_lane(captain, t
     assert observed == [("example/other", "existing")]
     assert recovered.submit_project(other)["result"] == "duplicate"
 
+    queued = recovered.view()["activeProjectJobs"][-1]["request"]
+    accepted = {"phase": "queued", "run": "existing"}
+    output = {"lane": queued["lane"], "head": queued["head"], "commit": "b" * 40}
+    monkeypatch.setattr(recovered.queue, "project_receipt", lambda _request: accepted)
+    monkeypatch.setattr(recovered.queue.queue, "read_project_run",
+                        lambda *_args: {"status": "COMPLETED", "output": output})
+    assert recovered.inspect_project(other)["result"] == "patch-ready"
+    module.save(root / "project-verification.json", {
+        "repository": other["repository"], "issue": other["issue"], "commit": output["commit"],
+        "pr": 41, "checks": ["candidate-ci"],
+    })
+    monkeypatch.setattr(module, "project_pr_checks", lambda *_args: "verified")
+    assert recovered.inspect_project(other)["job"]["checks"] == ["candidate-ci"]
+    assert recovered.view()["recentProjectResults"][-1]["state"] == "verified"
+    monkeypatch.setattr(module, "project_pr_checks", lambda *_args: "stale-candidate")
+    assert recovered.inspect_project(other)["result"] == "stale-candidate"
+
+
+def test_project_pr_checks_require_the_exact_commit_twice(captain, monkeypatch):
+    module, _, _ = captain
+    request = {"repository": "example/integration", "issue": 40, "head": "a" * 40}
+    candidate = "b" * 40
+    pull = {"number": 41, "state": "open", "head": {"sha": candidate},
+            "base": {"ref": "codex/captain", "repo": {"full_name": "example/integration"}}}
+    check = {"name": "candidate-ci", "status": "completed", "conclusion": "success",
+             "head_sha": candidate, "app": {"slug": "github-actions"}}
+    changed = False
+    reads = 0
+
+    def github(path):
+        nonlocal reads
+        if "/pulls/" in path:
+            reads += 1
+            return {**pull, "head": {"sha": "c" * 40}} if changed and reads % 2 == 0 else pull
+        if "/compare/" in path:
+            return {"status": "ahead", "merge_base_commit": {"sha": request["head"]}}
+        return {"total_count": 1, "check_runs": [check]}
+
+    monkeypatch.setattr(module, "github_get", github)
+    monkeypatch.setattr(module, "current_project_evidence", lambda *_args: True)
+    profile = {"pr": 41, "checks": ["candidate-ci"]}
+    assert module.project_pr_checks(request, "codex/captain", candidate, profile) == "verified"
+    check["head_sha"] = request["head"]
+    assert module.project_pr_checks(request, "codex/captain", candidate, profile) == "ci-pending"
+    check["head_sha"] = candidate
+    changed = True
+    assert module.project_pr_checks(request, "codex/captain", candidate, profile) == "stale-candidate"
+
 
 def test_project_recommendation_survives_restart_and_rechecks_epoch(captain):
     module, lease, watchdog = captain

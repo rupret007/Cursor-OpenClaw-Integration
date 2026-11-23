@@ -43,7 +43,12 @@ export function localState(operation, payload = {}, script = stateScript) {
   const python = process.env.FO_CAPTAIN_PYTHON || '/usr/bin/python3';
   return new Promise((resolve, reject) => {
     const child = execFile('/usr/bin/nice', ['-n', '10', python, '-I', '-B', script, operation],
-      { maxBuffer: 32 * 1024, ...(operation === 'submit' ? {} : { timeout: ['runner-quota', 'local-quota'].includes(operation) ? 7000 : 2500 }) },
+      {
+        maxBuffer: 48 * 1024,
+        ...(operation === 'submit' ? {} : {
+          timeout: operation === 'inspect-project' ? 30_000 : ['runner-quota', 'local-quota'].includes(operation) ? 7000 : 2500,
+        }),
+      },
       (error, stdout) => {
         if (error) return reject(new Error('Captain state unavailable'));
         try { resolve(JSON.parse(stdout)); } catch { reject(new Error('Invalid captain state')); }
@@ -132,9 +137,20 @@ const noDecisions = 'No captain decisions are waiting for Jeff.';
 function projectWork(job) {
   const { repository, issue, head } = job.request;
   const identity = repository + ' #' + issue + ' · ' + head.slice(0, 8) + '.';
-  return identity + (job.state === 'running'
-    ? ' Hatchet accepted the coding job. Awaiting independent verification.'
-    : ' Coding submission is unresolved. Check the original Hatchet receipt before another attempt.');
+  const status = {
+    running: 'Hatchet accepted the coding job. Awaiting its outcome.',
+    'patch-ready': 'The worker returned a candidate. Jeff can review the patch and authorize publication for exact-commit CI.',
+    'ci-pending': 'Independent CI evidence is pending for the candidate.',
+    'ci-failed': 'The last verification found a failing required check. Review CI before another attempt.',
+    verified: 'The last verification matched all required CI checks.',
+    refused: 'Hatchet refused the job. Check the coding worker.',
+    'worker-failed': 'Hatchet reports that the worker failed or was cancelled. Check the worker before authorizing another attempt.',
+    'invalid-artifact': 'The worker returned an invalid or inconsistent artifact. Inspect the isolated worktree.',
+    'stale-base': 'The issue or approved base changed. Review the current scope.',
+    'stale-candidate': 'The PR head or its base changed. Review the candidate against current GitHub evidence.',
+  };
+  return [identity, job.commit ? 'Candidate ' + job.commit.slice(0, 8) + '.' : '',
+    status[job.state] ?? 'Coding submission is unresolved. Check the original Hatchet receipt before another attempt.'].filter(Boolean).join(' ');
 }
 
 function decisions(view) {
@@ -146,7 +162,10 @@ function decisions(view) {
   if (view.lease.state === 'handback-pending') needs.push('Wait for the shared fence to finish transferring authority.');
   if (view.active?.overtime) needs.push(jobText(view.active));
   for (const job of view.activeProjectJobs ?? []) {
-    if (job.state !== 'running') needs.push(projectWork(job));
+    if (job.state !== 'running' && job.state !== 'ci-pending') needs.push(projectWork(job));
+  }
+  for (const job of view.recentProjectResults ?? []) {
+    if (job.state !== 'verified') needs.push(projectWork(job));
   }
   if (view.blocked && view.blocked.reason !== 'ci-pending') needs.push('Last blocked review · Integration PR #' + view.blocked.pr + '. ' +
     blockers[view.blocked.reason]);
@@ -252,7 +271,7 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
       return [view ? role(view) + '\n' + decisions(view).split('\n')[0] +
         (view.active ? '\n' + jobText(view.active) : '') :
         'Captain authority and decisions are unavailable.',
-        ...(view?.activeProjectJobs ?? []).filter((job) => job.state === 'running').map(projectWork),
+        ...(view?.activeProjectJobs ?? []).filter((job) => ['running', 'ci-pending'].includes(job.state)).map(projectWork),
         ...(projects ? [projects.summary] : []), ...evidence,
         quota?.modelFree ? 'Captain CI review uses a model-free worker.' :
           quota ? 'Captain runner quota · ' + quota.session.used + '% of 5-hour window · ' + quota.weekly.used + '% of weekly window.'
@@ -274,7 +293,8 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
         recommendation.issue + ' · ' + recommendation.action + ' · epoch ' + recommendation.epoch + '.' : '',
       view.blocked?.reason === 'ci-pending' ? 'Integration PR #' + view.blocked.pr + ' · ' +
         view.blocked.head.slice(0, 8) + ' · awaiting required CI.' : '',
-      ...(view.activeProjectJobs ?? []).filter((job) => job.state === 'running').map(projectWork),
+      ...(view.activeProjectJobs ?? []).filter((job) => ['running', 'ci-pending'].includes(job.state)).map(projectWork),
+      ...(view.recentProjectResults ?? []).filter((job) => job.state === 'verified').map(projectWork),
       ...view.jobs.map(jobText)].filter(Boolean).join('\n');
     return task(request.pr, view, turn);
   }
@@ -323,5 +343,24 @@ export function createCaptain({ registry, get, state = localState, admit = fleet
       await state('reported', { lane: job.lane });
     }
   }
-  return { run, tick };
+  let checkingProject = false;
+  async function tickProject() {
+    if (checkingProject) return;
+    checkingProject = true;
+    try {
+      const view = await state('view');
+      if (view.lease?.holder !== 'first-officer' || view.lease.state !== 'held') return;
+      const jobs = (view.activeProjectJobs ?? []).filter((job) =>
+        ['running', 'patch-ready', 'ci-pending'].includes(job.state));
+      const ready = jobs.filter((job) => now() / 1000 - (job.observed ?? 0) >= 30)
+        .sort((a, b) => (a.observed ?? 0) - (b.observed ?? 0));
+      if (ready.length) {
+        const { repository, issue, head, epoch } = ready[0].request;
+        await state('inspect-project', { repository, issue, head, epoch });
+      }
+    } finally {
+      checkingProject = false;
+    }
+  }
+  return { run, tick, tickProject };
 }

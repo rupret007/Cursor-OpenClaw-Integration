@@ -64,6 +64,31 @@ test('Invalid profiles make no reads and unavailable live evidence cannot recomm
   assert.throws(() => readProjectGithub('example/..', 'issues/17'), /outside/);
 });
 
+test('The background monitor checks one admitted job and reports a candidate as an approval decision', async () => {
+  const request = { repository: 'example/integration', issue: 40, head: 'a'.repeat(40), epoch: 2, lane: 'fixture' };
+  const job = { request, state: 'running' };
+  const view = {
+    lease: { epoch: 2, holder: 'first-officer', state: 'held' },
+    grant: { epoch: 2 }, armed: true, jobs: [], activeProjectJobs: [job],
+  };
+  const calls = [];
+  const captain = createCaptain({ state: async (op, payload) => {
+    if (op === 'view') return view;
+    assert.equal(op, 'inspect-project');
+    calls.push(payload);
+    job.state = 'patch-ready';
+    job.commit = 'b'.repeat(40);
+    job.observed = 120;
+  }, now: () => 120_000 });
+  await captain.tickProject();
+  await captain.tickProject();
+  assert.deepEqual(calls, [{ repository: request.repository, issue: 40, head: request.head, epoch: 2 }]);
+  const text = await captain.run({ action: 'decisions' }, { signal: AbortSignal.timeout(2000) });
+  assert.match(text, /Candidate bbbbbbbb/);
+  assert.match(text, /Jeff can review the patch and authorize publication/);
+});
+
+
 test('Stale PR heads cannot be recommended and private Captain replies expose project decisions', async () => {
   const projectBrief = createProjectBrief({
     config: async () => [{ ...integration, pr: 39, checks: ['offline-integration'] }, second],

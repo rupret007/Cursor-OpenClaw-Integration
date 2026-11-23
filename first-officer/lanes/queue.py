@@ -493,6 +493,34 @@ def dispatch(config, request, ledger, now=None, timeout=TIMEOUT):
                              "The lane was not queued.") from None
 
 
+def read_project_run(config, request, state, run, timeout):
+    if set(request) != PROJECT_REQUEST or not isinstance(run, str) or not RUN_ID.fullmatch(run):
+        raise ValueError("Expected a coding lane and original Hatchet run ID")
+    key = idempotency_key(request)
+    route = config["hatchet"]
+    (opener, url, headers, _), target = submission("hatchet", route, request, key)
+    if state["target"] != target:
+        raise ValueError("The ledger cannot verify this as the original Hatchet destination")
+    base = url.split("/api/v1/stable/", 1)[0]
+    try:
+        result = response_json(opener, Request(
+            f"{base}/api/v1/stable/workflow-runs/{run}", headers=headers), timeout)
+    except (Refusal, Uncertain) as error:
+        raise ValueError(f"Hatchet could not confirm the original coding submission. {error}.") from None
+    row = result.get("run") or {}
+    metadata = row.get("metadata") if isinstance(row, dict) else None
+    extra = row.get("additionalMetadata") if isinstance(row, dict) else None
+    envelope = row.get("input") if isinstance(row, dict) else None
+    workflow = result.get("workflowConfig")
+    if (not isinstance(metadata, dict) or metadata.get("id") != run or
+            row.get("tenantId") != route["tenant"] or
+            not isinstance(workflow, dict) or workflow.get("Name") != PROJECT_WORKFLOW or
+            not isinstance(extra, dict) or extra.get("idempotencyKey") != key or
+            not isinstance(envelope, dict) or envelope.get("input") != request):
+        raise ValueError("Hatchet returned a different coding run. The receipt remains unresolved.")
+    return row
+
+
 def reconcile_project(config, request, ledger, run, timeout=TIMEOUT):
     """Adopt an independently identified Hatchet run only after exact readback."""
     timeout = _bounded_timeout(timeout)
@@ -510,27 +538,7 @@ def reconcile_project(config, request, ledger, run, timeout=TIMEOUT):
             return {**state, "reused": True}
         if not state or state["backend"] != "hatchet" or state["phase"] not in ("pending", "uncertain"):
             raise ValueError("The ledger has no unresolved coding submission")
-        route = config["hatchet"]
-        (opener, url, headers, _), target = submission("hatchet", route, request, key)
-        if state["target"] != target:
-            raise ValueError("The ledger cannot verify this as the original Hatchet destination")
-        base = url.split("/api/v1/stable/", 1)[0]
-        try:
-            result = response_json(opener, Request(
-                f"{base}/api/v1/stable/workflow-runs/{run}", headers=headers), timeout)
-        except (Refusal, Uncertain) as error:
-            raise ValueError(f"Hatchet could not confirm the original coding submission. {error}.") from None
-        row = result.get("run") or {}
-        metadata = row.get("metadata") if isinstance(row, dict) else None
-        extra = row.get("additionalMetadata") if isinstance(row, dict) else None
-        envelope = row.get("input") if isinstance(row, dict) else None
-        workflow = result.get("workflowConfig")
-        if (not isinstance(metadata, dict) or metadata.get("id") != run or
-                row.get("tenantId") != route["tenant"] or
-                not isinstance(workflow, dict) or workflow.get("Name") != PROJECT_WORKFLOW or
-                not isinstance(extra, dict) or extra.get("idempotencyKey") != key or
-                not isinstance(envelope, dict) or envelope.get("input") != request):
-            raise ValueError("Hatchet returned a different coding run. The receipt remains unresolved.")
+        read_project_run(config, request, state, run, timeout)
         entry = {**state, "at": int(time.time()), "phase": "queued", "run": run}
         entry.pop("detail", None)
         transition(ledger, request, key, state, entry)

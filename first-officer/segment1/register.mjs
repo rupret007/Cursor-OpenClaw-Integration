@@ -217,6 +217,20 @@ export function registerSegmentOne(api, commands, services) {
         monitor = undefined;
       },
     });
+    let projectMonitor;
+    api.registerService({
+      id: 'fo-captain-project-monitor',
+      start() {
+        if (projectMonitor) return;
+        projectMonitor = setInterval(() => captain.tickProject().catch(() =>
+          api.logger.warn('Project Captain could not verify the current worker result.')), 15_000);
+        projectMonitor.unref();
+      },
+      stop() {
+        clearInterval(projectMonitor);
+        projectMonitor = undefined;
+      },
+    });
   }
   const dispatch = createDispatch({
     authorize(event, ctx) {

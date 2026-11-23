@@ -17,6 +17,79 @@ import pytest
 from standby_fixture import certificates
 
 
+def test_reviewed_project_releases_only_its_reservation_and_cannot_be_requeued(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "first-officer"))
+    queue_module = importlib.import_module("standby_queue")
+    lease = importlib.import_module("standby")
+    profile = {
+        "hatchet": {"base_url": "http://127.0.0.1:1", "tenant": "01010101",
+                    "workflow": "fo-captain-project", "token_env": "FO_FIXTURE_HATCHET"},
+        "restate": {"base_url": "http://127.0.0.1:2", "service": "CaptainReview", "handler": "verify",
+                    "scope": "fixture", "token_env": "FO_FIXTURE_RESTATE"},
+    }
+    monkeypatch.setenv("FO_FIXTURE_HATCHET", "fixture-token")
+    monkeypatch.setenv("FO_FIXTURE_RESTATE", "fixture-token")
+    project = queue_module.ProjectQueue(tmp_path, profile, clock=lambda: 100)
+    base = {"repository": "example/integration", "head": "a" * 40, "epoch": 1}
+
+    def request(issue):
+        identity = {**base, "issue": issue}
+        return {**identity, "lane": queue_module.queue.project_lane(**identity)}
+
+    def private(path, data):
+        path.touch(mode=0o600, exist_ok=True)
+        path.write_text(json.dumps(data))
+
+    first, next_job = request(40), request(41)
+    commit = "b" * 40
+    run = "fixture-reviewed-run-1"
+    submissions = []
+
+    def post(*_args):
+        submissions.append(True)
+        return {"metadata": {"id": f"fixture-reviewed-run-{len(submissions)}"}}
+
+    monkeypatch.setattr(queue_module.queue, "post", post)
+    status = "RUNNING"
+
+    def read_run(*_args):
+        return {"status": status, "output": {"lane": first["lane"], "head": first["head"], "commit": commit}}
+
+    monkeypatch.setattr(queue_module.queue, "read_project_run", read_run)
+    with lease.StandbyAuthority(tmp_path, clock=lambda: 100) as authority:
+        grant = authority.claim(lease.PRIMARY)
+
+        def scope(item):
+            private(project.scope, {"request": item, "epoch": 1, "expires": 150,
+                                    "worker": "local-qwen", "planSha256": "c" * 64})
+
+        scope(first)
+        assert project.submit(authority, grant, first)["run"] == run
+        with pytest.raises(queue_module.ProjectScopeRejected):
+            project.retire(authority, grant, first)
+        approval = {"request": first, "epoch": 1, "expires": 150, "run": run, "commit": commit}
+        private(tmp_path / "project-complete.json", approval)
+        with pytest.raises(queue_module.ProjectScopeRejected):
+            project.retire(authority, grant, first)
+        assert len(project.active()) == 1
+        status = "COMPLETED"
+        private(tmp_path / "project-complete.json", {**approval, "commit": "d" * 40})
+        with pytest.raises(queue_module.ProjectScopeRejected):
+            project.retire(authority, grant, first)
+        private(tmp_path / "project-complete.json", approval)
+        assert project.retire(authority, grant, first)["commit"] == commit
+        assert project.active() == []
+        project = queue_module.ProjectQueue(tmp_path, profile, clock=lambda: 100)
+        assert project.submit(authority, grant, first)["retired"] is True
+        assert project.receipt(first)["run"] == run
+        assert len(submissions) == 1
+        scope(next_job)
+        queued = project.submit(authority, grant, next_job)
+        assert queued["phase"] == "queued" and queued["run"] != run
+        assert project.active()[0]["request"] == next_job
+        assert len(submissions) == 2
+
+
 def test_broker_entrypoint_loads_release_modules_in_isolated_python(tmp_path):
     broker = Path(__file__).resolve().parents[2] / "first-officer/standby_broker.py"
     result = subprocess.run([sys.executable, "-I", "-B", str(broker), "--help"],
@@ -320,6 +393,8 @@ def test_broker_authenticates_each_host_and_fences_partitioned_primary(tmp_path,
         assert mac.submit_review(2, uncertain)["phase"] == "uncertain"
         assert mac.project_receipt(2, coding)["phase"] == "uncertain"
         with pytest.raises(transport.ProjectScopeRejected):
+            mac.retire_project(2, coding)
+        with pytest.raises(transport.ProjectScopeRejected):
             mac.project_worker_plan(2, coding)
         assert mac.project_status(2) == {"enabled": True, "jobs": [{"request": coding, "state": "unresolved"}]}
         with pytest.raises(transport.ProjectScopeRejected):
@@ -327,6 +402,8 @@ def test_broker_authenticates_each_host_and_fences_partitioned_primary(tmp_path,
         with pytest.raises(transport.BrokerUnavailable):
             mac.reconcile_project(2, coding, "fixture-project-run")
         assert mac.project_receipt(2, coding)["phase"] == "uncertain"
+        with pytest.raises(transport.ProjectScopeRejected):
+            mac.retire_project(2, coding)
         with pytest.raises(transport.ProjectScopeRejected):
             mac.project_worker_plan(2, coding)
         assert mac.project_status(2) == {"enabled": True, "jobs": [{"request": coding, "state": "unresolved"}]}

@@ -126,6 +126,9 @@ class Client:
             fields["planSha256"] = plan
         return self.request("/v1/project/submit", fields, timeout=5)["receipt"]
 
+    def retire_project(self, epoch, request):
+        return self.request("/v1/project/retire", {"epoch": epoch, "request": request}, timeout=5)["completion"]
+
     def project_worker_plan(self, epoch, request):
         return self.request("/v1/project/worker-plan", {"epoch": epoch, "request": request})["planSha256"]
 
@@ -315,7 +318,7 @@ class Request(BaseHTTPRequestHandler):
             authority.require_grant(grant)
             return 200, {"status": status}
         if self.path in ("/v1/project/submit", "/v1/project/receipt", "/v1/project/reconcile", "/v1/project/inspect",
-                         "/v1/project/worker-plan"):
+                         "/v1/project/worker-plan", "/v1/project/retire"):
             authority.require_grant(grant)
             project = self.server.project
             if project is None:
@@ -327,6 +330,8 @@ class Request(BaseHTTPRequestHandler):
             if guarded and (not isinstance(body["planSha256"], str) or not re.fullmatch(r"[a-f0-9]{64}", body["planSha256"])):
                 raise ValueError("Invalid local plan hash")
             request = body["request"]
+            if self.path == "/v1/project/retire":
+                return 200, {"completion": project.retire(authority, grant, request)}
             if self.path == "/v1/project/worker-plan":
                 return 200, {"planSha256": project.worker_plan(authority, grant, request)}
             if self.path == "/v1/project/inspect":

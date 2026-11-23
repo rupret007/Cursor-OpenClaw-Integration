@@ -482,6 +482,8 @@ def brokered_project_submit(home, queue, broker, epoch, repository, issue):
             return {"result": "scope-denied"}
         receipt = broker.submit_project(epoch, request, plan_hash)
 
+    if receipt.get("retired") is True:
+        return {"result": "duplicate", "job": {"request": request, "state": "retired", "commit": receipt["commit"]}}
     state = {"queued": "running", "refused": "refused"}.get(receipt["phase"], "unresolved")
     result = "duplicate" if receipt.get("reused") else state
     return {"result": result, "job": {"request": request, "state": state}}

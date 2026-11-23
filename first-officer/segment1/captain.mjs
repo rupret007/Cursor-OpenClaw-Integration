@@ -151,6 +151,7 @@ function projectWork(job) {
   const identity = repository + ' #' + issue + ' · ' + head.slice(0, 8) + '.';
   const status = {
     running: 'Hatchet accepted the coding job. Awaiting its outcome.',
+    retired: 'Jeff closed the reviewed run. Its receipt is archived.',
     'patch-ready': 'The worker returned a candidate. Jeff can review the patch and authorize publication for exact-commit CI.',
     'ci-pending': 'Independent CI evidence is pending for the candidate.',
     'ci-unavailable': 'I couldn’t verify current GitHub CI for the candidate.',

@@ -104,6 +104,7 @@ class ProjectQueue(BrokerQueue):
             raise ValueError("The standby broker needs the scoped Hatchet coding workflow")
         self.reservations = directory / "project-reservations.sqlite"
         self.observing = Lock()
+        self.completion = directory / "project-complete.json"
         with open_private(directory, self.reservations.name), closing(sqlite3.connect(self.reservations)) as db:
             db.execute("CREATE TABLE IF NOT EXISTS active_repo (repo TEXT PRIMARY KEY, lane_key TEXT NOT NULL, "
                        "request TEXT NOT NULL, plan_sha TEXT)")
@@ -111,10 +112,19 @@ class ProjectQueue(BrokerQueue):
                 db.execute("ALTER TABLE active_repo ADD COLUMN plan_sha TEXT")
             db.execute("CREATE TABLE IF NOT EXISTS project_observation (lane_key TEXT PRIMARY KEY, "
                        "state TEXT NOT NULL, commit_sha TEXT, observed INTEGER NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS completed_project (lane_key TEXT PRIMARY KEY, "
+                       "run TEXT NOT NULL, commit_sha TEXT NOT NULL, retired_at INTEGER NOT NULL)")
+
+    def completed(self, key):
+        with closing(sqlite3.connect(self.reservations)) as db:
+            return db.execute("SELECT run, commit_sha FROM completed_project WHERE lane_key = ?", (key,)).fetchone()
 
     def reserve(self, request, key, plan):
         repo = request["repository"]
         with closing(sqlite3.connect(self.reservations)) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("SELECT 1 FROM completed_project WHERE lane_key = ?", (key,)).fetchone():
+                raise ProjectScopeRejected("The completed run cannot reserve another write slot")
             active = db.execute("SELECT lane_key, plan_sha FROM active_repo WHERE repo = ?", (repo,)).fetchone()
             if active is not None:
                 if active[0] != key:
@@ -166,6 +176,12 @@ class ProjectQueue(BrokerQueue):
         plan = self.approved_plan(authority, grant, request)
         if expected_plan is not None and expected_plan != plan:
             raise ProjectScopeRejected("The Nuc and broker coding plan approvals differ")
+        previous = self.completed(key)
+        if previous is not None:
+            receipt = self.receipt(request)
+            if not receipt or receipt.get("run") != previous[0]:
+                raise ProjectScopeRejected("The completed run receipt could not be verified")
+            return {**receipt, "commit": previous[1], "retired": True, "reused": True}
 
         def authorize():
             if self.approved_plan(authority, grant, request) != plan:
@@ -178,6 +194,51 @@ class ProjectQueue(BrokerQueue):
         if receipt["phase"] == "refused":
             self.clear_refused(request, key)
         return receipt
+
+    def completion_approval(self, authority, grant, request):
+        authority.require_grant(grant)
+        if grant.node != PRIMARY:
+            raise ProjectScopeRejected("Completion needs the current Nuc and Jeff’s approval")
+        try:
+            approved = read_private_json(self.completion)
+            now = int(self.clock())
+            if (isinstance(approved, dict) and approved.keys() == {"request", "epoch", "expires", "run", "commit"}
+                    and self.key(approved["request"]) == self.key(request)
+                    and type(approved["epoch"]) is int and approved["epoch"] == grant.epoch
+                    and type(approved["expires"]) is int and now < approved["expires"] <= now + MAX_SCOPE_SECONDS
+                    and isinstance(approved["run"], str) and 0 < len(approved["run"]) <= 160
+                    and isinstance(approved["commit"], str) and re.fullmatch(r"[a-f0-9]{40}", approved["commit"])):
+                return approved
+        except (OSError, ValueError, RecursionError):
+            pass
+        raise ProjectScopeRejected("Jeff needs to approve the exact completed run and commit")
+
+    def retire(self, authority, grant, request):
+        key = self.key(request)
+        approved = self.completion_approval(authority, grant, request)
+        identity = approved["run"], approved["commit"]
+        result = {"state": "retired", "run": identity[0], "commit": identity[1]}
+        with self.observing:
+            previous = self.completed(key)
+            if previous is not None:
+                if previous != identity:
+                    raise ProjectScopeRejected("The completed receipt has a different identity")
+                return {**result, "reused": True}
+            receipt = self.receipt(request)
+            if not receipt or receipt["phase"] != "queued" or receipt.get("run") != identity[0]:
+                raise ProjectScopeRejected("The original Hatchet run is unavailable")
+            job = self._inspect(request)
+            if job["state"] != "patch-ready" or job.get("commit") != identity[1]:
+                raise ProjectScopeRejected("The exact candidate is not ready to close")
+            if self.completion_approval(authority, grant, request) != approved:
+                raise ProjectScopeRejected("The completion approval changed during verification")
+            with closing(sqlite3.connect(self.reservations)) as db, db:
+                removed = db.execute("DELETE FROM active_repo WHERE repo = ? AND lane_key = ?",
+                                     (request["repository"], key)).rowcount
+                if removed != 1:
+                    raise ProjectScopeRejected("The repository reservation changed")
+                db.execute("INSERT INTO completed_project VALUES (?, ?, ?, ?)", (key, *identity, int(self.clock())))
+        return result
 
     def active(self):
         with closing(sqlite3.connect(self.reservations)) as db:

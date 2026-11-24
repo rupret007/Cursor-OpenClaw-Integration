@@ -13,13 +13,14 @@ import subprocess
 import sys
 from tempfile import TemporaryDirectory
 from threading import Event, Thread
+import time
 
 # The release inventory pins this directory, including under Python -I.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from lanes import queue
-from standby import open_private, read_private_json
-from standby_broker import Client
+from standby import PRIMARY, STANDBY, open_private, read_private_json
+from standby_broker import BrokerUnavailable, Client
 from standby_channel import Channel
 from standby_host import GatewayProcess, Supervisor
 from standby_telegram import positive_id
@@ -151,7 +152,51 @@ def run(executable, template_path, environment_path, profile_path):
         Supervisor(client, start).run(stop, lambda status: print("Captain standby " + status, flush=True))
 
 
+def verify_broker(profile_path, holder, epoch, timeout):
+    profile = profile_from(profile_path)
+    broker = Client(profile["hostname"], profile["port"], cert=profile["cert"], key=profile["key"], ca=profile["ca"])
+    deadline = time.monotonic() + timeout
+    while (remaining := deadline - time.monotonic()) > 0:
+        try:
+            status = broker.readiness(timeout=min(remaining, 3))
+        except BrokerUnavailable:
+            pass
+        else:
+            if status["bot"] != profile["bot_id"]:
+                raise ValueError("Broker bot identity did not match the profile")
+            live_holder, live_epoch = status["holder"], status["epoch"]
+            if live_holder is not None and (live_holder, live_epoch) != (holder, epoch):
+                raise ValueError("A different holder or epoch is already active")
+            if live_holder is not None and status["gatewayRenewed"] and status["telegramPolling"]:
+                return
+        time.sleep(max(0, min(1, deadline - time.monotonic())))
+    raise TimeoutError("Broker did not report a renewed gateway and recent Telegram polling")
+
+
+def verify_broker_main(argv):
+    parser = argparse.ArgumentParser(description="Verify a Captain handoff without claiming or renewing a lease.")
+    parser.add_argument("profile", type=Path)
+    parser.add_argument("--holder", choices=(PRIMARY, STANDBY), required=True)
+    parser.add_argument("--epoch", type=int, required=True)
+    parser.add_argument("--timeout", type=int, default=120)
+    args = parser.parse_args(argv)
+    if not positive_id(args.epoch) or not 1 <= args.timeout <= 180:
+        parser.error("Use a positive epoch and a timeout between 1 and 180 seconds")
+    try:
+        verify_broker(args.profile, args.holder, args.epoch, args.timeout)
+    except TimeoutError:
+        print("Broker readiness timed out before the expected renewal and polling evidence.", file=sys.stderr)
+        return 1
+    except (OSError, ValueError, TypeError, RecursionError):
+        print("Broker readiness failed. Check the private profile, bot identity, holder and epoch.", file=sys.stderr)
+        return 1
+    print(f"Captain handoff verified for {args.holder} at epoch {args.epoch}.")
+    return 0
+
+
 def main():
+    if sys.argv[1:2] == ["verify-broker"]:
+        return verify_broker_main(sys.argv[2:])
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("executable", "template", "environment", "profile"):
         parser.add_argument(name, type=Path)

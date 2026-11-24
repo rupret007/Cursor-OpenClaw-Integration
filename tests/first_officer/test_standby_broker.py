@@ -588,11 +588,38 @@ def test_broker_authenticates_each_host_and_fences_partitioned_primary(tmp_path,
         with pytest.raises(transport.BrokerUnavailable):
             old_endpoint.claim()
         nuc, mac = client("nuc"), client("mac")
+        assert nuc.readiness() == {"holder": None, "epoch": None, "gatewayRenewed": False,
+                                   "telegramPolling": True, "bot": 202}
         assert nuc.claim() is None
         now += lease.LEASE_SECONDS
         assert mac.claim() is None
         epoch = nuc.claim()
         assert epoch == 3
+        assert mac.readiness()["gatewayRenewed"] is False
+        nuc.renew(3)
+        assert mac.readiness()["gatewayRenewed"] is True
+
+        verifier = Path(__file__).resolve().parents[2] / "first-officer/standby_launch.py"
+        profile = tmp_path / "readiness-profile.json"
+        profile.touch(mode=0o600)
+        private_profile = {"hostname": "127.0.0.1", "port": broker.server_port, "bot_id": 202,
+                           "cert": str(tmp_path / "mac.pem"), "key": str(tmp_path / "mac.key"),
+                           "ca": str(ca)}
+        profile.write_text(json.dumps(private_profile))
+
+        def verify(expected_holder, expected_epoch):
+            return subprocess.run([sys.executable, "-I", "-B", str(verifier), "verify-broker", str(profile),
+                                   "--holder", expected_holder, "--epoch", str(expected_epoch), "--timeout", "1"],
+                                  capture_output=True, check=False, text=True, timeout=4)
+
+        assert verify(lease.PRIMARY, 3).returncode == 0
+        assert verify(lease.STANDBY, 3).returncode == 1
+        assert verify(lease.PRIMARY, 2).returncode == 1
+        poll.last_success -= 30
+        assert verify(lease.PRIMARY, 3).returncode == 1
+        profile.write_text(json.dumps({**private_profile, "bot_id": 203}))
+        assert verify(lease.PRIMARY, 3).returncode == 1
+        poll.step()
         with pytest.raises(transport.LeaseRejected):
             mac.renew(2)
         assert nuc.next_telegram_message(epoch)["message_id"] == 14
@@ -607,6 +634,8 @@ def test_broker_authenticates_each_host_and_fences_partitioned_primary(tmp_path,
         assert nuc.review_receipt(epoch, approved)["run"] == "fixture-run-1"
         assert len(queue_calls) == 3
         assert [message_id for _, _, message_id in sends][-2:] == [14, 15]
+        now += 31
+        assert mac.readiness()["gatewayRenewed"] is False
     finally:
         broker.shutdown()
         thread.join(timeout=5)

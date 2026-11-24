@@ -8,6 +8,7 @@ import re
 import sqlite3
 import ssl
 from threading import Event
+import time
 
 from standby import open_private
 
@@ -160,6 +161,7 @@ class TelegramPoll:
         self.get_updates = get_updates
         self.offset = None
         self.available = Event()
+        self.last_success = None
         self.on_owner_update = None
 
     def step(self):
@@ -167,12 +169,17 @@ class TelegramPoll:
         # offset. Start without an offset after restart to handle old cursors.
         updates = self.get_updates(self.offset)
         self.offset = self.inbox.ingest(updates)
+        self.last_success = time.monotonic()
         self.available.set()
         if self.on_owner_update is not None:
             for update in updates:
                 message = self.inbox.selected_message(update)
                 if message is not None:
                     self.on_owner_update(message[0], message[1])
+
+    def recent(self):
+        return (self.available.is_set() and self.last_success is not None
+                and time.monotonic() - self.last_success <= 2 * POLL_TRANSPORT_SECONDS)
 
     def run(self, stop):
         while not stop.is_set():

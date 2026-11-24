@@ -78,6 +78,17 @@ class Client:
             raise BrokerUnavailable("Captain authority request was declined")
         return result
 
+    def readiness(self, *, timeout=REQUEST_TIMEOUT):
+        result = self.request("/v1/readiness", {}, timeout=timeout)
+        if (result.keys() != {"holder", "epoch", "gatewayRenewed", "telegramPolling", "bot"}
+                or result["holder"] not in (None, PRIMARY, STANDBY)
+                or (result["holder"] is None) != (result["epoch"] is None)
+                or (result["epoch"] is not None and not positive_id(result["epoch"]))
+                or (result["bot"] is not None and not positive_id(result["bot"]))
+                or type(result["gatewayRenewed"]) is not bool or type(result["telegramPolling"]) is not bool):
+            raise BrokerUnavailable("Captain authority returned invalid readiness evidence")
+        return result
+
     def claim(self):
         result = self.request("/v1/claim", {})
         epoch = result.get("epoch")
@@ -286,6 +297,10 @@ class Request(BaseHTTPRequestHandler):
 
     def dispatch(self, node, body):
         authority = self.server.authority
+        if self.path == "/v1/readiness" and not body:
+            poll, inbox = self.server.poll, self.server.inbox
+            return 200, {**authority.readiness(), "telegramPolling": poll is not None and poll.recent(),
+                         "bot": inbox.bot_id if inbox is not None else None}
         if self.path == "/v1/claim" and not body:
             grant = authority.claim(node)
             return 200, {"epoch": grant.epoch if grant is not None else None}

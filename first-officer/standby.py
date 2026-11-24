@@ -78,6 +78,7 @@ class StandbyAuthority:
         self._clock = clock
         self._grant = None
         self._deadline = None
+        self._last_renewal = None
         directory_info = directory.lstat()
         if (not stat.S_ISDIR(directory_info.st_mode) or directory_info.st_uid != os.getuid()
                 or directory_info.st_mode & 0o077):
@@ -230,6 +231,7 @@ class StandbyAuthority:
                              (grant.node, grant.epoch))
             self._db.execute("DELETE FROM planned_holder WHERE id = 1")
         self._grant = grant
+        self._last_renewal = None
         self._deadline = self._clock() + LEASE_SECONDS
         return grant
 
@@ -238,6 +240,15 @@ class StandbyAuthority:
         if grant is None or grant != self._valid_grant(now):
             raise LeaseRejected("Captain lease expired or superseded")
         self._deadline = now + LEASE_SECONDS
+        self._last_renewal = now
+
+    def readiness(self):
+        now = self._clock()
+        grant = self._valid_grant(now)
+        if grant is None:
+            return {"holder": None, "epoch": None, "gatewayRenewed": False}
+        recently_renewed = self._last_renewal is not None and now - self._last_renewal <= 2 * HEARTBEAT_SECONDS
+        return {"holder": grant.node, "epoch": grant.epoch, "gatewayRenewed": recently_renewed}
 
     def perform(self, grant, kind, operation, send):
         """Call the broker-owned sender once. An interrupted send stays unconfirmed.

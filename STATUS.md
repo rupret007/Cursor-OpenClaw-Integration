@@ -2,6 +2,8 @@
 
 ## Planned maintenance work in progress
 
+The handoff readiness command verifies the exact broker profile, bot identity, holder, and epoch. It requires a recent gateway renewal and recent Telegram poll. The mutual TLS test covers both success and refusal for stale polling or a mismatched bot, host, or epoch. The 31-test standby suite passed. Physical test-bot delivery remains a separate check before shutting down either host.
+
 Draft PR #44 had all four GitHub Actions checks green at `4488ce5`. The exact overlay was staged and its packaged files passed the private scan. The native Linux rehearsal used the packaged Nuc and Mac-role gateways and the 90-second lease. It replied 100.40 seconds after the Nuc-role process stopped, with zero duplicate replies. Telegram and the host identities were fixtures, so this does not prove physical takeover. A read-only SSH probe reached the Mac and determined management authentication is required for staging.
 
 The shared memory candidate saves only an owner-confirmed fact in the broker state. A local transfer test reads the fact under the new epoch and rejects the old epoch and its unconfirmed proposal. A packaged loopback rehearsal used the existing memory guard, confirmed a synthetic fact on the Nuc role, stopped that gateway, and recalled the same fact from the Mac role. The status reply arrived 100.79 seconds after the Nuc role stopped. Five final replies were delivered with zero duplicates. The host roles ran on Linux and Telegram was a fixture. Existing non-brokered facts have no automatic migration. The candidate passed 47 focused Python checks and 45 JavaScript tests. Live shared-memory recall on BobTestesBot is pending.

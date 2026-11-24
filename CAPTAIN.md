@@ -69,6 +69,20 @@ When neither gateway has polled the broker in the last two seconds, the broker c
 
 Run `tests/first_officer/standby-joined.py` in a loopback-only Linux namespace with a supported First Officer bundle and the installed Node and OpenClaw executables. It runs both packaged launchers with separate certificates, uses the real 90-second deadline, and checks a queued command and stale-host rejection. This exercises the broker, native gateway and durable inbox. Physical Mac startup and real Telegram delivery require the BobTestesBot rehearsal before production. Verify a brief Nuc outage keeps the current epoch. Then test a Nuc outage exceeding 90 seconds, an isolated Nuc that can still reach Telegram, a returning Nuc with an old epoch, an unavailable witness, and a Mac reboot to the login window. Interrupt a reply and a queued job during transfer. Require one Telegram consumer, no duplicate job, and a correct Mac reply within the two-minute target without a local login, SSH password, or Bobserver. Record measured takeover and recovery times. Roll back by disabling promotion, parking the Mac and confirming its fence is closed before restoring the Nuc as the sole consumer. Automatic promotion remains pending.
 
+### Planned maintenance checklist
+
+1. Record the active broker, last verified Captain host and epoch, and any unresolved delivery or job. Confirm both hosts have the reviewed build, paired test profiles, and required local services. Use BobTestesBot before a production decision.
+2. To take the Nuc offline while the broker is already on the Mini, park the Nuc gateway, stop the Mini broker briefly, and plan the Mini as the next holder. Start the broker and Mini gateway. To take the Mini offline, park its gateway and stop and disable its broker. Export, copy, and import the state on the Nuc before starting the Nuc broker and gateway. If the broker already runs on the surviving host, keep its state there and use the holder-change procedure.
+3. From either host with a paired profile for the destination, verify the expected holder and next epoch. The command checks a recent lease renewal after gateway startup and recent successful Telegram polling. It never claims or renews the lease.
+
+```bash
+python3 -I -B "$release/round6/runtime/segment1/queue-runtime/standby_launch.py" verify-broker \
+  "$destination_profile" --holder "$next_owner" --epoch "$next_epoch" --timeout 120
+```
+
+4. In BobTestesBot, confirm a fresh status reply through the intended gateway and inspect unsettled work before taking the source offline. The readiness check alone does not prove delivery or that another process stopped. Keep the previous consumer fenced and record the outage and reply timings.
+5. If verification fails, keep both full-machine shutdown and any retry of uncertain effects on hold. Resume an interrupted transfer by its original ID. Use the return procedure below before the first destination claim, or a fresh fenced handback after a claim. When maintenance ends, verify the returning host is parked before deliberately handing back.
+
 ### Plan a holder change on a stopped broker
 
 A planned holder change is bound to the last stored source host and epoch. This command is an offline journal operation. Use it only after parking the source gateway, stopping the sole broker, and disabling automatic restart during the procedure. The journal lock refuses a broker on the same state directory. It provides no protection against starting two brokers on separate state copies.

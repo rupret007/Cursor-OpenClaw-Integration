@@ -80,7 +80,7 @@ python3 -I -B "$release/round6/runtime/segment1/queue-runtime/standby_launch.py"
   "$destination_profile" --holder "$next_owner" --epoch "$next_epoch" --timeout 120
 ```
 
-4. In BobTestesBot, confirm a fresh status reply through the intended gateway and inspect unsettled work before taking the source offline. The readiness check alone does not prove delivery or that another process stopped. Keep the previous consumer fenced and record the outage and reply timings.
+4. In BobTestesBot, confirm a fresh status reply through the intended gateway and inspect unsettled work before taking the source offline. The readiness check alone does not prove delivery or that another process stopped. For unattended failover, measure a cold Mac start with the final model configuration. A warm start can meet the readiness budget even when a cold start exceeds it. Keep the previous consumer fenced and record the outage and reply timings.
 5. If verification fails, keep both full-machine shutdown and any retry of uncertain effects on hold. Resume an interrupted transfer by its original ID. Use the return procedure below before the first destination claim, or a fresh fenced handback after a claim. When maintenance ends, verify the returning host is parked before deliberately handing back.
 
 ### Plan a holder change on a stopped broker

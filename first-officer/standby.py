@@ -13,9 +13,11 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import shutil
 import sqlite3
 import stat
+import sys
 import tempfile
 import time
 
@@ -25,6 +27,7 @@ STANDBY = "mac-mini"
 HEARTBEAT_SECONDS = 15
 LEASE_SECONDS = 90
 IMPORT_PENDING = "broker-import-pending.json"
+DELIVERY_CLOCK = secrets.token_hex(16)
 EFFECT_KINDS = frozenset(("telegram-reply", "telegram-typing", "hatchet-submit", "restate-submit"))
 
 
@@ -67,9 +70,15 @@ def reserve_effect(db, kind, operation):
     return None
 
 
-def confirm_effect(db, kind, operation):
+def delivery_milliseconds():
+    return time.monotonic_ns() // 1_000_000
+
+
+def confirm_effect(db, kind, operation, grant):
     with db:
-        db.execute("UPDATE effects SET state = 'confirmed' WHERE kind = ? AND operation = ?", (kind, operation))
+        db.execute("UPDATE effects SET state = 'confirmed', confirmed_at_ms = ?, clock = ?, node = ?, epoch = ? "
+                   "WHERE kind = ? AND operation = ?", (delivery_milliseconds(), DELIVERY_CLOCK,
+                   grant.node if grant else None, grant.epoch if grant else None, kind, operation))
     return "confirmed"
 
 
@@ -116,6 +125,12 @@ class StandbyAuthority:
                     PRIMARY KEY (kind, operation)
                 );
             """)
+            columns = {column[1] for column in self._db.execute("PRAGMA table_info(effects)")}
+            with self._db:
+                for name, datatype in (("confirmed_at_ms", "INTEGER"), ("clock", "TEXT"),
+                                       ("node", "TEXT"), ("epoch", "INTEGER")):
+                    if name not in columns:
+                        self._db.execute(f"ALTER TABLE effects ADD COLUMN {name} {datatype}")
             sealed = self._export_id()
             if sealed is not None and sealed != export_id:
                 raise LeaseRejected("Broker journal was sealed for transfer")
@@ -270,7 +285,7 @@ class StandbyAuthority:
                 self._db.execute("DELETE FROM effects WHERE kind = ? AND operation = ?", (kind, operation))
             raise
         send()
-        return confirm_effect(self._db, kind, operation)
+        return confirm_effect(self._db, kind, operation, grant)
 
     def send_telegram_progress(self, message_id, phase, send, *, grant=None):
         """Use the gateway’s receipt for typing or acknowledgment."""
@@ -293,7 +308,7 @@ class StandbyAuthority:
                         db.execute("DELETE FROM effects WHERE kind = ? AND operation = ?", (kind, operation))
                     raise
             send()
-            return confirm_effect(db, kind, operation)
+            return confirm_effect(db, kind, operation, grant)
 
     def effect_status(self, grant, kind, operation):
         self.require_grant(grant)
@@ -528,7 +543,56 @@ def private_create(path, flags):
     return os.open(path, flags | os.O_NOFOLLOW, 0o600)
 
 
+def telegram_delivery_report(state, since):
+    private_directory(state)
+    pending = state / IMPORT_PENDING
+    if pending.exists() or pending.is_symlink():
+        raise LeaseRejected("Finish the pending broker import before reading evidence")
+    with ExitStack() as handles:
+        def read(name):
+            handles.enter_context(open_private(state, name, create=False))
+            return handles.enter_context(closing(sqlite3.connect((state / name).resolve().as_uri() + "?mode=ro",
+                                                               uri=True, timeout=1)))
+
+        authority, inbox = read("authority.sqlite"), read("telegram-inbox.sqlite")
+        messages = inbox.execute("SELECT message_id, received_at_ms, clock, outcome FROM inbox WHERE sent_at >= ? "
+                                 "ORDER BY sent_at DESC, message_id DESC LIMIT 20", (since,)).fetchall()
+        results = []
+        for message_id, received, received_clock, outcome in messages:
+            entry = {"outcome": outcome or "pending", "phases": {}}
+            for phase, kind in (("typing", "telegram-typing"), ("ack", "telegram-reply"), ("final", "telegram-reply")):
+                receipt = authority.execute("SELECT state, confirmed_at_ms, clock, node, epoch FROM effects "
+                                            "WHERE kind = ? AND operation = ?", (kind, f"message:{message_id}:{phase}")).fetchone()
+                if receipt is None:
+                    continue
+                status, confirmed, confirmed_clock, node, epoch = receipt
+                elapsed = (confirmed - received if status == "confirmed" and confirmed is not None
+                           and received is not None and received_clock == confirmed_clock
+                           and confirmed >= received else None)
+                entry["phases"][phase] = {"state": status, "relayMs": elapsed, "host": node, "epoch": epoch}
+            results.append(entry)
+        if pending.exists() or pending.is_symlink():
+            raise LeaseRejected("Finish the pending broker import before reading evidence")
+        return results
+
+
+def delivery_report_main(argv):
+    parser = argparse.ArgumentParser(description="Read up to twenty private Telegram delivery receipts without message details.")
+    parser.add_argument("--state", type=Path, required=True)
+    parser.add_argument("--since", type=int, required=True, help="Inclusive Telegram message time in Unix seconds")
+    args = parser.parse_args(argv)
+    if not 0 < args.since < 2**63:
+        parser.error("Use a positive Unix timestamp")
+    try:
+        result = telegram_delivery_report(args.state, args.since)
+    except (OSError, ValueError, sqlite3.Error):
+        parser.exit(1, "Private delivery timing evidence is unavailable for this broker state.\n")
+    print(json.dumps({"receipts": result}))
+
+
 def main():
+    if sys.argv[1:2] == ["delivery-report"]:
+        return delivery_report_main(sys.argv[2:])
     parser = argparse.ArgumentParser(description="Plan the next lease on a stopped Captain broker.")
     parser.add_argument("--state", type=Path, required=True)
     parser.add_argument("--source", choices=(PRIMARY, STANDBY), required=True)

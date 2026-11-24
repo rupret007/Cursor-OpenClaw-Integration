@@ -10,7 +10,7 @@ import ssl
 from threading import Event
 import time
 
-from standby import open_private
+from standby import DELIVERY_CLOCK, delivery_milliseconds, open_private
 
 
 MAX_PENDING = 512
@@ -45,6 +45,11 @@ class TelegramInbox:
                     outcome TEXT
                 )
             """)
+            columns = {column[1] for column in db.execute("PRAGMA table_info(inbox)")}
+            if "received_at_ms" not in columns:
+                db.execute("ALTER TABLE inbox ADD COLUMN received_at_ms INTEGER")
+            if "clock" not in columns:
+                db.execute("ALTER TABLE inbox ADD COLUMN clock TEXT")
             db.execute("CREATE TABLE IF NOT EXISTS identity (id INTEGER PRIMARY KEY CHECK (id = 1), "
                        "owner INTEGER NOT NULL, bot INTEGER NOT NULL)")
             db.execute("INSERT OR IGNORE INTO identity VALUES (1, ?, ?)", (owner, bot_id))
@@ -85,8 +90,10 @@ class TelegramInbox:
             message = self.selected_message(update)
             if message is not None:
                 messages.append(message)
+        received = delivery_milliseconds()
         with self.database() as db, db:
-            db.executemany("INSERT OR IGNORE INTO inbox (message_id, sent_at, text) VALUES (?, ?, ?)", messages)
+            db.executemany("INSERT OR IGNORE INTO inbox (message_id, sent_at, text, received_at_ms, clock) "
+                           "VALUES (?, ?, ?, ?, ?)", ((*message, received, DELIVERY_CLOCK) for message in messages))
             pending = db.execute("SELECT count(*) FROM inbox WHERE outcome IS NULL").fetchone()[0]
             if pending > MAX_PENDING:
                 raise OverflowError("Telegram inbox needs attention")

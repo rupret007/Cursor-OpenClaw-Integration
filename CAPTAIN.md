@@ -83,6 +83,17 @@ python3 -I -B "$release/round6/runtime/segment1/queue-runtime/standby_launch.py"
 4. In BobTestesBot, confirm a fresh status reply through the intended gateway and inspect unsettled work before taking the source offline. The readiness check alone does not prove delivery or that another process stopped. For unattended failover, measure a cold Mac start with the final model configuration. A warm start can meet the readiness budget even when a cold start exceeds it. Keep the previous consumer fenced and record the outage and reply timings.
 5. If verification fails, keep both full-machine shutdown and any retry of uncertain effects on hold. Resume an interrupted transfer by its original ID. Use the return procedure below before the first destination claim, or a fresh fenced handback after a claim. When maintenance ends, verify the returning host is parked before deliberately handing back.
 
+### Read delivery evidence after a test
+
+Before the rehearsal, record the current Unix timestamp in seconds. Afterward, run this on the host holding the broker state. It works even when the machine that started the test is offline.
+
+```bash
+python3 -I -B "$release/round6/runtime/segment1/queue-runtime/standby.py" delivery-report \
+  --state "$broker_state" --since "$test_started_unix"
+```
+
+The report shows confirmed and uncertain phases and the host and epoch that confirmed each gateway effect. It measures milliseconds from the broker's first receipt to Telegram confirmation when both observations use the same broker process clock. Existing receipts and phases timed across a broker restart or move show an unknown elapsed time. A broker-owned queued acknowledgment has no gateway host or epoch. Use the owner's observed reply and planned outage timestamp for end-to-end timing. The report contains only outcomes, timing, and authority evidence.
+
 ### Plan a holder change on a stopped broker
 
 A planned holder change is bound to the last stored source host and epoch. This command is an offline journal operation. Use it only after parking the source gateway, stopping the sole broker, and disabling automatic restart during the procedure. The journal lock refuses a broker on the same state directory. It provides no protection against starting two brokers on separate state copies.

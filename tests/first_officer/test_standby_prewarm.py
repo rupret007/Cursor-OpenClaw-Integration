@@ -83,3 +83,38 @@ def test_prewarm_rejects_routes_that_could_escape_its_scope(launcher, tmp_path, 
         template["plugins"]["allow"].append("unreviewed-plugin")
     with pytest.raises(ValueError, match="pinned Captain plugins|single local Qwen route"):
         launcher.prewarm_template(template, tmp_path)
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_boot_prewarm_finishes_before_supervision(launcher, tmp_path, monkeypatch, interrupted):
+    events = []
+    profile = {"hostname": "broker.invalid", "port": 4372, "bot_id": 234567,
+               "cert": "cert", "key": "key", "ca": "ca"}
+    monkeypatch.setattr(launcher, "profile_from", lambda _: profile)
+    monkeypatch.setattr(launcher, "template_from", lambda _: ({}, 101))
+    monkeypatch.setattr(launcher, "gateway_env", lambda _: {})
+    monkeypatch.setattr(launcher, "gateway_state", lambda _: (tmp_path, {}))
+    monkeypatch.setattr(launcher, "Client", lambda *args, **kwargs: object())
+    monkeypatch.setattr(launcher.signal, "signal", lambda *args: None)
+
+    def warm(executable, template, state, environment, stop):
+        with launcher.open_private(state, "standby-supervisor.lock") as lock:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        events.append("warm")
+        if interrupted:
+            stop.set()
+            return None
+        return 0.5
+
+    class Supervisor:
+        def __init__(self, *args, **kwargs):
+            events.append("supervisor")
+
+        def run(self, stop, update):
+            events.append("run")
+
+    monkeypatch.setattr(launcher, "warm_gateway", warm)
+    monkeypatch.setattr(launcher, "Supervisor", Supervisor)
+    launcher.run("openclaw", "template", "environment", "profile", prewarm_on_start=True)
+    assert events == (["warm"] if interrupted else ["warm", "supervisor", "run"])

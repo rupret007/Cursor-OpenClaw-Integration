@@ -174,7 +174,7 @@ OPENCLAW_STATE_DIR="$gateway_state" FO_LOCAL_NODE=mac-mini \
   prewarm "$openclaw" "$gateway_template" "$gateway_environment"
 ```
 
-Run preparation on each reviewed runtime or release change. Start the standby supervisor after a successful preparation and verify the unplanned takeover separately. During that verification, add `--previous-holder nucbox --previous-epoch "$old_epoch"` to the readiness command so the verifier can observe the old lease until it expires. It still requires the exact new epoch and rejects any other active lease. The preparation deadline is 60 seconds. The standby's actual readiness deadline is still 20 seconds. [OpenClaw gateway cache guidance](https://docs.openclaw.ai/gateway)
+The generated brokered Mac LaunchDaemon runs this preparation automatically before it tries to claim a lease. The supervisor holds the same private lock for warmup and lease supervision. A stopped or failed warmup cannot claim. When using a manual launcher, run preparation on each reviewed runtime or release change. Start the standby supervisor after a successful preparation and verify the unplanned takeover separately. During that verification, add `--previous-holder nucbox --previous-epoch "$old_epoch"` to the readiness command so the verifier can observe the old lease until it expires. It still requires the exact new epoch and rejects any other active lease. The preparation deadline is 60 seconds. The standby's actual readiness deadline is still 20 seconds. [OpenClaw gateway cache guidance](https://docs.openclaw.ai/gateway)
 
 ### Prepare the Mac standby broker as a system service
 
@@ -306,6 +306,40 @@ launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/local.openclaw.ca
 # Mac Mini unload before transfer.
 launchctl bootout "gui/$(id -u)/local.openclaw.captain"
 ```
+
+### Boot-managed gateways for the unattended rehearsal
+
+Use the independent broker profile for the isolated test bot and prepare both hosts against that same broker. The broker holds the Telegram polling token, update offset, lease, memory, and durable receipts on its local disk. The gateway hosts connect over mutual TLS using distinct keys. Broker loss parks the gateways. A NAS file share may hold backups. Running the broker on a NAS also requires a supported persistent service and storage local to that NAS. The separate queue can be unavailable while the bot still reads the last brokered receipts. A host's local model, GitHub authentication, and the Mac Andrea reader each have separate availability checks.
+
+Run the renderer under the intended service account. Reuse the absolute paths from the native service preparation block. Set `captain_node` to `nucbox` or `mac-mini`, and `broker_profile` to that host's private broker profile. On the Mini add `--mac-launch-daemon`. Use the brokered token-free gateway template and the local-model-only environment file. Keep the isolated rehearsal units and profile separate from any active production installation.
+
+```bash
+umask 077
+boot_options=(--standby-profile "$broker_profile")
+if [ "$captain_node" = mac-mini ]; then
+  boot_options+=(--mac-launch-daemon)
+fi
+python3 -I -B first-officer/standalone.py --node "$captain_node" \
+  --release "$pinned_candidate" --python "$python_bin" --node-binary "$node_bin" \
+  --openclaw "$openclaw_bin" --config "$private_gateway_config" \
+  --state "$private_gateway_state" --environment "$private_gateway_environment" \
+  "${boot_options[@]}" > "$private_service_definition"
+```
+
+On an approved clean rehearsal installation, confirm no previous service using the same bot or label remains active. Save the prior definitions and record which ones were enabled before installing. On the Nuc, verify the WSL distribution starts at Windows boot and `loginctl show-user "$(id -un)" -p Linger --value` returns `yes`. Use the systemd user install commands above, then run `systemctl --user enable --now openclaw-captain.service`. Restore the prior enablement and definition during rollback after `systemctl --user disable --now openclaw-captain.service` and verification that it stopped.
+
+On the Mini, the authorized administrator installs the rendered system plist with:
+
+```bash
+plist=/Library/LaunchDaemons/local.openclaw.captain.plist
+/usr/bin/plutil -lint "$private_service_definition" &&
+  sudo install -o root -g wheel -m 0644 "$private_service_definition" "$plist" &&
+  sudo launchctl enable system/local.openclaw.captain &&
+  sudo launchctl bootstrap system "$plist"
+sudo launchctl print system/local.openclaw.captain >/dev/null
+```
+
+Rehearse rollback by running `sudo launchctl disable system/local.openclaw.captain` and `sudo launchctl bootout system/local.openclaw.captain`, then verify the supervisor and gateway stopped. Preserve broker storage and reconcile unconfirmed effects before restarting any saved configuration. For the unattended test, log out of the Mini's desktop while macOS remains booted and the disk is unlocked. Measure takeover from confirmed loss of the Nuc and verify a fresh Telegram delivery under the new epoch. Repeat in the other direction. Verify a returned host is fenced before attempting handback.
 
 Standalone cutover gates still include the native Mac service rehearsal, binding the live gate, capacity and quota probes on each host, and the full Telegram checklist on each host. Verify both peer transfer and rollback through the generated services. Use the standalone checklist in [LIVE-TEST.md](LIVE-TEST.md) for both hosts. The Bobserver pilot and rollback below apply only to the legacy profile.
 

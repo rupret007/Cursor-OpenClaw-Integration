@@ -835,6 +835,13 @@ def test_standalone_service_pins_the_same_guard_on_both_hosts(tmp_path, monkeypa
     secrets.write_text(json.dumps({"OPENCLAW_LITELLM_API_KEY": "fixture-setting"}))
     settings["gateway"] = {"mode": "local", "bind": "loopback", "port": 43000}
     settings["channels"]["telegram"]["groupPolicy"] = "disabled"
+    settings["plugins"]["load"]["paths"] = [str(release / "first-officer-exec-guard.mjs"),
+                                             str(release / "round6/runtime/first-officer-conductor.mjs")]
+    settings["plugins"]["allow"] = ["first-officer-conductor", "first-officer-exec-guard", "telegram"]
+    settings["plugins"]["entries"].update({"first-officer-exec-guard": {}, "telegram": {}})
+    settings["models"] = {"providers": {"litellm": {"baseUrl": "http://127.0.0.1:44680/v1",
+                                                   "models": [{"id": "qwen-local-fast"}]}}}
+    settings["agents"] = {"defaults": {"model": {"primary": "litellm/qwen-local-fast"}}}
     settings["messages"] = {"inbound": {"debounceMs": 300, "byChannel": {"telegram": 300, "slack": 500}}}
     config.write_text(json.dumps(settings))
     profile = tmp_path / "broker.json"
@@ -862,8 +869,9 @@ def test_standalone_service_pins_the_same_guard_on_both_hosts(tmp_path, monkeypa
     plist = plistlib.loads(boot)
     assert plist["UserName"] == "gateway" and plist["RunAtLoad"] is True
     assert plist["ProgramArguments"][3:] == [str(release / standalone.STANDBY), str(runtime / "openclaw"),
-                                            str(config), str(secrets), str(profile)]
+                                            str(config), str(secrets), str(profile), "--prewarm-on-start"]
     assert str(release / standalone.STANDBY) in systemd.decode()
+    assert b"--prewarm-on-start" not in systemd
     assert b"fixture-setting" not in boot + systemd
     settings["channels"]["telegram"]["botToken"] = "fixture-token"
     config.write_text(json.dumps(settings))

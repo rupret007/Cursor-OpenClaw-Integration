@@ -141,7 +141,7 @@ def gateway_state(environment):
     return state, {**environment, "TMPDIR": str(scratch)}
 
 
-def run(executable, template_path, environment_path, profile_path):
+def run(executable, template_path, environment_path, profile_path, *, prewarm_on_start=False):
     template, owner = template_from(template_path)
     profile = profile_from(profile_path)
     state, environment = gateway_state(gateway_env(environment_path))
@@ -158,6 +158,11 @@ def run(executable, template_path, environment_path, profile_path):
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
             signal.signal(number, shutdown)
+        if prewarm_on_start:
+            elapsed = warm_gateway(executable, template, state, environment, stop)
+            if stop.is_set():
+                return
+            print(f"Captain standby prewarmed in {elapsed:.2f} seconds.", flush=True)
         startup = PRIMARY_STARTUP_SECONDS if environment.get("FO_LOCAL_NODE") == PRIMARY else STARTUP_SECONDS
         Supervisor(client, start, startup_seconds=startup).run(
             stop, lambda status: print("Captain standby " + status, flush=True))
@@ -204,28 +209,33 @@ class IdlePrewarmRelay:
         return None
 
 
+def warm_gateway(executable, template, state, environment, stop):
+    template = prewarm_template(template, Path(__file__).resolve().parents[4])
+    with TemporaryDirectory(prefix=".standby-prewarm-", dir=state) as directory:
+        scratch = Path(directory)
+        env = {**environment, "HOME": str(scratch), "XDG_CONFIG_HOME": str(scratch / ".config"),
+               "OPENCLAW_STATE_DIR": str(scratch)}
+        gateway = BrokeredGateway(IdlePrewarmRelay(), 1, 101, 234567, executable, template, env, scratch)
+        started = time.monotonic()
+        try:
+            while not stop.is_set() and time.monotonic() - started < 60:
+                if gateway.exited():
+                    raise ValueError("The isolated prewarm gateway exited")
+                if gateway.ready():
+                    return time.monotonic() - started
+                stop.wait(0.25)
+            if not stop.is_set():
+                raise TimeoutError("The isolated prewarm gateway did not reach readiness")
+        finally:
+            gateway.stop()
+
+
 def prewarm(executable, template_path, environment_path):
     template, _ = template_from(template_path)
-    template = prewarm_template(template, Path(__file__).resolve().parents[4])
     state, environment = gateway_state(gateway_env(environment_path))
     with open_private(state, "standby-supervisor.lock") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        with TemporaryDirectory(prefix=".standby-prewarm-", dir=state) as directory:
-            scratch = Path(directory)
-            env = {**environment, "HOME": str(scratch), "XDG_CONFIG_HOME": str(scratch / ".config"),
-                   "OPENCLAW_STATE_DIR": str(scratch)}
-            gateway = BrokeredGateway(IdlePrewarmRelay(), 1, 101, 234567, executable, template, env, scratch)
-            started = time.monotonic()
-            try:
-                while time.monotonic() - started < 60:
-                    if gateway.exited():
-                        raise ValueError("The isolated prewarm gateway exited")
-                    if gateway.ready():
-                        return time.monotonic() - started
-                    time.sleep(0.25)
-                raise TimeoutError("The isolated prewarm gateway did not reach readiness")
-            finally:
-                gateway.stop()
+        return warm_gateway(executable, template, state, environment, Event())
 
 
 def prewarm_main(argv):
@@ -350,10 +360,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("executable", "template", "environment", "profile"):
         parser.add_argument(name, type=Path)
+    parser.add_argument("--prewarm-on-start", action="store_true")
     args = parser.parse_args()
     os.umask(0o077)
     try:
-        run(args.executable, args.template, args.environment, args.profile)
+        run(args.executable, args.template, args.environment, args.profile,
+            prewarm_on_start=args.prewarm_on_start)
     except (KeyError, OSError, ValueError, TypeError, RecursionError, subprocess.SubprocessError):
         print("Captain standby launcher could not proceed.", file=sys.stderr)
         return 1

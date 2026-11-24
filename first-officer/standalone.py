@@ -212,6 +212,9 @@ def prepare(node, release, python, node_binary, openclaw, config, state, secrets
             validation_env = {**launcher.gateway_env(secrets), **environment, "OPENCLAW_CONFIG_PATH": str(checked_config)}
             command = [str(python), "-I", "-B", str(release / STANDBY), str(openclaw),
                        str(config), str(secrets), str(standby_profile)]
+            if mac_account is not None:
+                launcher.prewarm_template(template, release)
+                command.append("--prewarm-on-start")
         result = check([str(openclaw), "config", "validate"], check=False, timeout=30,
                        env=validation_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if result.returncode:

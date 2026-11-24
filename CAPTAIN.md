@@ -119,6 +119,12 @@ python3 -I -B "$release/round6/runtime/segment1/queue-runtime/standby.py" \
 
 The command verifies the original installed transfer, advances the epoch, and seals the destination without starting a live lease. Import the return snapshot on the former source using the source node and epoch printed by the command, the chosen return owner, and the return transfer ID. If export is interrupted after sealing, resume with the same parameters. After import, restart only the return broker and intended gateway, then check the new epoch and a test-bot reply. If the failed host did claim a lease, the rollback command refuses the old epoch. Use an ordinary fresh handback from the latest known holder in that case. If the destination is unreachable after import, keep the former source fenced until you can verify and transfer ownership back.
 
+### Shared private memory during standby
+
+Give each broker the same reviewed release and a pinned local Node runtime using `--memory-node`. The broker uses the existing packaged memory guard and stores owner-confirmed facts in its private state. Add the argument to the reviewed Linux broker unit override or pass it to the Mac broker renderer below. The Mac and Nuc use the same memory store while they share a broker. Sealed snapshots carry the store when the broker itself moves.
+
+In BobTestesBot, use `remember topic: fact`, send the confirmation phrase shown by the bot within five minutes, then use `recall topic`. A pending confirmation cannot authorize a write after an epoch change. The brokered text confirmation works through the relay's owner-only message path. Existing non-brokered memory still uses its existing confirmation and local store. Historical local facts have no automatic import into this shared store. Verify recall after each handoff using a synthetic, owner-approved fact.
+
 ### Prepare the Mac standby broker as a system service
 
 The Mac broker and gateway use separate LaunchDaemons. Run the broker renderer as the unprivileged broker account with a pinned Python executable, locally staged release, fixed private state directory, and private TLS and test-bot settings directory. Prepare the Nuc and Mac gateway profiles with the broker endpoint and separate client certificates. Verify that the broker certificate covers the chosen private endpoint. Keep the installed release and interpreter protected from modification by the service account.

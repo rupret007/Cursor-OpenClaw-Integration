@@ -21,8 +21,9 @@ if __name__ == "__main__":
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from standby import EFFECT_KINDS, Grant, LeaseRejected, PRIMARY, STANDBY, StandbyAuthority, read_private_json
+from standby_memory import BrokerMemory, packaged_guard
 from standby_queue import DailyBriefing, ProjectBusy, ProjectQueue, ProjectScopeRejected, ReviewQueue, ReviewScopeRejected
-from standby_telegram import BotAPI, POLL_TRANSPORT_SECONDS, TelegramInbox, TelegramPoll, reply_operation
+from standby_telegram import BotAPI, POLL_TRANSPORT_SECONDS, TelegramInbox, TelegramPoll, positive_id, reply_operation
 
 
 MAX_REQUEST_BYTES = 32_768
@@ -88,6 +89,12 @@ class Client:
         if self.request("/v1/renew", {"epoch": epoch}) != {"epoch": epoch}:
             raise BrokerUnavailable("Captain authority returned an invalid renewal")
 
+
+    def memory(self, epoch, message_id, operation, topic=None):
+        fields = {"epoch": epoch, "message_id": message_id, "operation": operation}
+        if topic is not None:
+            fields["topic"] = topic
+        return self.request("/v1/memory", fields)["memory"]
 
     def telegram_progress(self, epoch, message_id):
         return self.request("/v1/telegram/progress", {"epoch": epoch, "message_id": message_id})["progress"]
@@ -155,7 +162,7 @@ def client_fingerprint(path):
 
 class Broker(HTTPServer):
     def __init__(self, address, authority, *, cert, key, ca, peers, effects=None, inbox=None, poll=None,
-                 review=None, project=None, daily=None):
+                 review=None, project=None, daily=None, memory=None):
         if set(peers.values()) != {PRIMARY, STANDBY} or len(peers) != 2:
             raise ValueError("Use distinct certificates for the two Captain hosts")
         self.authority = authority
@@ -169,6 +176,7 @@ class Broker(HTTPServer):
         self.review = review
         self.project = project
         self.daily = daily
+        self.memory = memory
         if self.effects.keys() - EFFECT_KINDS:
             raise ValueError("Unknown effect adapter")
         self.tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -288,6 +296,19 @@ class Request(BaseHTTPRequestHandler):
         if self.path == "/v1/renew" and body.keys() == {"epoch"}:
             authority.renew(grant)
             return 200, {"epoch": epoch}
+        if self.path == "/v1/memory":
+            operation = body.get("operation")
+            expected = {"epoch", "message_id", "operation"}
+            if operation == "recall":
+                expected.add("topic")
+            if body.keys() != expected or not positive_id(body["message_id"]):
+                raise ValueError("Invalid private memory request")
+            authority.require_grant(grant)
+            if self.server.memory is None or self.server.inbox is None:
+                return 200, {"memory": {"state": "unavailable"}}
+            result = self.server.memory.run(authority, grant, self.server.inbox, body["message_id"],
+                                            operation, body.get("topic"))
+            return 200, {"memory": result}
         if self.path == "/v1/telegram/progress" and body.keys() == {"epoch", "message_id"} and self.server.inbox:
             authority.require_grant(grant)
             return 200, {"progress": self.server.telegram_progress(body["message_id"], grant)}
@@ -419,6 +440,7 @@ def main():
     parser.add_argument("--review-queue-config", type=Path)
     parser.add_argument("--project-queue-config", type=Path)
     parser.add_argument("--queue-environment", type=Path)
+    parser.add_argument("--memory-node", type=Path)
     args = parser.parse_args()
     if args.listen.is_global or args.listen.is_unspecified or args.listen.is_multicast:
         parser.error("Select a specific private interface")
@@ -427,6 +449,9 @@ def main():
             if args.review_queue_config is None and args.project_queue_config is None:
                 raise ValueError("Queue environment requires a configured broker queue")
             load_queue_environment(args.queue_environment)
+        if args.memory_node is not None and args.telegram_config is None:
+            raise ValueError("Private memory requires a configured Telegram owner")
+        validate_fact = packaged_guard(args.memory_node) if args.memory_node is not None else None
         peers = {client_fingerprint(args.nuc_cert): PRIMARY, client_fingerprint(args.mac_cert): STANDBY}
         with StandbyAuthority(args.state) as authority:
             review = (ReviewQueue(args.state, read_private_json(args.review_queue_config))
@@ -436,9 +461,10 @@ def main():
             inbox, effects, poll = None, {}, None
             if args.telegram_config is not None:
                 inbox, effects, poll = telegram_components(args.state, args.telegram_config)
+            memory = BrokerMemory(args.state, inbox.owner, inbox.bot_id, validate_fact) if validate_fact else None
             with Broker((str(args.listen), args.port), authority, cert=args.cert, key=args.key, ca=args.ca,
                         peers=peers, effects=effects, inbox=inbox, poll=poll, review=review, project=project,
-                        daily=DailyBriefing(args.state)) as broker:
+                        daily=DailyBriefing(args.state), memory=memory) as broker:
                 stop = Event()
                 tasks = [target for target in (poll.run if poll else None, project.refresh if project else None)
                          if target is not None]

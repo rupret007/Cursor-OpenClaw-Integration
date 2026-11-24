@@ -805,6 +805,9 @@ def test_standalone_service_pins_the_same_guard_on_both_hosts(tmp_path, monkeypa
         "--project-queue-config", str(queue_config), "--queue-environment", str(queue_env),
     ]
     assert b"fixture-queue-setting" not in rendered
+    with_memory = standalone.prepare_mac_broker(release, runtime / "python3", state, broker_dir, listen,
+                                                memory_node=runtime / "node")
+    assert plistlib.loads(with_memory)["ProgramArguments"][-2:] == ["--memory-node", str(runtime / "node")]
     with pytest.raises(ValueError, match="private broker interface"):
         standalone.prepare_mac_broker(release, runtime / "python3", state, broker_dir,
                                       standalone.ipaddress.IPv4Address("0.0.0.0"))

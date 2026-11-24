@@ -32,7 +32,7 @@ class TelegramInbox:
     def __init__(self, directory: Path, owner: int, bot_id: int):
         if not positive_id(owner) or not positive_id(bot_id):
             raise ValueError("Use a single verified Telegram owner and bot")
-        self.owner = owner
+        self.owner, self.bot_id = owner, bot_id
         self.directory = directory
         self.path = directory / "telegram-inbox.sqlite"
         with self.database() as db, db:

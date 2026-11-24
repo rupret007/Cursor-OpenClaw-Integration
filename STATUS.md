@@ -2,6 +2,10 @@
 
 ## Planned maintenance work in progress
 
+Draft PR #44 had all four GitHub Actions checks green at `4488ce5`. The exact overlay was staged and its packaged files passed the private scan. The native Linux rehearsal used the packaged Nuc and Mac-role gateways and the 90-second lease. It replied 100.40 seconds after the Nuc-role process stopped, with zero duplicate replies. Telegram and the host identities were fixtures, so this does not prove physical takeover. A read-only SSH probe reached the Mac and determined management authentication is required for staging.
+
+The shared memory candidate saves only an owner-confirmed fact in the broker state. A local transfer test reads the fact under the new epoch and rejects the old epoch and its unconfirmed proposal. The existing non-brokered facts have no automatic migration. The candidate passed 47 focused Python checks and 45 JavaScript tests. Live shared-memory recall on BobTestesBot is pending.
+
 The maintenance worktree starts from `5513419`. GitHub shows draft PR #43 open with four successful checks on that exact baseline. The Nuc OpenClaw, LiteLLM, and Captain queue user services showed no loaded instances in the current systemd query. The production Telegram consumer and Mac runtime remain unknown.
 
 The offline handoff command records a pending holder against the last exact lease epoch while the broker journal is exclusively locked. After the standard recovery wait, only the named host can claim the next epoch. A stale source epoch, a conflicting target, or a running broker blocks the command. Retrying the same target before it claims is safe. An explicit correction must name the previous target. The tests verify that an unconfirmed effect survives handback without a second send. The focused standby, broker, and host suite passed 23 tests on the Nuc.

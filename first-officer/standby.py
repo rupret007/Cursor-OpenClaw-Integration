@@ -297,7 +297,7 @@ class StandbyAuthority:
 
 BROKER_JOURNALS = (
     "authority.sqlite", "telegram-inbox.sqlite", "project-daily.sqlite", "project-reservations.sqlite",
-    "review-queue-receipts.jsonl", "project-queue-receipts.jsonl",
+    "review-queue-receipts.jsonl", "project-queue-receipts.jsonl", "private-memory.sqlite",
 )
 
 

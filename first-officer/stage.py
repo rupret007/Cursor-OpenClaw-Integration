@@ -29,7 +29,7 @@ QUEUE_MODULES = {
     "queue-runtime/pinhttp.py": "pinhttp.py",
     **{f"queue-runtime/{name}.py": f"{name}.py" for name in (
         "standby", "standby_broker", "standby_channel", "standby_child", "standby_host", "standby_launch",
-        "standby_queue", "standby_telegram",
+        "standby_memory", "standby_queue", "standby_telegram",
     )},
     "queue-runtime/workers/hatchet-review.py": "workers/hatchet-review.py",
     "queue-runtime/workers/hatchet-project.py": "workers/hatchet-project.py",

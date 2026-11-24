@@ -94,6 +94,20 @@ python3 -I -B "$release/round6/runtime/segment1/queue-runtime/standby.py" delive
 
 The report shows confirmed and uncertain phases and the host and epoch that confirmed each gateway effect. It measures milliseconds from the broker's first receipt to Telegram confirmation when both observations use the same broker process clock. Existing receipts and phases timed across a broker restart or move show an unknown elapsed time. A broker-owned queued acknowledgment has no gateway host or epoch. Use the owner's observed reply and planned outage timestamp for end-to-end timing. The report contains only outcomes, timing, and authority evidence.
 
+### Observe a machine-offline rehearsal from the surviving host
+
+Arm the observer on the surviving host immediately before taking the source offline. Use a private result file and a local profile for the surviving broker. Run the same reviewed build on the broker and in the observer.
+
+```bash
+umask 077
+nohup "$broker_python" -I -B "$release/round6/runtime/segment1/queue-runtime/standby_launch.py" \
+  observe-delivery "$local_profile" --state "$broker_state" --holder "$next_owner" \
+  --epoch "$next_epoch" --timeout 120 \
+  > "$private_observation_log" 2>&1 < /dev/null &
+```
+
+For unplanned Nuc loss, include `--previous-holder nucbox --previous-epoch "$old_epoch"`. After the observer reports it is armed, take the source offline during the approved window and send one fresh `captain status` from the paired BobTestesBot chat. Allow the arming second to pass before sending. The observer continues if the initiating SSH session disconnects. It requires a renewed destination lease, recent Telegram polling and one confirmed final reply from the exact destination epoch. It refuses ambiguous or uncertain receipts. The result gives elapsed time from arming and separate broker-phase timings. Verify the reply content and source machine outage independently.
+
 ### Plan a holder change on a stopped broker
 
 A planned holder change is bound to the last stored source host and epoch. This command is an offline journal operation. Use it only after parking the source gateway, stopping the sole broker, and disabling automatic restart during the procedure. The journal lock refuses a broker on the same state directory. It provides no protection against starting two brokers on separate state copies.

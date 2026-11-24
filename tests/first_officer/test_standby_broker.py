@@ -5,6 +5,7 @@ import importlib
 import json
 from pathlib import Path
 import runpy
+from select import select
 import ssl
 import subprocess
 import sys
@@ -639,6 +640,26 @@ def test_broker_authenticates_each_host_and_fences_partitioned_primary(tmp_path,
         assert nuc.review_receipt(epoch, approved)["run"] == "fixture-run-1"
         assert len(queue_calls) == 3
         assert [message_id for _, _, message_id in sends][-2:] == [14, 15]
+        profile.write_text(json.dumps(private_profile))
+        with subprocess.Popen([sys.executable, "-I", "-B", str(verifier), "observe-delivery", str(profile),
+                               "--state", str(state), "--holder", lease.PRIMARY, "--epoch", "3", "--timeout", "5"],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as observer:
+            try:
+                assert select([observer.stdout], [], [], 3)[0]
+                assert observer.stdout.readline().strip() == "Observation armed on the surviving host."
+                update = telegram_update(6, 16)
+                update["message"]["date"] = int(time.time()) + 1
+                inbox.ingest([update])
+                assert nuc.send_telegram_reply(epoch, 16, "final", "Fixture response") == "confirmed"
+                assert nuc.complete_telegram_message(epoch, 16) == "confirmed"
+                stdout, stderr = observer.communicate(timeout=6)
+                assert observer.returncode == 0, stderr
+                final = json.loads(stdout)["phases"]["final"]
+                assert final["host"] == lease.PRIMARY and final["epoch"] == 3 and final["relayMs"] >= 0
+            finally:
+                if observer.poll() is None:
+                    observer.kill()
+                    observer.wait(timeout=3)
         now += 31
         assert mac.readiness()["gatewayRenewed"] is False
     finally:

@@ -10,6 +10,7 @@ import re
 import runpy
 import secrets
 import signal
+import sqlite3
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
@@ -20,7 +21,7 @@ import time
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from lanes import queue
-from standby import PRIMARY, STANDBY, open_private, private_directory, read_private_json
+from standby import PRIMARY, STANDBY, open_private, private_directory, read_private_json, telegram_delivery_report
 from standby_broker import BrokerUnavailable, Client
 from standby_channel import Channel
 from standby_host import PRIMARY_STARTUP_SECONDS, STARTUP_SECONDS, GatewayProcess, Supervisor
@@ -264,9 +265,43 @@ def verify_broker(profile_path, holder, epoch, timeout, *, previous=None):
     raise TimeoutError("Broker did not report a renewed gateway and recent Telegram polling")
 
 
-def verify_broker_main(argv):
-    parser = argparse.ArgumentParser(description="Verify a Captain handoff without claiming or renewing a lease.")
+def observe_delivery(profile, state, holder, epoch, timeout, *, previous=None):
+    # Telegram gives whole seconds. Exclude the second in which we armed.
+    since = int(time.time()) + 1
+    started = time.monotonic()
+    deadline = started + timeout
+    print("Observation armed on the surviving host.", flush=True)
+    verify_broker(profile, holder, epoch, timeout, previous=previous)
+    while (remaining := deadline - time.monotonic()) > 0:
+        receipts = telegram_delivery_report(state, since)
+        if len(receipts) > 1:
+            raise ValueError("More than one owner message entered the observation window")
+        if receipts:
+            receipt = receipts[0]
+            if receipt["outcome"] == "unconfirmed":
+                raise ValueError("The final Telegram effect is unconfirmed")
+            if receipt["outcome"] == "confirmed":
+                final = receipt["phases"].get("final", {})
+                if final.get("state") != "confirmed" or (final.get("host"), final.get("epoch")) != (holder, epoch):
+                    raise ValueError("Final Telegram receipt belongs to a different holder or epoch")
+                if (remaining := deadline - time.monotonic()) <= 0:
+                    break
+                verify_broker(profile, holder, epoch, remaining)
+                elapsed = time.monotonic() - started
+                if elapsed >= timeout:
+                    break
+                return {"armedSeconds": round(elapsed, 3), **receipt}
+        time.sleep(min(0.25, remaining))
+    raise TimeoutError("No confirmed final reply before the observation deadline")
+
+
+def verify_broker_main(argv, *, observe=False):
+    description = ("Observe a final Telegram delivery from an exact Captain lease."
+                   if observe else "Verify a Captain handoff without claiming or renewing a lease.")
+    parser = argparse.ArgumentParser(description=description)
     parser.add_argument("profile", type=Path)
+    if observe:
+        parser.add_argument("--state", type=Path, required=True)
     parser.add_argument("--holder", choices=(PRIMARY, STANDBY), required=True)
     parser.add_argument("--epoch", type=int, required=True)
     parser.add_argument("--timeout", type=int, default=120)
@@ -280,6 +315,19 @@ def verify_broker_main(argv):
         if args.previous_holder is None or not positive_id(args.previous_epoch) or args.previous_epoch + 1 != args.epoch:
             parser.error("Give both the previous holder and the immediately preceding epoch")
         previous = args.previous_holder, args.previous_epoch
+    if observe:
+        try:
+            receipt = observe_delivery(args.profile, args.state, args.holder, args.epoch, args.timeout,
+                                       previous=previous)
+        except TimeoutError:
+            print("Timed out before the expected final Telegram receipt.", file=sys.stderr)
+            return 1
+        except (OSError, ValueError, TypeError, RecursionError, sqlite3.Error):
+            print("Delivery observation refused. Check the private profile, journal, lease and message count.",
+                  file=sys.stderr)
+            return 1
+        print(json.dumps(receipt))
+        return 0
     try:
         verify_broker(args.profile, args.holder, args.epoch, args.timeout, previous=previous)
     except TimeoutError:
@@ -297,6 +345,8 @@ def main():
         return prewarm_main(sys.argv[2:])
     if sys.argv[1:2] == ["verify-broker"]:
         return verify_broker_main(sys.argv[2:])
+    if sys.argv[1:2] == ["observe-delivery"]:
+        return verify_broker_main(sys.argv[2:], observe=True)
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("executable", "template", "environment", "profile"):
         parser.add_argument(name, type=Path)

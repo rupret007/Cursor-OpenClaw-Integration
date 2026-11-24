@@ -74,3 +74,37 @@ def test_delivery_report_migrates_old_receipts_and_masks_private_data(tmp_path, 
         "ack": {"state": "confirmed", "relayMs": 80, "host": lease.PRIMARY, "epoch": 1},
         "final": {"state": "confirmed", "relayMs": 400, "host": lease.PRIMARY, "epoch": 1},
     }
+
+
+@pytest.mark.parametrize("case", ["survivor", "old-lease", "ambiguous", "unconfirmed"])
+def test_delivery_observer_requires_one_confirmed_receipt_from_the_survivor(tmp_path, monkeypatch, case):
+    source = Path(__file__).resolve().parents[2] / "first-officer"
+    monkeypatch.syspath_prepend(str(source))
+    launcher = importlib.import_module("standby_launch")
+    profile = tmp_path / "profile.json"
+    verifies = []
+
+    def verify(path, holder, epoch, timeout, *, previous=None):
+        assert (path, holder, epoch) == (profile, "mac-mini", 2)
+        assert 0 < timeout <= 120
+        verifies.append(previous)
+
+    observed = {"outcome": "confirmed", "phases": {
+        "final": {"state": "confirmed", "host": "mac-mini", "epoch": 2, "relayMs": 95000},
+    }}
+    if case == "old-lease":
+        observed["phases"]["final"].update(host="nucbox", epoch=1)
+    if case == "unconfirmed":
+        observed.update(outcome="unconfirmed")
+    records = [observed, observed] if case == "ambiguous" else [observed]
+    monkeypatch.setattr(launcher, "verify_broker", verify)
+    monkeypatch.setattr(launcher, "telegram_delivery_report", lambda state, since: records)
+    predecessor = ("nucbox", 1)
+    if case == "survivor":
+        result = launcher.observe_delivery(profile, tmp_path, "mac-mini", 2, 120, previous=predecessor)
+        assert result["phases"]["final"]["relayMs"] == 95000
+        assert verifies == [predecessor, None]
+    else:
+        with pytest.raises(ValueError):
+            launcher.observe_delivery(profile, tmp_path, "mac-mini", 2, 120, previous=predecessor)
+        assert verifies == [predecessor]

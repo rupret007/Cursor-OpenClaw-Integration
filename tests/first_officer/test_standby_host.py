@@ -84,7 +84,8 @@ def test_partition_parks_nuc_and_mac_starts_after_lease_expires(host, tmp_path):
         assert started[1][2].stopped
 
 
-def test_unready_gateway_never_renews_and_stops_after_bounded_startup(host):
+@pytest.mark.parametrize("startup_seconds", [20, 60])
+def test_unready_gateway_never_renews_and_stops_after_bounded_startup(host, startup_seconds):
     class Peer:
         def claim(self):
             return 1
@@ -94,11 +95,11 @@ def test_unready_gateway_never_renews_and_stops_after_bounded_startup(host):
 
     now = 0
     child = Child(False)
-    supervisor = host.Supervisor(Peer(), lambda _epoch: child, clock=lambda: now)
+    supervisor = host.Supervisor(Peer(), lambda _epoch: child, clock=lambda: now, startup_seconds=startup_seconds)
     assert supervisor.step() == "starting"
-    now = 19
+    now = startup_seconds - 1
     assert supervisor.step() == "starting"
-    now = 20
+    now = startup_seconds
     assert supervisor.step() == "gateway-unready"
     assert child.stopped
 

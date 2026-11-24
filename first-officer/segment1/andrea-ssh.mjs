@@ -8,6 +8,11 @@ export const andreaCommand = 'first-officer-andrea-summary-v1';
 const execute = promisify(execFile);
 const title = 'Andrea · synced one-to-one text activity from the last 48 hours.';
 const groupTitle = 'Andrea · activity in approved group chats from the last 48 hours.';
+const historyUnavailable = new Map([
+  ['scope-unverified', 'Andrea couldn’t verify the approved chat scope for live history.'],
+  ['provider-unconfigured', 'Andrea’s live history source is unavailable.'],
+  ['no-authorized-chats', 'No conversations are approved for an Andrea live history read.'],
+]);
 const countLine = /^\d{1,2} incoming, \d{1,2} outgoing across ([1-4]) recent conversations\.$/;
 const lineFormats = [
   countLine,
@@ -99,7 +104,7 @@ function formatActivity(heading, lines, { topics, developments, latest }, follow
 }
 
 export function parseAndreaSummary(payload) {
-  const { version, summary: directSummary, groupSummary, activity, followUps } = JSON.parse(payload) ?? {};
+  const { version, summary: directSummary, groupSummary, activity, followUps, source } = JSON.parse(payload) ?? {};
   const grouped = groupSummary !== undefined;
   const heading = grouped ? groupTitle : title;
   const summary = grouped ? groupSummary : directSummary;
@@ -109,6 +114,12 @@ export function parseAndreaSummary(payload) {
     throw new Error('Andrea summary response was invalid');
   }
   const counts = countLine.exec(lines[0]);
+  const access = historyUnavailable.get(source);
+  if (!counts && access) {
+    const cache = lines.map((line) => line === 'Andrea returned no recent previews in the chats checked.'
+      ? 'The checked sync cache had no recent previews.' : line);
+    return [access, ...cache].join('\n');
+  }
   if (counts && validActivity(activity)) {
     return formatActivity(heading, lines, activity, formatFollowUps(followUps, Number(counts[1])));
   }

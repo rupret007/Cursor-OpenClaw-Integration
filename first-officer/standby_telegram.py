@@ -8,8 +8,9 @@ import re
 import sqlite3
 import ssl
 from threading import Event
+import time
 
-from standby import open_private
+from standby import DELIVERY_CLOCK, delivery_milliseconds, open_private
 
 
 MAX_PENDING = 512
@@ -32,7 +33,7 @@ class TelegramInbox:
     def __init__(self, directory: Path, owner: int, bot_id: int):
         if not positive_id(owner) or not positive_id(bot_id):
             raise ValueError("Use a single verified Telegram owner and bot")
-        self.owner = owner
+        self.owner, self.bot_id = owner, bot_id
         self.directory = directory
         self.path = directory / "telegram-inbox.sqlite"
         with self.database() as db, db:
@@ -44,6 +45,11 @@ class TelegramInbox:
                     outcome TEXT
                 )
             """)
+            columns = {column[1] for column in db.execute("PRAGMA table_info(inbox)")}
+            if "received_at_ms" not in columns:
+                db.execute("ALTER TABLE inbox ADD COLUMN received_at_ms INTEGER")
+            if "clock" not in columns:
+                db.execute("ALTER TABLE inbox ADD COLUMN clock TEXT")
             db.execute("CREATE TABLE IF NOT EXISTS identity (id INTEGER PRIMARY KEY CHECK (id = 1), "
                        "owner INTEGER NOT NULL, bot INTEGER NOT NULL)")
             db.execute("INSERT OR IGNORE INTO identity VALUES (1, ?, ?)", (owner, bot_id))
@@ -84,8 +90,10 @@ class TelegramInbox:
             message = self.selected_message(update)
             if message is not None:
                 messages.append(message)
+        received = delivery_milliseconds()
         with self.database() as db, db:
-            db.executemany("INSERT OR IGNORE INTO inbox (message_id, sent_at, text) VALUES (?, ?, ?)", messages)
+            db.executemany("INSERT OR IGNORE INTO inbox (message_id, sent_at, text, received_at_ms, clock) "
+                           "VALUES (?, ?, ?, ?, ?)", ((*message, received, DELIVERY_CLOCK) for message in messages))
             pending = db.execute("SELECT count(*) FROM inbox WHERE outcome IS NULL").fetchone()[0]
             if pending > MAX_PENDING:
                 raise OverflowError("Telegram inbox needs attention")
@@ -160,6 +168,7 @@ class TelegramPoll:
         self.get_updates = get_updates
         self.offset = None
         self.available = Event()
+        self.last_success = None
         self.on_owner_update = None
 
     def step(self):
@@ -167,12 +176,17 @@ class TelegramPoll:
         # offset. Start without an offset after restart to handle old cursors.
         updates = self.get_updates(self.offset)
         self.offset = self.inbox.ingest(updates)
+        self.last_success = time.monotonic()
         self.available.set()
         if self.on_owner_update is not None:
             for update in updates:
                 message = self.inbox.selected_message(update)
                 if message is not None:
                     self.on_owner_update(message[0], message[1])
+
+    def recent(self):
+        return (self.available.is_set() and self.last_success is not None
+                and time.monotonic() - self.last_success <= 2 * POLL_TRANSPORT_SECONDS)
 
     def run(self, stop):
         while not stop.is_set():

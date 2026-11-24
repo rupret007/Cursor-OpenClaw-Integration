@@ -224,6 +224,9 @@ test('the fixed Andrea summary reads an exact allowlisted thread missing from th
   };
   const denied = await runMacAndrea(andreaCommand, () => settings, (url, options) => read(url, options, 'contacts_only'), today);
   assert.equal(denied.source, 'scope-unverified');
+  const unavailable = parseAndreaSummary(JSON.stringify(denied));
+  assert.match(unavailable, /couldn’t verify the approved chat scope/);
+  assert.match(unavailable, /checked sync cache had no recent previews/);
   assert.deepEqual(examined, []);
   const result = await runMacAndrea(andreaCommand, () => settings, (url, options) => read(url, options, 'allowlist'), today);
   assert.equal(examined.length, 1);

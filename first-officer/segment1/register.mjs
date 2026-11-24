@@ -136,6 +136,25 @@ async function memoryReply(api, commands, liveConfig, request, { owner, signal }
   return {};
 }
 
+async function brokerMemory(request, { owner, ctx, signal }, liveConfig) {
+  if (request.kind === 'recall' && !request.args) return plain('Use “recall topic” with one saved topic.');
+  const operation = request.kind === 'memory-confirm' ? 'confirm' : request.kind;
+  const result = await telegramDirect(owner, liveConfig, 'foMemory', {
+    fo_message_id: brokerMessage(ctx), operation, ...(operation === 'recall' ? { topic: request.args } : {}),
+  }, signal);
+  switch (result?.state) {
+    case 'saved': return plain(`Saved fact for ${result.topic}\n${result.statement}`);
+    case 'missing': return plain(`No verified saved fact for ${request.args}.`);
+    case 'pending': return plain(`To save this fact for ${result.topic}, reply “confirm memory ${result.code}” within five minutes.`);
+    case 'confirmed': return plain(`Fact saved for ${result.topic}.`);
+    case 'expired': return plain('That memory confirmation expired or belongs to an earlier Captain. Ask me to remember the fact again.');
+    case 'unsafe': return plain('That fact contains material I can’t save.');
+    case 'busy': return plain('Too many memory confirmations are waiting. Try again in five minutes.');
+    case 'syntax': return plain('Use “remember topic: fact” to open a confirmation.');
+    default: throw new Error('Brokered private memory is unavailable');
+  }
+}
+
 function andreaReader(signal, { readPrivateConfig, createAndreaReader }) {
   const config = readPrivateConfig(readerConfig);
   return createAndreaReader({
@@ -193,6 +212,7 @@ function toolRegistry(api, commands, liveConfig, services, state, chat) {
       run: () => plain('I couldn’t identify the live status lookup. Ask for fleet load, gate status, quota status, or GitHub PR and CI status.'),
     },
     remember: { run: memory, failure: 'The private memory request failed. The fact wasn’t confirmed as saved.' },
+    'memory-confirm': { run: () => plain('Use the Remember button on this Captain to confirm a fact.') },
     recall: { run: memory, failure: 'The private memory lookup failed. I couldn’t verify a saved fact.' },
     texts: {
       run: async (_, { signal }) => {
@@ -301,6 +321,12 @@ export function registerSegmentOne(api, commands, services) {
   const chat = createQuickChat(api.runtime, services.redacted, { requireLocal: localFleetNode() !== 'bobserver' });
   const registry = toolRegistry(api, commands, liveConfig, services, state, chat);
   if (stagedStandby) {
+    for (const kind of ['remember', 'recall', 'memory-confirm']) {
+      registry[kind] = {
+        run: (request, turn) => brokerMemory(request, turn, liveConfig),
+        failure: 'Shared private memory is unavailable. I couldn’t verify this request.',
+      };
+    }
     registry.standby = { run: async () => plain(
       'This standby session can answer chat and live status. Interactive approvals and dispatch need the primary project state.',
     ) };
@@ -379,7 +405,7 @@ export function registerSegmentOne(api, commands, services) {
           return followUp || standaloneSimple(raw, routeFor, event);
         },
       });
-      if (stagedStandby && (!request || request.kind === 'remember' ||
+      if (stagedStandby && (!request ||
           request.kind === 'captain' && !['role', 'brief', 'decisions', 'handoff', 'help', 'advance-project'].includes(request.action))) {
         return { kind: 'standby' };
       }

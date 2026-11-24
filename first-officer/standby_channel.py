@@ -80,6 +80,18 @@ class Channel(ThreadingHTTPServer):
         except BrokerUnavailable:
             return {"result": "admission-unconfirmed"}
 
+    def memory(self, fields):
+        operation = fields.get("operation")
+        message_id = fields.get("fo_message_id")
+        expected = {"chat_id", "fo_message_id", "operation"}
+        if operation == "recall":
+            expected.add("topic")
+        with self.lock:
+            if (fields.keys() != expected or str(fields["chat_id"]) != str(self.owner)
+                    or not positive_id(message_id) or message_id != self.offered):
+                raise ValueError("Memory needs the current brokered owner message")
+        return self.broker.memory(self.epoch, message_id, operation, fields.get("topic"))
+
     def progress(self, fields):
         message_id = fields.get("fo_message_id")
         with self.lock:
@@ -208,6 +220,8 @@ class LocalRequest(BaseHTTPRequestHandler):
                 result = channel.broker.inspect_project(channel.epoch, fields["request"])
             elif method == "foProjectSubmit":
                 result = channel.submit_project(fields)
+            elif method == "foMemory":
+                result = channel.memory(fields)
             elif method == "foProgress":
                 result = channel.progress(fields)
             elif method == "sendChatAction":

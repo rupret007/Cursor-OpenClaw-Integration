@@ -54,7 +54,7 @@ python3 -I -B "$captain_state" local-import < "$private_handoff"
 
 The Nuc is primary. The Mac Mini can take over after **90 consecutive seconds without a valid Nuc renewal**. Renew every 15 seconds. Measure expiry on the authority service's clock. A standby with verified dependencies should answer a test command within two minutes of the Nuc going down. The Mac stays Captain when the Nuc returns. Handback uses the planned transfer.
 
-Before enabling automatic promotion, establish an independent authority and side-effect fence on an always-on device. Check whether the existing NAS can host it independently of either Captain host. Bobserver is optional compute. The fence must handle these conditions.
+For the two-host topology, run the independent broker service on the Mac Mini and run the primary Captain on the Nuc. The Mini can then take over during an unplanned Nuc outage. Move the broker to the Nuc before planned Mini maintenance. An unplanned Mini or broker outage pauses Telegram and queue dispatch until ownership is safe. The NAS holds backups and Bobserver supplies optional compute. The fence must handle these conditions.
 
 - Grant one active host a monotonically increasing epoch. A missed renewal makes the Mac eligible to ask for authority. The Mac can act only after the fence issues a new epoch. If the fence is unreachable, stop admitting new side effects.
 - Put the production Telegram token and polling cursor behind one relay. Deliver updates only to the current holder. Check its epoch before forwarding replies and preserve uncertain send receipts. Remove direct Telegram access from both gateway instances before enabling promotion.
@@ -63,13 +63,150 @@ Before enabling automatic promotion, establish an independent authority and side
 
 The standalone generator accepts `--mac-launch-daemon` to render a system service under the unprivileged gateway account. The current local-authority guard still parks the Mac without an approved handoff. Run the generator as the Mac gateway user. Installation in the system launchd domain is a one-time administrator task. A system service can run at the login window after macOS has started. A Mac waiting at FileVault's preboot unlock screen cannot provide standby. Verify Andrea separately because it uses a user-session dependency. [Apple launchd guide](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html)
 
-The offline lease store in `first-officer/standby.py` tests the deadline, stale-epoch rejection, and cross-epoch effect reservations. Its database belongs on the broker's local disk. A mounted archive share alone supplies neither a broker process nor a fence. The loopback-tested broker in `first-officer/standby_broker.py` uses mutual TLS and pins one client certificate to each host. The client checks the broker certificate and host name. The broker derives the node identity from the certificate and denies effects until an adapter is registered. An optional private Telegram configuration enables the broker to own long polling for one verified bot and owner. The broker stores selected text updates in its private inbox before confirming them upstream and clears their text when a final reply receipt settles. Restart begins without a saved upstream offset and deduplicates any replay by message ID. An unconfirmed final reply leaves a receipt for review without blocking the next inbox entry. An optional `--review-queue-config` uses the same configured Hatchet and Restate review routes and exact-result verifier as standalone Captain. Keep their submission credentials on the broker. A private `review-scope.json` in its state directory grants one exact `request` at an `epoch` until `expires` (Unix seconds, no more than one hour ahead). Its request contains the lane, PR number and full head. The broker rechecks the lease and scope before sending to either backend. The active host can read an original review receipt and verify the accepted run after an epoch change. The optional `--project-queue-config` selects the dedicated Hatchet coding workflow. The separate private `project-scope.json` binds one exact coding request, Nuc lease epoch, `worker: local-qwen` and expiry. The broker holds at most one unresolved or accepted request per repository. A confirmed refusal releases the reservation. An accepted run holds the reservation through review. After promotion, the Mac can report the reservation and reconcile the original run by its ID after exact Hatchet readback. The broker checks at most one due coding receipt every 30 seconds. It records a candidate from the original worker with the exact lane and approved base. A changed candidate or unavailable worker remains visible and leaves the repository reserved. A worker candidate is a patch ready for review. Exact-commit GitHub CI remains an independent verification gate. It cannot start a new coding job under the Nuc's grant. The host supervisor in `first-officer/standby_host.py` starts a child only with a broker lease, checks OpenClaw's loopback readiness, and renews only for a ready child. Startup grace is 20 seconds. A failed renewal parks the host and stops its child. A private watchdog pipe also closes if the supervisor crashes. The child guard then kills the gateway process group. A new launcher refuses an already occupied readiness port. The native gateway can use `standby_channel.py` as a loopback Telegram API with a locally generated placeholder token. The gateway's Telegram config uses that loopback `apiRoot`, `replyToMode: all`, and `FO_STANDBY_TELEGRAM=1` for the brokered typing and acknowledgment paths. The adapter forwards replies only for a pending original message. Use `standalone.py --standby-profile` with the usual pinned release paths to render the brokered service. The private profile contains `hostname`, `port`, `bot_id`, and absolute `cert`, `key`, and `ca` paths. Start from a token-free config template with one allowlisted Telegram owner. The launcher generates a temporary loopback config, starts its bridge before OpenClaw, and reports the broker epoch. The brokered service answers chat, status, and read-only handoff. The Nuc can submit one exact, operator-approved coding job. `what needs me?` reads broker reservations. Production activation and proactive monitoring require separate operator verification. [OpenClaw health checks](https://docs.openclaw.ai/gateway/health) [OpenClaw Telegram reply behavior](https://docs.openclaw.ai/channels/telegram/messaging) [Python TLS documentation](https://docs.python.org/3/library/ssl.html#ssl.CERT_REQUIRED) [Telegram Bot API](https://core.telegram.org/bots/api#getupdates)
+The offline lease store in `first-officer/standby.py` tests the deadline, stale-epoch rejection, and cross-epoch effect reservations. Its database belongs on the broker's local disk. A mounted archive share alone supplies neither a broker process nor a fence. The loopback-tested broker in `first-officer/standby_broker.py` uses mutual TLS and pins one client certificate to each host. The client checks the broker certificate and host name. The broker derives the node identity from the certificate and denies effects until an adapter is registered. An optional private Telegram configuration enables the broker to own long polling for one verified bot and owner. The broker stores selected text updates in its private inbox before confirming them upstream and clears their text when a final reply receipt settles. Restart begins without a saved upstream offset and deduplicates any replay by message ID. An unconfirmed final reply leaves a receipt for review without blocking the next inbox entry. An optional `--review-queue-config` uses the same configured Hatchet and Restate review routes and exact-result verifier as standalone Captain. Keep their submission credentials on the broker. A private `review-scope.json` in its state directory grants one exact `request` at an `epoch` until `expires` (Unix seconds, no more than one hour ahead). Its request contains the lane, PR number and full head. The broker rechecks the lease and scope before sending to either backend. The active host can read an original review receipt and verify the accepted run after an epoch change. The optional `--project-queue-config` selects the dedicated Hatchet coding workflow. The separate private `project-scope.json` binds one exact coding request, Nuc lease epoch, `worker: local-qwen` and expiry. The broker holds at most one unresolved or accepted request per repository. A confirmed refusal releases the reservation. An accepted run holds the reservation through review. After promotion, the Mac can report the reservation and reconcile the original run by its ID after exact Hatchet readback. The broker checks at most one due coding receipt every 30 seconds. It records a candidate from the original worker with the exact lane and approved base. A changed candidate or unavailable worker remains visible and leaves the repository reserved. A worker candidate is a patch ready for review. Exact-commit GitHub CI remains an independent verification gate. It cannot start a new coding job under the Nuc's grant. The host supervisor in `first-officer/standby_host.py` starts a child only with a broker lease, checks OpenClaw's loopback readiness, and renews only for a ready child. Startup grace is 60 seconds for the Nuc and 20 seconds for the Mac standby. The longer primary budget accommodates a cold start while retaining the 90-second lease and the existing two-minute standby target. A failed renewal parks the host and stops its child. A private watchdog pipe also closes if the supervisor crashes. The child guard then kills the gateway process group. A new launcher refuses an already occupied readiness port. The native gateway can use `standby_channel.py` as a loopback Telegram API with a locally generated placeholder token. The gateway's Telegram config uses that loopback `apiRoot`, `replyToMode: all`, and `FO_STANDBY_TELEGRAM=1` for the brokered typing and acknowledgment paths. The adapter forwards replies only for a pending original message. Use `standalone.py --standby-profile` with the usual pinned release paths to render the brokered service. The private profile contains `hostname`, `port`, `bot_id`, and absolute `cert`, `key`, and `ca` paths. Start from a token-free config template with one allowlisted Telegram owner. The launcher generates a temporary loopback config, starts its bridge before OpenClaw, and reports the broker epoch. The brokered service answers chat, status, and read-only handoff. The Nuc can submit one exact, operator-approved coding job. `what needs me?` reads broker reservations. Production activation and proactive monitoring require separate operator verification. [OpenClaw health checks](https://docs.openclaw.ai/gateway/health) [OpenClaw Telegram reply behavior](https://docs.openclaw.ai/channels/telegram/messaging) [Python TLS documentation](https://docs.python.org/3/library/ssl.html#ssl.CERT_REQUIRED) [Telegram Bot API](https://core.telegram.org/bots/api#getupdates)
 
 When neither gateway has polled the broker in the last two seconds, the broker can send typing and acknowledge a fresh, durably queued owner message. The fixed reply says the gateway will answer when ready. Both effects share the gateway’s receipts, so activation or an uncertain send cannot repeat them. The final answer still requires a ready, leased gateway.
 
 Run `tests/first_officer/standby-joined.py` in a loopback-only Linux namespace with a supported First Officer bundle and the installed Node and OpenClaw executables. It runs both packaged launchers with separate certificates, uses the real 90-second deadline, and checks a queued command and stale-host rejection. This exercises the broker, native gateway and durable inbox. Physical Mac startup and real Telegram delivery require the BobTestesBot rehearsal before production. Verify a brief Nuc outage keeps the current epoch. Then test a Nuc outage exceeding 90 seconds, an isolated Nuc that can still reach Telegram, a returning Nuc with an old epoch, an unavailable witness, and a Mac reboot to the login window. Interrupt a reply and a queued job during transfer. Require one Telegram consumer, no duplicate job, and a correct Mac reply within the two-minute target without a local login, SSH password, or Bobserver. Record measured takeover and recovery times. Roll back by disabling promotion, parking the Mac and confirming its fence is closed before restoring the Nuc as the sole consumer. Automatic promotion remains pending.
 
-### Start the broker at boot on an independent Linux host
+### Planned maintenance checklist
+
+1. Record the active broker, last verified Captain host and epoch, and any unresolved delivery or job. Confirm both brokers can be reached over their planned private endpoints with the correct mutual TLS identity. The Nuc and Mac probes used a direct private interface on the Mac and a temporary Windows relay to reach WSL in the reverse direction. If the Nuc is serving alone during Mini maintenance, the Nuc gateway can use its local broker directly. Confirm both hosts have the reviewed build, paired test profiles, and required local services. Pin a compatible OpenClaw version on both. The isolated Mac check used 2026.11.6 because the installed 2026.6.11 rejected this release's plugin format. Use BobTestesBot before a production decision.
+2. To take the Nuc offline while the broker is already on the Mini, park the Nuc gateway, stop the Mini broker briefly, and plan the Mini as the next holder. Start the broker and Mini gateway. To take the Mini offline, park its gateway and stop and disable its broker. Export, copy, and import the state on the Nuc before starting the Nuc broker and gateway. If the broker already runs on the surviving host, keep its state there and use the holder-change procedure.
+3. From either host with a paired profile for the destination, verify the expected holder and next epoch. The command checks a recent lease renewal after gateway startup and recent successful Telegram polling. It never claims or renews the lease.
+
+```bash
+python3 -I -B "$release/round6/runtime/segment1/queue-runtime/standby_launch.py" verify-broker \
+  "$destination_profile" --holder "$next_owner" --epoch "$next_epoch" --timeout 120
+```
+
+4. In BobTestesBot, confirm a fresh status reply through the intended gateway and inspect unsettled work before taking the source offline. The readiness check alone does not prove delivery or that another process stopped. For unattended failover, measure a cold Mac start with the final model configuration. A warm start can meet the readiness budget even when a cold start exceeds it. Keep the previous consumer fenced and record the outage and reply timings.
+5. If verification fails, keep both full-machine shutdown and any retry of uncertain effects on hold. Resume an interrupted transfer by its original ID. Use the return procedure below before the first destination claim, or a fresh fenced handback after a claim. When maintenance ends, verify the returning host is parked before deliberately handing back.
+
+### Read delivery evidence after a test
+
+Before the rehearsal, record the current Unix timestamp in seconds. Afterward, run this on the host holding the broker state. It works even when the machine that started the test is offline.
+
+```bash
+python3 -I -B "$release/round6/runtime/segment1/queue-runtime/standby.py" delivery-report \
+  --state "$broker_state" --since "$test_started_unix"
+```
+
+The report shows confirmed and uncertain phases and the host and epoch that confirmed each gateway effect. It measures milliseconds from the broker's first receipt to Telegram confirmation when both observations use the same broker process clock. Existing receipts and phases timed across a broker restart or move show an unknown elapsed time. A broker-owned queued acknowledgment has no gateway host or epoch. Use the owner's observed reply and planned outage timestamp for end-to-end timing. The report contains only outcomes, timing, and authority evidence.
+
+### Observe a machine-offline rehearsal from the surviving host
+
+Arm the observer on the surviving host immediately before taking the source offline. Use a private result file and a local profile for the surviving broker. Run the same reviewed build on the broker and in the observer.
+
+```bash
+umask 077
+nohup "$broker_python" -I -B "$release/round6/runtime/segment1/queue-runtime/standby_launch.py" \
+  observe-delivery "$local_profile" --state "$broker_state" --holder "$next_owner" \
+  --epoch "$next_epoch" --timeout 120 \
+  > "$private_observation_log" 2>&1 < /dev/null &
+```
+
+For unplanned Nuc loss, include `--previous-holder nucbox --previous-epoch "$old_epoch"`. After the observer reports it is armed, take the source offline during the approved window and send one fresh `captain status` from the paired BobTestesBot chat. Allow the arming second to pass before sending. The observer continues if the initiating SSH session disconnects. It requires a renewed destination lease, recent Telegram polling and one confirmed final reply from the exact destination epoch. It refuses ambiguous or uncertain receipts. The result gives elapsed time from arming and separate broker-phase timings. Verify the reply content and source machine outage independently.
+
+### Plan a holder change on a stopped broker
+
+A planned holder change is bound to the last stored source host and epoch. This command is an offline journal operation. Use it only after parking the source gateway, stopping the sole broker, and disabling automatic restart during the procedure. The journal lock refuses a broker on the same state directory. It provides no protection against starting two brokers on separate state copies.
+
+From the pinned release, run as the broker account. Set `broker_state`, `current_epoch`, and `release` to the verified private state path, last lease epoch, and release path.
+
+```bash
+python3 -I -B "$release/round6/runtime/segment1/queue-runtime/standby.py" \
+  --state "$broker_state" --source mac-mini --epoch "$current_epoch" --destination nucbox
+```
+
+A successful plan reserves the next claim for the named host. The broker still observes the 90-second recovery wait on startup. A repeated command before promotion preserves the existing plan. To undo a plan before it is consumed, run the command against the same stopped journal and source epoch with the original host as the destination and the previous destination supplied in `--replace-target`. After a successful claim, use the new epoch for any further handoff. The operation leaves effect receipts intact. Cross-host broker movement and service fencing require a separate transfer procedure.
+
+### Export a stopped broker for maintenance
+
+The export stage requires the source broker process to have exited, including its poll and queue threads. Disable service restart before export and verify the source service is pinned to a release that enforces the export seal. Restore from old backups or launching an older broker can bypass the seal. Keep one fixed state directory per service.
+
+Use the same stopped-journal command with an additional `--export-path` under a private mode-0700 parent and a locally generated 32-digit hexadecimal `--transfer-id`. Record the ID securely for retry. The command seals the source before publishing a private, checksummed snapshot. It preserves the Telegram inbox, lease and effects, daily briefing, coding reservations, and the review and project receipts. Provision destinations with separate private runtime settings and issue fresh grants on the new epoch. Transfer snapshots over an authenticated private connection. The inbox can contain private update text, so keep snapshots out of logs, source control, and shared storage.
+
+A failed copy can leave the source sealed without a completed snapshot. Use the same transfer ID and destination to resume. Keep the old service disabled. An existing snapshot with missing or changed contents fails verification and is preserved for investigation. The snapshot remains sealed.
+
+### Import into the stopped destination broker
+
+Use the same pinned release on both hosts. For a test rehearsal, keep both destination services stopped during import and confirm the source broker is still disabled. Copy the sealed snapshot over an authenticated connection into private storage owned by the destination broker account. Preserve mode 0700 for the directory and mode 0600 for the files. When packaging a Mac snapshot with the system tar, set `COPYFILE_DISABLE=1` and pass `--no-xattrs`. macOS can otherwise add AppleDouble entries that the import correctly rejects as extra files. Maintain one fixed, private state directory per service. Use an empty directory for first provisioning. Subsequent moves require the previously exported and sealed destination state. Keep the fixed directory and its journal after handoff so it can reject stale snapshots.
+
+On the destination, run as the broker account. Use the expected source lease host and epoch, next lease host, and transfer ID recorded during export.
+
+```bash
+python3 -I -B "$release/round6/runtime/segment1/queue-runtime/standby.py" \
+  --state "$broker_state" --source "$lease_owner" --epoch "$current_epoch" \
+  --destination "$next_owner" --import-path "$snapshot" --transfer-id "$transfer_id"
+```
+
+The import checks the manifest, the matching export seal, and the destination's prior epoch. A destination with an interrupted import stays fenced. Resume with the same snapshot and transfer ID. A repeat of an already applied import leaves the live journal untouched. A source journal and a received snapshot both remain sealed. Only the installed destination journal can open for service.
+
+Point the gateway profiles at the destination broker's verified private endpoint and restart the intended gateway and broker after import succeeds. The existing 90-second broker recovery window applies. Verify the exact next epoch and a test-bot reply before taking the former broker host offline. Handback after a successful claim uses a fresh export and import at the now-current epoch. Keep production on its current setup until the live test rehearsals and rollback pass.
+
+### Return a transfer after failed activation
+
+If the new gateway never claimed a lease, stop and disable the destination broker and gateway. Keep the former source disabled. On the stopped destination, use the same expected source lease and original snapshot, a fresh return transfer ID, and the intended return owner. If the destination import was interrupted, resume it before attempting the return.
+
+```bash
+python3 -I -B "$release/round6/runtime/segment1/queue-runtime/standby.py" \
+  --state "$broker_state" --source "$lease_owner" --epoch "$current_epoch" \
+  --destination "$return_owner" --rollback-from "$snapshot" \
+  --export-path "$return_snapshot" --transfer-id "$return_transfer_id"
+```
+
+The command verifies the original installed transfer, advances the epoch, and seals the destination without starting a live lease. Import the return snapshot on the former source using the source node and epoch printed by the command, the chosen return owner, and the return transfer ID. If export is interrupted after sealing, resume with the same parameters. After import, restart only the return broker and intended gateway, then check the new epoch and a test-bot reply. If the failed host did claim a lease, the rollback command refuses the old epoch. Use an ordinary fresh handback from the latest known holder in that case. If the destination is unreachable after import, keep the former source fenced until you can verify and transfer ownership back.
+
+### Shared private memory during standby
+
+Give each broker the same reviewed release and a pinned local Node runtime using `--memory-node`. The broker uses the existing packaged memory guard and stores owner-confirmed facts in its private state. Add the argument to the reviewed Linux broker unit override or pass it to the Mac broker renderer below. The Mac and Nuc use the same memory store while they share a broker. Sealed snapshots carry the store when the broker itself moves.
+
+In BobTestesBot, use `remember topic: fact`, send the confirmation phrase shown by the bot within five minutes, then use `recall topic`. A pending confirmation cannot authorize a write after an epoch change. The brokered text confirmation works through the relay's owner-only message path. Existing non-brokered memory still uses its existing confirmation and local store. Historical local facts have no automatic import into this shared store. Verify recall after each handoff using a synthetic, owner-approved fact.
+
+### Prepare the standby gateway for cold starts
+
+Use the same pinned OpenClaw executable and gateway state directory as the armed standby. Stop the isolated standby supervisor before preparation. The launcher holds that supervisor lock and prewarms a gateway with temporary state, the pinned Captain plugins, the loopback Qwen model, and an idle Telegram adapter. It retains the private worker cache. The command has no broker profile and cannot claim a lease or poll Telegram.
+
+```bash
+OPENCLAW_STATE_DIR="$gateway_state" FO_LOCAL_NODE=mac-mini \
+  "$broker_python" -I -B "$release/round6/runtime/segment1/queue-runtime/standby_launch.py" \
+  prewarm "$openclaw" "$gateway_template" "$gateway_environment"
+```
+
+The generated brokered Mac LaunchDaemon runs this preparation automatically before it tries to claim a lease. The supervisor holds the same private lock for warmup and lease supervision. A stopped or failed warmup cannot claim. When using a manual launcher, run preparation on each reviewed runtime or release change. Start the standby supervisor after a successful preparation and verify the unplanned takeover separately. During that verification, add `--previous-holder nucbox --previous-epoch "$old_epoch"` to the readiness command so the verifier can observe the old lease until it expires. It still requires the exact new epoch and rejects any other active lease. The preparation deadline is 60 seconds. The standby's actual readiness deadline is still 20 seconds. [OpenClaw gateway cache guidance](https://docs.openclaw.ai/gateway)
+
+### Prepare the Mac standby broker as a system service
+
+The Mac broker and gateway use separate LaunchDaemons. Run the broker renderer as the unprivileged broker account with a pinned Python executable, locally staged release, fixed private state directory, and private TLS and test-bot settings directory. Prepare the Nuc and Mac gateway profiles with the broker endpoint and separate client certificates. Verify that the broker certificate covers the chosen private endpoint. Keep the installed release and interpreter protected from modification by the service account.
+
+```bash
+umask 077
+plist=local.openclaw.captain-broker.plist
+python3 -I -B first-officer/standalone.py mac-broker --release "$release" \
+  --python "$broker_python" --state "$broker_state" --config-dir "$broker_config" \
+  --listen "$private_listen" > "$plist" &&
+  /usr/bin/plutil -lint "$plist"
+```
+
+On an approved isolated test installation, with the previous consumer stopped and the destination import verified, install and load the system plist.
+
+```bash
+sudo install -o root -g wheel -m 0644 "$plist" /Library/LaunchDaemons/
+sudo launchctl enable system/local.openclaw.captain-broker
+sudo launchctl bootstrap system "/Library/LaunchDaemons/$plist"
+```
+
+To fence the Mac broker during an approved transfer, disable its system service, boot it out, and verify the process has exited before exporting. Treat service stop errors or an ambiguous observation as a failed preflight.
+
+```bash
+sudo launchctl disable system/local.openclaw.captain-broker
+sudo launchctl bootout system/local.openclaw.captain-broker
+```
+
+The base broker service starts leases and the Telegram relay. To enable reconciliation on the Mini, also pass `--project-queue-config` or `--review-queue-config` with the respective private policy file and `--queue-environment` with a separate private JSON file. Use the existing `FO_HATCHET_LANE_TOKEN`, `FO_RESTATE_LANE_TOKEN`, and `FO_QUEUE_HOSTS` settings as needed. The plist contains only file paths. Keep the underlying queue reachable during maintenance if you need live job readback. The transferred receipts remain available if that queue is offline. Use BobTestesBot through the macOS login window to verify operation without an active desktop session. A preboot FileVault unlock is a separate condition. [Apple launchd guide](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html)
+
+### Start the broker at boot on a Linux host
 
 The systemd template at `first-officer/systemd/openclaw-captain-broker@.service` starts the pinned broker at boot under the dedicated `openclaw-broker` system account. Confirm the host has systemd, Python 3, and local persistent storage before choosing it. The broker must be reachable from both Captain hosts while either one is offline. Keep the SQLite state under `/var/lib/openclaw-captain-broker` on the broker’s own disk.
 
@@ -169,6 +306,42 @@ launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/local.openclaw.ca
 # Mac Mini unload before transfer.
 launchctl bootout "gui/$(id -u)/local.openclaw.captain"
 ```
+
+### Boot-managed gateways for the unattended rehearsal
+
+Use the independent broker profile for the isolated test bot and prepare both hosts against that same broker. The broker holds the Telegram polling token, update offset, lease, memory, and durable receipts on its local disk. The gateway hosts connect over mutual TLS using distinct keys. Broker loss parks the gateways. A NAS file share may hold backups. Running the broker on a NAS also requires a supported persistent service and storage local to that NAS. The separate queue can be unavailable while the bot still reads the last brokered receipts. A host's local model, GitHub authentication, and the Mac Andrea reader each have separate availability checks.
+
+Run the renderer under the intended service account. Reuse the absolute paths from the native service preparation block. Set `captain_node` to `nucbox` or `mac-mini`, and `broker_profile` to that host's private broker profile. On the Mini add `--mac-launch-daemon`. Use the brokered token-free gateway template and the local-model-only environment file. Keep the isolated rehearsal units and profile separate from any active production installation.
+
+```bash
+umask 077
+boot_options=(--standby-profile "$broker_profile")
+if [ "$captain_node" = mac-mini ]; then
+  boot_options+=(--mac-launch-daemon)
+fi
+python3 -I -B first-officer/standalone.py --node "$captain_node" \
+  --release "$pinned_candidate" --python "$python_bin" --node-binary "$node_bin" \
+  --openclaw "$openclaw_bin" --config "$private_gateway_config" \
+  --state "$private_gateway_state" --environment "$private_gateway_environment" \
+  "${boot_options[@]}" > "$private_service_definition"
+```
+
+On an approved clean rehearsal installation, confirm no previous service using the same bot or label remains active. Save the prior definitions and record which ones were enabled before installing. On the Nuc, verify the WSL distribution starts at Windows boot and `loginctl show-user "$(id -un)" -p Linger --value` returns `yes`. Use the systemd user install commands above, then run `systemctl --user enable --now openclaw-captain.service`. Restore the prior enablement and definition during rollback after `systemctl --user disable --now openclaw-captain.service` and verification that it stopped.
+
+On a Windows-hosted Nuc, inspect the existing WSL boot task before creating or enabling any duplicate. For the NucBox rehearsal, run `Get-ScheduledTask -TaskName WSL-Bob-Boot` and `Get-ScheduledTaskInfo -TaskName WSL-Bob-Boot` from Windows. The enabled boot trigger should launch the intended distribution under its owning Windows account and hold a foreground WSL process. A Linux systemd unit alone does not keep WSL alive. A manual start while Windows is signed in checks the action. The boot acceptance case requires a fresh reply and task evidence before Windows sign-in. [Microsoft WSL systemd documentation](https://learn.microsoft.com/en-us/windows/wsl/systemd)
+
+On the Mini, the authorized administrator installs the rendered system plist with:
+
+```bash
+plist=/Library/LaunchDaemons/local.openclaw.captain.plist
+/usr/bin/plutil -lint "$private_service_definition" &&
+  sudo install -o root -g wheel -m 0644 "$private_service_definition" "$plist" &&
+  sudo launchctl enable system/local.openclaw.captain &&
+  sudo launchctl bootstrap system "$plist"
+sudo launchctl print system/local.openclaw.captain >/dev/null
+```
+
+Rehearse rollback by running `sudo launchctl disable system/local.openclaw.captain` and `sudo launchctl bootout system/local.openclaw.captain`, then verify the supervisor and gateway stopped. Preserve broker storage and reconcile unconfirmed effects before restarting any saved configuration. For the unattended test, log out of the Mini's desktop while macOS remains booted and the disk is unlocked. Measure takeover from confirmed loss of the Nuc and verify a fresh Telegram delivery under the new epoch. Repeat in the other direction. Verify a returned host is fenced before attempting handback.
 
 Standalone cutover gates still include the native Mac service rehearsal, binding the live gate, capacity and quota probes on each host, and the full Telegram checklist on each host. Verify both peer transfer and rollback through the generated services. Use the standalone checklist in [LIVE-TEST.md](LIVE-TEST.md) for both hosts. The Bobserver pilot and rollback below apply only to the legacy profile.
 

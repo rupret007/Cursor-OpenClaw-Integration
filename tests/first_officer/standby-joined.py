@@ -6,6 +6,7 @@ import importlib
 import json
 import os
 from pathlib import Path
+import re
 import runpy
 import shlex
 import subprocess
@@ -98,11 +99,13 @@ def main():
         transport = importlib.import_module("standby_broker")
         telegram = importlib.import_module("standby_telegram")
         lease = importlib.import_module("standby")
+        memory_module = importlib.import_module("standby_memory")
         certs = root / "certs"
         certificates(certs)
         state = root / "broker-state"
         state.mkdir()
         inbox = telegram.TelegramInbox(state, 123456, 234567)
+        memory = memory_module.BrokerMemory(state, inbox.owner, inbox.bot_id, memory_module.packaged_guard(node))
         timestamps = {}
         sends = []
         ready = Future()
@@ -127,7 +130,7 @@ def main():
                          for name, identity in (("nuc", lease.PRIMARY), ("mac", lease.STANDBY))}
                 with MeasuredAuthority(state) as authority, transport.Broker(
                         ("127.0.0.1", 0), authority, cert=certs / "broker.pem", key=certs / "broker.key",
-                        ca=certs / "ca.pem", peers=peers, inbox=inbox, poll=poll,
+                        ca=certs / "ca.pem", peers=peers, inbox=inbox, poll=poll, memory=memory,
                         effects={"telegram-reply": inbox.reply_adapter(send_message),
                                  "telegram-typing": inbox.typing_adapter(lambda _owner: True)}) as broker:
                     ready.set_result(broker)
@@ -159,21 +162,26 @@ def main():
                                     "ca": str(certs / "ca.pem")})
             return run_host(directory, identity, executable, runtime / "standby_launch.py", config, profile, node)
 
-        def enqueue(number):
+        def enqueue(number, text="captain status"):
             updates[:] = [{"update_id": number, "message": {
-                "message_id": number, "date": int(time.time()), "text": "captain status",
+                "message_id": number, "date": int(time.time()), "text": text,
                 "chat": {"type": "private", "id": 123456}, "from": {"id": 123456, "is_bot": False},
             }}]
             poll.step()
 
-        def reply(number, epoch, deadline, acknowledgment="On it."):
+        def replies(number, deadline, acknowledgment="On it."):
             def settled():
                 pair = [row for row in sends if row[0] == number]
                 return pair if len(pair) >= 2 else None
 
             pair = until(settled, deadline, "A brokered Captain reply did not settle.")
-            assert len(pair) == 2 and pair[0][1] == acknowledgment and f"epoch {epoch}" in pair[1][1]
-            return pair[-1][2]
+            assert len(pair) == 2 and pair[0][1] == acknowledgment
+            return pair[-1]
+
+        def reply(number, epoch, deadline, acknowledgment="On it."):
+            _, text, finished = replies(number, deadline, acknowledgment)
+            assert f"epoch {epoch}" in text
+            return finished
 
         try:
             with serving(model), host("mac", lease.STANDBY) as mac_status, ExitStack() as primary:
@@ -181,6 +189,12 @@ def main():
                 nuc_status = primary.enter_context(host("nuc", lease.PRIMARY))
                 until(lambda: nuc_status("active"), 30, "The primary did not become ready.")
                 until(lambda: broker.last_telegram_pull is not None, 5, "Primary did not poll the broker.")
+                enqueue(6, "remember marker: violet tessellation")
+                _, review, _ = replies(6, 10)
+                confirmation = re.search(r"confirm memory [0-9a-f]{16}", review)
+                assert confirmation is not None
+                enqueue(7, confirmation.group())
+                assert replies(7, 10)[1] == "Fact saved for marker."
                 enqueue(10)
                 reply(10, 1, 10)
                 assert lease.STANDBY not in timestamps
@@ -210,11 +224,14 @@ def main():
                 else:
                     raise AssertionError("The previous host renewed the new epoch.")
                 until(lambda: inbox.next() is None, 5, "The shared inbox did not settle.")
-                assert len(sends) == 4
+                enqueue(12, "recall marker")
+                assert replies(12, 10)[1] == "Saved fact for marker\nviolet tessellation"
+                until(lambda: inbox.next() is None, 5, "The shared memory reply did not settle.")
+                assert len(sends) == 10
                 print(json.dumps({"queued_ack_seconds": round(acknowledgment_seconds, 3),
                                   "takeover_from_last_renewal": round(mac_ready - last_renewal, 2),
                                   "reply_after_nuc_stop": round(finished - stopped, 2),
-                                  "final_replies": 2, "duplicate_replies": 0}))
+                                  "final_replies": 5, "duplicate_replies": 0, "shared_memory_recall": "passed"}))
         finally:
             broker.shutdown()
             outer.join(5)

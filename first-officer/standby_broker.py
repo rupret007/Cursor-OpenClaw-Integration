@@ -6,6 +6,7 @@ import http.client
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import ipaddress
 import json
+import os
 from pathlib import Path
 import re
 import sqlite3
@@ -20,8 +21,9 @@ if __name__ == "__main__":
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from standby import EFFECT_KINDS, Grant, LeaseRejected, PRIMARY, STANDBY, StandbyAuthority, read_private_json
+from standby_memory import BrokerMemory, packaged_guard
 from standby_queue import DailyBriefing, ProjectBusy, ProjectQueue, ProjectScopeRejected, ReviewQueue, ReviewScopeRejected
-from standby_telegram import BotAPI, POLL_TRANSPORT_SECONDS, TelegramInbox, TelegramPoll, reply_operation
+from standby_telegram import BotAPI, POLL_TRANSPORT_SECONDS, TelegramInbox, TelegramPoll, positive_id, reply_operation
 
 
 MAX_REQUEST_BYTES = 32_768
@@ -76,6 +78,17 @@ class Client:
             raise BrokerUnavailable("Captain authority request was declined")
         return result
 
+    def readiness(self, *, timeout=REQUEST_TIMEOUT):
+        result = self.request("/v1/readiness", {}, timeout=timeout)
+        if (result.keys() != {"holder", "epoch", "gatewayRenewed", "telegramPolling", "bot"}
+                or result["holder"] not in (None, PRIMARY, STANDBY)
+                or (result["holder"] is None) != (result["epoch"] is None)
+                or (result["epoch"] is not None and not positive_id(result["epoch"]))
+                or (result["bot"] is not None and not positive_id(result["bot"]))
+                or type(result["gatewayRenewed"]) is not bool or type(result["telegramPolling"]) is not bool):
+            raise BrokerUnavailable("Captain authority returned invalid readiness evidence")
+        return result
+
     def claim(self):
         result = self.request("/v1/claim", {})
         epoch = result.get("epoch")
@@ -87,6 +100,12 @@ class Client:
         if self.request("/v1/renew", {"epoch": epoch}) != {"epoch": epoch}:
             raise BrokerUnavailable("Captain authority returned an invalid renewal")
 
+
+    def memory(self, epoch, message_id, operation, topic=None):
+        fields = {"epoch": epoch, "message_id": message_id, "operation": operation}
+        if topic is not None:
+            fields["topic"] = topic
+        return self.request("/v1/memory", fields)["memory"]
 
     def telegram_progress(self, epoch, message_id):
         return self.request("/v1/telegram/progress", {"epoch": epoch, "message_id": message_id})["progress"]
@@ -154,7 +173,7 @@ def client_fingerprint(path):
 
 class Broker(HTTPServer):
     def __init__(self, address, authority, *, cert, key, ca, peers, effects=None, inbox=None, poll=None,
-                 review=None, project=None, daily=None):
+                 review=None, project=None, daily=None, memory=None):
         if set(peers.values()) != {PRIMARY, STANDBY} or len(peers) != 2:
             raise ValueError("Use distinct certificates for the two Captain hosts")
         self.authority = authority
@@ -168,6 +187,7 @@ class Broker(HTTPServer):
         self.review = review
         self.project = project
         self.daily = daily
+        self.memory = memory
         if self.effects.keys() - EFFECT_KINDS:
             raise ValueError("Unknown effect adapter")
         self.tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -277,6 +297,10 @@ class Request(BaseHTTPRequestHandler):
 
     def dispatch(self, node, body):
         authority = self.server.authority
+        if self.path == "/v1/readiness" and not body:
+            poll, inbox = self.server.poll, self.server.inbox
+            return 200, {**authority.readiness(), "telegramPolling": poll is not None and poll.recent(),
+                         "bot": inbox.bot_id if inbox is not None else None}
         if self.path == "/v1/claim" and not body:
             grant = authority.claim(node)
             return 200, {"epoch": grant.epoch if grant is not None else None}
@@ -287,6 +311,19 @@ class Request(BaseHTTPRequestHandler):
         if self.path == "/v1/renew" and body.keys() == {"epoch"}:
             authority.renew(grant)
             return 200, {"epoch": epoch}
+        if self.path == "/v1/memory":
+            operation = body.get("operation")
+            expected = {"epoch", "message_id", "operation"}
+            if operation == "recall":
+                expected.add("topic")
+            if body.keys() != expected or not positive_id(body["message_id"]):
+                raise ValueError("Invalid private memory request")
+            authority.require_grant(grant)
+            if self.server.memory is None or self.server.inbox is None:
+                return 200, {"memory": {"state": "unavailable"}}
+            result = self.server.memory.run(authority, grant, self.server.inbox, body["message_id"],
+                                            operation, body.get("topic"))
+            return 200, {"memory": result}
         if self.path == "/v1/telegram/progress" and body.keys() == {"epoch", "message_id"} and self.server.inbox:
             authority.require_grant(grant)
             return 200, {"progress": self.server.telegram_progress(body["message_id"], grant)}
@@ -397,6 +434,17 @@ def telegram_components(state, config):
     return inbox, effects, TelegramPoll(inbox, api.get_updates)
 
 
+def load_queue_environment(path):
+    settings = read_private_json(path)
+    allowed = {"FO_HATCHET_LANE_TOKEN", "FO_RESTATE_LANE_TOKEN", "FO_QUEUE_HOSTS"}
+    if not isinstance(settings, dict) or not settings.keys() <= allowed or any(
+            not isinstance(value, str) or not value or len(value) > 4096 or
+            not value.isprintable() or any(character.isspace() for character in value)
+            for value in settings.values()):
+        raise ValueError("Invalid private broker queue environment")
+    os.environ.update(settings)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--listen", type=ipaddress.IPv4Address, default=ipaddress.IPv4Address("127.0.0.1"))
@@ -406,22 +454,32 @@ def main():
     parser.add_argument("--telegram-config", type=Path)
     parser.add_argument("--review-queue-config", type=Path)
     parser.add_argument("--project-queue-config", type=Path)
+    parser.add_argument("--queue-environment", type=Path)
+    parser.add_argument("--memory-node", type=Path)
     args = parser.parse_args()
     if args.listen.is_global or args.listen.is_unspecified or args.listen.is_multicast:
         parser.error("Select a specific private interface")
     try:
+        if args.queue_environment is not None:
+            if args.review_queue_config is None and args.project_queue_config is None:
+                raise ValueError("Queue environment requires a configured broker queue")
+            load_queue_environment(args.queue_environment)
+        if args.memory_node is not None and args.telegram_config is None:
+            raise ValueError("Private memory requires a configured Telegram owner")
+        validate_fact = packaged_guard(args.memory_node) if args.memory_node is not None else None
         peers = {client_fingerprint(args.nuc_cert): PRIMARY, client_fingerprint(args.mac_cert): STANDBY}
         with StandbyAuthority(args.state) as authority:
-            inbox, effects, poll = None, {}, None
-            if args.telegram_config is not None:
-                inbox, effects, poll = telegram_components(args.state, args.telegram_config)
             review = (ReviewQueue(args.state, read_private_json(args.review_queue_config))
                       if args.review_queue_config is not None else None)
             project = (ProjectQueue(args.state, read_private_json(args.project_queue_config))
                        if args.project_queue_config is not None else None)
+            inbox, effects, poll = None, {}, None
+            if args.telegram_config is not None:
+                inbox, effects, poll = telegram_components(args.state, args.telegram_config)
+            memory = BrokerMemory(args.state, inbox.owner, inbox.bot_id, validate_fact) if validate_fact else None
             with Broker((str(args.listen), args.port), authority, cert=args.cert, key=args.key, ca=args.ca,
                         peers=peers, effects=effects, inbox=inbox, poll=poll, review=review, project=project,
-                        daily=DailyBriefing(args.state)) as broker:
+                        daily=DailyBriefing(args.state), memory=memory) as broker:
                 stop = Event()
                 tasks = [target for target in (poll.run if poll else None, project.refresh if project else None)
                          if target is not None]

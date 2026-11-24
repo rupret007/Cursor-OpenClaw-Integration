@@ -52,6 +52,7 @@ export function classifyRequest(input, { legacyStatus, legacyRequest, isControl,
   }
   const captain = captainRequest(raw);
   if (captain) return captain;
+  if (/^confirm memory [0-9a-f]{16}$/.test(text)) return { kind: 'memory-confirm' };
   if (/^(?:remember|what did i tell you about|(?:what do you|do you) remember about|recall)\b/.test(ask)) {
     return memoryRequest(raw, ask);
   }

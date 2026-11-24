@@ -6,22 +6,25 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import re
 import runpy
 import secrets
 import signal
+import sqlite3
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
 from threading import Event, Thread
+import time
 
 # The release inventory pins this directory, including under Python -I.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from lanes import queue
-from standby import open_private, read_private_json
-from standby_broker import Client
+from standby import PRIMARY, STANDBY, open_private, private_directory, read_private_json, telegram_delivery_report
+from standby_broker import BrokerUnavailable, Client
 from standby_channel import Channel
-from standby_host import GatewayProcess, Supervisor
+from standby_host import PRIMARY_STARTUP_SECONDS, STARTUP_SECONDS, GatewayProcess, Supervisor
 from standby_telegram import positive_id
 
 
@@ -127,14 +130,21 @@ class BrokeredGateway:
             self.resources.close()
 
 
-def run(executable, template_path, environment_path, profile_path):
+def gateway_state(environment):
+    state = Path(environment["OPENCLAW_STATE_DIR"])
+    if not state.is_absolute():
+        raise ValueError("Standby needs an absolute gateway state directory")
+    private_directory(state)
+    scratch = state / "standby-worker-cache"
+    scratch.mkdir(mode=0o700, exist_ok=True)
+    private_directory(scratch)
+    return state, {**environment, "TMPDIR": str(scratch)}
+
+
+def run(executable, template_path, environment_path, profile_path, *, prewarm_on_start=False):
     template, owner = template_from(template_path)
     profile = profile_from(profile_path)
-    environment = gateway_env(environment_path)
-    state = Path(environment["OPENCLAW_STATE_DIR"])
-    info = state.lstat()
-    if not state.is_absolute() or not state.is_dir() or state.is_symlink() or info.st_uid != os.getuid() or info.st_mode & 0o077:
-        raise ValueError("Standby needs a private gateway state directory")
+    state, environment = gateway_state(gateway_env(environment_path))
     client = Client(profile["hostname"], profile["port"], cert=profile["cert"], key=profile["key"], ca=profile["ca"])
     stop = Event()
 
@@ -148,17 +158,214 @@ def run(executable, template_path, environment_path, profile_path):
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
             signal.signal(number, shutdown)
-        Supervisor(client, start).run(stop, lambda status: print("Captain standby " + status, flush=True))
+        if prewarm_on_start:
+            elapsed = warm_gateway(executable, template, state, environment, stop)
+            if stop.is_set():
+                return
+            print(f"Captain standby prewarmed in {elapsed:.2f} seconds.", flush=True)
+        startup = PRIMARY_STARTUP_SECONDS if environment.get("FO_LOCAL_NODE") == PRIMARY else STARTUP_SECONDS
+        Supervisor(client, start, startup_seconds=startup).run(
+            stop, lambda status: print("Captain standby " + status, flush=True))
+
+
+def prewarm_template(template, release):
+    # Admit only the reviewed Captain plugins and the Telegram channel adapter.
+    plugins = template["plugins"]
+    expected = {str(release / "first-officer-exec-guard.mjs"),
+                str(release / "round6/runtime/first-officer-conductor.mjs")}
+    paths = plugins["load"]["paths"]
+    allowed = {"first-officer-conductor", "first-officer-exec-guard", "telegram"}
+    if (not isinstance(paths, list) or len(paths) != len(expected) or set(paths) != expected
+            or set(plugins["allow"]) != allowed or set(plugins["entries"]) != allowed):
+        raise ValueError("Prewarm requires the pinned Captain plugins")
+    models = template["models"]["providers"]
+    local = "litellm/qwen-local-fast"
+    selected = template["agents"]["defaults"]["model"]
+    provider = models.get("litellm", {})
+    if (set(models) != {"litellm"} or selected.get("primary") != local or selected.get("fallbacks")
+            or re.fullmatch(r"http://(?:127\.0\.0\.1|localhost|\[::1\]):[1-9][0-9]{0,4}/v1/?",
+                            provider.get("baseUrl", "")) is None
+            or [entry.get("id") for entry in provider.get("models", [])] != ["qwen-local-fast"]):
+        raise ValueError("Prewarm requires the single local Qwen route")
+    return {
+        "gateway": {"mode": "local", "bind": "loopback", "port": template["gateway"]["port"],
+                    "auth": {"mode": "token", "token": secrets.token_urlsafe(32)}},
+        "plugins": {"allow": sorted(allowed), "load": {"paths": paths}, "entries": {
+            "telegram": {"enabled": True},
+            "first-officer-exec-guard": {"enabled": True},
+            "first-officer-conductor": {
+                "enabled": True, "hooks": {"allowConversationAccess": True},
+                "llm": {"allowModelOverride": True, "allowedModels": [local], "allowedCompletionModels": [local]},
+            },
+        }},
+        "agents": {"defaults": {"model": {"primary": local}}},
+        "models": {"providers": models},
+        "channels": template["channels"],
+    }
+
+
+class IdlePrewarmRelay:
+    def next_telegram_message(self, _epoch):
+        return None
+
+
+def warm_gateway(executable, template, state, environment, stop):
+    template = prewarm_template(template, Path(__file__).resolve().parents[4])
+    with TemporaryDirectory(prefix=".standby-prewarm-", dir=state) as directory:
+        scratch = Path(directory)
+        env = {**environment, "HOME": str(scratch), "XDG_CONFIG_HOME": str(scratch / ".config"),
+               "OPENCLAW_STATE_DIR": str(scratch)}
+        gateway = BrokeredGateway(IdlePrewarmRelay(), 1, 101, 234567, executable, template, env, scratch)
+        started = time.monotonic()
+        try:
+            while not stop.is_set() and time.monotonic() - started < 60:
+                if gateway.exited():
+                    raise ValueError("The isolated prewarm gateway exited")
+                if gateway.ready():
+                    return time.monotonic() - started
+                stop.wait(0.25)
+            if not stop.is_set():
+                raise TimeoutError("The isolated prewarm gateway did not reach readiness")
+        finally:
+            gateway.stop()
+
+
+def prewarm(executable, template_path, environment_path):
+    template, _ = template_from(template_path)
+    state, environment = gateway_state(gateway_env(environment_path))
+    with open_private(state, "standby-supervisor.lock") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return warm_gateway(executable, template, state, environment, Event())
+
+
+def prewarm_main(argv):
+    parser = argparse.ArgumentParser(description="Warm the pinned gateway with isolated state and an idle local relay.")
+    for name in ("executable", "template", "environment"):
+        parser.add_argument(name, type=Path)
+    args = parser.parse_args(argv)
+    os.umask(0o077)
+    try:
+        elapsed = prewarm(args.executable, args.template, args.environment)
+    except (OSError, KeyError, ValueError, TypeError, RecursionError, subprocess.SubprocessError):
+        print("Captain prewarm failed. Check the stopped supervisor, private paths, and pinned local model config.",
+              file=sys.stderr)
+        return 1
+    print(f"Isolated Captain prewarm reached readiness in {elapsed:.2f} seconds.")
+    return 0
+
+
+def verify_broker(profile_path, holder, epoch, timeout, *, previous=None):
+    profile = profile_from(profile_path)
+    broker = Client(profile["hostname"], profile["port"], cert=profile["cert"], key=profile["key"], ca=profile["ca"])
+    deadline = time.monotonic() + timeout
+    while (remaining := deadline - time.monotonic()) > 0:
+        try:
+            status = broker.readiness(timeout=min(remaining, 3))
+        except BrokerUnavailable:
+            pass
+        else:
+            if status["bot"] != profile["bot_id"]:
+                raise ValueError("Broker bot identity did not match the profile")
+            observed = status["holder"], status["epoch"]
+            if observed not in ((None, None), previous, (holder, epoch)):
+                raise ValueError("A different holder or epoch is already active")
+            if observed == (holder, epoch) and status["gatewayRenewed"] and status["telegramPolling"]:
+                return
+        time.sleep(max(0, min(1, deadline - time.monotonic())))
+    raise TimeoutError("Broker did not report a renewed gateway and recent Telegram polling")
+
+
+def observe_delivery(profile, state, holder, epoch, timeout, *, previous=None):
+    # Telegram gives whole seconds. Exclude the second in which we armed.
+    since = int(time.time()) + 1
+    started = time.monotonic()
+    deadline = started + timeout
+    print("Observation armed on the surviving host.", flush=True)
+    verify_broker(profile, holder, epoch, timeout, previous=previous)
+    while (remaining := deadline - time.monotonic()) > 0:
+        receipts = telegram_delivery_report(state, since)
+        if len(receipts) > 1:
+            raise ValueError("More than one owner message entered the observation window")
+        if receipts:
+            receipt = receipts[0]
+            if receipt["outcome"] == "unconfirmed":
+                raise ValueError("The final Telegram effect is unconfirmed")
+            if receipt["outcome"] == "confirmed":
+                final = receipt["phases"].get("final", {})
+                if final.get("state") != "confirmed" or (final.get("host"), final.get("epoch")) != (holder, epoch):
+                    raise ValueError("Final Telegram receipt belongs to a different holder or epoch")
+                if (remaining := deadline - time.monotonic()) <= 0:
+                    break
+                verify_broker(profile, holder, epoch, remaining)
+                elapsed = time.monotonic() - started
+                if elapsed >= timeout:
+                    break
+                return {"armedSeconds": round(elapsed, 3), **receipt}
+        time.sleep(min(0.25, remaining))
+    raise TimeoutError("No confirmed final reply before the observation deadline")
+
+
+def verify_broker_main(argv, *, observe=False):
+    description = ("Observe a final Telegram delivery from an exact Captain lease."
+                   if observe else "Verify a Captain handoff without claiming or renewing a lease.")
+    parser = argparse.ArgumentParser(description=description)
+    parser.add_argument("profile", type=Path)
+    if observe:
+        parser.add_argument("--state", type=Path, required=True)
+    parser.add_argument("--holder", choices=(PRIMARY, STANDBY), required=True)
+    parser.add_argument("--epoch", type=int, required=True)
+    parser.add_argument("--timeout", type=int, default=120)
+    parser.add_argument("--previous-holder", choices=(PRIMARY, STANDBY))
+    parser.add_argument("--previous-epoch", type=int)
+    args = parser.parse_args(argv)
+    if not positive_id(args.epoch) or not 1 <= args.timeout <= 180:
+        parser.error("Use a positive epoch and a timeout between 1 and 180 seconds")
+    previous = None
+    if args.previous_holder is not None or args.previous_epoch is not None:
+        if args.previous_holder is None or not positive_id(args.previous_epoch) or args.previous_epoch + 1 != args.epoch:
+            parser.error("Give both the previous holder and the immediately preceding epoch")
+        previous = args.previous_holder, args.previous_epoch
+    if observe:
+        try:
+            receipt = observe_delivery(args.profile, args.state, args.holder, args.epoch, args.timeout,
+                                       previous=previous)
+        except TimeoutError:
+            print("Timed out before the expected final Telegram receipt.", file=sys.stderr)
+            return 1
+        except (OSError, ValueError, TypeError, RecursionError, sqlite3.Error):
+            print("Delivery observation refused. Check the private profile, journal, lease and message count.",
+                  file=sys.stderr)
+            return 1
+        print(json.dumps(receipt))
+        return 0
+    try:
+        verify_broker(args.profile, args.holder, args.epoch, args.timeout, previous=previous)
+    except TimeoutError:
+        print("Broker readiness timed out before the expected renewal and polling evidence.", file=sys.stderr)
+        return 1
+    except (OSError, ValueError, TypeError, RecursionError):
+        print("Broker readiness failed. Check the private profile, bot identity, holder and epoch.", file=sys.stderr)
+        return 1
+    print(f"Captain handoff verified for {args.holder} at epoch {args.epoch}.")
+    return 0
 
 
 def main():
+    if sys.argv[1:2] == ["prewarm"]:
+        return prewarm_main(sys.argv[2:])
+    if sys.argv[1:2] == ["verify-broker"]:
+        return verify_broker_main(sys.argv[2:])
+    if sys.argv[1:2] == ["observe-delivery"]:
+        return verify_broker_main(sys.argv[2:], observe=True)
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("executable", "template", "environment", "profile"):
         parser.add_argument(name, type=Path)
+    parser.add_argument("--prewarm-on-start", action="store_true")
     args = parser.parse_args()
     os.umask(0o077)
     try:
-        run(args.executable, args.template, args.environment, args.profile)
+        run(args.executable, args.template, args.environment, args.profile,
+            prewarm_on_start=args.prewarm_on_start)
     except (KeyError, OSError, ValueError, TypeError, RecursionError, subprocess.SubprocessError):
         print("Captain standby launcher could not proceed.", file=sys.stderr)
         return 1

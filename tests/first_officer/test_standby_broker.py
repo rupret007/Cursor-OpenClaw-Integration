@@ -5,6 +5,7 @@ import importlib
 import json
 from pathlib import Path
 import runpy
+from select import select
 import ssl
 import subprocess
 import sys
@@ -133,6 +134,26 @@ def test_broker_entrypoint_loads_release_modules_in_isolated_python(tmp_path):
     assert "--telegram-config" in result.stdout
 
 
+def test_portable_queue_environment_is_private_and_limited(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "first-officer"))
+    transport = importlib.import_module("standby_broker")
+    name = "FO_HATCHET_LANE_TOKEN"
+    monkeypatch.setenv(name, "existing-fixture")
+    config = tmp_path / "queue-environment.json"
+    config.write_text(json.dumps({name: "fixture-token", "PATH": "unexpected"}))
+    config.chmod(0o600)
+    with pytest.raises(ValueError, match="private broker queue environment"):
+        transport.load_queue_environment(config)
+    assert transport.os.environ[name] == "existing-fixture"
+    config.write_text(json.dumps({name: "fixture-token"}))
+    config.chmod(0o644)
+    with pytest.raises(ValueError, match="private authority file"):
+        transport.load_queue_environment(config)
+    config.chmod(0o600)
+    transport.load_queue_environment(config)
+    assert transport.os.environ[name] == "fixture-token"
+
+
 def telegram_update(update_id, message_id, author=101):
     return {"update_id": update_id, "message": {"message_id": message_id, "date": 1, "text": "Fixture command",
             "chat": {"id": author, "type": "private"}, "from": {"id": author, "is_bot": False}}}
@@ -143,6 +164,7 @@ def test_broker_authenticates_each_host_and_fences_partitioned_primary(tmp_path,
     transport = importlib.import_module("standby_broker")
     host = importlib.import_module("standby_host")
     channel_module = importlib.import_module("standby_channel")
+    lease = importlib.import_module("standby")
     certificates(tmp_path, ("broker", "nuc", "mac", "unregistered"))
 
     ca = tmp_path / "ca.pem"
@@ -243,7 +265,7 @@ def test_broker_authenticates_each_host_and_fences_partitioned_primary(tmp_path,
         if message_id == 13 and text == "On it.":
             active_progress.wait()
         sends.append((owner, text, message_id))
-        if message_id == 12 and text != "On it.":
+        if message_id in (12, 14) and text != "On it.":
             raise TimeoutError
         return {"chat": {"id": owner}, "message_id": 400 + message_id}
 
@@ -526,12 +548,123 @@ def test_broker_authenticates_each_host_and_fences_partitioned_primary(tmp_path,
         assert sends == [(101, "Fixture response", 11), (101, "On it.", 12),
                          (101, "Fixture response", 12), (101, "On it.", 13),
                          (101, "Fixture response", 13)]
+        poll.step()
+        inbox.ingest([telegram_update(4, 14), telegram_update(5, 15)])
+        assert mac.next_telegram_message(2)["message_id"] == 14
+        with pytest.raises(transport.EffectUnconfirmed):
+            mac.send_telegram_reply(2, 14, "final", "Fixture response")
         standby.park()
         assert not active_gateways
     finally:
         broker.shutdown()
         thread.join(timeout=5)
 
+    assert not thread.is_alive()
+    old_endpoint = mac
+    old_state = state
+    approved_source = lease.Grant(transport.STANDBY, 2)
+    snapshot = tmp_path / "snapshot"
+    transfer_id = "ab" * 16
+    with lease.StandbyAuthority(old_state, export_id=transfer_id) as authority:
+        lease.export_snapshot(authority, old_state, snapshot, approved_source, transport.PRIMARY, transfer_id)
+    with pytest.raises(lease.LeaseRejected, match="sealed"):
+        lease.StandbyAuthority(old_state)
+
+    state = tmp_path / "destination"
+    state.mkdir(mode=0o700)
+    assert lease.import_snapshot(state, snapshot, approved_source, transport.PRIMARY, transfer_id)
+    assert not (state / "project-scope.json").exists()
+
+    telegram_module = importlib.import_module("standby_telegram")
+    inbox = telegram_module.TelegramInbox(state, 101, 202)
+    poll = telegram_module.TelegramPoll(inbox, lambda _offset: [telegram_update(4, 14), telegram_update(5, 15)])
+    poll.step()  # Upstream replay does not recreate settled messages.
+    review = transport.ReviewQueue(state, profile, clock=lambda: now)
+    project = transport.ProjectQueue(state, project_profile, clock=lambda: now)
+    ready = Future()
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    broker = ready.result(timeout=5)
+    try:
+        with pytest.raises(transport.BrokerUnavailable):
+            old_endpoint.claim()
+        nuc, mac = client("nuc"), client("mac")
+        assert nuc.readiness() == {"holder": None, "epoch": None, "gatewayRenewed": False,
+                                   "telegramPolling": True, "bot": 202}
+        assert nuc.claim() is None
+        now += lease.LEASE_SECONDS
+        assert mac.claim() is None
+        epoch = nuc.claim()
+        assert epoch == 3
+        assert mac.readiness()["gatewayRenewed"] is False
+        nuc.renew(3)
+        assert mac.readiness()["gatewayRenewed"] is True
+
+        verifier = Path(__file__).resolve().parents[2] / "first-officer/standby_launch.py"
+        profile = tmp_path / "readiness-profile.json"
+        profile.touch(mode=0o600)
+        private_profile = {"hostname": "127.0.0.1", "port": broker.server_port, "bot_id": 202,
+                           "cert": str(tmp_path / "mac.pem"), "key": str(tmp_path / "mac.key"),
+                           "ca": str(ca)}
+        profile.write_text(json.dumps(private_profile))
+
+        def verify(expected_holder, expected_epoch, *options):
+            return subprocess.run([sys.executable, "-I", "-B", str(verifier), "verify-broker", str(profile),
+                                   "--holder", expected_holder, "--epoch", str(expected_epoch), "--timeout", "1",
+                                   *options],
+                                  capture_output=True, check=False, text=True, timeout=4)
+
+        assert verify(lease.PRIMARY, 3).returncode == 0
+        assert verify(lease.STANDBY, 3).returncode == 1
+        assert verify(lease.PRIMARY, 2).returncode == 1
+        pending = verify(lease.STANDBY, 4, "--previous-holder", lease.PRIMARY, "--previous-epoch", "3")
+        assert pending.returncode == 1 and "timed out" in pending.stderr
+        invalid = verify(lease.STANDBY, 5, "--previous-holder", lease.PRIMARY, "--previous-epoch", "3")
+        assert invalid.returncode == 2
+        poll.last_success -= 30
+        assert verify(lease.PRIMARY, 3).returncode == 1
+        profile.write_text(json.dumps({**private_profile, "bot_id": 203}))
+        assert verify(lease.PRIMARY, 3).returncode == 1
+        poll.step()
+        with pytest.raises(transport.LeaseRejected):
+            mac.renew(2)
+        assert nuc.next_telegram_message(epoch)["message_id"] == 14
+        assert nuc.send_telegram_reply(epoch, 14, "final", "Fixture response") == "unconfirmed"
+        assert nuc.complete_telegram_message(epoch, 14) == "unconfirmed"
+        assert nuc.next_telegram_message(epoch)["message_id"] == 15
+        assert nuc.send_telegram_reply(epoch, 15, "final", "Fixture response") == "confirmed"
+        assert nuc.complete_telegram_message(epoch, 15) == "confirmed"
+        assert nuc.next_telegram_message(epoch) is None
+        assert nuc.project_receipt(epoch, coding)["run"] == "fixture-project-run"
+        assert nuc.reconcile_project(epoch, coding, "fixture-project-run")["reused"] is True
+        assert nuc.review_receipt(epoch, approved)["run"] == "fixture-run-1"
+        assert len(queue_calls) == 3
+        assert [message_id for _, _, message_id in sends][-2:] == [14, 15]
+        profile.write_text(json.dumps(private_profile))
+        with subprocess.Popen([sys.executable, "-I", "-B", str(verifier), "observe-delivery", str(profile),
+                               "--state", str(state), "--holder", lease.PRIMARY, "--epoch", "3", "--timeout", "5"],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as observer:
+            try:
+                assert select([observer.stdout], [], [], 3)[0]
+                assert observer.stdout.readline().strip() == "Observation armed on the surviving host."
+                update = telegram_update(6, 16)
+                update["message"]["date"] = int(time.time()) + 1
+                inbox.ingest([update])
+                assert nuc.send_telegram_reply(epoch, 16, "final", "Fixture response") == "confirmed"
+                assert nuc.complete_telegram_message(epoch, 16) == "confirmed"
+                stdout, stderr = observer.communicate(timeout=6)
+                assert observer.returncode == 0, stderr
+                final = json.loads(stdout)["phases"]["final"]
+                assert final["host"] == lease.PRIMARY and final["epoch"] == 3 and final["relayMs"] >= 0
+            finally:
+                if observer.poll() is None:
+                    observer.kill()
+                    observer.wait(timeout=3)
+        now += 31
+        assert mac.readiness()["gatewayRenewed"] is False
+    finally:
+        broker.shutdown()
+        thread.join(timeout=5)
     assert not thread.is_alive()
 
 

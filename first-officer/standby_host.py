@@ -10,11 +10,12 @@ import subprocess
 import sys
 import time
 
-from standby import HEARTBEAT_SECONDS, LeaseRejected
+from standby import HEARTBEAT_SECONDS, LEASE_SECONDS, LeaseRejected
 from standby_broker import BrokerUnavailable
 
 
 STARTUP_SECONDS = 20
+PRIMARY_STARTUP_SECONDS = 60
 POLL_SECONDS = 1
 RETRY_SECONDS = 3
 STOP_SECONDS = 4
@@ -84,7 +85,10 @@ class GatewayProcess:
 
 
 class Supervisor:
-    def __init__(self, client, start_gateway, *, clock=time.monotonic):
+    def __init__(self, client, start_gateway, *, clock=time.monotonic, startup_seconds=STARTUP_SECONDS):
+        if type(startup_seconds) is not int or not 0 < startup_seconds < LEASE_SECONDS:
+            raise ValueError("Gateway startup must fit inside the unrenewed lease")
+        self.startup_seconds = startup_seconds
         self.client = client
         self.start_gateway = start_gateway
         self.clock = clock
@@ -116,7 +120,7 @@ class Supervisor:
                 self.park()
                 return "unavailable"
             self.epoch = epoch
-            self.startup_until = self.clock() + STARTUP_SECONDS
+            self.startup_until = self.clock() + self.startup_seconds
 
         if self.gateway.exited():
             self.park()

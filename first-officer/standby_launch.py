@@ -22,7 +22,7 @@ from lanes import queue
 from standby import PRIMARY, STANDBY, open_private, read_private_json
 from standby_broker import BrokerUnavailable, Client
 from standby_channel import Channel
-from standby_host import GatewayProcess, Supervisor
+from standby_host import PRIMARY_STARTUP_SECONDS, STARTUP_SECONDS, GatewayProcess, Supervisor
 from standby_telegram import positive_id
 
 
@@ -149,7 +149,9 @@ def run(executable, template_path, environment_path, profile_path):
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
             signal.signal(number, shutdown)
-        Supervisor(client, start).run(stop, lambda status: print("Captain standby " + status, flush=True))
+        startup = PRIMARY_STARTUP_SECONDS if environment.get("FO_LOCAL_NODE") == PRIMARY else STARTUP_SECONDS
+        Supervisor(client, start, startup_seconds=startup).run(
+            stop, lambda status: print("Captain standby " + status, flush=True))
 
 
 def verify_broker(profile_path, holder, epoch, timeout):

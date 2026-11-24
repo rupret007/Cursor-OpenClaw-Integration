@@ -2,6 +2,10 @@
 
 ## Planned maintenance work in progress
 
+The physical Mac Mini verified the staged `829e6d1` bundle and used an isolated OpenClaw 2026.11.6 runtime. The pre-existing Mac installation rejected the staged plugin format. The isolated broker and Mac gateway renewed at epoch 4 and completed one owner-originated BobTestesBot message with confirmed typing, acknowledgment, and final delivery. The final receipt was observed within 12 seconds of Telegram’s message timestamp. This was a live Mac reply with the Nuc test gateway stopped. The Nuc machine remained online. This test does not establish per-phase latency targets, unattended takeover from a healthy Nuc, or either physical maintenance direction.
+
+The isolated Nuc gateway missed the 20-second startup deadline under sustained high load. It reached HTTP bind after roughly 39 seconds in a separate diagnostic. Repeated test starts were stopped. The candidate gives the Nuc up to 60 seconds for startup, keeps the Mini at 20 seconds, and still requires readiness before renewal. All 32 focused standby tests passed. The revised budget still needs a physical Nuc retest.
+
 The handoff readiness command verifies the exact broker profile, bot identity, holder, and epoch. It requires a recent gateway renewal and recent Telegram poll. The mutual TLS test covers both success and refusal for stale polling or a mismatched bot, host, or epoch. The 31-test standby suite passed. Physical test-bot delivery remains a separate check before shutting down either host.
 
 Draft PR #44 had all four GitHub Actions checks green at `4488ce5`. The exact overlay was staged and its packaged files passed the private scan. The native Linux rehearsal used the packaged Nuc and Mac-role gateways and the 90-second lease. It replied 100.40 seconds after the Nuc-role process stopped, with zero duplicate replies. Telegram and the host identities were fixtures, so this does not prove physical takeover. A read-only SSH probe reached the Mac and determined management authentication is required for staging.

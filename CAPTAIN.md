@@ -328,6 +328,8 @@ python3 -I -B first-officer/standalone.py --node "$captain_node" \
 
 On an approved clean rehearsal installation, confirm no previous service using the same bot or label remains active. Save the prior definitions and record which ones were enabled before installing. On the Nuc, verify the WSL distribution starts at Windows boot and `loginctl show-user "$(id -un)" -p Linger --value` returns `yes`. Use the systemd user install commands above, then run `systemctl --user enable --now openclaw-captain.service`. Restore the prior enablement and definition during rollback after `systemctl --user disable --now openclaw-captain.service` and verification that it stopped.
 
+On a Windows-hosted Nuc, inspect the existing WSL boot task before creating or enabling any duplicate. For the NucBox rehearsal, run `Get-ScheduledTask -TaskName WSL-Bob-Boot` and `Get-ScheduledTaskInfo -TaskName WSL-Bob-Boot` from Windows. The enabled boot trigger should launch the intended distribution under its owning Windows account and hold a foreground WSL process. A Linux systemd unit alone does not keep WSL alive. A manual start while Windows is signed in checks the action. The boot acceptance case requires a fresh reply and task evidence before Windows sign-in. [Microsoft WSL systemd documentation](https://learn.microsoft.com/en-us/windows/wsl/systemd)
+
 On the Mini, the authorized administrator installs the rendered system plist with:
 
 ```bash

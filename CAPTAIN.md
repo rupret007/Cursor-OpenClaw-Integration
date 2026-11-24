@@ -106,7 +106,7 @@ A failed copy can leave the source sealed without a completed snapshot. Use the 
 
 ### Import into the stopped destination broker
 
-Use the same pinned release on both hosts. For a test rehearsal, keep both destination services stopped during import and confirm the source broker is still disabled. Copy the sealed snapshot over an authenticated connection into private storage owned by the destination broker account. Preserve mode 0700 for the directory and mode 0600 for the files. Maintain one fixed, private state directory per service. Use an empty directory for first provisioning. Subsequent moves require the previously exported and sealed destination state. Keep the fixed directory and its journal after handoff so it can reject stale snapshots.
+Use the same pinned release on both hosts. For a test rehearsal, keep both destination services stopped during import and confirm the source broker is still disabled. Copy the sealed snapshot over an authenticated connection into private storage owned by the destination broker account. Preserve mode 0700 for the directory and mode 0600 for the files. When packaging a Mac snapshot with the system tar, set `COPYFILE_DISABLE=1` and pass `--no-xattrs`. macOS can otherwise add AppleDouble entries that the import correctly rejects as extra files. Maintain one fixed, private state directory per service. Use an empty directory for first provisioning. Subsequent moves require the previously exported and sealed destination state. Keep the fixed directory and its journal after handoff so it can reject stale snapshots.
 
 On the destination, run as the broker account. Use the expected source lease host and epoch, next lease host, and transfer ID recorded during export.
 

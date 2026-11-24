@@ -139,6 +139,18 @@ Give each broker the same reviewed release and a pinned local Node runtime using
 
 In BobTestesBot, use `remember topic: fact`, send the confirmation phrase shown by the bot within five minutes, then use `recall topic`. A pending confirmation cannot authorize a write after an epoch change. The brokered text confirmation works through the relay's owner-only message path. Existing non-brokered memory still uses its existing confirmation and local store. Historical local facts have no automatic import into this shared store. Verify recall after each handoff using a synthetic, owner-approved fact.
 
+### Prepare the standby gateway for cold starts
+
+Use the same pinned OpenClaw executable and gateway state directory as the armed standby. Stop the isolated standby supervisor before preparation. The launcher holds that supervisor lock and prewarms a gateway with temporary state, the pinned Captain plugins, the loopback Qwen model, and an idle Telegram adapter. It retains the private worker cache. The command has no broker profile and cannot claim a lease or poll Telegram.
+
+```bash
+OPENCLAW_STATE_DIR="$gateway_state" FO_LOCAL_NODE=mac-mini \
+  "$broker_python" -I -B "$release/round6/runtime/segment1/queue-runtime/standby_launch.py" \
+  prewarm "$openclaw" "$gateway_template" "$gateway_environment"
+```
+
+Run preparation on each reviewed runtime or release change. Start the standby supervisor after a successful preparation and verify the unplanned takeover separately. The preparation deadline is 60 seconds. The standby's actual readiness deadline is still 20 seconds. [OpenClaw gateway cache guidance](https://docs.openclaw.ai/gateway)
+
 ### Prepare the Mac standby broker as a system service
 
 The Mac broker and gateway use separate LaunchDaemons. Run the broker renderer as the unprivileged broker account with a pinned Python executable, locally staged release, fixed private state directory, and private TLS and test-bot settings directory. Prepare the Nuc and Mac gateway profiles with the broker endpoint and separate client certificates. Verify that the broker certificate covers the chosen private endpoint. Keep the installed release and interpreter protected from modification by the service account.

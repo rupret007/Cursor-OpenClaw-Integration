@@ -6,6 +6,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import re
 import runpy
 import secrets
 import signal
@@ -19,7 +20,7 @@ import time
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from lanes import queue
-from standby import PRIMARY, STANDBY, open_private, read_private_json
+from standby import PRIMARY, STANDBY, open_private, private_directory, read_private_json
 from standby_broker import BrokerUnavailable, Client
 from standby_channel import Channel
 from standby_host import PRIMARY_STARTUP_SECONDS, STARTUP_SECONDS, GatewayProcess, Supervisor
@@ -128,14 +129,21 @@ class BrokeredGateway:
             self.resources.close()
 
 
+def gateway_state(environment):
+    state = Path(environment["OPENCLAW_STATE_DIR"])
+    if not state.is_absolute():
+        raise ValueError("Standby needs an absolute gateway state directory")
+    private_directory(state)
+    scratch = state / "standby-worker-cache"
+    scratch.mkdir(mode=0o700, exist_ok=True)
+    private_directory(scratch)
+    return state, {**environment, "TMPDIR": str(scratch)}
+
+
 def run(executable, template_path, environment_path, profile_path):
     template, owner = template_from(template_path)
     profile = profile_from(profile_path)
-    environment = gateway_env(environment_path)
-    state = Path(environment["OPENCLAW_STATE_DIR"])
-    info = state.lstat()
-    if not state.is_absolute() or not state.is_dir() or state.is_symlink() or info.st_uid != os.getuid() or info.st_mode & 0o077:
-        raise ValueError("Standby needs a private gateway state directory")
+    state, environment = gateway_state(gateway_env(environment_path))
     client = Client(profile["hostname"], profile["port"], cert=profile["cert"], key=profile["key"], ca=profile["ca"])
     stop = Event()
 
@@ -152,6 +160,87 @@ def run(executable, template_path, environment_path, profile_path):
         startup = PRIMARY_STARTUP_SECONDS if environment.get("FO_LOCAL_NODE") == PRIMARY else STARTUP_SECONDS
         Supervisor(client, start, startup_seconds=startup).run(
             stop, lambda status: print("Captain standby " + status, flush=True))
+
+
+def prewarm_template(template, release):
+    # Admit only the reviewed Captain plugins and the Telegram channel adapter.
+    plugins = template["plugins"]
+    expected = {str(release / "first-officer-exec-guard.mjs"),
+                str(release / "round6/runtime/first-officer-conductor.mjs")}
+    paths = plugins["load"]["paths"]
+    allowed = {"first-officer-conductor", "first-officer-exec-guard", "telegram"}
+    if (not isinstance(paths, list) or len(paths) != len(expected) or set(paths) != expected
+            or set(plugins["allow"]) != allowed or set(plugins["entries"]) != allowed):
+        raise ValueError("Prewarm requires the pinned Captain plugins")
+    models = template["models"]["providers"]
+    local = "litellm/qwen-local-fast"
+    selected = template["agents"]["defaults"]["model"]
+    provider = models.get("litellm", {})
+    if (set(models) != {"litellm"} or selected.get("primary") != local or selected.get("fallbacks")
+            or re.fullmatch(r"http://(?:127\.0\.0\.1|localhost|\[::1\]):[1-9][0-9]{0,4}/v1/?",
+                            provider.get("baseUrl", "")) is None
+            or [entry.get("id") for entry in provider.get("models", [])] != ["qwen-local-fast"]):
+        raise ValueError("Prewarm requires the single local Qwen route")
+    return {
+        "gateway": {"mode": "local", "bind": "loopback", "port": template["gateway"]["port"],
+                    "auth": {"mode": "token", "token": secrets.token_urlsafe(32)}},
+        "plugins": {"allow": sorted(allowed), "load": {"paths": paths}, "entries": {
+            "telegram": {"enabled": True},
+            "first-officer-exec-guard": {"enabled": True},
+            "first-officer-conductor": {
+                "enabled": True, "hooks": {"allowConversationAccess": True},
+                "llm": {"allowModelOverride": True, "allowedModels": [local], "allowedCompletionModels": [local]},
+            },
+        }},
+        "agents": {"defaults": {"model": {"primary": local}}},
+        "models": {"providers": models},
+        "channels": template["channels"],
+    }
+
+
+class IdlePrewarmRelay:
+    def next_telegram_message(self, _epoch):
+        return None
+
+
+def prewarm(executable, template_path, environment_path):
+    template, _ = template_from(template_path)
+    template = prewarm_template(template, Path(__file__).resolve().parents[4])
+    state, environment = gateway_state(gateway_env(environment_path))
+    with open_private(state, "standby-supervisor.lock") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with TemporaryDirectory(prefix=".standby-prewarm-", dir=state) as directory:
+            scratch = Path(directory)
+            env = {**environment, "HOME": str(scratch), "XDG_CONFIG_HOME": str(scratch / ".config"),
+                   "OPENCLAW_STATE_DIR": str(scratch)}
+            gateway = BrokeredGateway(IdlePrewarmRelay(), 1, 101, 234567, executable, template, env, scratch)
+            started = time.monotonic()
+            try:
+                while time.monotonic() - started < 60:
+                    if gateway.exited():
+                        raise ValueError("The isolated prewarm gateway exited")
+                    if gateway.ready():
+                        return time.monotonic() - started
+                    time.sleep(0.25)
+                raise TimeoutError("The isolated prewarm gateway did not reach readiness")
+            finally:
+                gateway.stop()
+
+
+def prewarm_main(argv):
+    parser = argparse.ArgumentParser(description="Warm the pinned gateway with isolated state and an idle local relay.")
+    for name in ("executable", "template", "environment"):
+        parser.add_argument(name, type=Path)
+    args = parser.parse_args(argv)
+    os.umask(0o077)
+    try:
+        elapsed = prewarm(args.executable, args.template, args.environment)
+    except (OSError, KeyError, ValueError, TypeError, RecursionError, subprocess.SubprocessError):
+        print("Captain prewarm failed. Check the stopped supervisor, private paths, and pinned local model config.",
+              file=sys.stderr)
+        return 1
+    print(f"Isolated Captain prewarm reached readiness in {elapsed:.2f} seconds.")
+    return 0
 
 
 def verify_broker(profile_path, holder, epoch, timeout):
@@ -197,6 +286,8 @@ def verify_broker_main(argv):
 
 
 def main():
+    if sys.argv[1:2] == ["prewarm"]:
+        return prewarm_main(sys.argv[2:])
     if sys.argv[1:2] == ["verify-broker"]:
         return verify_broker_main(sys.argv[2:])
     parser = argparse.ArgumentParser(description=__doc__)

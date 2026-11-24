@@ -149,7 +149,7 @@ OPENCLAW_STATE_DIR="$gateway_state" FO_LOCAL_NODE=mac-mini \
   prewarm "$openclaw" "$gateway_template" "$gateway_environment"
 ```
 
-Run preparation on each reviewed runtime or release change. Start the standby supervisor after a successful preparation and verify the unplanned takeover separately. The preparation deadline is 60 seconds. The standby's actual readiness deadline is still 20 seconds. [OpenClaw gateway cache guidance](https://docs.openclaw.ai/gateway)
+Run preparation on each reviewed runtime or release change. Start the standby supervisor after a successful preparation and verify the unplanned takeover separately. During that verification, add `--previous-holder nucbox --previous-epoch "$old_epoch"` to the readiness command so the verifier can observe the old lease until it expires. It still requires the exact new epoch and rejects any other active lease. The preparation deadline is 60 seconds. The standby's actual readiness deadline is still 20 seconds. [OpenClaw gateway cache guidance](https://docs.openclaw.ai/gateway)
 
 ### Prepare the Mac standby broker as a system service
 

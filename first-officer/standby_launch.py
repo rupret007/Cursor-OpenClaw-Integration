@@ -243,7 +243,7 @@ def prewarm_main(argv):
     return 0
 
 
-def verify_broker(profile_path, holder, epoch, timeout):
+def verify_broker(profile_path, holder, epoch, timeout, *, previous=None):
     profile = profile_from(profile_path)
     broker = Client(profile["hostname"], profile["port"], cert=profile["cert"], key=profile["key"], ca=profile["ca"])
     deadline = time.monotonic() + timeout
@@ -255,10 +255,10 @@ def verify_broker(profile_path, holder, epoch, timeout):
         else:
             if status["bot"] != profile["bot_id"]:
                 raise ValueError("Broker bot identity did not match the profile")
-            live_holder, live_epoch = status["holder"], status["epoch"]
-            if live_holder is not None and (live_holder, live_epoch) != (holder, epoch):
+            observed = status["holder"], status["epoch"]
+            if observed not in ((None, None), previous, (holder, epoch)):
                 raise ValueError("A different holder or epoch is already active")
-            if live_holder is not None and status["gatewayRenewed"] and status["telegramPolling"]:
+            if observed == (holder, epoch) and status["gatewayRenewed"] and status["telegramPolling"]:
                 return
         time.sleep(max(0, min(1, deadline - time.monotonic())))
     raise TimeoutError("Broker did not report a renewed gateway and recent Telegram polling")
@@ -270,11 +270,18 @@ def verify_broker_main(argv):
     parser.add_argument("--holder", choices=(PRIMARY, STANDBY), required=True)
     parser.add_argument("--epoch", type=int, required=True)
     parser.add_argument("--timeout", type=int, default=120)
+    parser.add_argument("--previous-holder", choices=(PRIMARY, STANDBY))
+    parser.add_argument("--previous-epoch", type=int)
     args = parser.parse_args(argv)
     if not positive_id(args.epoch) or not 1 <= args.timeout <= 180:
         parser.error("Use a positive epoch and a timeout between 1 and 180 seconds")
+    previous = None
+    if args.previous_holder is not None or args.previous_epoch is not None:
+        if args.previous_holder is None or not positive_id(args.previous_epoch) or args.previous_epoch + 1 != args.epoch:
+            parser.error("Give both the previous holder and the immediately preceding epoch")
+        previous = args.previous_holder, args.previous_epoch
     try:
-        verify_broker(args.profile, args.holder, args.epoch, args.timeout)
+        verify_broker(args.profile, args.holder, args.epoch, args.timeout, previous=previous)
     except TimeoutError:
         print("Broker readiness timed out before the expected renewal and polling evidence.", file=sys.stderr)
         return 1

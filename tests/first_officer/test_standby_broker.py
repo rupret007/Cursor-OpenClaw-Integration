@@ -607,14 +607,19 @@ def test_broker_authenticates_each_host_and_fences_partitioned_primary(tmp_path,
                            "ca": str(ca)}
         profile.write_text(json.dumps(private_profile))
 
-        def verify(expected_holder, expected_epoch):
+        def verify(expected_holder, expected_epoch, *options):
             return subprocess.run([sys.executable, "-I", "-B", str(verifier), "verify-broker", str(profile),
-                                   "--holder", expected_holder, "--epoch", str(expected_epoch), "--timeout", "1"],
+                                   "--holder", expected_holder, "--epoch", str(expected_epoch), "--timeout", "1",
+                                   *options],
                                   capture_output=True, check=False, text=True, timeout=4)
 
         assert verify(lease.PRIMARY, 3).returncode == 0
         assert verify(lease.STANDBY, 3).returncode == 1
         assert verify(lease.PRIMARY, 2).returncode == 1
+        pending = verify(lease.STANDBY, 4, "--previous-holder", lease.PRIMARY, "--previous-epoch", "3")
+        assert pending.returncode == 1 and "timed out" in pending.stderr
+        invalid = verify(lease.STANDBY, 5, "--previous-holder", lease.PRIMARY, "--previous-epoch", "3")
+        assert invalid.returncode == 2
         poll.last_success -= 30
         assert verify(lease.PRIMARY, 3).returncode == 1
         profile.write_text(json.dumps({**private_profile, "bot_id": 203}))

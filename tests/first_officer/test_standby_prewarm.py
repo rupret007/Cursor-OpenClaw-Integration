@@ -1,3 +1,4 @@
+import fcntl
 import importlib
 import json
 from pathlib import Path
@@ -60,6 +61,11 @@ def test_prewarm_uses_an_idle_relay_and_the_same_private_worker_cache(launcher, 
             lifecycle.append("stop")
 
     monkeypatch.setattr(launcher, "BrokeredGateway", Gateway)
+    with launcher.open_private(state, "standby-supervisor.lock") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(BlockingIOError):
+            launcher.prewarm(tmp_path / "openclaw", template, environment)
+    assert lifecycle == []
     launcher.prewarm(tmp_path / "openclaw", template, environment)
     assert lifecycle == ["start", "stop"]
     assert not list(state.glob(".standby-prewarm-*"))
